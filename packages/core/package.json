@@ -6,7 +6,8 @@
   "description": "FacetDB core: question sets, thresholds, decisions, record statuses, the worker and the connector, action and model-provider contracts. Pure TypeScript; every side effect enters through an injected adapter.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
