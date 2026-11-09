@@ -46,6 +46,8 @@ export type Capabilities = {
 export type RecordDecision = {
   readonly decisions: Readonly<Record<string, Decision>>;
   readonly status: RecordStatus;
+  /** True when a person decided a question of this record: the connector sets `facetdb_reviewed`. */
+  readonly reviewed?: boolean;
 };
 
 export type WriteResult = {

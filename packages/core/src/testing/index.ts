@@ -12,4 +12,5 @@ export {
   type ContractOptions,
   runConnectorContract,
 } from "./contract-suite.ts";
+export { FakeDecisionLog } from "./decision-log.ts";
 export { FakeStore } from "./store.ts";

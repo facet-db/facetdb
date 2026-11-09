@@ -5,6 +5,7 @@
  */
 
 export * from "./contracts/index.ts";
+export * from "./log/index.ts";
 export * from "./questions/index.ts";
 export * from "./records/index.ts";
 export * from "./thresholds/index.ts";

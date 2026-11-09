@@ -20,6 +20,7 @@ export type {
   ScanPage,
   WriteResult,
 } from "./connector.ts";
+export type { DecisionLog } from "./decision-log.ts";
 export type { PluginKind, PluginManifest } from "./plugin.ts";
 export { PLUGIN_KINDS } from "./plugin.ts";
 export type { ModelProvider, ProviderRequest, ProviderResponse, Usage } from "./provider.ts";
