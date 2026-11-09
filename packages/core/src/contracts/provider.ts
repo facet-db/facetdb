@@ -18,8 +18,12 @@ export type Usage = {
   readonly outputTokens: number;
 };
 
-/** One answer per question name, each in its question's own option or level order. */
+/**
+ * One answer per question name, each in its question's own option or level order. `model` is the
+ * exact version the response named: the decision log records it, not the version that was asked.
+ */
 export type ProviderResponse = {
+  readonly model: string;
   readonly answers: Readonly<Record<string, Answer>>;
   readonly usage: Usage;
 };

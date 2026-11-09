@@ -347,7 +347,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         kind: "answer",
         key: row.key,
         version,
-        model: questionSet.model,
+        model: response.model,
         stateHash: row.hash,
         answers: response.answers,
         usage: response.usage,

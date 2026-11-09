@@ -72,6 +72,7 @@ export function createFakeProvider(script: FakeScript = {}): FakeProvider {
           throw failureError(failure);
         }
         return Promise.resolve({
+          model: request.model,
           answers: answersFor(script, request),
           usage: script.usage ?? DEFAULT_USAGE,
         });

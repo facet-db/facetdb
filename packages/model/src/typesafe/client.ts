@@ -28,15 +28,25 @@ export type TypeSafeProviderOptions = {
   readonly clock: Clock;
 };
 
+/** The shared System One client: one `POST` to `url` with the given headers. */
+export type SystemOneOptions = {
+  /** The full endpoint, `<base>/v1/systemone`. */
+  readonly url: string;
+  /** Headers every call carries, such as the key's header; `content-type` is always set here. */
+  readonly headers: Readonly<Record<string, string>>;
+  readonly fetch: typeof fetch;
+  /** Measures an HTTP-date `retry-after` against now. */
+  readonly clock: Clock;
+};
+
 const REJECTED = new Set([400, 401, 413, 415, 422]);
 
 /**
- * The TypeSafe System One client: `ask` is exactly one `POST /v1/systemone`. It validates the
- * response, returns the tokens the call consumed, and maps failures to typed errors. It never
+ * The System One client: `ask` is exactly one `POST` to the endpoint. It validates the response,
+ * returns the model and the tokens the call consumed, and maps failures to typed errors. It never
  * retries (the retry policy wraps it) and never turns a failure into an answer.
  */
-export function createTypeSafeProvider(options: TypeSafeProviderOptions): ModelProvider {
-  const url = `${(options.baseUrl ?? TYPESAFE_BASE_URL).replace(/\/+$/, "")}${SYSTEMONE_PATH}`;
+export function createSystemOneProvider(options: SystemOneOptions): ModelProvider {
   return {
     async ask(request: ProviderRequest): Promise<ProviderResponse> {
       // The request already carries only the state the questions read.
@@ -49,12 +59,9 @@ export function createTypeSafeProvider(options: TypeSafeProviderOptions): ModelP
       const body = JSON.stringify(buildRequest(questionSet, request.state));
       let response: Response;
       try {
-        response = await options.fetch(url, {
+        response = await options.fetch(options.url, {
           method: "POST",
-          headers: {
-            authorization: `Bearer ${options.apiKey}`,
-            "content-type": "application/json",
-          },
+          headers: { ...options.headers, "content-type": "application/json" },
           body,
         });
       } catch (cause) {
@@ -77,7 +84,18 @@ export function createTypeSafeProvider(options: TypeSafeProviderOptions): ModelP
         throw new UnexpectedStatusError(response.status);
       }
       const parsed = parseAnswers(questionSet, await response.json());
-      return { answers: parsed.answers, usage: parsed.usage };
+      return { model: parsed.model, answers: parsed.answers, usage: parsed.usage };
     },
   };
+}
+
+/** TypeSafe's own endpoint, with its bearer key. */
+export function createTypeSafeProvider(options: TypeSafeProviderOptions): ModelProvider {
+  const base = (options.baseUrl ?? TYPESAFE_BASE_URL).replace(/\/+$/, "");
+  return createSystemOneProvider({
+    url: `${base}${SYSTEMONE_PATH}`,
+    headers: { authorization: `Bearer ${options.apiKey}` },
+    fetch: options.fetch,
+    clock: options.clock,
+  });
 }

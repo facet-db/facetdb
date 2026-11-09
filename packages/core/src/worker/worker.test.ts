@@ -48,6 +48,7 @@ const questionSet: QuestionSet = {
 
 function response(probability: number): ProviderResponse {
   return {
+    model: "jev-1.14.0",
     answers: { scam: { type: "noul", probability } },
     usage: { inputTokens: 120, outputTokens: 8 },
   };
@@ -249,6 +250,20 @@ describe("the worker loop", () => {
       stateHash: stateHash(["body"], { body: "hello" }),
       usage: { inputTokens: 120, outputTokens: 8 },
     });
+  });
+
+  it("logs the model the response names, not the one the set asked for", async () => {
+    // A compatible provider or a gateway may answer with another served version.
+    const provider = new ScriptedProvider(() =>
+      Promise.resolve({ ...response(SURE_YES), model: "jev-1.13.0" }),
+    );
+    const test = await rig({ provider });
+    test.db.edit("a", { body: "hello" });
+
+    await createWorker(test.deps).runOnce();
+
+    expect(test.provider.requests[0]?.model).toBe("jev-1.14.0");
+    expect((await test.log.latestAnswer("a"))?.model).toBe("jev-1.13.0");
   });
 
   it("discards the answer of a record that changed in flight and queues it again", async () => {

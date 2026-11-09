@@ -94,7 +94,11 @@ class ScriptedWorker implements BackfillWorker {
         probability: question.name === "scam" ? (SCAM_CYCLE[row % 3] ?? 0.5) : 0.9,
       };
     }
-    return Promise.resolve({ answers, usage: { inputTokens: 100, outputTokens: 5 } });
+    return Promise.resolve({
+      model: request.model,
+      answers,
+      usage: { inputTokens: 100, outputTokens: 5 },
+    });
   }
 
   askedRows(): number[] {
