@@ -15,3 +15,4 @@ export type {
 } from "./model.ts";
 export type { ReapplyReport } from "./reapply.ts";
 export { reapplyThresholds } from "./reapply.ts";
+export { decideRecord, statusOf } from "./record-decisions.ts";
