@@ -49,6 +49,18 @@ function questionAt(set: Record<string, unknown>, index: number): Record<string,
   return (set["questions"] as Record<string, unknown>[])[index] as Record<string, unknown>;
 }
 
+/** Renames a question the way a user would: its threshold key moves with it. */
+function renameQuestion(set: Record<string, unknown>, index: number, name: string): void {
+  const question = questionAt(set, index);
+  const thresholds = set["thresholds"] as Record<string, unknown>;
+  const old = question["name"] as string;
+  question["name"] = name;
+  if (old in thresholds) {
+    thresholds[name] = thresholds[old];
+    delete thresholds[old];
+  }
+}
+
 function mutated(mutate: Mutation): Record<string, unknown> {
   const set = supportMessages();
   mutate(set);
@@ -92,9 +104,10 @@ describe("question set validation", () => {
   });
 
   const accepted: [string, Mutation][] = [
-    ["a one-letter name", (s) => (questionAt(s, 0)["name"] = "u")],
-    ["a 40-character name", (s) => (questionAt(s, 0)["name"] = `a${"b".repeat(39)}`)],
-    ["digits and underscores after the first letter", (s) => (questionAt(s, 0)["name"] = "q_2b")],
+    ["a one-letter name", (s) => renameQuestion(s, 0, "u")],
+    ["a 40-character name", (s) => renameQuestion(s, 0, `a${"b".repeat(39)}`)],
+    ["digits and underscores after the first letter", (s) => renameQuestion(s, 0, "q_2b")],
+    ["a name that only begins like facetdb", (s) => renameQuestion(s, 0, "facetdbx")],
     ["choice with exactly 2 options", (s) => (questionAt(s, 1)["options"] = options(2))],
     ["choice with exactly 255 options", (s) => (questionAt(s, 1)["options"] = options(255))],
     ["score with exactly 2 levels", (s) => (questionAt(s, 0)["levels"] = levels(2))],
@@ -126,20 +139,26 @@ describe("question set validation", () => {
   });
 
   const refused: [string, Mutation, string][] = [
-    [
-      "a name starting with a digit",
-      (s) => (questionAt(s, 0)["name"] = "2fast"),
-      "questions.0.name",
-    ],
-    ["a name starting with an underscore", (s) => (questionAt(s, 0)["name"] = "_x"), "lowercase"],
-    ["an uppercase name", (s) => (questionAt(s, 0)["name"] = "Urgency"), "lowercase letters"],
-    ["a name with a dash", (s) => (questionAt(s, 0)["name"] = "wants-refund"), "underscores"],
+    ["a name starting with a digit", (s) => renameQuestion(s, 0, "2fast"), "questions.0.name"],
+    ["a name starting with an underscore", (s) => renameQuestion(s, 0, "_x"), "lowercase"],
+    ["an uppercase name", (s) => renameQuestion(s, 0, "Urgency"), "lowercase letters"],
+    ["a name with a dash", (s) => renameQuestion(s, 0, "wants-refund"), "underscores"],
     [
       "a 41-character name",
-      (s) => (questionAt(s, 0)["name"] = `a${"b".repeat(40)}`),
+      (s) => renameQuestion(s, 0, `a${"b".repeat(40)}`),
       "at most 40 characters",
     ],
-    ["an empty name", (s) => (questionAt(s, 0)["name"] = ""), "questions.0.name"],
+    ["an empty name", (s) => renameQuestion(s, 0, ""), "questions.0.name"],
+    [
+      "a name in FacetDB's prefix",
+      (s) => renameQuestion(s, 0, "facetdb_status"),
+      "keeps that prefix for its own columns",
+    ],
+    [
+      "the bare name facetdb (its columns would start with facetdb_)",
+      (s) => renameQuestion(s, 0, "facetdb"),
+      'question name "facetdb" must not be facetdb',
+    ],
     [
       "two questions with one name",
       (s) => (questionAt(s, 2)["name"] = "team"),
@@ -339,7 +358,7 @@ describe("question-set versions", () => {
     ["adding a state field", (s) => (s["read"] = ["subject", "body", "channel", "customer_tier"])],
     ["reordering the state fields", (s) => (s["read"] = ["body", "subject", "channel"])],
     ["a new model version", (s) => (s["model"] = "jev-1.15.0")],
-    ["renaming a question", (s) => (questionAt(s, 0)["name"] = "priority")],
+    ["renaming a question", (s) => renameQuestion(s, 0, "priority")],
     [
       "adding a question",
       (s) =>

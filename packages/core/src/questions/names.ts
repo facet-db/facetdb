@@ -9,6 +9,12 @@ export const QUESTION_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
 export const QUESTION_NAME_RULE =
   "lowercase letters, digits and underscores, starting with a letter, at most 40 characters";
 
+/**
+ * Everything FacetDB adds to a database carries the `facetdb_` prefix. A question named `facetdb`
+ * or `facetdb_…` would put its answer columns (`facetdb_probability`) there.
+ */
+export const RESERVED_QUESTION_NAME = /^facetdb(_|$)/;
+
 // The only place the answer-column suffixes are spelled; the install generator and
 // `facetdb types` both read them through `answerColumns`.
 const PROBABILITY_SUFFIX = "_probability";

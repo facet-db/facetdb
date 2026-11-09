@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { QUESTION_NAME_PATTERN, QUESTION_NAME_RULE } from "./names.ts";
+import { resolveThresholds, type ThresholdOverride } from "../thresholds/index.ts";
+import { QUESTION_NAME_PATTERN, QUESTION_NAME_RULE, RESERVED_QUESTION_NAME } from "./names.ts";
 import type { Question } from "./types.ts";
 
 /**
@@ -15,22 +16,17 @@ const MOVING_ALIAS = /^[a-z][a-z0-9]*-(latest|preview)$/;
 const choiceOptionLimits = { min: 2, max: 255 } as const;
 const scoreLevelLimits = { min: 2, max: 10 } as const;
 
-/**
- * A per-question override of the stakes defaults, as in `thresholds: { urgency: {
- * confidenceAtLeast: 0.6 } }`. The ranges and the `noBelow < yesAbove` check are not enforced yet.
- */
-export type ThresholdOverride = {
-  readonly yesAbove?: number;
-  readonly noBelow?: number;
-  readonly confidenceAtLeast?: number;
-};
+export type { ThresholdOverride };
 
 export type QuestionSet = {
   readonly questions: readonly Question[];
   /** The state fields, in config order: only what the questions need. */
   readonly read: readonly string[];
   readonly model: string;
-  /** Keyed by question name; a question without an entry keeps its stakes defaults. */
+  /**
+   * Keyed by question name; a question without an entry keeps its stakes defaults, and a key that
+   * names no question is refused (a typo would otherwise keep the defaults silently).
+   */
   readonly thresholds: Readonly<Record<string, ThresholdOverride>>;
   /** A filter on state fields; records outside it are skipped. */
   readonly where?: string;
@@ -73,9 +69,15 @@ function rejectDuplicates(
   });
 }
 
-const questionName = z.string().regex(QUESTION_NAME_PATTERN, {
-  error: (issue) => `question name "${String(issue.input)}" must use ${QUESTION_NAME_RULE}`,
-});
+const questionName = z
+  .string()
+  .regex(QUESTION_NAME_PATTERN, {
+    error: (issue) => `question name "${String(issue.input)}" must use ${QUESTION_NAME_RULE}`,
+  })
+  .refine((name) => !RESERVED_QUESTION_NAME.test(name), {
+    error: (issue) =>
+      `question name "${String(issue.input)}" must not be facetdb or start with facetdb_; FacetDB keeps that prefix for its own columns`,
+  });
 
 // The branches stay inferred so the union can read their `type` literal; the annotation on
 // `question` below is what ties them to the declared types in `types.ts`.
@@ -155,10 +157,17 @@ const question: z.ZodType<Question> = z.discriminatedUnion("type", [
   scoreQuestion,
 ]);
 
+// A probability or confidence, so every threshold value lies in [0, 1].
+const unitInterval = (what: string) =>
+  z
+    .number({ error: `${what} must be a number` })
+    .min(0, `${what} must be at least 0`)
+    .max(1, `${what} must be at most 1`);
+
 const thresholdOverride: z.ZodType<ThresholdOverride> = z.strictObject({
-  yesAbove: z.number().exactOptional(),
-  noBelow: z.number().exactOptional(),
-  confidenceAtLeast: z.number().exactOptional(),
+  yesAbove: unitInterval("yesAbove").exactOptional(),
+  noBelow: unitInterval("noBelow").exactOptional(),
+  confidenceAtLeast: unitInterval("confidenceAtLeast").exactOptional(),
 });
 
 export const questionSetSchema: z.ZodType<QuestionSet> = z
@@ -183,7 +192,45 @@ export const questionSetSchema: z.ZodType<QuestionSet> = z
       ctx,
       (index) => ["questions", index, "name"],
     );
+    for (const [name, override] of Object.entries(set.thresholds)) {
+      const question = set.questions.find((candidate) => candidate.name === name);
+      if (question === undefined) {
+        const names = set.questions.map((candidate) => candidate.name).join(", ");
+        ctx.addIssue({
+          code: "custom",
+          message: `no question is named "${name}"; thresholds are keyed by question name (${names})`,
+          path: ["thresholds", name],
+        });
+        continue;
+      }
+      for (const message of thresholdProblems(question, override)) {
+        ctx.addIssue({ code: "custom", message, path: ["thresholds", name] });
+      }
+    }
   });
+
+/**
+ * A noul takes `yesAbove` and `noBelow`, a choice or score takes `confidenceAtLeast`, and the
+ * noul pair must keep `noBelow` lower than `yesAbove` once the stakes defaults fill the gaps.
+ */
+function thresholdProblems(question: Question, override: ThresholdOverride): string[] {
+  if (question.type === "noul") {
+    if (override.confidenceAtLeast !== undefined) {
+      return ["a noul question takes yesAbove and noBelow, not confidenceAtLeast"];
+    }
+    const thresholds = resolveThresholds(question, override);
+    if (thresholds.kind === "yes-no" && thresholds.noBelow >= thresholds.yesAbove) {
+      return [
+        `noBelow (${thresholds.noBelow}) must be lower than yesAbove (${thresholds.yesAbove})`,
+      ];
+    }
+    return [];
+  }
+  if (override.yesAbove !== undefined || override.noBelow !== undefined) {
+    return [`a ${question.type} question takes confidenceAtLeast, not yesAbove or noBelow`];
+  }
+  return [];
+}
 
 /** The config boundary: unknown input in, a question set or every problem in plain words out. */
 export function parseQuestionSet(input: unknown): QuestionSetParseResult {
