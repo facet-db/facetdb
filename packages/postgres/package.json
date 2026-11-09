@@ -1,0 +1,20 @@
+{
+  "name": "@facetdb/postgres",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB on Postgres: the trigger-and-jobs connector (inline columns or side table), the polling connector, and the FacetDB store for plugin and API sources. PGlite in development, any Postgres in production.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.11",
+    "@facetdb/core": "workspace:*",
+    "postgres": "3.4.9"
+  }
+}

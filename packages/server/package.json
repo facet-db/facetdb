@@ -1,0 +1,22 @@
+{
+  "name": "@facetdb/server",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB HTTP surface: the check API for API sources, signed webhooks, and the review endpoints the dashboard and the terminal review share.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "@facetdb/postgres": "workspace:*",
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14",
+    "zod": "4.6.7"
+  }
+}

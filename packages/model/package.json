@@ -1,0 +1,19 @@
+{
+  "name": "@facetdb/model",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB model providers: the TypeSafe /v1/systemone client with backoff, compatible providers behind a base URL, and the scripted fake used by tests and dry runs.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

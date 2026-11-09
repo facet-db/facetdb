@@ -1,0 +1,9 @@
+packages:
+  - "packages/*"
+  - "plugins/*"
+  - "apps/*"
+
+# Supply-chain rule: a package version must be at least 3 days old
+# before it can be installed, for the whole workspace, with no per-package exceptions.
+minimumReleaseAge: 4320
+minimumReleaseAgeStrict: true

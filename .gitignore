@@ -1,0 +1,23 @@
+# dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# secrets: never commit
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# product runtime data (facetdb dev keeps its embedded Postgres here)
+.facetdb/
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
