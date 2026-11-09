@@ -5,15 +5,5 @@
  */
 
 export * from "./questions/index.ts";
+export * from "./records/index.ts";
 export * from "./thresholds/index.ts";
-
-/** The six record statuses a row's `facetdb_status` can hold. */
-export const RECORD_STATUSES = [
-  "pending",
-  "done",
-  "needs_review",
-  "error",
-  "unchecked",
-  "skipped",
-] as const;
-export type RecordStatus = (typeof RECORD_STATUSES)[number];
