@@ -22,6 +22,7 @@ import { conditionHolds, configureAction } from "./action-pipeline.ts";
 import {
   createWorker,
   DEFAULT_WORKER_LIMITS,
+  type OutagePolicy,
   type ReviewQueue,
   type WorkerDeps,
   type WorkerLimits,
@@ -805,5 +806,150 @@ describe("action conditions", () => {
     await step.run(record, decisions);
 
     expect(action.calls[0]?.config).toEqual({ label: "scam" });
+  });
+});
+
+describe("the outage policy in the worker", () => {
+  /** A hand-written policy: the worker only needs its three verdicts, not the arithmetic. */
+  function scriptedPolicy(verdict: "error" | "unchecked"): OutagePolicy & {
+    readonly held: Set<RecordKey>;
+    nextDue: RecordKey[];
+  } {
+    const held = new Set<RecordKey>();
+    return {
+      held,
+      nextDue: [],
+      failed(key) {
+        held.add(key);
+        return verdict;
+      },
+      succeeded(key) {
+        // As the real policy: the answered record is no longer held; the rest come back now.
+        held.delete(key);
+        const all = [...held];
+        held.clear();
+        return all;
+      },
+      due() {
+        const due = this.nextDue;
+        this.nextDue = [];
+        for (const key of due) {
+          held.delete(key);
+        }
+        return due;
+      },
+      hold(keys) {
+        for (const key of keys) {
+          held.add(key);
+        }
+      },
+    };
+  }
+
+  it("marks a record unchecked when the window is spent, re-queues it on recovery, and answers it to done", async () => {
+    let down = true;
+    const provider = new ScriptedProvider(() =>
+      down
+        ? Promise.reject(new Error("the model is overloaded (529)"))
+        : Promise.resolve(response(SURE_YES)),
+    );
+    const test = await rig({ provider });
+    const outage = scriptedPolicy("unchecked");
+    const worker = createWorker({ ...test.deps, outage });
+    test.db.edit("a", { body: "a listing" });
+
+    const first = await worker.runOnce();
+    expect(first.held).toEqual([{ key: "a", status: "unchecked" }]);
+    expect(test.db.decisionOf("a")).toEqual({ decisions: {}, status: "unchecked" });
+    expect(test.db.jobs.size).toBe(0);
+
+    // The model returns; the next successful call ends the outage and queues "a" again.
+    down = false;
+    test.db.edit("b", { body: "another listing" });
+    const second = await worker.runOnce();
+    expect(second.requeued).toEqual(["a"]);
+    expect(test.db.jobs.has("a")).toBe(true);
+
+    const third = await worker.runOnce();
+    expect(third.written).toEqual(["a"]);
+    expect(test.db.decisionOf("a")?.status).toBe("done");
+  });
+
+  it("marks a record error when the source holds, and asks it again when the policy says it is due", async () => {
+    let down = true;
+    const provider = new ScriptedProvider(() =>
+      down
+        ? Promise.reject(new Error("the model is overloaded (529)"))
+        : Promise.resolve(response(UNSURE)),
+    );
+    const test = await rig({ provider });
+    const outage = scriptedPolicy("error");
+    const worker = createWorker({ ...test.deps, outage });
+    test.db.edit("a", { body: "a listing" });
+
+    await worker.runOnce();
+    expect(test.db.decisionOf("a")?.status).toBe("error");
+
+    down = false;
+    outage.nextDue = ["a"];
+    // Due records are queued before the claim, so the same pass asks them.
+    const retry = await worker.runOnce();
+    expect(retry.requeued).toEqual(["a"]);
+    expect(retry.written).toEqual(["a"]);
+    expect(test.db.decisionOf("a")?.status).toBe("needs_review");
+  });
+
+  it("hands a record back to the policy when the queue refuses it, so a retry stays scheduled", async () => {
+    class RefusingConnector extends FakeConnector {
+      refuse = false;
+      override enqueue(keys: readonly RecordKey[]): Promise<void> {
+        return this.refuse ? Promise.reject(new Error("the queue is down")) : super.enqueue(keys);
+      }
+    }
+    let connector: RefusingConnector | undefined;
+    const provider = new ScriptedProvider(() => Promise.reject(new Error("overloaded")));
+    const test = await rig({
+      provider,
+      connector: (db) => {
+        connector = new RefusingConnector(db);
+        return connector;
+      },
+    });
+    const outage = scriptedPolicy("error");
+    const worker = createWorker({ ...test.deps, outage });
+    test.db.edit("a", { body: "a listing" });
+    await worker.runOnce();
+    expect(outage.held.has("a")).toBe(true);
+
+    outage.nextDue = ["a"];
+    if (connector !== undefined) {
+      connector.refuse = true;
+    }
+    const report = await worker.runOnce();
+
+    expect(report.requeued).toEqual([]);
+    expect(report.failures.map(({ key }) => key)).toEqual([null]);
+    // Not stranded: the policy holds it again and will offer it at the next retry.
+    expect(outage.held.has("a")).toBe(true);
+    expect(test.db.decisionOf("a")?.status).toBe("error");
+  });
+
+  it("keeps retrying through the queue while the policy says retry", async () => {
+    const provider = new ScriptedProvider(() => Promise.reject(new Error("overloaded")));
+    const test = await rig({ provider });
+    const outage: OutagePolicy = {
+      failed: () => "retry",
+      succeeded: () => [],
+      due: () => [],
+      hold: () => {},
+    };
+    test.db.edit("a", { body: "a listing" });
+
+    const report = await createWorker({ ...test.deps, outage }).runOnce();
+
+    expect(report.held).toEqual([]);
+    expect(report.failures.map(({ key }) => key)).toEqual(["a"]);
+    expect(test.db.decisionOf("a")).toBeNull();
+    expect(test.db.jobs.get("a")).toEqual({ claimedBy: null });
   });
 });

@@ -48,6 +48,31 @@ export type ReviewQueue = {
   withdraw(key: RecordKey, stateHash: string): Promise<void>;
 };
 
+/**
+ * What the retry window decides about a record whose model call failed: `retry` keeps it queued
+ * and pending; `error` and `unchecked` take it out of the queue with that status, to be queued
+ * again by the policy.
+ */
+export type OutageVerdict = "retry" | "error" | "unchecked";
+
+/**
+ * The worker's side of the outage policy (`@facetdb/model` builds it; core only calls it). It
+ * remembers which records are held, and tells the worker when to ask them again.
+ */
+export type OutagePolicy = {
+  /** A model call for `key` failed; what the worker does with the record. */
+  failed(key: RecordKey, error: unknown): OutageVerdict;
+  /** A model call for `key` succeeded; the held records to queue again if this ended an outage. */
+  succeeded(key: RecordKey): readonly RecordKey[];
+  /** Held records whose scheduled retry has come; each is returned once, then queued again. */
+  due(): readonly RecordKey[];
+  /**
+   * The worker could not queue these records (the queue refused them): hold them again for the
+   * next retry, so a record marked error or unchecked is never left with no retry scheduled.
+   */
+  hold(keys: readonly RecordKey[]): void;
+};
+
 export type WorkerDeps = {
   readonly connector: Connector;
   readonly provider: ModelProvider;
@@ -65,6 +90,8 @@ export type WorkerDeps = {
    * runs.
    */
   readonly alerts?: AlertSignals;
+  /** The retry window and `onOutage` policy; without it a failed call just returns the record to the queue. */
+  readonly outage?: OutagePolicy;
 };
 
 /**
@@ -103,6 +130,10 @@ export type PassReport = {
   readonly refused: readonly { readonly key: RecordKey; readonly estimate: number }[];
   /** State above the warning size but sent. */
   readonly warned: readonly { readonly key: RecordKey; readonly estimate: number }[];
+  /** The model stayed down past the retry window: marked `error` (hold) or `unchecked` (release) and left the queue. */
+  readonly held: readonly { readonly key: RecordKey; readonly status: "error" | "unchecked" }[];
+  /** Held records queued again, on their 5-minute schedule or because the model came back. */
+  readonly requeued: readonly RecordKey[];
   readonly failures: readonly RecordFailure[];
 };
 
@@ -150,6 +181,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     questionSet,
     version,
     alerts,
+    outage,
   } = deps;
 
   /** An alert that cannot be sent or stored is handed back as a failure; the record is unaffected. */
@@ -209,6 +241,44 @@ export function createWorker(deps: WorkerDeps): Worker {
     return true;
   }
 
+  /** Queues held records again; a failure is handed back, and the policy will not offer them twice. */
+  async function requeue(report: MutablePass, keys: readonly RecordKey[]): Promise<void> {
+    if (keys.length === 0) {
+      return;
+    }
+    try {
+      await connector.enqueue(keys);
+      report.requeued.push(...keys);
+    } catch (error) {
+      // The policy has already let these keys go; it takes them back for the next retry.
+      outage?.hold(keys);
+      report.failures.push({ key: null, stage: "record", error });
+    }
+  }
+
+  /**
+   * The model call failed and the outage policy says the retry window is spent: the record gets its
+   * status through `write`, still guarded by the hash it was read with, and leaves the queue.
+   */
+  async function hold(
+    row: ReadRow,
+    verdict: "error" | "unchecked",
+    report: MutablePass,
+  ): Promise<Settled> {
+    const event = verdict === "error" ? "model-error" : "released-unchecked";
+    const result = await connector.write(
+      row.key,
+      { decisions: {}, status: transition("pending", event) },
+      row.hash,
+    );
+    if (!result.written) {
+      report.discarded.push(row.key);
+      return "release";
+    }
+    report.held.push({ key: row.key, status: verdict });
+    return "ack";
+  }
+
   async function processRecord(row: ReadRow, report: MutablePass): Promise<Settled> {
     let stage: FailureStage = "record";
     try {
@@ -260,9 +330,17 @@ export function createWorker(deps: WorkerDeps): Worker {
         });
       } catch (error) {
         await tell(report, row.key, (signals) => signals.modelCall(false));
-        throw error;
+        const verdict = outage?.failed(row.key, error) ?? "retry";
+        if (verdict === "retry") {
+          throw error;
+        }
+        // The failure stays in the report; the record is held instead of retried at once.
+        report.failures.push({ key: row.key, stage, error });
+        stage = "record";
+        return await hold(row, verdict, report);
       }
       await tell(report, row.key, (signals) => signals.modelCall(true));
+      await requeue(report, outage?.succeeded(row.key) ?? []);
 
       stage = "record";
       const entry: AnswerEntry = {
@@ -299,10 +377,13 @@ export function createWorker(deps: WorkerDeps): Worker {
   }
 
   async function runOnce(): Promise<PassReport> {
+    const report = newPass(0);
+    // A held record is asked again every 5 minutes while the model is down.
+    await requeue(report, outage?.due() ?? []);
     const claimed = await connector.claim(limits.claimBatch);
     // The queue holds one entry per record, but a connector may repeat a key in a batch.
     const keys = [...new Set(claimed)];
-    const report = newPass(keys.length);
+    report.claimed = keys.length;
     // The worker is alive whether or not the queue had anything for it.
     await tell(report, null, (signals) => signals.beat());
     if (keys.length === 0) {
@@ -411,6 +492,8 @@ function newPass(claimed: number): MutablePass {
     withdrawn: [],
     refused: [],
     warned: [],
+    held: [],
+    requeued: [],
     failures: [],
   };
 }

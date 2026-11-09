@@ -4,6 +4,8 @@ export type {
   FailureStage,
   HumanDecisionNotice,
   HumanDecisionOutcome,
+  OutagePolicy,
+  OutageVerdict,
   PassReport,
   RecordFailure,
   ReviewQueue,
