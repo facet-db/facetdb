@@ -36,9 +36,14 @@ export type NoulAnswer = {
   readonly probability: number;
 };
 
-/** A choice answer: one probability per option, in the question's option order. */
+/**
+ * A choice answer: the top option as the model named it (the decision log keeps it), and one
+ * probability per option, in the question's option order. The parser guarantees `top` holds the
+ * highest probability; on a tie, `top` decides.
+ */
 export type ChoiceAnswer = {
   readonly type: "choice";
+  readonly top: string;
   readonly probabilities: readonly number[];
 };
 

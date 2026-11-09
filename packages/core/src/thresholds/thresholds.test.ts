@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { parseQuestionSet, type Question } from "../questions/index.ts";
 import {
+  type Answer,
   choiceConfidence,
   decide,
   defaultThresholds,
@@ -134,43 +135,38 @@ describe("noul decisions", () => {
   });
 });
 
+/** A choice answer whose named top option is the most probable one, unless `top` says otherwise. */
+const picked = (probabilities: number[], top?: string): Answer => ({
+  type: "choice",
+  top: top ?? `option_${probabilities.indexOf(Math.max(...probabilities))}`,
+  probabilities,
+});
+
 describe("choice decisions", () => {
   it("decides the top option when confidence is exactly at the threshold", () => {
-    const decision = decide(choice(2), confidence(0.5), {
-      type: "choice",
-      probabilities: [0.75, 0.25],
-    });
+    const decision = decide(choice(2), confidence(0.5), picked([0.75, 0.25]));
     expect(decision).toEqual({ kind: "decided", value: "option_0", probabilityOrConfidence: 0.5 });
   });
 
   it("needs review when confidence sits just under the threshold", () => {
-    const decision = decide(choice(2), confidence(0.5), {
-      type: "choice",
-      probabilities: [0.7, 0.3],
-    });
+    const decision = decide(choice(2), confidence(0.5), picked([0.7, 0.3]));
     expect(decision).toEqual({ kind: "needs_review" });
   });
 
   it("uses the high-stakes 0.75 for a choice", () => {
     const high = defaultThresholds("choice", "high");
-    expect(
-      decide(choice(2, "high"), high, { type: "choice", probabilities: [0.875, 0.125] }),
-    ).toMatchObject({ kind: "decided", value: "option_0" });
+    expect(decide(choice(2, "high"), high, picked([0.875, 0.125]))).toMatchObject({
+      kind: "decided",
+      value: "option_0",
+    });
     // Confidence 0.6 at 0.8 versus 0.2: below 0.75, so it is not decided at high stakes.
-    expect(decide(choice(2, "high"), high, { type: "choice", probabilities: [0.8, 0.2] })).toEqual({
-      kind: "needs_review",
-    });
-    expect(decide(choice(2, "high"), high, { type: "choice", probabilities: [0.7, 0.3] })).toEqual({
-      kind: "needs_review",
-    });
+    expect(decide(choice(2, "high"), high, picked([0.8, 0.2]))).toEqual({ kind: "needs_review" });
+    expect(decide(choice(2, "high"), high, picked([0.7, 0.3]))).toEqual({ kind: "needs_review" });
   });
 
-  it("gives the first option on a tie, as Jev leans to the first option listed", () => {
-    const decision = decide(choice(3), confidence(0), {
-      type: "choice",
-      probabilities: [0.4, 0.4, 0.2],
-    });
-    expect(decision).toMatchObject({ kind: "decided", value: "option_0" });
+  it("decides the option the model named, which settles a tie", () => {
+    const decision = decide(choice(3), confidence(0), picked([0.4, 0.4, 0.2], "option_1"));
+    expect(decision).toMatchObject({ kind: "decided", value: "option_1" });
   });
 
   it("means different things for different list sizes: 0.50 is 75% for two and about 51% for forty", () => {
@@ -178,13 +174,11 @@ describe("choice decisions", () => {
     const fortyTop = 1 / 40 + 0.52 * (1 - 1 / 40);
     const rest = (1 - fortyTop) / 39;
     const probabilities = [fortyTop, ...Array.from({ length: 39 }, () => rest)];
-    expect(decide(forty, confidence(0.5), { type: "choice", probabilities })).toMatchObject({
+    expect(decide(forty, confidence(0.5), picked(probabilities))).toMatchObject({
       kind: "decided",
     });
     const below = [0.5, ...Array.from({ length: 39 }, () => 0.5 / 39)];
-    expect(decide(forty, confidence(0.5), { type: "choice", probabilities: below })).toEqual({
-      kind: "needs_review",
-    });
+    expect(decide(forty, confidence(0.5), picked(below))).toEqual({ kind: "needs_review" });
   });
 });
 
@@ -293,7 +287,7 @@ describe("the decision rule's properties (fast-check prints a seed on failure)",
         (p, stakes) => {
           const probabilities = [p, 1 - p];
           const thresholds = defaultThresholds("choice", stakes);
-          const decision = decide(choice(2, stakes), thresholds, { type: "choice", probabilities });
+          const decision = decide(choice(2, stakes), thresholds, picked(probabilities));
           const conf = choiceConfidence(probabilities);
           const threshold = thresholds.kind === "confidence" ? thresholds.confidenceAtLeast : 0;
           expect(decision.kind === "decided").toBe(conf >= threshold);

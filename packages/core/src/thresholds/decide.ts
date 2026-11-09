@@ -53,12 +53,8 @@ function decideChoice(
   answer: ChoiceAnswer,
 ): Decision {
   const confidence = choiceConfidence(answer.probabilities);
-  const option = question.options[topIndex(answer.probabilities)];
-  if (option === undefined) {
-    throw new Error(`choice "${question.name}" has no option for its probabilities`);
-  }
   if (confidence >= thresholds.confidenceAtLeast) {
-    return { kind: "decided", value: option.name, probabilityOrConfidence: confidence };
+    return { kind: "decided", value: answer.top, probabilityOrConfidence: confidence };
   }
   return { kind: "needs_review" };
 }
