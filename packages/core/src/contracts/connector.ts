@@ -12,6 +12,11 @@ export type ReadRow = {
   readonly key: RecordKey;
   readonly state: Readonly<Record<string, StateValue>>;
   readonly hash: string;
+  /**
+   * True when the source's `where` filter excludes the record. The connector evaluates the filter
+   * in its own SQL; core never sees it, and skips an excluded record without a model call.
+   */
+  readonly excluded: boolean;
 };
 
 export type ReadResult = {
@@ -46,8 +51,12 @@ export type Capabilities = {
 export type RecordDecision = {
   readonly decisions: Readonly<Record<string, Decision>>;
   readonly status: RecordStatus;
-  /** True when a person decided a question of this record: the connector sets `facetdb_reviewed`. */
-  readonly reviewed?: boolean;
+  /**
+   * Set when a person decided a question of this record. `facetdb_reviewed` is true once any
+   * question was decided by a person, so the connector sets it here and never
+   * clears it: a write without `reviewed` leaves the flag as it was.
+   */
+  readonly reviewed?: true;
 };
 
 export type WriteResult = {
@@ -74,8 +83,21 @@ export type Connector = {
   write(key: RecordKey, decision: RecordDecision, expectedHash: string): Promise<WriteResult>;
   /** Pages through every record, newest first, from a cursor that survives a restart. */
   scan(cursor: ScanCursor | null): Promise<ScanPage>;
+  /**
+   * Queues keys for the workers, as the change capture does: a key already queued stays one entry
+   * (the queue holds one entry per record). A backfill enqueues.
+   */
+  enqueue(keys: readonly RecordKey[]): Promise<void>;
   /** Claims up to `limit` queued keys so no other worker on the same queue takes them. */
   claim(limit: number): Promise<readonly RecordKey[]>;
+  /**
+   * Queues `key` already claimed by this worker and returns true, or returns false when the key is
+   * queued already: a worker holds it or will, and asks it whole. Settle it with `ack` or `release`.
+   * Never hold an uncommitted job row across the model call: the app's trigger would wait on it.
+   * In SQL, commit `insert … on conflict do nothing returning` first, then claim the row with
+   * `select … for update skip locked` (false if a worker took it in between).
+   */
+  claimKey(key: RecordKey): Promise<boolean>;
   /** Removes claimed keys from the queue once their work is done. */
   ack(keys: readonly RecordKey[]): Promise<void>;
   /** Returns claimed keys to the queue for another attempt. */

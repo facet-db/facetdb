@@ -420,6 +420,96 @@ describe("a human decision stands until the record's state changes", () => {
     expect(writes[0]?.decision.decisions["scam"]).toMatchObject({ kind: "decided", value: true });
   });
 
+  it("keeps the first person's decision when a second decides from the same card snapshot", async () => {
+    const log = new FakeDecisionLog();
+    const { write, writes } = fakeWriter([], { r1: "h1" });
+    const snapshot: ReviewedRecord = {
+      ...reviewed("h1"),
+      questions: [scam, team],
+      decisions: { scam: { kind: "needs_review" }, team: { kind: "needs_review" } },
+      answers: {
+        scam: { type: "noul", probability: 0.55 },
+        team: { type: "choice", top: "billing", probabilities: [0.6, 0.4] },
+      },
+    };
+
+    await applyHumanDecision(humanEntry("r1", "scam", true, "h1"), snapshot, log, write);
+    // The second reviewer's card still shows scam as needs_review.
+    const second = await applyHumanDecision(
+      humanEntry("r1", "team", "tech", "h1"),
+      snapshot,
+      log,
+      write,
+    );
+
+    expect(second.status).toBe("done");
+    expect(writes.at(-1)?.decision.decisions).toEqual({
+      scam: { kind: "decided", value: true, probabilityOrConfidence: 0.55 },
+      team: { kind: "decided", value: "tech", probabilityOrConfidence: 0.19999999999999996 },
+    });
+  });
+
+  it("keeps both decisions when two reviewers overlap and the stale write lands last", async () => {
+    const log = new FakeDecisionLog();
+    const rows: RecordDecision[] = [];
+    let atFirstWrite: () => void = () => {};
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      atFirstWrite = resolve;
+    });
+    let releaseFirst: () => void = () => {};
+    const firstWriteHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const write = async (_key: string, decision: RecordDecision): Promise<WriteResult> => {
+      calls += 1;
+      if (calls === 1) {
+        atFirstWrite();
+        await firstWriteHeld;
+      }
+      rows.push(decision);
+      return { written: true };
+    };
+    const snapshot: ReviewedRecord = {
+      ...reviewed("h1"),
+      questions: [scam, team],
+      decisions: { scam: { kind: "needs_review" }, team: { kind: "needs_review" } },
+      answers: {
+        scam: { type: "noul", probability: 0.55 },
+        team: { type: "choice", top: "billing", probabilities: [0.6, 0.4] },
+      },
+    };
+
+    // A logs scam and stalls in its write; B logs team and writes both; then A's stale write lands.
+    const a = applyHumanDecision(humanEntry("r1", "scam", true, "h1"), snapshot, log, write);
+    await firstWriteStarted;
+    await applyHumanDecision(humanEntry("r1", "team", "tech", "h1"), snapshot, log, write);
+    releaseFirst();
+    await a;
+
+    expect(rows.at(-1)?.status).toBe("done");
+    expect(rows.at(-1)?.decisions["scam"]).toMatchObject({ kind: "decided", value: true });
+    expect(rows.at(-1)?.decisions["team"]).toMatchObject({ kind: "decided", value: "tech" });
+  });
+
+  it("does not come back when the state returns: after A, B, A the decision made at A is retired", async () => {
+    const log = new FakeDecisionLog();
+    await log.appendAnswer(answerEntry("r1", "hA", { scam: { type: "noul", probability: 0.55 } }));
+    await log.appendHuman(humanEntry("r1", "scam", false, "hA"));
+    await log.appendAnswer(answerEntry("r1", "hB", { scam: { type: "noul", probability: 0.55 } }));
+    const { write, writes } = fakeWriter([], { r1: "hA" });
+
+    await recordAnswer(
+      answerEntry("r1", "hA", { scam: { type: "noul", probability: 0.95 } }),
+      current,
+      log,
+      write,
+    );
+
+    expect(await humanDecisionStands(log, "r1", "scam", "hA")).toBe(false);
+    expect(writes[0]?.decision.decisions["scam"]).toMatchObject({ kind: "decided", value: true });
+  });
+
   it("is refused by the write when the record changed while the card was open", async () => {
     const log = new FakeDecisionLog();
     const { write, writes } = fakeWriter([], { r1: "h-newer" });

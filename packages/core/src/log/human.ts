@@ -45,7 +45,8 @@ export function humanDecision(question: Question, value: HumanValue, answer: Ans
 /**
  * The human decision that stands for a question given a record's history: the person's latest word
  * on it, provided it was made against the record's current state, since it stands until that
- * state changes. A decision made against an older state is retired.
+ * state changes. A decision made against an older state is retired, and so is one followed by an
+ * answer at another state: after A, B, A the decision made at A does not return.
  */
 export function standingHuman(
   history: readonly LogEntry[],
@@ -56,6 +57,12 @@ export function standingHuman(
   for (const entry of history) {
     if (entry.kind === "human" && entry.question === question) {
       latest = entry;
+    } else if (
+      entry.kind === "answer" &&
+      latest !== undefined &&
+      entry.stateHash !== latest.stateHash
+    ) {
+      latest = undefined;
     }
   }
   return latest !== undefined && latest.stateHash === stateHash ? latest : undefined;
@@ -97,8 +104,10 @@ export type HumanResult = {
  * Applies one reviewer decision from the review screen. The entry is logged first, so a crash
  * between the two steps leaves a logged decision and an unchanged row, never a changed row nobody
  * can explain; then the value is written at once with `reviewed` set, and the status becomes done
- * when every question is decided. If the record changed while the card was open the write is
- * refused and the entry no longer stands, because its state hash is old.
+ * when every question is decided. Every person's decision standing in the log is written, not
+ * only this one: two reviewers working from the same card snapshot would otherwise each write
+ * the other's question back to review. If the record changed while the card was open the write
+ * is refused and the entry no longer stands, because its hash is old.
  */
 export async function applyHumanDecision(
   entry: HumanEntry,
@@ -121,15 +130,45 @@ export async function applyHumanDecision(
       `"${entry.question}" is not a question of record "${record.key}" with a logged answer`,
     );
   }
-  const decisions = {
-    ...record.decisions,
-    [entry.question]: humanDecision(question, entry.value, answer),
-  };
+  await log.appendHuman(entry);
+  // Overlapping reviewers: each one re-reads the log after its write and writes again when a
+  // person decided something meanwhile, so the write that lands last always carries every
+  // decision logged before it (an entry appended after that re-read comes with its own write).
+  let history = await log.history(record.key);
+  for (;;) {
+    const { decisions, status } = withPeople(record, history);
+    const result = await write(record.key, { decisions, status, reviewed: true }, record.hash);
+    if (!result.written) {
+      return { written: false, status };
+    }
+    const after = await log.history(record.key);
+    if (humanCount(after) === humanCount(history)) {
+      return { written: true, status };
+    }
+    history = after;
+  }
+}
+
+/** The card's decisions with every person's decision standing in `history` laid over them. */
+function withPeople(
+  record: ReviewedRecord,
+  history: readonly LogEntry[],
+): { decisions: Record<string, Decision>; status: RecordStatus } {
+  const decisions: Record<string, Decision> = { ...record.decisions };
+  for (const candidate of record.questions) {
+    const standing = standingHuman(history, candidate.name, record.hash);
+    const logged = record.answers[candidate.name];
+    if (standing !== undefined && logged !== undefined) {
+      decisions[candidate.name] = humanDecision(candidate, standing.value, logged);
+    }
+  }
   const allDecided = record.questions.every(
     (candidate) => decisions[candidate.name]?.kind === "decided",
   );
   const status = allDecided ? transition(record.status, "human-decided-last") : record.status;
-  await log.appendHuman(entry);
-  const result = await write(record.key, { decisions, status, reviewed: true }, record.hash);
-  return { written: result.written, status };
+  return { decisions, status };
+}
+
+function humanCount(history: readonly LogEntry[]): number {
+  return history.filter((entry) => entry.kind === "human").length;
 }

@@ -4,6 +4,7 @@
  * through its barrel.
  */
 
+export * from "./alerts/index.ts";
 export * from "./backfill/index.ts";
 export * from "./contracts/index.ts";
 export * from "./log/index.ts";

@@ -17,6 +17,8 @@ export type FakeDatabaseOptions = {
   readonly fields: readonly string[];
   /** Rows per scan page. Defaults to 10. */
   readonly pageSize?: number;
+  /** The source's `where` filter as the connector's SQL would evaluate it: true excludes the row. */
+  readonly excludes?: (state: Readonly<Record<string, StateValue>>) => boolean;
 };
 
 /** A row as the fake table keeps it: its insertion order, its state and the decision written to it. */
@@ -40,6 +42,7 @@ type FakeJob = {
 export class FakeDatabase {
   readonly fields: readonly string[];
   readonly pageSize: number;
+  readonly excludes: (state: Readonly<Record<string, StateValue>>) => boolean;
   readonly rows = new FakeStore<FakeRow>();
   readonly jobs = new FakeStore<FakeJob>();
   readonly #changes: RecordKey[] = [];
@@ -51,6 +54,7 @@ export class FakeDatabase {
   constructor(options: FakeDatabaseOptions) {
     this.fields = options.fields;
     this.pageSize = options.pageSize ?? 10;
+    this.excludes = options.excludes ?? (() => false);
     if (!Number.isInteger(this.pageSize) || this.pageSize < 1) {
       throw new Error(`a page holds at least one row, not ${this.pageSize}`);
     }
@@ -128,6 +132,11 @@ export class FakeDatabase {
   }
 
   /** The trigger: insert the job once (`on conflict do nothing`), then wake every watcher. */
+  /** Queues a key and wakes the watchers, exactly as the trigger does on a change. */
+  queue(key: RecordKey): void {
+    this.#fire(key);
+  }
+
   #fire(key: RecordKey): void {
     if (!this.jobs.has(key)) {
       this.jobs.set(key, { claimedBy: null });
@@ -207,8 +216,29 @@ export class FakeConnector implements Connector {
     if (row === undefined || stateHash(this.#db.fields, row.state) !== expectedHash) {
       return { written: false };
     }
-    this.#db.rows.set(key, { ...row, decision });
+    // `facetdb_reviewed` is true once any question was decided by a person: never cleared.
+    const reviewed = decision.reviewed ?? row.decision?.reviewed;
+    this.#db.rows.set(key, {
+      ...row,
+      decision: reviewed === true ? { ...decision, reviewed } : decision,
+    });
     return { written: true };
+  }
+
+  async enqueue(keys: readonly RecordKey[]): Promise<void> {
+    this.#db.assertInstalled();
+    for (const key of keys) {
+      this.#db.queue(key);
+    }
+  }
+
+  async claimKey(key: RecordKey): Promise<boolean> {
+    this.#db.assertInstalled();
+    if (this.#db.jobs.has(key)) {
+      return false;
+    }
+    this.#db.jobs.set(key, { claimedBy: this.#worker });
+    return true;
   }
 
   async scan(cursor: ScanCursor | null): Promise<ScanPage> {
@@ -258,6 +288,11 @@ export class FakeConnector implements Connector {
   }
 
   #readRow(key: RecordKey, row: FakeRow): ReadRow {
-    return { key, state: row.state, hash: stateHash(this.#db.fields, row.state) };
+    return {
+      key,
+      state: row.state,
+      hash: stateHash(this.#db.fields, row.state),
+      excluded: this.#db.excludes(row.state),
+    };
   }
 }

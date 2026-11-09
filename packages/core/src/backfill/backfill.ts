@@ -1,3 +1,4 @@
+import type { AlertSignals } from "../alerts/index.ts";
 import type {
   Clock,
   Connector,
@@ -10,7 +11,7 @@ import type {
 } from "../contracts/index.ts";
 import { type AnswerEntry, recordAnswer } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
-import { type StateValue, shouldSkip, transition } from "../records/index.ts";
+import { type StateValue, shouldSkip } from "../records/index.ts";
 import { buildRequest, CHARACTERS_PER_TOKEN, checkStateSize } from "../requests/index.ts";
 import { DEFAULT_MAX_IN_FLIGHT } from "../worker/index.ts";
 
@@ -62,6 +63,8 @@ export type BackfillDeps = {
   readonly version: number;
   /** The source's own refuse limit for a record's state; 32,000 when absent. */
   readonly maxStateTokens?: number;
+  /** Told when a run finishes or stops. */
+  readonly alerts?: AlertSignals;
 };
 
 /** The states `estimate` reads, and how many records they stand for. */
@@ -111,7 +114,9 @@ export type DeferredReason =
   /** Its state changed since it was last answered: the worker will ask it with the whole set. */
   | "stale"
   /** Another question has no stored answer to merge with. */
-  | "incomplete";
+  | "incomplete"
+  /** Already in the queue: a worker holds it or will, and asks it with the whole set. */
+  | "queued";
 
 export type BackfillFailure = { readonly key: RecordKey; readonly error: unknown };
 
@@ -123,15 +128,15 @@ export type BackfillReport = {
    */
   readonly status: "completed" | "declined" | "stopped";
   readonly estimate: BackfillEstimate;
-  /** Model calls made whose answers were logged and written. */
+  /** A whole-set run: records put in the worker's queue, which asks, skips or refuses each one. */
+  readonly enqueued: readonly RecordKey[];
+  /** An added-question run: model calls made whose answers were logged and written. */
   readonly answered: readonly RecordKey[];
   /** Already answered at the same state (and version): not asked again. */
   readonly alreadyAnswered: readonly RecordKey[];
-  /** Nothing to ask: every state field blank. */
-  readonly skipped: readonly RecordKey[];
   /** The record changed while the model was answering: the answer is logged, the row untouched. */
   readonly discarded: readonly RecordKey[];
-  /** State too large to send. */
+  /** An added-question run: state too large to send (the worker marks the record when it gets it). */
   readonly refused: readonly RecordKey[];
   readonly deferred: readonly { readonly key: RecordKey; readonly reason: DeferredReason }[];
   readonly failures: readonly BackfillFailure[];
@@ -190,8 +195,10 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     let cursor = from;
     do {
       const page = await connector.scan(cursor);
-      records += page.rows.length;
-      for (const row of page.rows) {
+      // A record the source's filter excludes is never asked, so it costs nothing.
+      const included = page.rows.filter((row) => !row.excluded);
+      records += included.length;
+      for (const row of included) {
         if (states.length < ESTIMATE_SAMPLE_SIZE) {
           states.push(row.state);
         }
@@ -213,6 +220,9 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     const asked = pickQuestions(questionSet, options.onlyQuestions);
     const only = options.onlyQuestions === undefined ? undefined : new Set(options.onlyQuestions);
     const runKey = runKeyOf(version, options.onlyQuestions);
+    // The alert names the added questions when the run asks only those, else every question.
+    const askedLabel =
+      options.onlyQuestions === undefined ? null : options.onlyQuestions.join(", ");
 
     const saved = await cursorStore.load(runKey);
     const start = saved === undefined || saved.done ? null : saved.cursor;
@@ -236,53 +246,86 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       }
     }
 
+    /**
+     * The whole set: the record goes into the worker's queue at the pace, and the worker asks it,
+     * skips it or refuses it exactly as it does any change. The queue holds one entry per record,
+     * so a record the worker is already asking is never answered twice.
+     */
+    async function enqueueWhole(row: ReadRow): Promise<void> {
+      const prior = await log.latestAnswer(row.key);
+      if (isCurrent(prior, row, asked, version)) {
+        report.alreadyAnswered.push(row.key);
+        return;
+      }
+      await waitForTurn();
+      await connector.enqueue([row.key]);
+      report.enqueued.push(row.key);
+    }
+
     async function settle(row: ReadRow): Promise<void> {
       try {
-        const prior = await log.latestAnswer(row.key);
-        if (shouldSkip(questionSet.read, row.state, { filterExcluded: false }).skip) {
-          if (only === undefined) {
-            await writeBlank(row);
-            report.skipped.push(row.key);
-          }
+        if (only === undefined) {
+          await enqueueWhole(row);
           return;
         }
-        if (
-          only === undefined ? isCurrent(prior, row, asked, version) : hasAll(prior, row, asked)
-        ) {
+        if (shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded }).skip) {
+          return;
+        }
+        const prior = await log.latestAnswer(row.key);
+        if (hasAll(prior, row, asked)) {
           report.alreadyAnswered.push(row.key);
           return;
         }
-        if (only !== undefined) {
-          const reason = deferral(prior, row, questionSet, only);
-          if (reason !== undefined) {
-            report.deferred.push({ key: row.key, reason });
-            return;
-          }
+        const reason = deferral(prior, row, questionSet, only);
+        if (reason !== undefined) {
+          report.deferred.push({ key: row.key, reason });
+          return;
         }
         const size = checkStateSize(
           recordTokens({ ...questionSet, questions: asked }, row.state),
           deps.maxStateTokens,
         );
         if (size.kind === "refuse") {
-          // The model is not called: an oversize state is an error for the record, never an answer.
-          if (only === undefined) {
-            await connector.write(
-              row.key,
-              { decisions: {}, status: transition("pending", "model-error") },
-              row.hash,
-            );
-          }
           report.refused.push(row.key);
           return;
         }
         await waitForTurn();
+        // Held like a worker's claim while asking, so the worker never asks the record at once.
+        if (!(await connector.claimKey(row.key))) {
+          report.deferred.push({ key: row.key, reason: "queued" });
+          return;
+        }
+        // Read again under the claim: the worker may have answered the record since the first read.
+        const held = await log.latestAnswer(row.key);
+        if (hasAll(held, row, asked)) {
+          await connector.ack([row.key]);
+          report.alreadyAnswered.push(row.key);
+          return;
+        }
+        const late = deferral(held, row, questionSet, only);
+        if (late !== undefined) {
+          // The worker asks it whole: back to the queue, never acked away.
+          await connector.release([row.key]);
+          report.deferred.push({ key: row.key, reason: late });
+          return;
+        }
+        await askAdded(row, held);
+      } catch (error) {
+        report.failures.push({ key: row.key, error });
+      }
+    }
+
+    /** Asks the added questions alone for a record this run holds, then acks or releases its job. */
+    async function askAdded(row: ReadRow, prior: AnswerEntry | undefined): Promise<void> {
+      let written = false;
+      try {
         const response = await worker.ask({
           model: questionSet.model,
           state: row.state,
           questions: asked,
         });
         // Every other question keeps the answer it already has, so its decision is the one it had.
-        const kept = only === undefined || prior === undefined ? {} : prior.answers;
+        const kept = prior === undefined ? {} : prior.answers;
         const entry: AnswerEntry = {
           kind: "answer",
           key: row.key,
@@ -302,21 +345,26 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         const result = await recordAnswer(entry, questionSet, log, (key, decision, hash) =>
           connector.write(key, decision, hash),
         );
-        (result.written ? report.answered : report.discarded).push(row.key);
-      } catch (error) {
-        report.failures.push({ key: row.key, error });
+        written = result.written;
+        (written ? report.answered : report.discarded).push(row.key);
+      } finally {
+        await settleClaim(row, written);
       }
     }
 
-    async function writeBlank(row: ReadRow): Promise<void> {
-      const result = await connector.write(
-        row.key,
-        { decisions: {}, status: transition("pending", "skipped") },
-        row.hash,
-      );
-      if (!result.written) {
-        report.discarded.push(row.key);
+    /**
+     * Done when written. Otherwise the job goes back to the queue only when the record changed, so
+     * the worker asks it whole at its new state; an unchanged record is let go (the unsaved cursor
+     * brings it back to the next run) instead of costing a whole-set call during an outage.
+     */
+    async function settleClaim(row: ReadRow, written: boolean): Promise<void> {
+      if (written) {
+        await connector.ack([row.key]);
+        return;
       }
+      const { rows } = await connector.read([row.key]);
+      const unchanged = rows[0]?.hash === row.hash;
+      await (unchanged ? connector.ack([row.key]) : connector.release([row.key]));
     }
 
     let cursor = start;
@@ -335,6 +383,10 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       if (report.failures.length > 0) {
         // Not saved: the next run starts this page again and skips what was answered.
         report.status = "stopped";
+        await deps.alerts?.backfillFailed({
+          failed: report.failures.length,
+          question: askedLabel,
+        });
         return report;
       }
       await cursorStore.save(runKey, { cursor: page.next, done: page.next === null });
@@ -344,6 +396,11 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     } while (cursor !== null);
 
     report.status = "completed";
+    await deps.alerts?.backfillFinished({
+      answered: report.answered.length,
+      queued: report.enqueued.length,
+      question: askedLabel,
+    });
     return report;
   }
 
@@ -360,9 +417,9 @@ function newReport(estimated: BackfillEstimate): MutableReport {
   return {
     status: "completed",
     estimate: estimated,
+    enqueued: [],
     answered: [],
     alreadyAnswered: [],
-    skipped: [],
     discarded: [],
     refused: [],
     deferred: [],

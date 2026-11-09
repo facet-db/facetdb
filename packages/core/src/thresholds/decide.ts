@@ -1,4 +1,4 @@
-import type { ChoiceQuestion, Question, ScoreQuestion } from "../questions/index.ts";
+import type { Question, ScoreQuestion } from "../questions/index.ts";
 import { choiceConfidence } from "./confidence.ts";
 import type {
   Answer,
@@ -28,7 +28,7 @@ export function decide(question: Question, thresholds: Thresholds, answer: Answe
       if (answer.type !== "choice" || thresholds.kind !== "confidence") {
         throw mismatch(question.type, thresholds, answer);
       }
-      return decideChoice(question, thresholds, answer);
+      return decideChoice(thresholds, answer);
     case "score":
       if (answer.type !== "score" || thresholds.kind !== "confidence") {
         throw mismatch(question.type, thresholds, answer);
@@ -47,11 +47,7 @@ function decideNoul(thresholds: YesNoThresholds, answer: NoulAnswer): Decision {
   return { kind: "needs_review" };
 }
 
-function decideChoice(
-  question: ChoiceQuestion,
-  thresholds: ConfidenceThresholds,
-  answer: ChoiceAnswer,
-): Decision {
+function decideChoice(thresholds: ConfidenceThresholds, answer: ChoiceAnswer): Decision {
   const confidence = choiceConfidence(answer.probabilities);
   if (confidence >= thresholds.confidenceAtLeast) {
     return { kind: "decided", value: answer.top, probabilityOrConfidence: confidence };

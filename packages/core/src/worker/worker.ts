@@ -1,3 +1,4 @@
+import type { AlertSignals } from "../alerts/index.ts";
 import type {
   ActionDecisions,
   ActionRecord,
@@ -5,6 +6,7 @@ import type {
   Connector,
   DecisionLog,
   ModelProvider,
+  ProviderResponse,
   ReadRow,
   RecordDecision,
   RecordKey,
@@ -58,13 +60,21 @@ export type WorkerDeps = {
   readonly questionSet: QuestionSet;
   /** The question-set version in force; every logged answer carries it. */
   readonly version: number;
+  /**
+   * Where the heartbeat and the outcome of every model call go; optional so a bare worker still
+   * runs.
+   */
+  readonly alerts?: AlertSignals;
 };
 
-/** Where in a record's path something failed: the model call, the log and write, or one action. */
-export type FailureStage = "ask" | "record" | "action";
+/**
+ * Where in a record's path something failed: the model call, the log and write, one action, or the
+ * alerts module (a failed alert never changes what happened to the record).
+ */
+export type FailureStage = "ask" | "record" | "action" | "alert";
 
 export type RecordFailure = {
-  readonly key: RecordKey;
+  readonly key: RecordKey | null;
   readonly stage: FailureStage;
   /** Which action, when the stage is `action`. */
   readonly action?: string;
@@ -129,7 +139,34 @@ type Wake = { readonly failed: false } | { readonly failed: true; readonly error
  * actions, ack. Pure orchestration; every side effect enters through `deps`.
  */
 export function createWorker(deps: WorkerDeps): Worker {
-  const { connector, provider, log, reviews, actions, clock, limits, questionSet, version } = deps;
+  const {
+    connector,
+    provider,
+    log,
+    reviews,
+    actions,
+    clock,
+    limits,
+    questionSet,
+    version,
+    alerts,
+  } = deps;
+
+  /** An alert that cannot be sent or stored is handed back as a failure; the record is unaffected. */
+  async function tell(
+    report: MutablePass,
+    key: RecordKey | null,
+    send: (signals: AlertSignals) => Promise<void>,
+  ): Promise<void> {
+    if (alerts === undefined) {
+      return;
+    }
+    try {
+      await send(alerts);
+    } catch (error) {
+      report.failures.push({ key, stage: "alert", error });
+    }
+  }
 
   async function runActions(
     row: ReadRow,
@@ -179,7 +216,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.withdrawn.push(row.key);
       }
 
-      if (shouldSkip(questionSet.read, row.state, { filterExcluded: false }).skip) {
+      if (shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded }).skip) {
         const result = await connector.write(
           row.key,
           { decisions: {}, status: transition("pending", "skipped") },
@@ -214,11 +251,18 @@ export function createWorker(deps: WorkerDeps): Worker {
       }
 
       stage = "ask";
-      const response = await provider.ask({
-        model: questionSet.model,
-        state: row.state,
-        questions: questionSet.questions,
-      });
+      let response: ProviderResponse;
+      try {
+        response = await provider.ask({
+          model: questionSet.model,
+          state: row.state,
+          questions: questionSet.questions,
+        });
+      } catch (error) {
+        await tell(report, row.key, (signals) => signals.modelCall(false));
+        throw error;
+      }
+      await tell(report, row.key, (signals) => signals.modelCall(true));
 
       stage = "record";
       const entry: AnswerEntry = {
@@ -259,6 +303,8 @@ export function createWorker(deps: WorkerDeps): Worker {
     // The queue holds one entry per record, but a connector may repeat a key in a batch.
     const keys = [...new Set(claimed)];
     const report = newPass(keys.length);
+    // The worker is alive whether or not the queue had anything for it.
+    await tell(report, null, (signals) => signals.beat());
     if (keys.length === 0) {
       return report;
     }

@@ -6,6 +6,7 @@ import {
   FakeDecisionLog,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
+import type { AlertSignals } from "../alerts/index.ts";
 import type {
   ActionRecord,
   Clock,
@@ -156,9 +157,13 @@ async function rig(
     clock?: Clock;
     limits?: WorkerLimits;
     connector?: (db: FakeDatabase, journal: string[]) => FakeConnector;
+    excludes?: ConstructorParameters<typeof FakeDatabase>[0]["excludes"];
   } = {},
 ): Promise<Rig> {
-  const db = new FakeDatabase({ fields: ["body"] });
+  const db = new FakeDatabase({
+    fields: ["body"],
+    ...(options.excludes === undefined ? {} : { excludes: options.excludes }),
+  });
   const journal: string[] = [];
   const connector = options.connector?.(db, journal) ?? new JournalConnector(db, journal);
   await connector.install();
@@ -522,6 +527,18 @@ describe("the worker loop", () => {
     expect(test.db.jobs.size).toBe(0);
   });
 
+  it("skips a record the source's where filter excludes, without asking the model", async () => {
+    const test = await rig({ excludes: (state) => state["body"] === "internal note" });
+    test.db.edit("a", { body: "internal note" });
+    test.db.edit("b", { body: "Where is my parcel?" });
+
+    const report = await createWorker(test.deps).runOnce();
+
+    expect(report.skipped).toEqual(["a"]);
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.db.decisionOf("a")).toEqual({ decisions: {}, status: "skipped" });
+  });
+
   describe("the state size guard", () => {
     it("refuses a state above 32,000 tokens: no model call, the record is marked error", async () => {
       const test = await rig();
@@ -678,6 +695,67 @@ describe("the worker loop", () => {
       stop.abort();
       await running;
     });
+  });
+});
+
+describe("telling the alerts module", () => {
+  /** Remembers what the worker told it; a test can make it fail. */
+  function signalsFake(failWith?: Error): { signals: AlertSignals; told: string[] } {
+    const told: string[] = [];
+    const tell = (what: string): Promise<void> => {
+      told.push(what);
+      return failWith === undefined ? Promise.resolve() : Promise.reject(failWith);
+    };
+    return {
+      told,
+      signals: {
+        modelCall: (ok) => tell(`call ${ok ? "ok" : "failed"}`),
+        beat: () => tell("beat"),
+        backfillFinished: () => tell("backfill finished"),
+        backfillFailed: () => tell("backfill failed"),
+      },
+    };
+  }
+
+  it("beats on every pass, empty or not, and reports each model call's outcome", async () => {
+    const outage = new Error("529: overloaded");
+    const test = await rig({
+      provider: new ScriptedProvider((request) =>
+        request.state["body"] === "bad"
+          ? Promise.reject(outage)
+          : Promise.resolve(response(SURE_YES)),
+      ),
+    });
+    const { signals, told } = signalsFake();
+    const worker = createWorker({ ...test.deps, alerts: signals });
+
+    await worker.runOnce();
+    expect(told).toEqual(["beat"]);
+
+    test.db.edit("a", { body: "bad" });
+    test.db.edit("b", { body: "good" });
+    told.length = 0;
+    await worker.runOnce();
+    expect(told.filter((entry) => entry === "beat")).toHaveLength(1);
+    expect(told.filter((entry) => entry.startsWith("call")).sort()).toEqual([
+      "call failed",
+      "call ok",
+    ]);
+  });
+
+  it("hands a failing alert back as a failure without touching the record", async () => {
+    const test = await rig();
+    const boom = new Error("alert store is down");
+    const worker = createWorker({ ...test.deps, alerts: signalsFake(boom).signals });
+    test.db.edit("a", { body: "hello" });
+
+    const report = await worker.runOnce();
+
+    expect(report.written).toEqual(["a"]);
+    expect(report.failures.filter((failure) => failure.stage !== "alert")).toEqual([]);
+    expect(report.failures.map((failure) => failure.stage)).toEqual(["alert", "alert"]);
+    expect(report.failures[0]?.key).toBeNull();
+    expect(test.db.decisionOf("a")).not.toBeNull();
   });
 });
 

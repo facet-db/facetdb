@@ -141,6 +141,35 @@ export function runConnectorContract(
       expect(await fx.decisionOf(k)).toEqual(aDecision());
     });
 
+    it("keeps facetdb_reviewed once set: a later write without it never clears it", async () => {
+      const fx = await open();
+      await fx.connector.install();
+      await seed(fx, 1);
+      const [key] = seedKeys(1);
+      const k = key ?? "";
+      const hash = (await fx.connector.read([k])).rows[0]?.hash ?? "";
+
+      await fx.connector.write(k, { ...aDecision(), reviewed: true }, hash);
+      await fx.connector.write(k, { ...aDecision(), status: "needs_review" }, hash);
+
+      expect((await fx.decisionOf(k))?.reviewed).toBe(true);
+      expect((await fx.decisionOf(k))?.status).toBe("needs_review");
+    });
+
+    it("enqueue keeps one entry per record, and claimKey holds only a key nobody queued", async () => {
+      const fx = await open();
+      await fx.connector.install();
+      await fx.connector.enqueue(["q1", "q1", "q2"]);
+
+      expect(await fx.connector.claimKey("q1")).toBe(false);
+      expect(await fx.connector.claimKey("q3")).toBe(true);
+      // q3 is held by this worker, so a claim hands out only the two queued keys, once each.
+      const claimed = await fx.connector.claim(10);
+      expect([...claimed].sort()).toEqual(["q1", "q2"]);
+      await fx.connector.ack([...claimed, "q3"]);
+      expect(await fx.connector.claim(10)).toEqual([]);
+    });
+
     it("scan visits every record exactly once, even when rows arrive between pages", async () => {
       const fx = await open();
       await fx.connector.install();

@@ -1,5 +1,6 @@
 import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
+import type { AlertSignals } from "../alerts/index.ts";
 import type {
   Connector,
   ProviderRequest,
@@ -7,6 +8,7 @@ import type {
   RecordKey,
   ScanCursor,
 } from "../contracts/index.ts";
+import { type AnswerEntry, recordAnswer } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { buildRequest } from "../requests/index.ts";
 import {
@@ -100,10 +102,35 @@ class ScriptedWorker implements BackfillWorker {
   }
 }
 
-/** A connector that notes the cursor of every scan, to prove where a resumed run starts. */
+/**
+ * A connector that notes the cursor of every scan, to prove where a resumed run starts, and when
+ * each key was enqueued, to prove the pace. `failEnqueue` makes the queue refuse a key.
+ */
 class SpyConnector extends FakeConnector {
   readonly scans: (ScanCursor | null)[] = [];
+  readonly enqueued: { key: RecordKey; at: number }[] = [];
   writes = 0;
+  failEnqueue: (key: RecordKey) => boolean = () => false;
+  readonly #clock: FakeClock;
+
+  constructor(db: FakeDatabase, clock: FakeClock) {
+    super(db);
+    this.#clock = clock;
+  }
+
+  override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+    for (const key of keys) {
+      if (this.failEnqueue(key)) {
+        throw new Error(`the queue refused ${key}`);
+      }
+      this.enqueued.push({ key, at: this.#clock.now() });
+    }
+    return super.enqueue(keys);
+  }
+
+  enqueuedKeys(): RecordKey[] {
+    return this.enqueued.map(({ key }) => key);
+  }
 
   override scan(cursor: ScanCursor | null): ReturnType<FakeConnector["scan"]> {
     this.scans.push(cursor);
@@ -131,10 +158,10 @@ async function rig(rows: number): Promise<Rig> {
   for (let n = 1; n <= rows; n += 1) {
     db.edit(`k${n}`, { body: `row-${n}` });
   }
-  const connector = new SpyConnector(db);
+  const clock = new FakeClock();
+  const connector = new SpyConnector(db, clock);
   await connector.install();
   const journal: string[] = [];
-  const clock = new FakeClock();
   const log = new FakeDecisionLog(journal);
   const cursors = new FakeCursorStore();
   return {
@@ -158,8 +185,40 @@ async function rig(rows: number): Promise<Rig> {
 
 const yes = (): boolean => true;
 
+/** What the worker does with the queue a whole-set run filled: claims, asks, records, acks. */
+async function drainQueue(
+  r: Rig,
+  worker: ScriptedWorker,
+  questionSet: QuestionSet = SCAM_ONLY,
+  version = 1,
+): Promise<void> {
+  const keys = await r.connector.claim(1_000);
+  const { rows } = await r.connector.read(keys);
+  for (const row of rows) {
+    const response = await worker.ask({
+      model: questionSet.model,
+      state: row.state,
+      questions: questionSet.questions,
+    });
+    const entry: AnswerEntry = {
+      kind: "answer",
+      key: row.key,
+      version,
+      model: questionSet.model,
+      stateHash: row.hash,
+      answers: response.answers,
+      usage: response.usage,
+      at: new Date(r.clock.now()),
+    };
+    await recordAnswer(entry, questionSet, r.log, (key, decision, hash) =>
+      r.connector.write(key, decision, hash),
+    );
+  }
+  await r.connector.ack(keys);
+}
+
 describe("backfill pacing", () => {
-  it("@timing starts records at the pace, one interval apart, on the injected clock", async () => {
+  it("@timing enqueues records at the pace, one interval apart, on the injected clock", async () => {
     const r = await rig(30);
     const worker = new ScriptedWorker(r.clock, r.journal);
     const backfill = createBackfill(r.deps(worker));
@@ -167,15 +226,15 @@ describe("backfill pacing", () => {
     const report = await backfill.run({ pace: 50, maxInFlight: 1, onEstimate: yes });
 
     expect(report.status).toBe("completed");
-    expect(report.answered).toHaveLength(30);
-    // One request every 20 ms: the first at once, the 30th after 29 intervals.
-    expect(worker.requests.map(({ at }) => at)).toEqual(
+    expect(report.enqueued).toHaveLength(30);
+    // One record every 20 ms: the first at once, the 30th after 29 intervals.
+    expect(r.connector.enqueued.map(({ at }) => at)).toEqual(
       Array.from({ length: 30 }, (_, n) => n * 20),
     );
     expect(r.clock.sleeps.every((ms) => ms === 20)).toBe(true);
   });
 
-  it("@timing holds the pace with several requests in flight", async () => {
+  it("@timing holds the pace with several lanes", async () => {
     const r = await rig(30);
     const worker = new ScriptedWorker(r.clock, r.journal);
     const backfill = createBackfill(r.deps(worker));
@@ -185,7 +244,54 @@ describe("backfill pacing", () => {
     // 30 records at 10 a second take 29 intervals of 100 ms, however many lanes share them.
     expect(r.clock.now()).toBe(2_900);
     expect(r.clock.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(2_900);
-    expect(worker.requests).toHaveLength(30);
+    expect(r.connector.enqueued).toHaveLength(30);
+  });
+
+  it("asks nothing itself: the whole set goes through the worker's queue, one entry per record", async () => {
+    const r = await rig(3);
+    // A change already queued k2 and a worker holds it while it asks.
+    r.db.queue("k2");
+    const peer = new FakeConnector(r.db);
+    expect(await peer.claim(1)).toEqual(["k2"]);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    const report = await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+
+    expect(worker.requests).toHaveLength(0);
+    expect(r.connector.writes).toBe(0);
+    expect(report.enqueued).toEqual(["k3", "k2", "k1"]);
+    // k2 stays the one entry the peer holds: nobody asks it twice.
+    expect(r.db.jobs.size).toBe(3);
+    expect(r.db.jobs.get("k2")?.claimedBy).not.toBeNull();
+    expect([...(await r.connector.claim(10))].sort()).toEqual(["k1", "k3"]);
+  });
+
+  it("leaves out a record the source's filter excludes, and does not price it", async () => {
+    const db = new FakeDatabase({
+      fields: ["body"],
+      excludes: (state) => state["body"] === "internal",
+    });
+    db.edit("k1", { body: "row-1" });
+    db.edit("k2", { body: "internal" });
+    const clock = new FakeClock();
+    const connector = new SpyConnector(db, clock);
+    await connector.install();
+    const worker = new ScriptedWorker(clock, []);
+    const backfill = createBackfill({
+      connector,
+      worker,
+      clock,
+      cursorStore: new FakeCursorStore(),
+      log: new FakeDecisionLog([]),
+      questionSet: SCAM_ONLY,
+      version: 1,
+    });
+
+    const report = await backfill.run({ onEstimate: yes });
+
+    expect(report.estimate.records).toBe(1);
+    // The worker gets both: an excluded record is marked skipped there, with no model call.
+    expect([...report.enqueued].sort()).toEqual(["k1", "k2"]);
   });
 
   it("paces at 50 records per second when the pace is not given", async () => {
@@ -203,7 +309,7 @@ describe("backfill pacing", () => {
 
     await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
 
-    expect(worker.askedRows()).toEqual(Array.from({ length: 25 }, (_, n) => 25 - n));
+    expect(r.connector.enqueuedKeys()).toEqual(Array.from({ length: 25 }, (_, n) => `k${25 - n}`));
   });
 
   it("refuses a pace that is not a positive number", async () => {
@@ -218,9 +324,10 @@ describe("backfill pacing", () => {
 describe("backfill resume", () => {
   it("resumes from the saved cursor after a restart without asking answered records again", async () => {
     const r = await rig(25);
-    const down = new ScriptedWorker(r.clock, r.journal, (row) => row === 14);
+    r.connector.failEnqueue = (key) => key === "k14";
+    const worker = new ScriptedWorker(r.clock, r.journal);
 
-    const first = await createBackfill(r.deps(down)).run({ maxInFlight: 1, onEstimate: yes });
+    const first = await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
 
     // Rows 25 to 16 are page one and saved; page two (15 to 6) has the failure and is not saved.
     expect(first.status).toBe("stopped");
@@ -228,23 +335,27 @@ describe("backfill resume", () => {
     const savedAfterFirstPage = r.cursors.saves.at(-1)?.progress;
     expect(r.cursors.saves).toHaveLength(1);
     expect(savedAfterFirstPage?.done).toBe(false);
+    // Meanwhile the worker answers what reached the queue.
+    await drainQueue(r, worker);
 
-    // A restart: a new backfill, the same cursor store and the same log, a healthy model.
-    const healthy = new ScriptedWorker(r.clock, r.journal);
+    // A restart: a new backfill, the same cursor store and the same log, a healthy queue.
+    r.connector.failEnqueue = () => false;
+    r.connector.enqueued.length = 0;
     r.connector.scans.length = 0;
-    const second = await createBackfill(r.deps(healthy)).run({ maxInFlight: 1, onEstimate: yes });
+    const second = await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
 
     expect(second.status).toBe("completed");
     // The survey and the run both start at the saved cursor, never at the top.
     expect(r.connector.scans[0]).toBe(savedAfterFirstPage?.cursor);
     expect(r.connector.scans).not.toContain(null);
-    // Page two's answered rows are not asked again; the failed row and page three are.
-    expect(healthy.askedRows()).toEqual([14, 5, 4, 3, 2, 1]);
-    expect(second.alreadyAnswered.map((key) => key).sort()).toEqual(
+    // Page two's answered rows are not queued again; the refused row and page three are.
+    expect(r.connector.enqueuedKeys()).toEqual(["k14", "k5", "k4", "k3", "k2", "k1"]);
+    expect([...second.alreadyAnswered].sort()).toEqual(
       ["k15", "k13", "k12", "k11", "k10", "k9", "k8", "k7", "k6"].sort(),
     );
-    // Every record was asked exactly once overall, plus the one failed call.
-    expect(down.requests.length + healthy.requests.length).toBe(26);
+    await drainQueue(r, worker);
+    // Every record was asked exactly once overall.
+    expect(worker.requests).toHaveLength(25);
     expect(r.cursors.saves.at(-1)?.progress).toEqual({ cursor: null, done: true });
   });
 
@@ -268,12 +379,14 @@ describe("backfill resume", () => {
     const backfill = createBackfill(r.deps(worker));
 
     await backfill.run({ onEstimate: yes });
+    await drainQueue(r, worker);
     r.connector.scans.length = 0;
     const again = await backfill.run({ onEstimate: yes });
 
     expect(r.connector.scans[0]).toBeNull();
-    // Nothing changed since: the second pass asks no one.
+    // Nothing changed since: the second pass queues no one.
     expect(again.alreadyAnswered).toHaveLength(5);
+    expect(again.enqueued).toHaveLength(0);
     expect(worker.requests).toHaveLength(5);
   });
 });
@@ -281,7 +394,9 @@ describe("backfill resume", () => {
 describe("backfill of an added question", () => {
   async function answeredBeforeTheNewQuestion(rows: number): Promise<Rig> {
     const r = await rig(rows);
-    await createBackfill(r.deps(new ScriptedWorker(r.clock, r.journal))).run({ onEstimate: yes });
+    const worker = new ScriptedWorker(r.clock, r.journal);
+    await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+    await drainQueue(r, worker);
     return r;
   }
 
@@ -317,6 +432,23 @@ describe("backfill of an added question", () => {
       // The unsure scam answer still waits for a person, so the record does too.
       expect(after?.status).toBe(n % 3 === 1 ? "needs_review" : "done");
     }
+    // Each record was held while asked and its job settled afterwards.
+    expect(r.db.jobs.size).toBe(0);
+  });
+
+  it("leaves a record already in the queue to the worker, which asks it whole", async () => {
+    const r = await answeredBeforeTheNewQuestion(3);
+    await r.connector.enqueue(["k2"]);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    const report = await createBackfill(r.deps(worker, SCAM_AND_SPAM, 2)).run({
+      onlyQuestions: ["spam"],
+      onEstimate: yes,
+    });
+
+    expect([...report.answered].sort()).toEqual(["k1", "k3"]);
+    expect(report.deferred).toEqual([{ key: "k2", reason: "queued" }]);
+    expect(r.db.jobs.get("k2")).toEqual({ claimedBy: null });
   });
 
   it("does not ask a record that already holds the added question's answer", async () => {
@@ -465,7 +597,7 @@ describe("backfill consent", () => {
     });
 
     expect(r.journal[0]).toBe("estimate shown");
-    expect(r.journal.filter((line) => line === "ask")).toHaveLength(5);
+    expect(r.connector.enqueued).toHaveLength(5);
   });
 
   it("makes no model call, no write and no cursor save when the caller declines", async () => {
@@ -501,27 +633,84 @@ describe("backfill consent", () => {
   });
 });
 
-describe("backfill records that need no model call", () => {
-  it("skips a blank record without asking and marks it skipped", async () => {
-    const r = await rig(2);
-    r.db.edit("k3", { body: "   " });
+describe("backfill alerts", () => {
+  function recorder(): { signals: AlertSignals; told: string[] } {
+    const told: string[] = [];
+    return {
+      told,
+      signals: {
+        modelCall: () => Promise.resolve(),
+        beat: () => Promise.resolve(),
+        backfillFinished: ({ answered, queued, question }) => {
+          told.push(`finished ${answered}+${queued} ${question}`);
+          return Promise.resolve();
+        },
+        backfillFailed: ({ failed, question }) => {
+          told.push(`failed ${failed} ${question}`);
+          return Promise.resolve();
+        },
+      },
+    };
+  }
+
+  it("says a finished run finished, with how many records it queued", async () => {
+    const r = await rig(4);
+    const { signals, told } = recorder();
     const worker = new ScriptedWorker(r.clock, r.journal);
 
-    const report = await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+    await createBackfill({ ...r.deps(worker), alerts: signals }).run({ onEstimate: yes });
 
-    expect(report.skipped).toEqual(["k3"]);
-    expect(worker.askedRows()).toEqual([2, 1]);
-    expect(r.db.decisionOf("k3")?.status).toBe("skipped");
+    expect(told).toEqual(["finished 0+4 null"]);
   });
 
-  it("never turns a failed call into an answer", async () => {
+  it("says a stopped run failed, with how many records could not be queued", async () => {
     const r = await rig(3);
-    const worker = new ScriptedWorker(r.clock, r.journal, (row) => row === 2);
+    const { signals, told } = recorder();
+    r.connector.failEnqueue = (key) => key === "k2";
+    const worker = new ScriptedWorker(r.clock, r.journal);
 
-    const report = await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
+    await createBackfill({ ...r.deps(worker), alerts: signals }).run({
+      maxInFlight: 1,
+      onEstimate: yes,
+    });
+
+    expect(told).toEqual(["failed 1 null"]);
+  });
+
+  it("says nothing when the caller declines the estimate", async () => {
+    const r = await rig(3);
+    const { signals, told } = recorder();
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    await createBackfill({ ...r.deps(worker), alerts: signals }).run({ onEstimate: () => false });
+
+    expect(told).toEqual([]);
+  });
+});
+
+describe("backfill failures", () => {
+  it("never turns a failed call into an answer, and lets an unchanged record go for the next run", async () => {
+    const r = await rig(3);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+    await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+    await drainQueue(r, worker);
+    const before = await r.log.latestAnswer("k2");
+    const down = new ScriptedWorker(r.clock, r.journal, (row) => row === 2);
+
+    const report = await createBackfill(r.deps(down, SCAM_AND_SPAM, 2)).run({
+      onlyQuestions: ["spam"],
+      maxInFlight: 1,
+      onEstimate: yes,
+    });
 
     expect(report.status).toBe("stopped");
-    expect(r.db.decisionOf("k2")).toBeNull();
-    expect(await r.log.latestAnswer("k2")).toBeUndefined();
+    expect(r.db.decisionOf("k2")?.decisions["spam"]).toBeUndefined();
+    expect(await r.log.latestAnswer("k2")).toEqual(before);
+    // Unchanged, so not queued for a whole-set call; the unsaved cursor brings it back next run.
+    expect(r.db.jobs.has("k2")).toBe(false);
+    const retry = await createBackfill(
+      r.deps(new ScriptedWorker(r.clock, r.journal), SCAM_AND_SPAM, 2),
+    ).run({ onlyQuestions: ["spam"], maxInFlight: 1, onEstimate: yes });
+    expect(retry.answered).toContain("k2");
   });
 });
