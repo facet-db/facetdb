@@ -1,10 +1,16 @@
 /**
  * @facetdb/model: model providers. Every provider speaks the TypeSafe System One shape; the HTTP
- * client, its backoff and the scripted fake come later.
+ * client and the scripted fake are here, backoff and base-URL providers are not in yet.
  */
 
-/** The one endpoint every compatible provider serves. */
-export const SYSTEMONE_PATH = "/v1/systemone";
-
-/** A pinned model version looks like `jev-1.14.0`; aliases such as `jev-latest` are refused in config. */
-export const PINNED_MODEL_RE = /^[a-z][a-z0-9]*-\d+\.\d+\.\d+$/;
+export {
+  ModelUnreachableError,
+  RequestRejectedError,
+  RetryableError,
+  UnexpectedStatusError,
+} from "./errors.ts";
+export type { FakeFailure, FakeProvider, FakeScript } from "./fake/fake-provider.ts";
+export { createFakeProvider } from "./fake/fake-provider.ts";
+export { PINNED_MODEL_RE, SYSTEMONE_PATH } from "./paths.ts";
+export type { TypeSafeProviderOptions } from "./typesafe/client.ts";
+export { createTypeSafeProvider, TYPESAFE_BASE_URL } from "./typesafe/client.ts";
