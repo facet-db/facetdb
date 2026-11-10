@@ -1,9 +1,17 @@
 import type { QuestionSet } from "@facetdb/core";
+import {
+  BODY_TAG,
+  SIDE_MARK,
+  SIDE_TABLE_SCHEMA,
+  sideTableName,
+  sideViewName,
+} from "../scan/index.ts";
 import { connectPostgres, type SqlConnect, type SqlQuery, type SqlRow } from "../sql/index.ts";
 import {
   ENQUEUE_ROLE,
   type InstallStatement,
   installOwnedColumns,
+  installOwnedColumnTypes,
   installSql,
   ownedColumnsQuery,
   type ProjectRef,
@@ -19,7 +27,7 @@ import {
  */
 
 /** What the caller knows about the source; the key comes from the catalog unless given. */
-export type MigrateSource = Omit<TableSource, "key"> & { readonly key?: string };
+export type MigrateSource = Omit<TableSource, "key" | "keyType"> & { readonly key?: string };
 
 export type MigratePlan = {
   readonly source: MigrateSource;
@@ -77,10 +85,32 @@ type RoleFacts = {
   readonly bypassRls: boolean;
   readonly createRole: boolean;
   readonly createDb: boolean;
+  /** Roles it belongs to; FacetDB's roles belong to none. */
+  readonly memberOf: readonly string[];
 };
 
 type Inspection = {
   readonly primaryKey: readonly string[];
+  /** The primary key column's SQL type as `format_type` prints it; side-table mode creates its key with it. */
+  readonly keyType: string | undefined;
+  /** The columns of `facetdb.<table>_answers` (none when it does not exist); looked up in every mode, so a switch of mode is noticed. */
+  readonly sideColumns: readonly string[];
+  /** `data_type` of each side-table column, to notice a question whose type changed there too. */
+  readonly sideTypes: ReadonlyMap<string, string>;
+  /** `server_version_num`: side-table mode needs 150000 (views with `security_invoker`). */
+  readonly serverVersion: number;
+  /**
+   * The relation named `<table>_with_answers` beside the source, when one exists: its comment
+   * (`facetdb` for the view an earlier install made) or null for a comment-less relation of the
+   * customer's; undefined when there is none.
+   */
+  readonly viewMark: string | null | undefined;
+  /** Views or rules built on FacetDB's view beside the table (side-table mode drops and recreates it). */
+  readonly viewDependents: number;
+  /** The primary key is a stored generated column (null in a BEFORE trigger: the queue would get no key). */
+  readonly generatedKey: boolean;
+  /** `data_type` of each marked column, to notice a question whose type changed. */
+  readonly markedTypes: ReadonlyMap<string, string>;
   readonly appOwned: readonly string[];
   readonly marked: readonly string[];
   readonly owner: string | null;
@@ -103,6 +133,37 @@ const PRIMARY_KEY_QUERY = `select kcu.column_name as name
    and kcu.table_name = tc.table_name
  where tc.table_schema = $1 and tc.table_name = $2 and tc.constraint_type = 'PRIMARY KEY'
  order by kcu.ordinal_position`;
+
+const KEY_TYPE_QUERY = `select format_type(a.atttypid, a.atttypmod) as type
+  from pg_catalog.pg_attribute a
+ where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass and a.attname = $3 and not a.attisdropped`;
+
+const SIDE_COLUMNS_QUERY = `select column_name as name, data_type as type from information_schema.columns
+ where table_schema = $1 and table_name = $2 order by ordinal_position`;
+
+const SERVER_VERSION_QUERY = `select current_setting('server_version_num')::int as v`;
+
+/** Any relation (table, view, materialized view, foreign table) of that name, with its comment. */
+const RELATION_MARK_QUERY = `select obj_description(c.oid, 'pg_class') as mark
+  from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = $1 and c.relname = $2 and c.relkind in ('r', 'v', 'm', 'f', 'p')`;
+
+/** The roles a role is a member of: a pre-existing FacetDB role with `pg_read_all_data` is not least privilege. */
+const MEMBERSHIP_QUERY = `select r.rolname as name
+  from pg_catalog.pg_auth_members m
+  join pg_catalog.pg_roles r on r.oid = m.roleid
+  join pg_catalog.pg_roles mem on mem.oid = m.member
+ where mem.rolname = $1 order by 1`;
+
+/** A primary key that is a stored generated column is still null in a BEFORE trigger. */
+const GENERATED_KEY_QUERY = `select is_generated as generated from information_schema.columns
+ where table_schema = $1 and table_name = $2 and column_name = $3`;
+
+/** Views and rules that depend on a relation, other than itself: a drop would take them down. */
+const DEPENDENTS_QUERY = `select count(distinct r.ev_class)::int as n
+  from pg_catalog.pg_depend d
+  join pg_catalog.pg_rewrite r on r.oid = d.objid
+ where d.refobjid = format('%I.%I', $1::text, $2::text)::regclass and r.ev_class <> d.refobjid`;
 
 const OWNERS_EXISTS_QUERY = `select 1 from information_schema.tables where table_schema = 'facetdb' and table_name = 'table_owners'`;
 
@@ -131,6 +192,10 @@ async function roleFacts(query: SqlQuery, name: string): Promise<RoleFacts> {
     bypassRls: row["rolbypassrls"] === true,
     createRole: row["rolcreaterole"] === true,
     createDb: row["rolcreatedb"] === true,
+    memberOf:
+      rows.length === 0
+        ? []
+        : (await query(MEMBERSHIP_QUERY, [name])).map((r) => String(r["name"])),
   };
 }
 
@@ -146,10 +211,42 @@ async function inspect(
   }
   const names = (rows: readonly SqlRow[]) => rows.map((row) => String(row["name"]));
   const primaryKey = names(await query(PRIMARY_KEY_QUERY, [schema, source.table]));
+  const keyType =
+    primaryKey.length === 1
+      ? String((await query(KEY_TYPE_QUERY, [schema, source.table, primaryKey[0]]))[0]?.["type"])
+      : undefined;
+  // Looked up in every mode, by the plain derived name (a name over the limit simply is not found).
+  const sideRows = await query(SIDE_COLUMNS_QUERY, [SIDE_TABLE_SCHEMA, `${source.table}_answers`]);
+  const sideColumns = names(sideRows);
+  const sideTypes = new Map(
+    sideRows.map((row) => [String(row["name"]), String(row["type"])] as const),
+  );
+  const serverVersion = Number((await query(SERVER_VERSION_QUERY))[0]?.["v"] ?? 0);
+  const viewRows = await query(RELATION_MARK_QUERY, [schema, `${source.table}_with_answers`]);
+  const viewMark =
+    viewRows.length === 0
+      ? undefined
+      : viewRows[0]?.["mark"] == null
+        ? null
+        : String(viewRows[0]?.["mark"]);
+  const viewDependents =
+    viewRows.length === 0
+      ? 0
+      : Number(
+          (await query(DEPENDENTS_QUERY, [schema, `${source.table}_with_answers`]))[0]?.["n"] ?? 0,
+        );
   const unmarked = ownedColumnsQuery(source, questionSet, { marked: false });
   const markedQuery = ownedColumnsQuery(source, questionSet, { marked: true });
   const appOwned = names(await query(unmarked.text, unmarked.params));
-  const marked = names(await query(markedQuery.text, markedQuery.params));
+  const markedRows = await query(markedQuery.text, markedQuery.params);
+  const marked = names(markedRows);
+  const markedTypes = new Map(
+    markedRows.map((row) => [String(row["name"]), String(row["type"])] as const),
+  );
+  const generatedKey =
+    primaryKey.length === 1 &&
+    (await query(GENERATED_KEY_QUERY, [schema, source.table, primaryKey[0]]))[0]?.["generated"] ===
+      "ALWAYS";
   let owner: string | null = null;
   let otherProjects: readonly string[] = [];
   if ((await query(OWNERS_EXISTS_QUERY)).length > 0) {
@@ -161,7 +258,24 @@ async function inspect(
   const enqueuer = await roleFacts(query, ENQUEUE_ROLE);
   const usedElsewhere =
     worker.exists && (await query(USED_ELSEWHERE_QUERY, [WORKER_ROLE])).length > 0;
-  return { primaryKey, appOwned, marked, owner, worker, enqueuer, otherProjects, usedElsewhere };
+  return {
+    primaryKey,
+    keyType,
+    sideColumns,
+    sideTypes,
+    serverVersion,
+    viewMark,
+    viewDependents,
+    generatedKey,
+    markedTypes,
+    appOwned,
+    marked,
+    owner,
+    worker,
+    enqueuer,
+    otherProjects,
+    usedElsewhere,
+  };
 }
 
 function refusal(plan: MigratePlan, inspection: Inspection): string | null {
@@ -176,8 +290,66 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   if (source.key !== undefined && source.key !== inspection.primaryKey[0]) {
     return `${table}'s primary key is ${inspection.primaryKey[0]}, not ${source.key}; the config and the table disagree.`;
   }
+  // The trigger fires on updates of the state columns: a state column that is one of FacetDB's
+  // own (a question's column, or any facetdb_ column) would fire it on the worker's own write and
+  // queue the record again forever.
+  const owned = new Set(installOwnedColumns(plan.questionSet));
+  const circular = plan.questionSet.read.filter((c) => owned.has(c) || c.startsWith("facetdb_"));
+  if (circular.length > 0) {
+    return `${table}: the state field ${circular.join(", ")} is a column FacetDB writes; a state field must be the application's own column, or the worker's writes would re-queue every record.`;
+  }
   if (inspection.appOwned.length > 0) {
     return `${table} already has a column named ${inspection.appOwned.join(", ")} that is not FacetDB's; rename the question or the column.`;
+  }
+  const key = inspection.primaryKey[0] ?? "";
+  if ([source.schema ?? "public", source.table, key].some((name) => name.includes(BODY_TAG))) {
+    return `${table}: a schema, table or key name holding ${BODY_TAG} cannot be installed; FacetDB quotes its SQL bodies with that tag.`;
+  }
+  if (inspection.generatedKey) {
+    return `${table}'s primary key ${key} is a generated column, still null when the trigger runs, so FacetDB could not queue the record. Use a key the application sets.`;
+  }
+  const expected = installOwnedColumnTypes(plan.questionSet);
+  const stored = source.storage === "side-table" ? inspection.sideTypes : inspection.markedTypes;
+  const drifted = [...stored]
+    .filter(([name, type]) => expected.has(name) && expected.get(name) !== type)
+    .map(([name, type]) => `${name} is ${type} and the question now needs ${expected.get(name)}`);
+  if (drifted.length > 0) {
+    return `${table}: ${drifted.join("; ")}; a question's type cannot change in place. Remove the question (migrate --prune drops its columns), then add it back.`;
+  }
+  for (const [name, facts] of [
+    [WORKER_ROLE, inspection.worker],
+    [ENQUEUE_ROLE, inspection.enqueuer],
+  ] as const) {
+    if (facts.memberOf.length > 0) {
+      return `the role ${name} on this server is a member of ${facts.memberOf.join(", ")}; FacetDB's roles belong to no other role (least privilege). Revoke those memberships or drop the role, then run migrate again.`;
+    }
+  }
+  const sideMode = source.storage === "side-table";
+  if (sideMode) {
+    try {
+      sideTableName(source.table);
+      sideViewName(source.table);
+    } catch (error) {
+      return `${table}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  if (sideMode && inspection.serverVersion < 150000) {
+    return `${table}: side-table mode needs Postgres 15 or later (this server is ${inspection.serverVersion}); its view runs with the caller's rights (security_invoker) so the table's row-level security still applies to whoever reads it. Use storage "inline" on this server.`;
+  }
+  if (sideMode && inspection.viewMark !== undefined && inspection.viewMark !== SIDE_MARK) {
+    return `${table}: a relation named ${source.table}_with_answers already exists beside the table and FacetDB did not make it; side-table mode would replace it. Rename it, or keep storage "inline".`;
+  }
+  if (sideMode && inspection.viewMark === SIDE_MARK && inspection.viewDependents > 0) {
+    return `${table}: ${inspection.viewDependents} view(s) or rule(s) of yours depend on ${source.table}_with_answers, which this migrate recreates. Drop them, run migrate, then create them again.`;
+  }
+  if (sideMode && inspection.marked.length > 0) {
+    return `${table} carries FacetDB columns from an inline install (${inspection.marked.join(", ")}); side-table mode would put the same names in the view twice. Uninstall the inline install first, or keep storage "inline".`;
+  }
+  if (!sideMode && inspection.sideColumns.length > 0 && inspection.owner !== null) {
+    return `${table} is installed in side-table mode (facetdb.${source.table}_answers); installing inline would keep two copies of the answers. Uninstall first, or keep storage "side-table".`;
+  }
+  if (sideMode && inspection.sideColumns.length > 0 && inspection.owner === null) {
+    return `facetdb.${source.table}_answers already exists and no install of FacetDB on ${table} made it; rename it or point this source at another table.`;
   }
   if (inspection.owner !== null && inspection.owner !== project.id) {
     return `${table} already carries FacetDB columns from another project (${inspection.owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
@@ -226,15 +398,19 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       return { ok: false, reason };
     }
     const key = inspection.primaryKey[0] as string;
-    const source: TableSource = { ...plan.source, key };
+    const source: TableSource = {
+      ...plan.source,
+      key,
+      ...(inspection.keyType === undefined ? {} : { keyType: inspection.keyType }),
+    };
     const statements = installSql(source, plan.questionSet, plan.project, {
       ...(plan.workerPassword === undefined ? {} : { workerPassword: plan.workerPassword }),
     });
     const sql = renderSql(statements);
     options.print(sql);
-    const changed = installOwnedColumns(plan.questionSet).some(
-      (name) => !inspection.marked.includes(name),
-    );
+    const present =
+      plan.source.storage === "side-table" ? inspection.sideColumns : inspection.marked;
+    const changed = installOwnedColumns(plan.questionSet).some((name) => !present.includes(name));
     const workerPasswordApplied = plan.workerPassword !== undefined;
     if (options.dryRun) {
       return { ok: true, key, statements, sql, applied: false, changed, workerPasswordApplied };

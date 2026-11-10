@@ -1,8 +1,9 @@
-import { PGlite } from "@electric-sql/pglite";
+import type { PGlite } from "@electric-sql/pglite";
 import type { Connector, QuestionSet, RecordDecision, RecordKey, StateValue } from "@facetdb/core";
 import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SqlClient } from "../sql/index.ts";
+import { freshPglite } from "../testing/pglite.ts";
 import { createPollingConnector, type PollingConnector, pollingInstallSql } from "./index.ts";
 import { pgliteClient } from "./pglite-client.ts";
 
@@ -39,7 +40,7 @@ class World {
   readonly clock = new TurningClock();
   readonly warnings: string[] = [];
   readonly open: PollingConnector[] = [];
-  readonly db = new PGlite();
+  db!: PGlite;
   readonly keyType: "text" | "integer";
   readonly questionSet: QuestionSet;
   #tick = 1_700_000_000;
@@ -51,6 +52,7 @@ class World {
   }
 
   async create(): Promise<this> {
+    this.db = await freshPglite();
     await this.db.exec(
       `create table listings (id ${this.keyType} primary key, title text, body text, price numeric(10,2), updated_at timestamptz not null default now())`,
     );

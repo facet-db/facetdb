@@ -121,10 +121,12 @@ describe("facetdb types: the support-messages example", () => {
     expect(renderDrizzle(supportMessages)).toBe(await fixture("support-messages.drizzle.txt"));
   });
 
+  // Spawns tsc: a few seconds alone, more on a loaded machine (6.3 s seen at load 15 on
+  // 2026-11-01, past vitest's 5 s default).
   it("writes a declaration that typechecks under strict settings", () => {
     const declaration = renderDeclaration(supportMessages);
     expect(typecheck(declaration)).toEqual([]);
-  });
+  }, 30_000);
 
   it("proves the typecheck can fail, so a clean result means something", () => {
     expect(typecheck("export type Broken = { team: NotAType };")).not.toEqual([]);

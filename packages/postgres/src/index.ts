@@ -8,4 +8,5 @@ export const FACETDB_PREFIX = "facetdb_";
 
 export * from "./install/index.ts";
 export * from "./polling/index.ts";
+export * from "./scan/index.ts";
 export * from "./store/index.ts";

@@ -8,7 +8,23 @@ import {
   UPDATED_AT_COLUMN,
 } from "@facetdb/core";
 import { OWNED_MARK } from "../polling/index.ts";
+import {
+  CREATION_COLUMN,
+  SIDE_TABLE_SCHEMA,
+  SIDE_TABLE_SETTING,
+  type StorageMode,
+  sideTableEnqueuerGrants,
+  sideTableName,
+  sideTableReaderGrants,
+  sideTableSecurityStatements,
+  sideTableStatements,
+  sideTableWorkerGrants,
+  sideViewName,
+  VIEW_NAME_SETTING,
+  VIEW_SCHEMA_SETTING,
+} from "../scan/index.ts";
 import { JOBS_TABLE, jobsTableSql, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
+import { scramVerifier } from "./scram.ts";
 
 /**
  * The install SQL for a table source. One generator, one order of statements; `migrate` prints
@@ -28,6 +44,14 @@ export type TableSource = {
   readonly key: string;
   /** Defaults to `reset`: a changed record goes back to pending until the new decision lands. */
   readonly onChange?: OnChange;
+  /**
+   * Where the answers live. `inline` (default) adds the columns to the table; `side-table` leaves
+   * the table alone and keeps them in `facetdb.<table>_answers` with the view
+   * `<table>_with_answers`. The trigger is on the source table in both modes.
+   */
+  readonly storage?: StorageMode;
+  /** The key column's SQL type as the catalog prints it; side-table mode needs it (`migrate` reads it). */
+  readonly keyType?: string;
 };
 
 /** The project that owns the install: the marker `migrate` checks before touching a table. */
@@ -97,6 +121,20 @@ export function installOwnedColumns(questionSet: QuestionSet): readonly string[]
   return ownedColumnDefinitions(questionSet).map(([name]) => name);
 }
 
+/**
+ * The type each owned column must have, as `information_schema.columns.data_type` prints it, so
+ * `migrate` can refuse a marked column whose question changed type instead of adopting it with
+ * the old type (the worker's writes would fail later).
+ */
+export function installOwnedColumnTypes(questionSet: QuestionSet): ReadonlyMap<string, string> {
+  return new Map(
+    ownedColumnDefinitions(questionSet).map(([name, definition]) => {
+      const base = definition.split(" ")[0] ?? definition;
+      return [name, base === "timestamptz" ? "timestamp with time zone" : base];
+    }),
+  );
+}
+
 function ownedColumnDefinitions(questionSet: QuestionSet): readonly (readonly [string, string])[] {
   return [
     ...questionSet.questions.flatMap((question) =>
@@ -122,12 +160,17 @@ export function triggerName(source: TableSource): string {
  * tables would collide; the runtime claims with this prefix (`jobsQueries.claim`, `$1`).
  */
 export function queueKeyPrefix(source: TableSource): string {
-  return `${source.schema ?? "public"}.${source.table}:`;
+  // Length-prefixed, as the store's `queuePrefix` is: `public.listings` and a table named
+  // `listings:1` can never read as one another's keys.
+  const qualified = `${source.schema ?? "public"}.${source.table}`;
+  return `${qualified.length}:${qualified}:`;
 }
 
 function functionName(onChange: OnChange): string {
   return `${quoteIdent(SCHEMA)}.${quoteIdent(ENQUEUE_FUNCTIONS[onChange])}`;
 }
+
+const SIDE_FUNCTION = `${quoteIdent(SCHEMA)}.${quoteIdent("enqueue_side")}`;
 
 /**
  * The two trigger functions, installed together so switching a source's `onChange` later changes
@@ -138,7 +181,7 @@ function functionName(onChange: OnChange): string {
  * notify, all inside the app's transaction. `enqueue` sets the status back to pending;
  * `enqueue_keep` leaves it, so a decided record keeps its decision until the new one lands.
  */
-function enqueueFunctions(): readonly string[] {
+function enqueueFunctions(side: boolean): readonly string[] {
   const body = (
     onChange: OnChange,
   ) => `create or replace function ${functionName(onChange)}() returns trigger
@@ -153,7 +196,33 @@ ${onChange === "reset" ? `  new.${quoteIdent(STATUS_COLUMN)} := 'pending';\n` : 
   perform pg_notify('facetdb_jobs', '');
   return new;
 end $$`;
-  return [body("reset"), body("keep")];
+  return [body("reset"), body("keep"), ...(side ? [sideBody()] : [])];
+}
+
+/**
+ * `onChange: reset` in side-table mode: the source table has no status column to set, so the
+ * stored status lives on the side row. Same shape as `enqueue`, with one more statement: the
+ * record's side row, when it has one, goes back to pending (only when it is not pending already,
+ * to write nothing needlessly). A record without a side row reads as pending through the view.
+ * The arguments after the key column and the queue prefix name the side table; the function reads
+ * the key only (the owner holds select on the key and status columns of the side table, nothing else).
+ */
+function sideBody(): string {
+  const status = quoteLiteral(STATUS_COLUMN);
+  return `create or replace function ${SIDE_FUNCTION}() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  key text;
+begin
+  execute format('select ($1).%I::text', tg_argv[0]) into key using new;
+  execute format('update %I.%I set %I = ''pending'' where %I = ($1).%I and %I is distinct from ''pending''',
+                 tg_argv[2], tg_argv[3], ${status}, tg_argv[0], tg_argv[0], ${status}) using new;
+  insert into ${JOBS_TABLE} (record_key)
+  values (tg_argv[1] || key)
+  on conflict (record_key) do nothing;
+  perform pg_notify('facetdb_jobs', '');
+  return new;
+end $$`;
 }
 
 /**
@@ -175,6 +244,8 @@ export function installSql(
   const stateColumns = questionSet.read;
   const worker = quoteIdent(WORKER_ROLE);
   const enqueuer = quoteIdent(ENQUEUE_ROLE);
+  const side = source.storage === "side-table";
+  const onChange = source.onChange ?? "reset";
   const plain = (text: string): InstallStatement => ({ text, params: [] });
   const policy = (name: string, command: "select" | "update") =>
     `  if not exists (select 1 from pg_catalog.pg_policies
@@ -189,6 +260,9 @@ export function installSql(
     // The literal rules this script relies on, pinned for the transaction whatever the server's
     // default: a backslash inside a quoted name is a backslash.
     plain("set local standard_conforming_strings = on"),
+    // The `alter table` statements take ACCESS EXCLUSIVE on the customer's table: better a failed
+    // migrate after ten seconds than the application's queries piling up behind it.
+    plain("set local lock_timeout = '10s'"),
     // The schema and the queue, shared with the store: one definition (sql/jobs.ts).
     ...jobsTableSql().map(plain),
     // The project marker: which project installed on which table.
@@ -212,16 +286,39 @@ export function installSql(
       text: `insert into ${OWNERS_TABLE} (table_schema, table_name, project_id) values ($1, $2, $3) on conflict (table_schema, table_name) do nothing`,
       params: [schema, source.table, project.id],
     },
-    // The answer and status columns, marked as FacetDB's (a later install adopts marked columns
-    // and refuses unmarked ones; uninstall drops only marked ones).
-    plain(
-      `alter table ${table}\n${columns
-        .map(([name, type]) => `  add column if not exists ${quoteIdent(name)} ${type}`)
-        .join(",\n")}`,
-    ),
-    ...owned.map((name) =>
-      plain(`comment on column ${table}.${quoteIdent(name)} is '${OWNED_MARK}'`),
-    ),
+    ...(side
+      ? // Side-table mode: the application's table is not altered. The side table carries the
+        // same columns, keyed by the same key, and the view joins them; both are FacetDB's whole.
+        [
+          // The view's schema and name reach the grant-saving blocks as settings (a `$$` body
+          // cannot quote a name; see the password and the policies).
+          {
+            text: `select set_config('${VIEW_SCHEMA_SETTING}', $1, true), set_config('${VIEW_NAME_SETTING}', $2, true), set_config('${SIDE_TABLE_SETTING}', $3, true), set_config('${SCHEMA_SETTING}', $4, true), set_config('${TABLE_SETTING}', $5, true)`,
+            params: [
+              schema,
+              sideViewName(source.table),
+              sideTableName(source.table),
+              schema,
+              source.table,
+            ],
+          },
+          ...sideTableStatements(source, columns).map(plain),
+          // Whoever may read the source table may read its answers: the table's readers get select
+          // on the side table and usage on the schema, or the security-invoker view would refuse them.
+          plain(sideTableReaderGrants()),
+        ]
+      : [
+          // The answer and status columns, marked as FacetDB's (a later install adopts marked
+          // columns and refuses unmarked ones; uninstall drops only marked ones).
+          plain(
+            `alter table ${table}\n${columns
+              .map(([name, type]) => `  add column if not exists ${quoteIdent(name)} ${type}`)
+              .join(",\n")}`,
+          ),
+          ...owned.map((name) =>
+            plain(`comment on column ${table}.${quoteIdent(name)} is '${OWNED_MARK}'`),
+          ),
+        ]),
     // The owner of the trigger functions: no login, insert on the queue and nothing else. The
     // admin takes membership so it can hand the functions over (and can again on a later run).
     plain(`do $$
@@ -235,20 +332,30 @@ end $$`),
     plain(`grant insert on ${JOBS_TABLE} to ${enqueuer}`),
     // `on conflict (record_key)` reads the arbiter column, so the inserter needs select on it.
     plain(`grant select (record_key) on ${JOBS_TABLE} to ${enqueuer}`),
+    ...(side ? sideTableEnqueuerGrants(source, enqueuer).map(plain) : []),
     // Change capture: the functions and the trigger on the state columns only.
-    ...enqueueFunctions().map(plain),
+    ...enqueueFunctions(side).map(plain),
     // A new owner must hold CREATE on the function's schema (a superuser skips that check, a
     // customer's admin on RDS, Supabase or Neon does not); granted for the hand-over and revoked.
     plain(`grant create on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
     plain(`alter function ${functionName("reset")}() owner to ${enqueuer}`),
     plain(`alter function ${functionName("keep")}() owner to ${enqueuer}`),
+    ...(side ? [plain(`alter function ${SIDE_FUNCTION}() owner to ${enqueuer}`)] : []),
     plain(`revoke create on schema ${quoteIdent(SCHEMA)} from ${enqueuer}`),
     plain(`drop trigger if exists ${quoteIdent(triggerName(source))} on ${table}`),
     plain(
       `create trigger ${quoteIdent(triggerName(source))} before insert or update of ${stateColumns
         .map(quoteIdent)
         .join(", ")}
-  on ${table} for each row execute function ${functionName(source.onChange ?? "reset")}(${quoteLiteral(source.key)}, ${quoteLiteral(queueKeyPrefix(source))})`,
+  on ${table} for each row execute function ${
+    side && onChange === "reset" ? SIDE_FUNCTION : functionName(onChange)
+  }(${[
+    source.key,
+    queueKeyPrefix(source),
+    ...(side && onChange === "reset" ? [SIDE_TABLE_SCHEMA, sideTableName(source.table)] : []),
+  ]
+    .map(quoteLiteral)
+    .join(", ")})`,
     ),
     // The worker login: created once; a password given later resets it. The password
     // never appears in SQL text; without one, an existing role is left as it is.
@@ -256,8 +363,10 @@ end $$`),
       ? []
       : [
           {
+            // A SCRAM verifier, never the password: nothing the server logs or keeps in an
+            // error's context can give the password back (install/scram.ts).
             text: `select set_config('${PASSWORD_SETTING}', $1, true)`,
-            params: [options.workerPassword],
+            params: [scramVerifier(options.workerPassword)],
             redacted: true,
           },
         ]),
@@ -279,13 +388,20 @@ end $$`),
     // only FacetDB's own columns; on the queue, select and delete, plus insert
     // and update because claims are updates and a backfill enqueues (sql/jobs.ts).
     plain(`grant usage on schema ${quoteIdent(schema)} to ${worker}`),
+    // Side-table mode: the worker reads the source's key and state and writes only the side table.
     plain(
-      `grant select (${[source.key, ...stateColumns.filter((c) => c !== source.key), ...owned]
+      `grant select (${[
+        source.key,
+        ...stateColumns.filter((c) => c !== source.key),
+        ...(side ? [] : owned),
+      ]
         .map(quoteIdent)
         .join(", ")})
   on ${table} to ${worker}`,
     ),
-    plain(`grant update (${owned.map(quoteIdent).join(", ")})\n  on ${table} to ${worker}`),
+    ...(side
+      ? sideTableWorkerGrants(source, owned, worker).map(plain)
+      : [plain(`grant update (${owned.map(quoteIdent).join(", ")})\n  on ${table} to ${worker}`)]),
     // The policies, for a table with row-level security on: the names reach the block as settings.
     {
       text: `select set_config('${SCHEMA_SETTING}', $1, true), set_config('${TABLE_SETTING}', $2, true)`,
@@ -293,9 +409,21 @@ end $$`),
     },
     plain(`do $$
 begin
-${policy("facetdb_reads", "select")}
-${policy("facetdb_writes", "update")}
+${policy("facetdb_reads", "select")}${side ? "" : `\n${policy("facetdb_writes", "update")}`}
 end $$`),
+    // The creation marker, when the table has one, so `scan` can order newest first: the worker
+    // reads that one column more (and cannot see a column it holds no right on, so the scan would
+    // fall back to the key silently). Names reach the block as settings, as for the policies.
+    plain(`do $$
+begin
+  if exists (select 1 from pg_catalog.pg_attribute a
+              where a.attrelid = format('%I.%I', current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'))::regclass
+                and a.attname = ${quoteLiteral(CREATION_COLUMN)} and not a.attisdropped) then
+    execute format('grant select (%I) on %I.%I to %I', ${quoteLiteral(CREATION_COLUMN)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(WORKER_ROLE)});
+  end if;
+end $$`),
+    // Side-table mode: row-level security on the side table, now that both roles exist.
+    ...(side ? sideTableSecurityStatements(source, WORKER_ROLE, ENQUEUE_ROLE).map(plain) : []),
     plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
     plain(`grant select, insert, update, delete on ${JOBS_TABLE} to ${worker}`),
   ];
@@ -307,17 +435,23 @@ end $$`),
  * A `$n` is replaced only in statements that have parameters, so a `$$` body is never touched.
  */
 export function renderSql(statements: readonly InstallStatement[]): string {
-  return `${statements.map(renderStatement).join(";\n\n")};\n`;
+  // One transaction, as `migrate` runs it: the script relies on `set local`, transaction-local
+  // settings and a temp table that lives to the commit; run statement by statement in autocommit
+  // it would set the placeholder as the password and lose the view's grants.
+  return `begin;\n\n${statements.map(renderStatement).join(";\n\n")};\n\ncommit;\n`;
 }
 
 function renderStatement(statement: InstallStatement): string {
   if (statement.params.length === 0) {
     return statement.text;
   }
+  if (statement.redacted) {
+    // Not rendered at all, not even with a placeholder: inside the printed transaction a
+    // placeholder would become the login's password when a human runs the script. Without the
+    // setting, the role block raises FacetDB's own message and the transaction rolls back.
+    return "-- the worker password: set by `facetdb migrate` for the transaction, never printed;\n-- run by hand, this script stops at the role below with a FacetDB message and changes nothing";
+  }
   return statement.text.replaceAll(/\$(\d+)/g, (_, index: string) => {
-    if (statement.redacted) {
-      return "'<the worker password, never printed>'";
-    }
     const value = statement.params[Number(index) - 1];
     return quoteLiteral(String(value));
   });
@@ -335,7 +469,7 @@ export function ownedColumnsQuery(
   options: { readonly marked: boolean },
 ): { readonly text: string; readonly params: readonly unknown[] } {
   return {
-    text: `select c.column_name as name
+    text: `select c.column_name as name, c.data_type as type
   from information_schema.columns c
  where c.table_schema = $1 and c.table_name = $2 and c.column_name = any($3::text[])
    and (coalesce(col_description(format('%I.%I', c.table_schema, c.table_name)::regclass, c.ordinal_position), '') = $4) = $5

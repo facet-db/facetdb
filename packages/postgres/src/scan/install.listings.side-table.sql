@@ -1,0 +1,265 @@
+begin;
+
+set local standard_conforming_strings = on;
+
+set local lock_timeout = '10s';
+
+create schema if not exists "facetdb";
+
+create table if not exists "facetdb"."jobs" (
+  record_key text primary key,
+  enqueued_at timestamptz not null default now(),
+  claimed_at timestamptz,
+  claimed_by text
+);
+
+create index if not exists "jobs_queue" on "facetdb"."jobs" (enqueued_at, record_key);
+
+create table if not exists "facetdb"."projects" (
+  id text primary key,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists "facetdb"."table_owners" (
+  table_schema text not null,
+  table_name text not null,
+  project_id text not null references "facetdb"."projects" (id),
+  installed_at timestamptz not null default now(),
+  primary key (table_schema, table_name)
+);
+
+insert into "facetdb"."projects" (id, name) values ('proj_listings', 'Listings') on conflict (id) do nothing;
+
+insert into "facetdb"."table_owners" (table_schema, table_name, project_id) values ('public', 'listings', 'proj_listings') on conflict (table_schema, table_name) do nothing;
+
+select set_config('facetdb.install_view_schema', 'public', true), set_config('facetdb.install_view', 'listings_with_answers', true), set_config('facetdb.install_side_table', 'listings_answers', true), set_config('facetdb.install_schema', 'public', true), set_config('facetdb.install_table', 'listings', true);
+
+create table if not exists "facetdb"."listings_answers" (
+  "id" integer primary key
+);
+
+alter table "facetdb"."listings_answers"
+  add column if not exists "is_scam" boolean,
+  add column if not exists "is_scam_probability" real,
+  add column if not exists "facetdb_status" text not null default 'pending',
+  add column if not exists "facetdb_updated_at" timestamptz,
+  add column if not exists "facetdb_reviewed" boolean not null default false;
+
+do $fdb$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conname = 'listings_answers_key_fkey'
+                    and conrelid = format('%I.%I', 'facetdb', current_setting('facetdb.install_side_table'))::regclass) then
+    execute format('alter table %I.%I add constraint %I foreign key (%I) references %I.%I (%I) on delete cascade',
+                   'facetdb', current_setting('facetdb.install_side_table'), 'listings_answers_key_fkey',
+                   'id', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), 'id');
+  end if;
+end $fdb$;
+
+comment on table "facetdb"."listings_answers" is 'facetdb';
+
+do $$
+begin
+  create temp table if not exists facetdb_view_grants (grantee_sql text, privilege text, grantable boolean) on commit drop;
+  delete from facetdb_view_grants;
+  insert into facetdb_view_grants
+    select case when a.grantee = 0 then 'public' else quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) end,
+           a.privilege_type, a.is_grantable
+      from pg_catalog.pg_class c
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      cross join lateral pg_catalog.aclexplode(c.relacl) a
+     where n.nspname = current_setting('facetdb.install_view_schema') and c.relname = current_setting('facetdb.install_view')
+       and a.grantee <> c.relowner;
+end $$;
+
+drop view if exists "public"."listings_with_answers";
+
+create view "public"."listings_with_answers" with (security_invoker = true) as
+select t.*,
+  a."is_scam",
+  a."is_scam_probability",
+  coalesce(a."facetdb_status", 'pending') as "facetdb_status",
+  a."facetdb_updated_at",
+  coalesce(a."facetdb_reviewed", false) as "facetdb_reviewed"
+  from "public"."listings" t
+  left join "facetdb"."listings_answers" a on a."id" = t."id";
+
+comment on view "public"."listings_with_answers" is 'facetdb';
+
+do $$
+declare
+  g record;
+begin
+  for g in select * from facetdb_view_grants loop
+    execute format('grant %s on %I.%I to %s%s', g.privilege, current_setting('facetdb.install_view_schema'),
+                   current_setting('facetdb.install_view'), g.grantee_sql,
+                   case when g.grantable then ' with grant option' else '' end);
+  end loop;
+end $$;
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select case when a.grantee = 0 then 'public' else quote_ident(pg_catalog.pg_get_userbyid(a.grantee)) end as grantee_sql
+      from pg_catalog.pg_class c
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      cross join lateral pg_catalog.aclexplode(c.relacl) a
+     where n.nspname = current_setting('facetdb.install_schema') and c.relname = current_setting('facetdb.install_table')
+       and a.privilege_type = 'SELECT' and a.grantee <> c.relowner
+  loop
+    execute format('grant usage on schema %I to %s', 'facetdb', r.grantee_sql);
+    execute format('grant select on %I.%I to %s', 'facetdb', current_setting('facetdb.install_side_table'), r.grantee_sql);
+    execute format('grant select on %I.%I to %s', current_setting('facetdb.install_view_schema'), current_setting('facetdb.install_view'), r.grantee_sql);
+  end loop;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'facetdb_enqueue') then
+    execute format('create role %I nologin', 'facetdb_enqueue');
+  end if;
+end $$;
+
+grant "facetdb_enqueue" to current_user;
+
+grant usage on schema "facetdb" to "facetdb_enqueue";
+
+grant insert on "facetdb"."jobs" to "facetdb_enqueue";
+
+grant select (record_key) on "facetdb"."jobs" to "facetdb_enqueue";
+
+grant select ("id", "facetdb_status"), update ("facetdb_status") on "facetdb"."listings_answers" to "facetdb_enqueue";
+
+create or replace function "facetdb"."enqueue"() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  key text;
+begin
+  execute format('select ($1).%I::text', tg_argv[0]) into key using new;
+  new."facetdb_status" := 'pending';
+  insert into "facetdb"."jobs" (record_key)
+  values (tg_argv[1] || key)
+  on conflict (record_key) do nothing;
+  perform pg_notify('facetdb_jobs', '');
+  return new;
+end $$;
+
+create or replace function "facetdb"."enqueue_keep"() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  key text;
+begin
+  execute format('select ($1).%I::text', tg_argv[0]) into key using new;
+  insert into "facetdb"."jobs" (record_key)
+  values (tg_argv[1] || key)
+  on conflict (record_key) do nothing;
+  perform pg_notify('facetdb_jobs', '');
+  return new;
+end $$;
+
+create or replace function "facetdb"."enqueue_side"() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  key text;
+begin
+  execute format('select ($1).%I::text', tg_argv[0]) into key using new;
+  execute format('update %I.%I set %I = ''pending'' where %I = ($1).%I and %I is distinct from ''pending''',
+                 tg_argv[2], tg_argv[3], 'facetdb_status', tg_argv[0], tg_argv[0], 'facetdb_status') using new;
+  insert into "facetdb"."jobs" (record_key)
+  values (tg_argv[1] || key)
+  on conflict (record_key) do nothing;
+  perform pg_notify('facetdb_jobs', '');
+  return new;
+end $$;
+
+grant create on schema "facetdb" to "facetdb_enqueue";
+
+alter function "facetdb"."enqueue"() owner to "facetdb_enqueue";
+
+alter function "facetdb"."enqueue_keep"() owner to "facetdb_enqueue";
+
+alter function "facetdb"."enqueue_side"() owner to "facetdb_enqueue";
+
+revoke create on schema "facetdb" from "facetdb_enqueue";
+
+drop trigger if exists "facetdb_listings" on "public"."listings";
+
+create trigger "facetdb_listings" before insert or update of "title", "description"
+  on "public"."listings" for each row execute function "facetdb"."enqueue_side"('id', '15:public.listings:', 'facetdb', 'listings_answers');
+
+-- the worker password: set by `facetdb migrate` for the transaction, never printed;
+-- run by hand, this script stops at the role below with a FacetDB message and changes nothing;
+
+do $$
+declare
+  password text := nullif(current_setting('facetdb.worker_password', true), '');
+begin
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'facetdb_worker') then
+    if password is null then
+      raise exception 'FacetDB: the worker login facetdb_worker does not exist and no password was given for it';
+    end if;
+    execute format('create role %I login password %L', 'facetdb_worker', password);
+  elsif password is not null then
+    execute format('alter role %I with login password %L', 'facetdb_worker', password);
+  end if;
+end $$;
+
+grant usage on schema "public" to "facetdb_worker";
+
+grant select ("id", "title", "description")
+  on "public"."listings" to "facetdb_worker";
+
+grant select ("id", "is_scam", "is_scam_probability", "facetdb_status", "facetdb_updated_at", "facetdb_reviewed") on "facetdb"."listings_answers" to "facetdb_worker";
+
+grant insert ("id", "is_scam", "is_scam_probability", "facetdb_status", "facetdb_updated_at", "facetdb_reviewed") on "facetdb"."listings_answers" to "facetdb_worker";
+
+grant update ("is_scam", "is_scam_probability", "facetdb_status", "facetdb_updated_at", "facetdb_reviewed") on "facetdb"."listings_answers" to "facetdb_worker";
+
+select set_config('facetdb.install_schema', 'public', true), set_config('facetdb.install_table', 'listings', true);
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_policies
+                 where schemaname = current_setting('facetdb.install_schema')
+                   and tablename = current_setting('facetdb.install_table')
+                   and policyname = 'facetdb_reads') then
+    execute format('create policy %I on %I.%I for select to %I using (true)',
+                   'facetdb_reads', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), 'facetdb_worker');
+  end if;
+end $$;
+
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_attribute a
+              where a.attrelid = format('%I.%I', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'))::regclass
+                and a.attname = 'created_at' and not a.attisdropped) then
+    execute format('grant select (%I) on %I.%I to %I', 'created_at', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), 'facetdb_worker');
+  end if;
+end $$;
+
+alter table "facetdb"."listings_answers" enable row level security;
+
+do $fdb$
+begin
+  if not exists (select 1 from pg_catalog.pg_policies where schemaname = 'facetdb'
+                  and tablename = current_setting('facetdb.install_side_table') and policyname = 'facetdb_side_reads') then
+    execute format('create policy %I on %I.%I for select using (exists (select 1 from %I.%I s where s.%I = %I.%I.%I))',
+                   'facetdb_side_reads', 'facetdb', current_setting('facetdb.install_side_table'),
+                   current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), 'id',
+                   'facetdb', current_setting('facetdb.install_side_table'), 'id');
+  end if;
+  if not exists (select 1 from pg_catalog.pg_policies where schemaname = 'facetdb'
+                  and tablename = current_setting('facetdb.install_side_table') and policyname = 'facetdb_side_workers') then
+    execute format('create policy %I on %I.%I to %I, %I using (true) with check (true)',
+                   'facetdb_side_workers', 'facetdb', current_setting('facetdb.install_side_table'), 'facetdb_worker', 'facetdb_enqueue');
+  end if;
+end $fdb$;
+
+grant usage on schema "facetdb" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."jobs" to "facetdb_worker";
+
+commit;

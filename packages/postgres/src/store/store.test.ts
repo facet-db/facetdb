@@ -1,4 +1,4 @@
-import { PGlite } from "@electric-sql/pglite";
+import type { PGlite } from "@electric-sql/pglite";
 import type {
   AnswerEntry,
   HumanEntry,
@@ -11,6 +11,7 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { pgliteClient } from "../polling/index.ts";
 import { CLAIM_LEASE_MS, jobsTableSql } from "../sql/index.ts";
+import { freshPglite } from "../testing/pglite.ts";
 import { createCrypto, newSalt } from "./crypto.ts";
 import { createStore, requireTls, type Store } from "./store.ts";
 
@@ -37,7 +38,7 @@ afterEach(async () => {
 });
 
 async function newDb(): Promise<PGlite> {
-  const db = new PGlite();
+  const db = await freshPglite();
   opened.push(db);
   return db;
 }

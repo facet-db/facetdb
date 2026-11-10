@@ -1,4 +1,8 @@
+begin;
+
 set local standard_conforming_strings = on;
+
+set local lock_timeout = '10s';
 
 create schema if not exists "facetdb";
 
@@ -99,9 +103,10 @@ revoke create on schema "facetdb" from "facetdb_enqueue";
 drop trigger if exists "facetdb_listings" on "public"."listings";
 
 create trigger "facetdb_listings" before insert or update of "title", "description"
-  on "public"."listings" for each row execute function "facetdb"."enqueue"('id', 'public.listings:');
+  on "public"."listings" for each row execute function "facetdb"."enqueue"('id', '15:public.listings:');
 
-select set_config('facetdb.worker_password', '<the worker password, never printed>', true);
+-- the worker password: set by `facetdb migrate` for the transaction, never printed;
+-- run by hand, this script stops at the role below with a FacetDB message and changes nothing;
 
 do $$
 declare
@@ -145,6 +150,17 @@ begin
   end if;
 end $$;
 
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_attribute a
+              where a.attrelid = format('%I.%I', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'))::regclass
+                and a.attname = 'created_at' and not a.attisdropped) then
+    execute format('grant select (%I) on %I.%I to %I', 'created_at', current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), 'facetdb_worker');
+  end if;
+end $$;
+
 grant usage on schema "facetdb" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."jobs" to "facetdb_worker";
+
+commit;

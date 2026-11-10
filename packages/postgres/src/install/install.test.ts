@@ -74,7 +74,7 @@ async function listingsTable(
     readonly compositeKey?: boolean;
   } = {},
 ): Promise<PgliteWorld> {
-  world = createPgliteWorld();
+  world = await createPgliteWorld();
   worlds.push(world);
   const name = options.table ?? "listings";
   const key = options.compositeKey ? "id integer, region text" : "id serial primary key";
@@ -222,7 +222,7 @@ describe("installSql", () => {
     );
     const texts = statements.map((s) => s.text).join("\n");
     expect(texts).toContain('"My Schema"."odd""na$$me"');
-    expect(texts).toContain("'Id', 'My Schema.odd\"na$$me:'");
+    expect(texts).toContain("'Id', '20:My Schema.odd\"na$$me:'");
     const inBlocks = statements.filter((s) => s.text.startsWith("do $$")).map((s) => s.text);
     for (const block of inBlocks) {
       expect(block).not.toContain("odd");
@@ -296,7 +296,7 @@ describe("migrate on PGlite", () => {
     await listingsTable();
     await run();
     await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
-    expect(await jobs()).toEqual(["public.listings:1"]);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
     expect(await status(1)).toBe("pending");
     await world.client.query(`delete from facetdb.jobs`);
     await world.client.query(
@@ -307,10 +307,10 @@ describe("migrate on PGlite", () => {
     await world.client.query(`update public.listings set secret = 'x' where id = 1`);
     expect(await jobs()).toEqual([]);
     await world.client.query(`update public.listings set title = 'changed' where id = 1`);
-    expect(await jobs()).toEqual(["public.listings:1"]);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
     expect(await status(1)).toBe("pending");
     await world.client.query(`update public.listings set description = 'again' where id = 1`);
-    expect(await jobs()).toEqual(["public.listings:1"]);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
   });
 
   it("onChange keep enqueues the change and leaves the status", async () => {
@@ -320,7 +320,7 @@ describe("migrate on PGlite", () => {
     await world.client.query(`delete from facetdb.jobs`);
     await world.client.query(`update public.listings set facetdb_status = 'done' where id = 1`);
     await world.client.query(`update public.listings set title = 'changed' where id = 1`);
-    expect(await jobs()).toEqual(["public.listings:1"]);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
     expect(await status(1)).toBe("done");
   });
 
@@ -331,7 +331,7 @@ describe("migrate on PGlite", () => {
     await world.client.query(
       `insert into public."price$$""list" (title, description) values ('a', 'b')`,
     );
-    expect(await jobs()).toEqual(['public.price$$"list:1']);
+    expect(await jobs()).toEqual(['19:public.price$$"list:1']);
     const policies = await world.client.query(
       `select policyname from pg_policies where tablename = $1 order by 1`,
       ['price$$"list'],
@@ -450,7 +450,7 @@ describe("migrate on PGlite", () => {
     );
     expect(create).toEqual([{ can_create: false }]);
     await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
-    expect(await jobs()).toEqual(["public.listings:1"]);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
   });
 
   it("refuses a password that would lock another project out, unless rotated on purpose", async () => {
@@ -493,6 +493,132 @@ describe("migrate on PGlite", () => {
     expect(result).toMatchObject({ ok: false });
     if (!result.ok) {
       expect(result.reason).toContain(ENQUEUE_ROLE);
+    }
+  });
+
+  it("stores a SCRAM verifier, never the password, and prints one transaction", async () => {
+    await listingsTable();
+    const { result, printed } = await run();
+    expect(result).toMatchObject({ ok: true });
+    expect(await workerPasswordHash()).toMatch(/^SCRAM-SHA-256\$4096:/);
+    const texts = result.ok ? result.statements.map((s) => String(s.params[0] ?? "")) : [];
+    expect(texts.join("\n")).not.toContain("a-long-random-password");
+    expect(printed[0]?.startsWith("begin;\n")).toBe(true);
+    expect(printed[0]?.endsWith("commit;\n")).toBe(true);
+    expect(printed[0]).toContain("set local lock_timeout = '10s'");
+  });
+
+  it("prints no password statement, and run by hand the script stops at the role and changes nothing", async () => {
+    await listingsTable();
+    const { printed } = await run({}, { dryRun: true });
+    const script = printed[0] ?? "";
+    expect(script).not.toContain("set_config('facetdb.worker_password'");
+    expect(script).not.toContain("<the worker password");
+    // The whole printed script, as psql -f would run it, on a fresh cluster.
+    await expect(world.db.exec(script)).rejects.toThrow(
+      /worker login facetdb_worker does not exist/,
+    );
+    // PGlite is one session: the failed script leaves its transaction open and aborted, as psql would.
+    await world.db.exec("rollback");
+    const columns = await world.client.query(
+      `select column_name from information_schema.columns where table_name = 'listings' and column_name = 'facetdb_status'`,
+    );
+    expect(columns).toHaveLength(0);
+    expect(
+      await world.client.query(`select 1 from pg_roles where rolname = 'facetdb_worker'`),
+    ).toEqual([]);
+  });
+
+  it("queues keys under a length-prefixed table name", async () => {
+    await listingsTable();
+    await run();
+    await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
+    expect(await jobs()).toEqual(["15:public.listings:1"]);
+  });
+
+  it("refuses a marked column whose question changed type", async () => {
+    await listingsTable();
+    await run();
+    const changed: QuestionSet = {
+      ...listings,
+      questions: [
+        {
+          type: "choice",
+          name: "is_scam",
+          instructions: "Which?",
+          options: [
+            { name: "yes", description: "y" },
+            { name: "no", description: "n" },
+          ],
+          stakes: "low",
+          storeProbabilities: false,
+        },
+      ],
+    };
+    const result = await migrate({
+      adminUrl: "postgres://admin@unused/listings",
+      connect: world.connect,
+      print: () => undefined,
+      plan: { source: { table: "listings" }, questionSet: changed, project },
+    });
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.reason).toContain("is_scam is boolean");
+    }
+  });
+
+  it("refuses a generated primary key, a FacetDB role with memberships, and a name holding the body tag", async () => {
+    world = await createPgliteWorld();
+    worlds.push(world);
+    await world.client.query(
+      `create table public.listings (n integer, id integer generated always as (n * 2) stored primary key, title text, description text)`,
+    );
+    const generated = await run();
+    expect(generated.result).toMatchObject({ ok: false });
+    if (!generated.result.ok) {
+      expect(generated.result.reason).toContain("generated");
+    }
+
+    await listingsTable();
+    await world.client.query(`create role facetdb_worker login`);
+    await world.client.query(`grant pg_read_all_data to facetdb_worker`);
+    const member = await run();
+    expect(member.result).toMatchObject({ ok: false });
+    if (!member.result.ok) {
+      expect(member.result.reason).toContain("pg_read_all_data");
+    }
+
+    await listingsTable({ table: "odd$fdb$name" });
+    const tagged = await run({ source: { table: "odd$fdb$name" } });
+    expect(tagged.result).toMatchObject({ ok: false });
+    if (!tagged.result.ok) {
+      expect(tagged.result.reason).toContain("$fdb$");
+    }
+  });
+
+  it("refuses a state field that is one of FacetDB's own columns", async () => {
+    await listingsTable();
+    for (const read of [
+      ["title", "is_scam"],
+      ["title", "facetdb_status"],
+    ]) {
+      const printed: string[] = [];
+      const result = await migrate({
+        adminUrl: "postgres://admin@unused/listings",
+        connect: world.connect,
+        print: (sql) => printed.push(sql),
+        plan: {
+          source: { table: "listings" },
+          questionSet: { ...listings, read },
+          project,
+          workerPassword: "a-long-random-password",
+        },
+      });
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.reason).toContain(read[1]);
+      }
+      expect(printed).toEqual([]);
     }
   });
 });

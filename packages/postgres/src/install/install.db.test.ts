@@ -112,9 +112,9 @@ describe("the worker login on a real Postgres", () => {
   it("works the queue and nothing else in the facetdb schema", async () => {
     await admin.query(`update public.listings set title = 'changed' where id = 1`);
     const queued = await worker.query(`select record_key from facetdb.jobs`);
-    expect(queued.map((row) => row["record_key"])).toEqual(["public.listings:1"]);
+    expect(queued.map((row) => row["record_key"])).toEqual(["15:public.listings:1"]);
     await worker.query(
-      `update facetdb.jobs set claimed_at = now(), claimed_by = 'w1' where record_key = 'public.listings:1'`,
+      `update facetdb.jobs set claimed_at = now(), claimed_by = 'w1' where record_key = '15:public.listings:1'`,
     );
     await worker.query(`delete from facetdb.jobs where claimed_by = 'w1'`);
     expect(await worker.query(`select record_key from facetdb.jobs`)).toEqual([]);
