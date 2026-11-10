@@ -80,6 +80,19 @@ on conflict (record_key) do update set claimed_at = null, claimed_by = null`,
 returning record_key`,
 
   /**
+   * `$1` key, `$2` worker, `$3` now (ms), `$4` lease (ms). Takes that one job if it is unclaimed or
+   * its claim lease ended; no row comes back when it is not queued or another worker holds it.
+   */
+  claimOne: `update ${JOBS_TABLE}
+   set claimed_at = to_timestamp($3::double precision / 1000), claimed_by = $2
+ where record_key in (
+   select record_key from ${JOBS_TABLE}
+    where record_key = $1::text
+      and (claimed_at is null or claimed_at <= to_timestamp(($3::double precision - $4::double precision) / 1000))
+    for update skip locked)
+returning record_key`,
+
+  /**
    * `$1` key, `$2` worker, `$3` now (ms). Inserts the job already claimed; no row comes back when
    * the key is queued already, claimed or not.
    */

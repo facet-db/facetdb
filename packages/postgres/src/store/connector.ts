@@ -62,6 +62,11 @@ export type StoreConnector = Connector & {
    */
   upsertRecord(key: RecordKey, state: Readonly<Record<string, StateValue>>): Promise<boolean>;
   getRecord(key: RecordKey): Promise<StoredRecord | undefined>;
+  /**
+   * Claims the one queued job of `key` (true), and nothing else: false when the key is not queued or
+   * another worker holds it. A call that waits for one record has the worker take only that one.
+   */
+  claimRecord(key: RecordKey): Promise<boolean>;
 };
 
 const CAPABILITIES: Capabilities = {
@@ -294,6 +299,15 @@ export function createStoreConnector(
         CLAIM_LEASE_MS,
       ]);
       return rows.map((row) => unqueued(text(row, "record_key")));
+    },
+    async claimRecord(key) {
+      const rows = await client.query(jobsQueries.claimOne, [
+        queued(key),
+        workerId,
+        clock.now(),
+        CLAIM_LEASE_MS,
+      ]);
+      return rows.length > 0;
     },
     async claimKey(key) {
       const rows = await client.query(jobsQueries.claimKey, [queued(key), workerId, clock.now()]);

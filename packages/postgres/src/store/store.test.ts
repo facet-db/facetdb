@@ -275,6 +275,20 @@ describe("the store connector", () => {
     await two.ack(["k"]);
   });
 
+  it("claims only the one queued key it is asked for, and leaves the rest queued", async () => {
+    const { store, clock } = await newStore();
+    const one = store.connector({ sourceId: "src", fields: FIELDS, workerId: "w1" });
+    const two = store.connector({ sourceId: "src", fields: FIELDS, workerId: "w2" });
+    await one.enqueue(["old1", "old2", "mine"]);
+    expect(await one.claimRecord("mine")).toBe(true);
+    // Held by w1 now: nobody else takes it, and a key that is not queued is not claimed.
+    expect(await two.claimRecord("mine")).toBe(false);
+    expect(await two.claimRecord("absent")).toBe(false);
+    expect([...(await two.claim(10))].sort()).toEqual(["old1", "old2"]);
+    clock.advance(CLAIM_LEASE_MS + 1);
+    expect(await two.claimRecord("mine")).toBe(true);
+  });
+
   it("keeps sources' queues apart", async () => {
     const { store } = await newStore();
     const a = store.connector({ sourceId: "a", fields: FIELDS, workerId: "w" });

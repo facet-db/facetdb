@@ -6,7 +6,8 @@
   "description": "FacetDB on Postgres: the trigger-and-jobs connector (inline columns or side table), the polling connector, and the FacetDB store for plugin and API sources. PGlite in development, any Postgres in production.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
