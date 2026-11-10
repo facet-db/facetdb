@@ -1,4 +1,4 @@
-import type { ModelProvider } from "@facetdb/core";
+import type { Clock, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
 import { Command, CommanderError } from "commander";
 import type { ProjectConfig } from "../config/index.ts";
@@ -28,18 +28,22 @@ export class CliError extends Error {
   readonly code: string;
   readonly fix: string;
   readonly exit: typeof EXIT_SETUP | typeof EXIT_USAGE;
+  /** Plain data a piped command still wants on failure (`doctor --json` lists every check). */
+  readonly details: unknown;
 
   constructor(
     code: string,
     message: string,
     fix: string,
     exit: typeof EXIT_SETUP | typeof EXIT_USAGE = EXIT_SETUP,
+    details?: unknown,
   ) {
     super(message);
     this.name = "CliError";
     this.code = code;
     this.fix = fix;
     this.exit = exit;
+    this.details = details;
   }
 }
 
@@ -60,9 +64,25 @@ export type CliIo = {
   readonly prompt: (question: string, options?: { readonly secret?: boolean }) => Promise<string>;
 };
 
+/**
+ * The project directory's files and the machine's tools, as the commands that write or detect see
+ * them. Paths are relative to the project directory; the composition root passes the real disk,
+ * a test a temporary directory.
+ */
+export type Workspace = {
+  exists(path: string): Promise<boolean>;
+  /** Writes a file, creating its directory; replaces one that exists only when `overwrite` is set. */
+  write(path: string, text: string, options: { readonly overwrite: boolean }): Promise<void>;
+  /** Whether the `claude` command is on the PATH. */
+  hasClaudeCommand(): boolean;
+};
+
 /** Everything a command may touch, wired once by the composition root (`main.ts`). */
 export type CliDeps = {
   readonly io: CliIo;
+  readonly workspace: Workspace;
+  /** The time, for ages (a heartbeat's); a test passes a fake. */
+  readonly clock: Clock;
   /** The directory the command runs in; its name is the project's name for now (see `projectRef`). */
   readonly projectDir: string;
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -134,6 +154,7 @@ function errorJson(error: CliError): string {
       fix: error.fix,
       docs: docsLink(error.code),
     },
+    ...(error.details === undefined ? {} : { details: error.details }),
   })}\n`;
 }
 
@@ -272,8 +293,10 @@ export type CapturedRun = {
  */
 export async function runInProcess(
   argv: readonly string[],
-  deps: Omit<CliDeps, "io" | "store" | "provider"> &
-    Partial<Pick<CliDeps, "store" | "provider">> & { readonly answers?: readonly string[] },
+  deps: Omit<CliDeps, "io" | "store" | "provider" | "workspace" | "clock"> &
+    Partial<Pick<CliDeps, "store" | "provider" | "workspace" | "clock">> & {
+      readonly answers?: readonly string[];
+    },
   commands: readonly RegisteredCommand[],
 ): Promise<CapturedRun> {
   let stdout = "";
@@ -302,6 +325,19 @@ export async function runInProcess(
       store: () => Promise.reject(new Error("this test gave the command no store")),
       provider: () => {
         throw new Error("this test gave the command no model provider");
+      },
+      workspace: {
+        exists: () => Promise.reject(new Error("this test gave the command no workspace")),
+        write: () => Promise.reject(new Error("this test gave the command no workspace")),
+        hasClaudeCommand: () => {
+          throw new Error("this test gave the command no workspace");
+        },
+      },
+      clock: {
+        now: () => {
+          throw new Error("this test gave the command no clock");
+        },
+        sleep: () => Promise.reject(new Error("this test gave the command no clock")),
       },
       ...rest,
       io,

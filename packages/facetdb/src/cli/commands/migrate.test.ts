@@ -150,6 +150,12 @@ async function runSeeingPrompts(argv: readonly string[], answers: readonly strin
       provider: () => {
         throw new Error("no provider");
       },
+      workspace: {
+        exists: () => Promise.resolve(false),
+        write: () => Promise.resolve(),
+        hasClaudeCommand: () => false,
+      },
+      clock: { now: () => 0, sleep: () => Promise.resolve() },
     },
     COMMANDS,
   );

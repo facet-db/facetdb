@@ -1,3 +1,6 @@
+import { accessSync, constants } from "node:fs";
+import { access, mkdir, writeFile } from "node:fs/promises";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import type { Clock } from "@facetdb/core";
@@ -5,7 +8,14 @@ import { selectProvider } from "@facetdb/model";
 import { connectPostgres, createStore, SECRET_VARIABLE } from "@facetdb/postgres";
 import { loadConfig } from "../config/index.ts";
 import { COMMANDS } from "./commands/index.ts";
-import { type CliDeps, CliError, type CliIo, formatError, runProgram } from "./program.ts";
+import {
+  type CliDeps,
+  CliError,
+  type CliIo,
+  formatError,
+  runProgram,
+  type Workspace,
+} from "./program.ts";
 
 /**
  * The composition root of the `facetdb` process: the only place that touches the process's
@@ -50,6 +60,41 @@ async function prompt(question: string, options?: { readonly secret?: boolean })
   }
 }
 
+/** The project directory on the real disk, and the `claude` command looked up on the real PATH. */
+function diskWorkspace(
+  projectDir: string,
+  env: Readonly<Record<string, string | undefined>>,
+): Workspace {
+  return {
+    exists: async (path) => {
+      try {
+        await access(resolve(projectDir, path));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    write: async (path, text, { overwrite }) => {
+      const file = resolve(projectDir, path);
+      await mkdir(dirname(file), { recursive: true });
+      // "wx" fails when the file exists, so a race cannot replace what init was told to keep.
+      await writeFile(file, text, { flag: overwrite ? "w" : "wx" });
+    },
+    hasClaudeCommand: () =>
+      (env["PATH"] ?? "")
+        .split(delimiter)
+        .filter((directory) => directory !== "")
+        .some((directory) => {
+          try {
+            accessSync(join(directory, "claude"), constants.X_OK);
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+  };
+}
+
 function processIo(): CliIo {
   return {
     stdout: (text) => {
@@ -67,6 +112,8 @@ export function processDeps(): CliDeps {
   const projectDir = process.cwd();
   return {
     io: processIo(),
+    workspace: diskWorkspace(projectDir, env),
+    clock,
     projectDir,
     env,
     loadConfig: async (path) =>

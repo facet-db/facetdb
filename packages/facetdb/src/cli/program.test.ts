@@ -22,6 +22,9 @@ import {
 
 const ADMIN_URL = "postgres://admin:admin@localhost:5432/app";
 
+/** The commands that run SQL with an admin connection string; init and doctor are tested in their own files. */
+const ADMIN_COMMANDS = ["migrate", "uninstall"] as const;
+
 const config: ProjectConfig = facetdb({
   model: "jev-1.14.0",
   sources: [
@@ -91,12 +94,18 @@ describe("the facetdb program", () => {
         provider: () => {
           throw new Error("unused");
         },
+        workspace: {
+          exists: () => Promise.resolve(false),
+          write: () => Promise.resolve(),
+          hasClaudeCommand: () => false,
+        },
+        clock: { now: () => 0, sleep: () => Promise.resolve() },
       },
       COMMANDS,
       { code: 0 },
     );
     const names = program.commands.map((command) => command.name());
-    expect(names).toEqual(["migrate", "uninstall"]);
+    expect(names).toEqual(["init", "doctor", "migrate", "uninstall"]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);
       expect(flags, command.name()).toContain("--dry-run");
@@ -104,7 +113,7 @@ describe("the facetdb program", () => {
     }
   });
 
-  it.each(COMMANDS.map((command) => command.name))("%s accepts --dry-run", async (name) => {
+  it.each(ADMIN_COMMANDS)("%s accepts --dry-run", async (name) => {
     const result = await run([name, "--dry-run", "--admin-url", ADMIN_URL]);
     expect(result.code, result.stderr).not.toBe(2);
     expect(result.prompts).toEqual([]);
@@ -181,7 +190,7 @@ describe("the facetdb program", () => {
   it("speaks of probabilities in plain words", async () => {
     expect(likelyYes(0.58)).toBe("58% likely yes");
     expect(likelyYes(0.995)).toBe("100% likely yes");
-    for (const name of COMMANDS.map((command) => command.name)) {
+    for (const name of ADMIN_COMMANDS) {
       const result = await run([name, "--dry-run", "--admin-url", ADMIN_URL]);
       expect(`${result.stdout}${result.stderr}`).not.toContain("noul=");
     }
