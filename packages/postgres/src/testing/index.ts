@@ -2,6 +2,9 @@ import { PGlite } from "@electric-sql/pglite";
 import type { Clock } from "@facetdb/core";
 import { createStore, type Store } from "../store/index.ts";
 
+export { createPgliteWorld, type PgliteWorld } from "./pglite.ts";
+export { createScratchDatabase, type ScratchDatabase, serverUrl } from "./postgres.ts";
+
 /** The secret every test store is made with; it protects nothing. */
 export const TEST_SECRET = "a-long-random-secret-for-tests-only";
 

@@ -13,6 +13,19 @@ export function quoteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
+/**
+ * A string literal inside DDL, where no parameter can travel (a trigger's arguments, a `format()`
+ * call in a `do` block): single quotes around it, any single quote inside doubled, and a backslash
+ * left alone (standard_conforming_strings is on since Postgres 9.1). Only install SQL uses it, and
+ * only for names that came from the config; a value a user types still goes as a parameter.
+ */
+export function quoteLiteral(text: string): string {
+  if (text.includes("\0")) {
+    throw new Error("a literal must not contain a NUL character");
+  }
+  return `'${text.replaceAll("'", "''")}'`;
+}
+
 /** A table as the source names it: a schema (default `public`) and a name, both quoted. */
 export function quoteTable(table: {
   readonly schema?: string | undefined;
