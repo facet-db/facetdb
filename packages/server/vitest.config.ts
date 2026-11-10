@@ -7,5 +7,9 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
+    // The check tests run on the real store over PGlite: the cluster template is built once before
+    // the workers start (postgres' testing/pglite.ts), and a cold checkout gets 15 s a test.
+    globalSetup: ["../postgres/src/testing/global-setup.ts"],
+    testTimeout: 15_000,
   },
 });

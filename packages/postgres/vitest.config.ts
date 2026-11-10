@@ -7,5 +7,9 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
+    // The PGlite cluster template is built once before the workers start (testing/pglite.ts), and a
+    // cold checkout still boots slower than a warm one: 15 s leaves a hang failing.
+    globalSetup: ["./src/testing/global-setup.ts"],
+    testTimeout: 15_000,
   },
 });

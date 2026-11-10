@@ -49,6 +49,15 @@ async function templateDataDir(): Promise<Blob> {
   return template;
 }
 
+/**
+ * Builds the template once, before the test workers start (vitest `globalSetup`): otherwise every
+ * file's first test builds it, all at once on a cold checkout, and the slowest of them passes the
+ * 5-second default timeout (seen on 2026-11-01).
+ */
+export async function warmPgliteTemplate(): Promise<void> {
+  await templateDataDir();
+}
+
 /** A fresh, empty PGlite, booted from the cached template. The caller closes it. */
 export async function freshPglite(): Promise<PGlite> {
   const db = new PGlite({ loadDataDir: await templateDataDir() });
