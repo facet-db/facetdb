@@ -87,8 +87,8 @@ export const ENQUEUE_ROLE = "facetdb_enqueue";
  * quote a name). Each is set by `set_config($n, true)` and read by `current_setting`.
  */
 export const PASSWORD_SETTING = "facetdb.worker_password";
-const SCHEMA_SETTING = "facetdb.install_schema";
-const TABLE_SETTING = "facetdb.install_table";
+export const SCHEMA_SETTING = "facetdb.install_schema";
+export const TABLE_SETTING = "facetdb.install_table";
 
 const SCHEMA = "facetdb";
 const PROJECTS_TABLE = `${quoteIdent(SCHEMA)}.${quoteIdent("projects")}`;
@@ -135,7 +135,10 @@ export function installOwnedColumnTypes(questionSet: QuestionSet): ReadonlyMap<s
   );
 }
 
-function ownedColumnDefinitions(questionSet: QuestionSet): readonly (readonly [string, string])[] {
+/** The owned columns with their SQL definitions, in install order (prune rebuilds the side view from them). */
+export function ownedColumnDefinitions(
+  questionSet: QuestionSet,
+): readonly (readonly [string, string])[] {
   return [
     ...questionSet.questions.flatMap((question) =>
       answerColumns(question).map(({ name, kind }): readonly [string, string] => [
@@ -148,7 +151,7 @@ function ownedColumnDefinitions(questionSet: QuestionSet): readonly (readonly [s
 }
 
 /** The trigger's name on a table: FacetDB's prefix and the table's name. */
-export function triggerName(source: TableSource): string {
+export function triggerName(source: Pick<TableSource, "table">): string {
   return `facetdb_${source.table}`;
 }
 
@@ -159,7 +162,7 @@ export function triggerName(source: TableSource): string {
  * database (and by the store, which prefixes its sources the same way), so a bare key from two
  * tables would collide; the runtime claims with this prefix (`jobsQueries.claim`, `$1`).
  */
-export function queueKeyPrefix(source: TableSource): string {
+export function queueKeyPrefix(source: Pick<TableSource, "table" | "schema">): string {
   // Length-prefixed, as the store's `queuePrefix` is: `public.listings` and a table named
   // `listings:1` can never read as one another's keys.
   const qualified = `${source.schema ?? "public"}.${source.table}`;

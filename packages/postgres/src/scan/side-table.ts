@@ -149,10 +149,13 @@ export function sideKeyConstraint(table: string): string {
  * the table. It is dropped and created, not replaced: `t.*` is expanded at creation, and `create or
  * replace` would refuse the next run after the application added a column. Both relations carry
  * the mark; `migrate` refuses to touch a relation of these names that does not.
+ * `whileViewDropped` runs between the drop and the create: `migrate --prune` drops the side
+ * table's columns of removed questions there, since the view reads them by name.
  */
 export function sideTableStatements(
   source: SideTableSource,
   columns: readonly ColumnDefinition[],
+  options: { readonly whileViewDropped?: readonly string[] } = {},
 ): readonly string[] {
   if (source.keyType === undefined) {
     throw new Error(
@@ -211,6 +214,7 @@ begin
        and a.grantee <> c.relowner;
 end $$`,
     `drop view if exists ${view}`,
+    ...(options.whileViewDropped ?? []),
     `create view ${view} with (security_invoker = true) as
 select t.*,
   ${selected.join(",\n  ")}
