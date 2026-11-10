@@ -156,6 +156,7 @@ async function runSeeingPrompts(argv: readonly string[], answers: readonly strin
         hasClaudeCommand: () => false,
       },
       clock: { now: () => 0, sleep: () => Promise.resolve() },
+      backfill: () => Promise.reject(new Error("no backfill")),
     },
     COMMANDS,
   );

@@ -84,6 +84,24 @@ export function tableTargets(
 }
 
 /**
+ * The one table source a command that reads or answers rows works on: the one `--source` names, or
+ * the only one the config has. Several and no `--source` is a bad invocation that lists the names.
+ */
+export function singleTarget(config: ProjectConfig, only: string | undefined): TableTarget {
+  const targets = tableTargets(config, only);
+  const [first] = targets;
+  if (first === undefined || targets.length > 1) {
+    throw new CliError(
+      "which-source",
+      `the config has ${targets.length} sources that read a table, and this command works on one`,
+      `pass --source with one of: ${targets.map((target) => target.source.name).join(", ")}`,
+      EXIT_USAGE,
+    );
+  }
+  return first;
+}
+
+/**
  * The project the install belongs to. The config does not name the project yet, so the project
  * directory's name is both its name and its id: it is what `uninstall` asks to have typed back.
  */

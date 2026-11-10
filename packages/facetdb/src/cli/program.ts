@@ -1,7 +1,7 @@
-import type { Clock, ModelProvider } from "@facetdb/core";
+import type { BackfillDeps, Clock, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
 import { Command, CommanderError } from "commander";
-import type { ProjectConfig } from "../config/index.ts";
+import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
 
 /**
@@ -51,9 +51,14 @@ export function docsLink(code: string): string {
   return `${DOCS_FIX_URL}${code}`;
 }
 
+/** "58%": a probability or a confidence as a whole percent, never a decimal. */
+export function percent(probability: number): string {
+  return `${Math.round(probability * 100)}%`;
+}
+
 /** "58% likely yes": how a probability reads anywhere a user sees one. */
 export function likelyYes(probability: number): string {
-  return `${Math.round(probability * 100)}% likely yes`;
+  return `${percent(probability)} likely yes`;
 }
 
 /** The terminal, as the commands see it; the composition root passes the process's, a test its own. */
@@ -97,6 +102,23 @@ export type CliDeps = {
   readonly store: () => Promise<Store>;
   /** The model provider for a config: `modelUrl`'s server, else TypeSafe with `TYPESAFE_API_KEY`. */
   readonly provider: (config: ProjectConfig) => ModelProvider;
+  /**
+   * Everything a backfill of one source needs, wired by the composition root: the source's
+   * connector, the decision log, the cursor store, the spending gate. The caller closes it. With
+   * `dryRun` the setup must not open the FacetDB store nor write anything: it only reads the
+   * source, enough for the estimate.
+   */
+  readonly backfill: (
+    config: ProjectConfig,
+    source: SourceConfig,
+    mode: { readonly dryRun: boolean },
+  ) => Promise<BackfillSetup>;
+};
+
+/** What `CliDeps.backfill` hands the command: the engine's dependencies, and how to let go of them. */
+export type BackfillSetup = {
+  readonly deps: BackfillDeps;
+  close(): Promise<void>;
 };
 
 /** What a command's `run` receives: its parsed options and the commander arguments. */
@@ -293,8 +315,8 @@ export type CapturedRun = {
  */
 export async function runInProcess(
   argv: readonly string[],
-  deps: Omit<CliDeps, "io" | "store" | "provider" | "workspace" | "clock"> &
-    Partial<Pick<CliDeps, "store" | "provider" | "workspace" | "clock">> & {
+  deps: Omit<CliDeps, "io" | "store" | "provider" | "workspace" | "clock" | "backfill"> &
+    Partial<Pick<CliDeps, "store" | "provider" | "workspace" | "clock" | "backfill">> & {
       readonly answers?: readonly string[];
     },
   commands: readonly RegisteredCommand[],
@@ -326,6 +348,7 @@ export async function runInProcess(
       provider: () => {
         throw new Error("this test gave the command no model provider");
       },
+      backfill: () => Promise.reject(new Error("this test gave the command no backfill")),
       workspace: {
         exists: () => Promise.reject(new Error("this test gave the command no workspace")),
         write: () => Promise.reject(new Error("this test gave the command no workspace")),

@@ -100,12 +100,13 @@ describe("the facetdb program", () => {
           hasClaudeCommand: () => false,
         },
         clock: { now: () => 0, sleep: () => Promise.resolve() },
+        backfill: () => Promise.reject(new Error("unused")),
       },
       COMMANDS,
       { code: 0 },
     );
     const names = program.commands.map((command) => command.name());
-    expect(names).toEqual(["init", "doctor", "migrate", "uninstall"]);
+    expect(names).toEqual(["init", "doctor", "migrate", "uninstall", "preview", "backfill"]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);
       expect(flags, command.name()).toContain("--dry-run");

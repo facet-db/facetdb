@@ -3,10 +3,12 @@ import { access, mkdir, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import type { Clock } from "@facetdb/core";
+import type { Clock, Connector } from "@facetdb/core";
 import { selectProvider } from "@facetdb/model";
 import { connectPostgres, createStore, SECRET_VARIABLE } from "@facetdb/postgres";
-import { loadConfig } from "../config/index.ts";
+import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
+import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
+import { projectRef } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
 import {
   type CliDeps,
@@ -110,7 +112,7 @@ function processIo(): CliIo {
 export function processDeps(): CliDeps {
   const env = process.env;
   const projectDir = process.cwd();
-  return {
+  const deps: CliDeps = {
     io: processIo(),
     workspace: diskWorkspace(projectDir, env),
     clock,
@@ -132,14 +134,61 @@ export function processDeps(): CliDeps {
       }
       return createStore({ url, secret: env[SECRET_VARIABLE], clock, connect: connectPostgres });
     },
-    provider: (config) =>
-      selectProvider({
-        modelUrl: config.modelUrl,
-        apiKey: env["TYPESAFE_API_KEY"],
-        fetch: globalThis.fetch,
-        clock,
-      }),
+    provider: (config) => provider(config, env),
+    backfill: async (config, source, mode) => {
+      if (mode.dryRun) {
+        // The store's schema and rows are made on open: a dry run reads the source and nothing else.
+        const connector = await sourceConnector(source);
+        return {
+          deps: wireBackfillDryRun({ config, source, connector, clock }),
+          close: () => Promise.resolve(),
+        };
+      }
+      const store = await deps.store();
+      try {
+        const connector = await sourceConnector(source);
+        const wired = await wireBackfill({
+          config,
+          source,
+          project: projectRef(projectDir),
+          store,
+          connector,
+          provider: provider(config, env),
+          clock,
+        });
+        return { deps: wired, close: () => store.close() };
+      } catch (error) {
+        await store.close();
+        throw error;
+      }
+    },
   };
+  return deps;
+}
+
+function provider(config: ProjectConfig, env: Readonly<Record<string, string | undefined>>) {
+  return selectProvider({
+    modelUrl: config.modelUrl,
+    apiKey: env["TYPESAFE_API_KEY"],
+    fetch: globalThis.fetch,
+    clock,
+  });
+}
+
+/**
+ * The connector of a table source. The Postgres capture runtime (`claim`, `claimKey`, hash-guarded
+ * `write` over the worker login) is not built yet, and the polling connector's queue lives in one
+ * process, so a backfill through it would report records queued that no worker would ever see.
+ * Until the runtime lands this refuses, in words, instead of pretending.
+ */
+function sourceConnector(source: SourceConfig): Promise<Connector> {
+  return Promise.reject(
+    new CliError(
+      "connector-unavailable",
+      `the source "${source.name}" is a Postgres table, and the connector that queues its records for the worker is not part of this build yet`,
+      "update FacetDB to a version that ships the Postgres capture runtime, then run the command again; facetdb preview already works",
+    ),
+  );
 }
 
 async function main(): Promise<void> {
