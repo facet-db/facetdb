@@ -11,6 +11,7 @@ import type {
 import { type AnswerEntry, recordAnswer } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { buildRequest } from "../requests/index.ts";
+import type { SpendingGate } from "../spending/index.ts";
 import {
   type BackfillDeps,
   type BackfillProgress,
@@ -40,6 +41,56 @@ function setOf(questions: readonly Question[]): QuestionSet {
 
 const SCAM_ONLY = setOf([scam]);
 const SCAM_AND_SPAM = setOf([scam, spam]);
+
+/** A gate that admits everything and counts nothing: for the tests that are not about spending. */
+const UNLIMITED: SpendingGate = {
+  allowsWork: () => Promise.resolve(true),
+  admit: () => Promise.resolve("unlimited"),
+  settle: () => Promise.resolve(),
+  record: () => Promise.resolve(),
+};
+
+/**
+ * A gate that pauses at its cap, as a project does: a request is admitted while the count and the open
+ * reservations are under the cap, and every answer's tokens are counted.
+ */
+class CappedGate implements SpendingGate {
+  counted = 0;
+  reserved = 0;
+  readonly #cap: number;
+  readonly #open = new Map<string, number>();
+  #admitted = 0;
+
+  constructor(cap: number) {
+    this.#cap = cap;
+  }
+
+  allowsWork(): Promise<boolean> {
+    return Promise.resolve(this.counted < this.#cap);
+  }
+
+  admit(requestTokens: number): Promise<string | undefined> {
+    if (this.counted + this.reserved >= this.#cap) {
+      return Promise.resolve(undefined);
+    }
+    this.#admitted += 1;
+    const id = `r${this.#admitted}`;
+    this.#open.set(id, requestTokens);
+    this.reserved += requestTokens;
+    return Promise.resolve(id);
+  }
+
+  settle(reservation: string): Promise<void> {
+    this.reserved -= this.#open.get(reservation) ?? 0;
+    this.#open.delete(reservation);
+    return Promise.resolve();
+  }
+
+  record(inputTokens: number): Promise<void> {
+    this.counted += inputTokens;
+    return Promise.resolve();
+  }
+}
 
 class FakeCursorStore implements CursorStore {
   readonly saves: { run: string; progress: BackfillProgress }[] = [];
@@ -183,6 +234,7 @@ async function rig(rows: number): Promise<Rig> {
       log,
       questionSet,
       version,
+      spending: UNLIMITED,
     }),
   };
 }
@@ -289,6 +341,7 @@ describe("backfill pacing", () => {
       log: new FakeDecisionLog([]),
       questionSet: SCAM_ONLY,
       version: 1,
+      spending: UNLIMITED,
     });
 
     const report = await backfill.run({ onEstimate: yes });
@@ -438,6 +491,27 @@ describe("backfill of an added question", () => {
     }
     // Each record was held while asked and its job settled afterwards.
     expect(r.db.jobs.size).toBe(0);
+  });
+
+  it("stops at the spending cap: no call is made past it, and every answer is counted", async () => {
+    const r = await answeredBeforeTheNewQuestion(12);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+    // Each answer costs 100 input tokens: the cap admits three requests and refuses the fourth.
+    const gate = new CappedGate(250);
+
+    const report = await createBackfill({
+      ...r.deps(worker, SCAM_AND_SPAM, 2),
+      spending: gate,
+    }).run({ onlyQuestions: ["spam"], maxInFlight: 1, onEstimate: yes });
+
+    expect(report.status).toBe("paused");
+    expect(worker.requests).toHaveLength(3);
+    expect(report.answered).toHaveLength(3);
+    expect(gate.counted).toBe(300);
+    expect(gate.reserved).toBe(0);
+    // The refused record went back to the queue with its claim; no cursor of this run was saved.
+    expect(r.db.jobs.size).toBe(0);
+    expect(r.cursors.saves.some(({ run }) => run.startsWith("only@"))).toBe(false);
   });
 
   it("leaves a record already in the queue to the worker, which asks it whole", async () => {

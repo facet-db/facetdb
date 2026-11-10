@@ -6,6 +6,7 @@ export type { StateSizeCheck } from "./size.ts";
 export {
   CHARACTERS_PER_TOKEN,
   checkStateSize,
+  estimateRequestTokens,
   estimateTokens,
   STATE_REFUSE_TOKENS,
   STATE_WARN_TOKENS,

@@ -18,6 +18,7 @@ import type {
 import { applyHumanDecision, type HumanEntry, type ReviewedRecord } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { stateHash } from "../records/index.ts";
+import type { SpendingGate } from "../spending/index.ts";
 import { conditionHolds, configureAction } from "./action-pipeline.ts";
 import {
   createWorker,
@@ -38,6 +39,15 @@ const scam: Question = {
 // The low-stakes noul defaults: yes at or above 0.70, no at or below 0.30.
 const SURE_YES = 0.95;
 const UNSURE = 0.5;
+
+// The explicit no-cap gate: every request may go and nothing is counted. Tests that are not about
+// spending pass it, so no worker is built without a gate.
+const UNLIMITED: SpendingGate = {
+  allowsWork: () => Promise.resolve(true),
+  admit: () => Promise.resolve("unlimited"),
+  settle: () => Promise.resolve(),
+  record: () => Promise.resolve(),
+};
 
 const questionSet: QuestionSet = {
   questions: [scam],
@@ -188,6 +198,7 @@ async function rig(
       limits: options.limits ?? DEFAULT_WORKER_LIMITS,
       questionSet,
       version: 3,
+      spending: UNLIMITED,
     },
   };
 }
@@ -203,6 +214,14 @@ function journalStep(journal: string[]): WorkerDeps["actions"][number] {
 }
 
 describe("the worker loop", () => {
+  it("refuses to compile a worker with no spending gate, since it would run uncapped", async () => {
+    const test = await rig();
+    const { spending: _gate, ...withoutGate } = test.deps;
+    // @ts-expect-error without a gate the worker would run uncapped, so the compiler refuses it
+    const bare = createWorker(withoutGate);
+    expect(bare).toBeDefined();
+  });
+
   it("walks the eight-step happy path: read, ask, decide, log, write, then the actions, then ack", async () => {
     const journal: string[] = [];
     const slack = new FakeAction<{ channel: string }>();

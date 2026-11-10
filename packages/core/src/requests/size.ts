@@ -25,6 +25,15 @@ export function estimateTokens(state: Readonly<Record<string, StateValue>>): num
 }
 
 /**
+ * A whole request as the model will read it (the state and the questions), estimated the same way
+ * as the state alone. The spending gate reserves this much for a request until its answer is counted.
+ */
+export function estimateRequestTokens(request: object): number {
+  const characters = Array.from(JSON.stringify(request)).length;
+  return Math.ceil(characters / CHARACTERS_PER_TOKEN);
+}
+
+/**
  * Warns above 8,000 estimated tokens and refuses above 32,000, or above the source's own
  * `maxStateTokens` when it sets one. Both comparisons are strict: exactly the limit is allowed.
  */

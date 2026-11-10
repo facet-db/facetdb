@@ -12,7 +12,13 @@ import type {
 import { type AnswerEntry, recordAnswer } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type StateValue, shouldSkip } from "../records/index.ts";
-import { buildRequest, CHARACTERS_PER_TOKEN, checkStateSize } from "../requests/index.ts";
+import {
+  buildRequest,
+  CHARACTERS_PER_TOKEN,
+  checkStateSize,
+  estimateRequestTokens,
+} from "../requests/index.ts";
+import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import { DEFAULT_MAX_IN_FLIGHT } from "../worker/index.ts";
 
 /** Jev charges $0.042 per million input tokens and nothing for output. */
@@ -65,6 +71,11 @@ export type BackfillDeps = {
   readonly maxStateTokens?: number;
   /** Told when a run finishes or stops. */
   readonly alerts?: AlertSignals;
+  /**
+   * The project's spending cap. Every added-question call is admitted and counted through it, as
+   * the worker's are. Required: a backfill built without one would run uncapped.
+   */
+  readonly spending: SpendingGate;
 };
 
 /** The states `estimate` reads, and how many records they stand for. */
@@ -124,9 +135,10 @@ export type BackfillReport = {
   /**
    * `completed`: every page settled. `declined`: the estimate was refused, nothing was asked.
    * `stopped`: a page had failures; the cursor stays at the start of that page, so the next run
-   * resumes there and asks only what is still unanswered.
+   * resumes there and asks only what is still unanswered. `paused`: the spending cap was reached, so
+   * the run made no further call; the cursor stays at the start of that page, as with `stopped`.
    */
-  readonly status: "completed" | "declined" | "stopped";
+  readonly status: "completed" | "declined" | "stopped" | "paused";
   readonly estimate: BackfillEstimate;
   /** A whole-set run: records put in the worker's queue, which asks, skips or refuses each one. */
   readonly enqueued: readonly RecordKey[];
@@ -164,7 +176,7 @@ export type Backfill = {
  * Pure orchestration: every side effect enters through `deps`.
  */
 export function createBackfill(deps: BackfillDeps): Backfill {
-  const { connector, worker, clock, cursorStore, log, questionSet, version } = deps;
+  const { connector, worker, clock, cursorStore, log, questionSet, version, spending } = deps;
 
   function estimate(
     set: QuestionSet,
@@ -262,7 +274,13 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       report.enqueued.push(row.key);
     }
 
+    /** Set when the spending cap refuses a request: no record after it is asked, in this run. */
+    let paused = false;
+
     async function settle(row: ReadRow): Promise<void> {
+      if (paused) {
+        return;
+      }
       try {
         if (only === undefined) {
           await enqueueWhole(row);
@@ -316,14 +334,54 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     }
 
     /** Asks the added questions alone for a record this run holds, then acks or releases its job. */
+    /**
+     * Counts one answer's input tokens. A failed count is reported and the answer is still written, since
+     * it was paid for. A failed alert changes nothing: the count is stored, and the alert is raised again
+     * at the next check that finds the same level.
+     */
+    async function countSpend(row: ReadRow, inputTokens: number): Promise<void> {
+      try {
+        await spending.record(inputTokens);
+      } catch (error) {
+        if (!(error instanceof SpendingAlertError)) {
+          report.failures.push({ key: row.key, error });
+        }
+      }
+    }
+
+    /** Releases a request's reservation; a failure is reported, and never drops the answer. */
+    async function releaseSpend(row: ReadRow, reservation: ReservationId): Promise<void> {
+      try {
+        await spending.settle(reservation);
+      } catch (error) {
+        report.failures.push({ key: row.key, error });
+      }
+    }
+
+    /** Asks the added questions alone for a record this run holds, then acks or releases its job. */
     async function askAdded(row: ReadRow, prior: AnswerEntry | undefined): Promise<void> {
       let written = false;
       try {
-        const response = await worker.ask({
+        const request: ProviderRequest = {
           model: questionSet.model,
           state: row.state,
           questions: asked,
-        });
+        };
+        // Admitted before the call, as the worker admits each of its requests. A refused request
+        // is not made, and the run pauses; the record goes back to the queue with its claim.
+        const reservation = await spending.admit(estimateRequestTokens(request));
+        if (reservation === undefined) {
+          paused = true;
+          return;
+        }
+        let response: ProviderResponse;
+        try {
+          response = await worker.ask(request);
+          await countSpend(row, response.usage.inputTokens);
+        } finally {
+          // Counted (or failed) by now: the reservation gives way to the count, or to nothing.
+          await releaseSpend(row, reservation);
+        }
         // Every other question keeps the answer it already has, so its decision is the one it had.
         const kept = prior === undefined ? {} : prior.answers;
         const entry: AnswerEntry = {
@@ -387,6 +445,11 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           failed: report.failures.length,
           question: askedLabel,
         });
+        return report;
+      }
+      if (paused) {
+        // Not saved, as with a stopped run. The spending gate has already raised the pause alert.
+        report.status = "paused";
         return report;
       }
       await cursorStore.save(runKey, { cursor: page.next, done: page.next === null });

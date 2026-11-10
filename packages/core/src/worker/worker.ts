@@ -14,7 +14,8 @@ import type {
 import { type AnswerEntry, decideRecord, recordAnswer, statusOf } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
-import { checkStateSize, estimateTokens } from "../requests/index.ts";
+import { checkStateSize, estimateRequestTokens, estimateTokens } from "../requests/index.ts";
+import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import type { ActionStep } from "./action-pipeline.ts";
 
 // The batch, the in-flight cap and the poll.
@@ -92,13 +93,19 @@ export type WorkerDeps = {
   readonly alerts?: AlertSignals;
   /** The retry window and `onOutage` policy; without it a failed call just returns the record to the queue. */
   readonly outage?: OutagePolicy;
+  /**
+   * The project's spending cap. Required: a worker built without one would run uncapped. A test
+   * that wants no cap passes an explicit unlimited gate.
+   */
+  readonly spending: SpendingGate;
 };
 
 /**
- * Where in a record's path something failed: the model call, the log and write, one action, or the
- * alerts module (a failed alert never changes what happened to the record).
+ * Where in a record's path something failed: the model call, the log and write, one action, the
+ * alerts module (a failed alert never changes what happened to the record), or the spending cap
+ * (an unreadable cap claims nothing; an uncounted answer is still written and reported).
  */
-export type FailureStage = "ask" | "record" | "action" | "alert";
+export type FailureStage = "ask" | "record" | "action" | "alert" | "spending";
 
 export type RecordFailure = {
   readonly key: RecordKey | null;
@@ -116,6 +123,8 @@ export type RecordFailure = {
 export type PassReport = {
   /** Distinct keys the pass took from the queue. */
   readonly claimed: number;
+  /** The spending gate kept this pass from asking: the project is paused (records stay queued) or its cap could not be read. */
+  readonly paused: boolean;
   /** Answered, logged and written. */
   readonly written: readonly RecordKey[];
   /** Nothing to ask: every state field blank (written as skipped). */
@@ -182,6 +191,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     version,
     alerts,
     outage,
+    spending,
   } = deps;
 
   /** An alert that cannot be sent or stored is handed back as a failure; the record is unaffected. */
@@ -239,6 +249,71 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
     await reviews.withdraw(row.key, prior.stateHash);
     return true;
+  }
+
+  /**
+   * Checked before every claim. A paused project claims nothing; a cap that cannot be read fails
+   * closed, so no money is spent on an unknown cap. A failed alert is reported, but the gate still
+   * decides with the status it was settled at, so an alert outage neither stops a project that may
+   * answer nor lets a request past the cap.
+   */
+  async function spendingAllows(report: MutablePass): Promise<boolean> {
+    try {
+      return await spending.allowsWork((error) => {
+        report.failures.push({ key: null, stage: "alert", error });
+      });
+    } catch (error) {
+      report.failures.push({ key: null, stage: "spending", error });
+      return false;
+    }
+  }
+
+  /**
+   * Checked before every request to the model. The gate counts every request admitted for the
+   * project and not yet counted, from any worker bound to the same spending, and if the request
+   * may go it reserves this one's estimate. A request that is admitted and crosses the cap still
+   * finishes.
+   */
+  async function admit(
+    report: MutablePass,
+    requestTokens: number,
+  ): Promise<ReservationId | undefined> {
+    try {
+      return await spending.admit(requestTokens, (error) => {
+        report.failures.push({ key: null, stage: "alert", error });
+      });
+    } catch (error) {
+      report.failures.push({ key: null, stage: "spending", error });
+      return undefined;
+    }
+  }
+
+  /** Releases a request's reservation. A failure is reported; it never drops the answer, which is already paid for. */
+  async function release(
+    report: MutablePass,
+    key: RecordKey,
+    reservation: ReservationId,
+  ): Promise<void> {
+    try {
+      await spending.settle(reservation);
+    } catch (error) {
+      report.failures.push({ key, stage: "spending", error });
+    }
+  }
+
+  /** Counts one answer's input tokens. A failure is reported; the answer is still written, since it was paid for. */
+  async function countSpend(
+    report: MutablePass,
+    key: RecordKey,
+    inputTokens: number,
+  ): Promise<void> {
+    try {
+      await spending.record(inputTokens);
+    } catch (error) {
+      // The count is stored before the alert is raised, so an alert failure leaves nothing uncounted.
+      const stage = error instanceof SpendingAlertError ? "alert" : "spending";
+      report.failures.push({ key, stage, error });
+    }
   }
 
   /** Queues held records again; a failure is handed back, and the policy will not offer them twice. */
@@ -320,27 +395,48 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.warned.push({ key: row.key, estimate });
       }
 
+      // Checked per request, not once per pass, so a batch cannot carry a project past its cap. A
+      // record that may not be asked goes back to the queue, still pending. An admitted request
+      // reserves its estimated cost until its answer is counted, so the lanes of a pass cannot all
+      // pass.
+      const requestTokens = estimateRequestTokens({
+        model: questionSet.model,
+        state: row.state,
+        questions: questionSet.questions,
+      });
+      const reservation = await admit(report, requestTokens);
+      if (reservation === undefined) {
+        report.paused = true;
+        return "release";
+      }
+
       stage = "ask";
       let response: ProviderResponse;
       try {
-        response = await provider.ask({
-          model: questionSet.model,
-          state: row.state,
-          questions: questionSet.questions,
-        });
-      } catch (error) {
-        await tell(report, row.key, (signals) => signals.modelCall(false));
-        const verdict = outage?.failed(row.key, error) ?? "retry";
-        if (verdict === "retry") {
-          throw error;
+        try {
+          response = await provider.ask({
+            model: questionSet.model,
+            state: row.state,
+            questions: questionSet.questions,
+          });
+        } catch (error) {
+          await tell(report, row.key, (signals) => signals.modelCall(false));
+          const verdict = outage?.failed(row.key, error) ?? "retry";
+          if (verdict === "retry") {
+            throw error;
+          }
+          // The failure stays in the report; the record is held instead of retried at once.
+          report.failures.push({ key: row.key, stage, error });
+          stage = "record";
+          return await hold(row, verdict, report);
         }
-        // The failure stays in the report; the record is held instead of retried at once.
-        report.failures.push({ key: row.key, stage, error });
-        stage = "record";
-        return await hold(row, verdict, report);
+        await tell(report, row.key, (signals) => signals.modelCall(true));
+        await requeue(report, outage?.succeeded(row.key) ?? []);
+        await countSpend(report, row.key, response.usage.inputTokens);
+      } finally {
+        // Counted (or failed) by now: the reservation gives way to the count, or to nothing.
+        await release(report, row.key, reservation);
       }
-      await tell(report, row.key, (signals) => signals.modelCall(true));
-      await requeue(report, outage?.succeeded(row.key) ?? []);
 
       stage = "record";
       const entry: AnswerEntry = {
@@ -380,11 +476,14 @@ export function createWorker(deps: WorkerDeps): Worker {
     const report = newPass(0);
     // A held record is asked again every 5 minutes while the model is down.
     await requeue(report, outage?.due() ?? []);
-    const claimed = await connector.claim(limits.claimBatch);
+    // A paused project keeps its records queued: nothing is claimed, so nothing is lost.
+    const allowed = await spendingAllows(report);
+    report.paused = !allowed;
+    const claimed = allowed ? await connector.claim(limits.claimBatch) : [];
     // The queue holds one entry per record, but a connector may repeat a key in a batch.
     const keys = [...new Set(claimed)];
     report.claimed = keys.length;
-    // The worker is alive whether or not the queue had anything for it.
+    // The worker is alive whether or not the queue had anything for it, or was allowed to take it.
     await tell(report, null, (signals) => signals.beat());
     if (keys.length === 0) {
       return report;
@@ -485,6 +584,7 @@ type MutablePass = {
 function newPass(claimed: number): MutablePass {
   return {
     claimed,
+    paused: false,
     written: [],
     skipped: [],
     discarded: [],
