@@ -15,7 +15,9 @@ export type {
 export { actionCall, choice, facetdb, noul, score } from "./dsl.ts";
 export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";
-export type { LoadOptions } from "./load.ts";
+export type { LoadedConfig, LoadOptions } from "./load.ts";
 export { loadConfig } from "./load.ts";
 export type { ConfigIssue, ConfigParseResult } from "./schema.ts";
 export { ConfigError, parseProjectConfig } from "./schema.ts";
+export type { ConfigWarning, WordingWarning, WordingWarningCode } from "./warnings.ts";
+export { formatWarnings, wordingWarnings } from "./warnings.ts";

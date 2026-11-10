@@ -47,6 +47,11 @@ async function scratchDir(): Promise<string> {
 
 const env = () => process.env;
 
+/** Loads a config from a project directory with the warnings left unprinted. */
+function load(projectDir: string, path = "facetdb.config.ts") {
+  return loadConfig(path, { projectDir, env: env(), stderr: { write: () => true }, quiet: true });
+}
+
 function messagesOf(run: () => unknown): string[] {
   try {
     run();
@@ -120,7 +125,7 @@ describe("the DSL", () => {
 
 describe("the example config", () => {
   it("loads from the fixture and round-trips through the project JSON", async () => {
-    const config = await loadConfig("facetdb.config.ts", { projectDir: fixtures, env: env() });
+    const { config } = await load(fixtures);
     expect(config.model).toBe("jev-1.14.0");
     expect(config.sources.map((source) => source.name)).toEqual([
       "support_messages",
@@ -153,18 +158,18 @@ describe("the example config", () => {
   });
 
   it("exports a config file that loads to an equal project", async () => {
-    const config = await loadConfig("facetdb.config.ts", { projectDir: fixtures, env: env() });
+    const { config } = await load(fixtures);
     const dir = await scratchDir();
     // The exported file imports "facetdb"; this link is what `pnpm add facetdb` would put there.
     await mkdir(join(dir, "node_modules"));
     await symlink(packageDir, join(dir, "node_modules", "facetdb"));
     await writeFile(join(dir, "facetdb.config.ts"), configFileSource(config));
-    const reloaded = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() });
+    const { config: reloaded } = await load(dir);
     expect(reloaded).toEqual(config);
   });
 
   it("writes the exported file the way a developer would", async () => {
-    const config = await loadConfig("facetdb.config.ts", { projectDir: fixtures, env: env() });
+    const { config } = await load(fixtures);
     const source = configFileSource(config);
     expect(source).toContain('import { actionCall, choice, facetdb, noul, score } from "facetdb";');
     expect(source).toContain("database: process.env.DATABASE_URL,");
@@ -216,7 +221,7 @@ describe("the example config", () => {
     await mkdir(join(dir, "node_modules"));
     await symlink(packageDir, join(dir, "node_modules", "facetdb"));
     await writeFile(join(dir, "facetdb.config.ts"), configFileSource(parsed.config));
-    const reloaded = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() });
+    const { config: reloaded } = await load(dir);
     expect(toProjectJson(reloaded)).toEqual(json);
   });
 
@@ -283,9 +288,7 @@ describe("what the schema refuses", () => {
       join(dir, "facetdb.config.ts"),
       `export default ${JSON.stringify({ model: "jev-1.14.0", onCapReached: "pause", sources: [source("first"), source("second")] })};\n`,
     );
-    const error = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() }).catch(
-      (caught: unknown) => caught,
-    );
+    const error = await load(dir).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).issues).toEqual([
       {
@@ -589,35 +592,27 @@ describe("what the schema refuses", () => {
 describe("the loader", () => {
   it("refuses a config outside the project directory before evaluating it", async () => {
     const dir = await scratchDir();
-    const outside = await loadConfig(join(fixtures, "facetdb.config.ts"), {
-      projectDir: dir,
-      env: env(),
-    }).catch((caught: unknown) => caught);
+    const outside = await load(dir, join(fixtures, "facetdb.config.ts")).catch(
+      (caught: unknown) => caught,
+    );
     expect(outside).toBeInstanceOf(ConfigError);
     expect((outside as ConfigError).message).toContain("outside the project directory");
 
-    const parent = await loadConfig("../facetdb.config.ts", {
-      projectDir: fixtures,
-      env: env(),
-    }).catch((caught: unknown) => caught);
+    const parent = await load(fixtures, "../facetdb.config.ts").catch((caught: unknown) => caught);
     expect(parent).toBeInstanceOf(ConfigError);
   });
 
   it("refuses a link inside the project that leads outside it", async () => {
     const dir = await scratchDir();
     await symlink(join(fixtures, "facetdb.config.ts"), join(dir, "facetdb.config.ts"));
-    const error = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() }).catch(
-      (caught: unknown) => caught,
-    );
+    const error = await load(dir).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).message).toContain("outside the project directory");
   });
 
   it("says what to do when the file is missing", async () => {
     const dir = await scratchDir();
-    const error = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() }).catch(
-      (caught: unknown) => caught,
-    );
+    const error = await load(dir).catch((caught: unknown) => caught);
     expect((error as ConfigError).message).toContain("facetdb init");
   });
 
@@ -640,9 +635,7 @@ describe("the loader", () => {
         ],
       })};\n`,
     );
-    const error = await loadConfig("facetdb.config.ts", { projectDir: dir, env: env() }).catch(
-      (caught: unknown) => caught,
-    );
+    const error = await load(dir).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).issues[0]?.path).toBe("sources[0].database");
     expect((error as ConfigError).message).not.toContain("hunter2");
@@ -650,9 +643,7 @@ describe("the loader", () => {
 
   it("says the variable is not set when the environment reference is empty", async () => {
     delete process.env["DATABASE_URL"];
-    const error = await loadConfig("facetdb.config.ts", { projectDir: fixtures, env: env() }).catch(
-      (caught: unknown) => caught,
-    );
+    const error = await load(fixtures).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).issues[0]).toMatchObject({ path: "sources[0].database" });
     expect((error as ConfigError).message).toContain("DATABASE_URL");

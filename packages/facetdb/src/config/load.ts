@@ -1,8 +1,10 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { QuestionSet } from "@facetdb/core";
 import type { ProjectConfig } from "./dsl.ts";
 import { ConfigError, type ConfigIssue, parseProjectConfig } from "./schema.ts";
+import { type ConfigWarning, formatWarnings, wordingWarnings } from "./warnings.ts";
 
 /**
  * The loader: imports `facetdb.config.ts` through Node's type stripping, so there is no build step,
@@ -16,7 +18,38 @@ export type LoadOptions = {
   readonly projectDir: string;
   /** The environment the config's `process.env` expressions were read from. */
   readonly env: Readonly<Record<string, string | undefined>>;
+  /** Where the wording warnings are printed, once per load: the process's stderr in a command. */
+  readonly stderr: { write(text: string): unknown };
+  /** `--quiet`: the warnings are still returned, never printed. */
+  readonly quiet?: boolean;
+  /**
+   * The estimated state size in tokens of a typical record, per source name, for commands that have
+   * looked at rows. A source without an entry has nothing measured and gets no size warning.
+   */
+  readonly stateEstimates?: Readonly<Record<string, number>>;
 };
+
+export type LoadedConfig = {
+  readonly config: ProjectConfig;
+  /** What the model tends to get wrong in the wording; a warning never refuses the config. */
+  readonly warnings: readonly ConfigWarning[];
+};
+
+function warningsOf(config: ProjectConfig, options: LoadOptions): ConfigWarning[] {
+  return config.sources.flatMap((source) => {
+    const set: QuestionSet = {
+      questions: source.questions,
+      read: source.read,
+      model: source.model ?? config.model,
+      thresholds: source.thresholds,
+      ...(source.where === undefined ? {} : { where: source.where }),
+    };
+    return wordingWarnings(set, options.stateEstimates?.[source.name] ?? 0).map((warning) => ({
+      ...warning,
+      source: source.name,
+    }));
+  });
+}
 
 function isInside(directory: string, file: string): boolean {
   const path = relative(directory, file);
@@ -74,7 +107,7 @@ function recordVariables(
   return { config: { ...config, sources }, issues };
 }
 
-export async function loadConfig(path: string, options: LoadOptions): Promise<ProjectConfig> {
+export async function loadConfig(path: string, options: LoadOptions): Promise<LoadedConfig> {
   const projectDir = await realPathOf(resolve(options.projectDir), "The project directory");
   const file = await realPathOf(resolve(projectDir, path), "The config file");
   if (!isInside(projectDir, file)) {
@@ -107,5 +140,9 @@ export async function loadConfig(path: string, options: LoadOptions): Promise<Pr
   if (issues.length > 0) {
     throw new ConfigError(issues, path);
   }
-  return config;
+  const warnings = warningsOf(config, options);
+  if (warnings.length > 0 && options.quiet !== true) {
+    options.stderr.write(formatWarnings(warnings));
+  }
+  return { config, warnings };
 }
