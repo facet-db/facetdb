@@ -3,7 +3,7 @@
 AI answers as database columns. You write "Is this listing a scam?" once; every row of your table
 gets a stored answer with a probability from TypeSafe's Jev decision model. Sure answers are final,
 unsure ones go to a person on a review screen, and that person's decision is written back too.
-Open source, every major database on launch day; FacetDB Cloud runs it for you.
+Open source, for every major database; FacetDB Cloud runs it for you.
 
 ## Quick start
 
