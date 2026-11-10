@@ -7,3 +7,4 @@ export const FACETDB_SCHEMA = "facetdb";
 export const FACETDB_PREFIX = "facetdb_";
 
 export * from "./polling/index.ts";
+export * from "./store/index.ts";

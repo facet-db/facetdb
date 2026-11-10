@@ -12,3 +12,4 @@ export {
   pollingUninstallSql,
   STATE_HASH_COLUMN,
 } from "./install.ts";
+export { pgliteClient } from "./pglite-client.ts";
