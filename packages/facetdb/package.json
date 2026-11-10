@@ -6,7 +6,8 @@
   "description": "The facetdb package users install: the config DSL (facetdb, noul, choice, score), the plugin SDK under facetdb/plugin, the SDK client and the facetdb CLI.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./plugin": "./src/plugin/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
