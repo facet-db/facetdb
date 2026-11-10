@@ -106,7 +106,15 @@ describe("the facetdb program", () => {
       { code: 0 },
     );
     const names = program.commands.map((command) => command.name());
-    expect(names).toEqual(["init", "doctor", "migrate", "uninstall", "preview", "backfill"]);
+    expect(names).toEqual([
+      "init",
+      "doctor",
+      "migrate",
+      "uninstall",
+      "preview",
+      "backfill",
+      "explain",
+    ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);
       expect(flags, command.name()).toContain("--dry-run");
