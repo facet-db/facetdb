@@ -151,6 +151,7 @@ async function rig(questions: QuestionSet["questions"] = [urgency, wantsRefund])
     ),
     worker: { forRecord: (_projectId, _name, key) => worker(key) },
     clock,
+    retryAfterSeconds: 30,
   });
   const app = createApp({
     keys,

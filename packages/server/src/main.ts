@@ -13,7 +13,12 @@ export type ServerDeps = {
   /** The workers that answer each API source's queue. */
   readonly worker: CheckWorkers;
   readonly clock: Clock;
+  /** `retry-after` of a 503 when the model is unreachable; defaults to the model backoff's ceiling. */
+  readonly retryAfterSeconds?: number;
 };
+
+/** The ceiling of the model's backoff (`DEFAULT_MAX_MS`, 30 s): by then the next attempt has been made. */
+export const DEFAULT_RETRY_AFTER_SECONDS = 30;
 
 /**
  * The HTTP surface's composition root: every dependency of the app is wired here and nowhere else.
@@ -22,7 +27,12 @@ export type ServerDeps = {
 export function createServer(deps: ServerDeps): Hono<AppEnv> {
   return createApp({
     keys: createApiKeys(deps.store.apiKeys),
-    check: createCheckService({ store: deps.store, worker: deps.worker, clock: deps.clock }),
+    check: createCheckService({
+      store: deps.store,
+      worker: deps.worker,
+      clock: deps.clock,
+      retryAfterSeconds: deps.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS,
+    }),
     newRequestId: randomUUID,
   });
 }

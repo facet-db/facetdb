@@ -3,8 +3,6 @@
  * signed webhooks and the review endpoints. Routes parse,
  * authenticate, call one service and map the result; they never touch the database.
  */
-export const WEBHOOK_SIGNATURE_HEADER = "facetdb-signature";
-
 export { API_VERSION } from "./app.ts";
 export type { ApiKeys } from "./auth/api-keys.ts";
 export { createApiKeys } from "./auth/api-keys.ts";
@@ -24,4 +22,24 @@ export { onlyRecord } from "./check/target.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";
-export { createServer } from "./main.ts";
+export { createServer, DEFAULT_RETRY_AFTER_SECONDS } from "./main.ts";
+export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
+export { createWebhookAction } from "./webhooks/action.ts";
+export type {
+  DeliveryReport,
+  NewWebhook,
+  Outbox,
+  OutboxDatabase,
+  OutboxDeps,
+  WebhookFetch,
+  WebhookGaveUp,
+} from "./webhooks/outbox.ts";
+export {
+  createOutbox,
+  GIVE_UP_AFTER_MS,
+  RETRY_FIRST_MS,
+  RETRY_MAX_MS,
+  retryDelayMs,
+} from "./webhooks/outbox.ts";
+export type { Verification } from "./webhooks/sign.ts";
+export { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "./webhooks/sign.ts";

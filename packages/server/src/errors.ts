@@ -13,13 +13,22 @@ export class ApiError extends Error {
   readonly status: ContentfulStatusCode;
   readonly code: string;
   readonly fix: string;
+  /** Response headers that belong to the failure, such as `retry-after`. */
+  readonly headers: Readonly<Record<string, string>>;
 
-  constructor(status: ContentfulStatusCode, code: string, message: string, fix: string) {
+  constructor(
+    status: ContentfulStatusCode,
+    code: string,
+    message: string,
+    fix: string,
+    headers: Readonly<Record<string, string>> = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.fix = fix;
+    this.headers = headers;
   }
 
   toBody(): ErrorBody {

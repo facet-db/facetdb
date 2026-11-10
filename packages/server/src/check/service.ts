@@ -28,6 +28,12 @@ export type CheckDeps = {
   readonly store: CheckStore;
   readonly worker: CheckWorkers;
   readonly clock: Clock;
+  /**
+   * What `retry-after` says (whole seconds) when the model could not be asked: the model package's
+   * backoff ceiling, which the composition root passes. The record stays queued and the worker loop
+   * answers it when the model is back, so the caller may also just wait for its webhook.
+   */
+  readonly retryAfterSeconds: number;
 };
 
 /**
@@ -59,10 +65,13 @@ export type CheckResult =
   | { readonly kind: "unknown_source"; readonly source: string }
   | { readonly kind: "invalid_record"; readonly problems: readonly string[] }
   /** The record is stored and queued, but no answer exists: the wait ran out, or the model could not be asked. */
+  | { readonly kind: "unanswered"; readonly id: string; readonly reason: "waiting" }
   | {
       readonly kind: "unanswered";
       readonly id: string;
-      readonly reason: "waiting" | "unavailable";
+      readonly reason: "unavailable";
+      /** The seconds the caller is told to wait (`retry-after`). */
+      readonly retryAfterSeconds: number;
     };
 
 export type CheckService = {
@@ -110,8 +119,15 @@ export function createCheckService(deps: CheckDeps): CheckService {
           (failure) => failure.key === request.id && failure.stage === "ask",
         );
         if (failed || report.paused) {
-          // A failed model call is an error, never an answer; the 503 and the webhook come later.
-          return { kind: "unanswered", id: request.id, reason: "unavailable" };
+          // A failed model call is an error, never an answer. The record is stored and the failed
+          // job went back to the queue, so the worker loop answers it when the model returns and
+          // the source's webhook action (the outbox) delivers that answer.
+          return {
+            kind: "unanswered",
+            id: request.id,
+            reason: "unavailable",
+            retryAfterSeconds: deps.retryAfterSeconds,
+          };
         }
         if (report.claimed === 0) {
           // Another worker holds the job: look again shortly instead of asking twice.
@@ -152,7 +168,7 @@ function answersOf(stored: StoredRecord): Record<string, CheckedAnswer> {
   return answers;
 }
 
-function checkedAnswer(decision: Decision): CheckedAnswer | undefined {
+export function checkedAnswer(decision: Decision): CheckedAnswer | undefined {
   if (decision.kind === "needs_review") {
     return undefined;
   }

@@ -50,13 +50,20 @@ export function checkRoute(service: CheckService): Hono<AppEnv> {
           "Send exactly the fields the source reads (`read` in facetdb.config.ts); use null for a blank one.",
         );
       case "unanswered":
+        if (result.reason === "waiting") {
+          throw new ApiError(
+            503,
+            "answer_pending",
+            "The record is stored, but its answer is not ready yet.",
+            "Send the same call again in a minute; an unchanged record is not asked twice.",
+          );
+        }
         throw new ApiError(
           503,
-          result.reason === "waiting" ? "answer_pending" : "model_unavailable",
-          result.reason === "waiting"
-            ? "The record is stored, but its answer is not ready yet."
-            : "The model could not be asked just now. The record is stored and stays queued.",
-          "Send the same call again in a minute; an unchanged record is not asked twice.",
+          "model_unavailable",
+          "The model could not be asked just now. The record is stored and stays queued.",
+          `Send the same call again after ${result.retryAfterSeconds} seconds (an unchanged record is not asked twice), or wait for the answer on your webhook.`,
+          { "retry-after": String(result.retryAfterSeconds) },
         );
     }
   });

@@ -48,7 +48,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   app.onError((error, c) => {
     if (error instanceof ApiError) {
-      return c.json(error.toBody(), error.status);
+      return c.json(error.toBody(), error.status, { ...error.headers });
     }
     // Never echo the cause: it may carry a record's state. The request id lets the operator find it.
     console.error(
