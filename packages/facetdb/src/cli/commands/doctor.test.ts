@@ -501,7 +501,7 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
       expect(result.code).toBe(1);
       const line = lineFor(result.stdout, "worker heartbeat");
       expect(line).toMatch(/^FAIL.*no heartbeats table/);
-      expect(line).toContain("Fix: start the worker with facetdb worker");
+      expect(line).toContain("Fix: run facetdb migrate");
       const schema = await world.client.query("select to_regnamespace('facetdb')::text as name");
       expect(schema[0]?.["name"]).toBeNull();
     });

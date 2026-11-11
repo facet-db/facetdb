@@ -51,6 +51,30 @@ async function world(): Promise<PgliteWorld> {
   return w;
 }
 
+/** Decision-log rows in the table the install made (its checks want a model and answers, or a human). */
+async function logDecisions(
+  w: PgliteWorld,
+  rows: readonly (readonly [
+    source: string,
+    key: string,
+    kind: "answer" | "human",
+    version: number,
+  ])[],
+): Promise<void> {
+  for (const [source, key, kind, version] of rows) {
+    await w.client.query(
+      `insert into facetdb.decisions
+         (source_id, record_key, kind, version, state_hash, model, answers, usage, question, value, reviewer, at)
+       values ($1, $2, $3, $4, 'h',
+         case when $3 = 'answer' then 'jev-1.14.0' end, case when $3 = 'answer' then '{}'::jsonb end,
+         case when $3 = 'answer' then '{}'::jsonb end,
+         case when $3 = 'human' then 'q' end, case when $3 = 'human' then 'true'::jsonb end,
+         case when $3 = 'human' then 'r' end, now())`,
+      [source, key, kind, version],
+    );
+  }
+}
+
 async function migrateOn(
   w: PgliteWorld,
   overrides: {
@@ -254,19 +278,19 @@ describe("scan", () => {
     async function logged(w: PgliteWorld): Promise<void> {
       await seed(w, 6);
       await migrateOn(w, { source: { table: "listings" } });
-      await w.client.query(
-        `create table facetdb.decisions (source_id text not null, record_key text not null, kind text not null, version integer not null)`,
-      );
       // 6 and 5: done at v2. 4: done at v1 (an older version). 3: logged at v2 but pending again
       // (its state changed). 2 and 1: never answered.
       await w.client.query(
         `update public.listings set facetdb_status = 'done' where id in (4, 5, 6)`,
       );
-      await w.client.query(
-        `insert into facetdb.decisions (source_id, record_key, kind, version) values
-           ('src', '6', 'answer', 2), ('src', '5', 'answer', 2), ('src', '4', 'answer', 1),
-           ('src', '3', 'answer', 2), ('other', '2', 'answer', 2), ('src', '1', 'human', 2)`,
-      );
+      await logDecisions(w, [
+        ["src", "6", "answer", 2],
+        ["src", "5", "answer", 2],
+        ["src", "4", "answer", 1],
+        ["src", "3", "answer", 2],
+        ["other", "2", "answer", 2],
+        ["src", "1", "human", 2],
+      ]);
     }
 
     it("are left out by the query, not in memory", async () => {
@@ -539,14 +563,13 @@ describe("side-table install", () => {
     await seed(w, 4);
     await migrateOn(w);
     await w.client.query(
-      `create table facetdb.decisions (source_id text not null, record_key text not null, kind text not null, version integer not null)`,
-    );
-    await w.client.query(
       `insert into facetdb.listings_answers (id, is_scam, facetdb_status) values (4, false, 'done'), (3, false, 'done'), (2, false, 'pending')`,
     );
-    await w.client.query(
-      `insert into facetdb.decisions (source_id, record_key, kind, version) values ('src', '4', 'answer', 3), ('src', '3', 'answer', 2), ('src', '2', 'answer', 3)`,
-    );
+    await logDecisions(w, [
+      ["src", "4", "answer", 3],
+      ["src", "3", "answer", 2],
+      ["src", "2", "answer", 3],
+    ]);
     const scan = createScan({
       query: w.client.query,
       source: { table: "listings", key: "id", storage: "side-table" },

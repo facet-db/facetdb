@@ -133,27 +133,105 @@ const MIGRATIONS: readonly Migration[] = [
 /** The newest migration number this version of FacetDB knows. */
 export const SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
 
+/**
+ * Every table the store's migrations create, in an order a drop can follow (referencing tables
+ * before the ones they reference). `facetdb migrate` grants the worker login its rights on these
+ * and `facetdb uninstall` removes them; a test compares the list with what the migrations really
+ * create, so a new table missing here fails the suite instead of failing the worker at run time.
+ */
+export const STORE_TABLES: readonly string[] = [
+  "api_keys",
+  "credentials",
+  "sources",
+  "projects",
+  "question_set_versions",
+  "decisions",
+  "jobs",
+  "records",
+  "usage",
+  "usage_reservations",
+  "usage_alerts",
+  "alerts",
+  "alert_history",
+  "heartbeats",
+  "cursors",
+  "install",
+];
+
+/** The version table: the worker reads it to see that nothing is left to migrate, and writes nothing. */
+export const STORE_VERSION_TABLE = "store_migrations";
+
+/** The sequences behind the store's `bigserial` columns; the worker needs `usage, select` on them. */
+export const STORE_SEQUENCES: readonly string[] = ["decisions_id_seq", "alert_history_id_seq"];
+
+const VERSION_TABLE_SQL = `create table if not exists facetdb.store_migrations (
+  version integer primary key,
+  applied_at timestamptz not null default now()
+)`;
+
+/** The statement that records one migration as applied; written to be run again. */
+function recordMigration(version: number): string {
+  return `insert into facetdb.store_migrations (version) values (${version}) on conflict (version) do nothing`;
+}
+
+/**
+ * The store's whole DDL as one idempotent script, for the install script `facetdb migrate` prints
+ * and runs with the admin credential: the schema, the version table, every migration in order and
+ * the rows that mark them applied. `migrateStore` runs the same statements, so the two cannot drift.
+ */
+export function storeInstallStatements(): string[] {
+  return [
+    `create schema if not exists ${quoteIdent("facetdb")}`,
+    VERSION_TABLE_SQL,
+    ...MIGRATIONS.flatMap((migration) => [
+      ...migration.statements,
+      recordMigration(migration.version),
+    ]),
+  ];
+}
+
 const SCHEMA_LOCK = "facetdb.store_migrations";
+
+/** The store is behind this FacetDB and the login cannot create what is missing (it is not an admin). */
+export class StoreNotInstalledError extends Error {
+  constructor(found: number) {
+    const state =
+      found === 0
+        ? "not installed"
+        : `at schema version ${found}, behind this FacetDB (${SCHEMA_VERSION})`;
+    super(
+      `the FacetDB store is ${state}, and this login may not create tables; run \`facetdb migrate\` with the admin credential`,
+    );
+    this.name = "StoreNotInstalledError";
+  }
+}
 
 /**
  * Brings the store to `SCHEMA_VERSION`. Safe to call on every start and from several processes at
- * once. A store written by a newer FacetDB is refused rather than guessed at.
+ * once. A store written by a newer FacetDB is refused rather than guessed at. A store that is
+ * already current is only read, with no DDL (not even `if not exists`, which a login without CREATE
+ * is refused); one that is behind is migrated when the login may create, and otherwise the error
+ * names the fix (`StoreNotInstalledError`).
  */
 export async function migrateStore(client: SqlClient): Promise<void> {
+  const seen = await currentVersions(client.query);
+  if (seen !== undefined && isCurrent(seen)) {
+    return;
+  }
+  const may = await client.query(
+    `select case when to_regnamespace('facetdb') is null
+                 then has_database_privilege(current_database(), 'create')
+                 else has_schema_privilege('facetdb', 'create') end as may`,
+  );
+  if (may[0]?.["may"] !== true) {
+    throw new StoreNotInstalledError(Math.max(0, ...(seen ?? [])));
+  }
   await client.transaction(async (query) => {
     await query("select pg_advisory_xact_lock(hashtext($1))", [SCHEMA_LOCK]);
     await query(`create schema if not exists ${quoteIdent("facetdb")}`);
-    await query(`create table if not exists facetdb.store_migrations (
-  version integer primary key,
-  applied_at timestamptz not null default now()
-)`);
+    await query(VERSION_TABLE_SQL);
     const applied = await appliedVersions(query);
-    const newest = Math.max(0, ...applied);
-    if (newest > SCHEMA_VERSION) {
-      throw new Error(
-        `the FacetDB store is at schema version ${newest}, newer than this FacetDB knows (${SCHEMA_VERSION}); upgrade FacetDB`,
-      );
-    }
+    refuseNewer(applied);
     for (const migration of MIGRATIONS) {
       if (applied.includes(migration.version)) {
         continue;
@@ -161,11 +239,35 @@ export async function migrateStore(client: SqlClient): Promise<void> {
       for (const statement of migration.statements) {
         await query(statement);
       }
-      await query("insert into facetdb.store_migrations (version) values ($1)", [
-        migration.version,
-      ]);
+      await query(recordMigration(migration.version));
     }
   });
+}
+
+function refuseNewer(applied: readonly number[]): void {
+  const newest = Math.max(0, ...applied);
+  if (newest > SCHEMA_VERSION) {
+    throw new Error(
+      `the FacetDB store is at schema version ${newest}, newer than this FacetDB knows (${SCHEMA_VERSION}); upgrade FacetDB`,
+    );
+  }
+}
+
+function isCurrent(applied: readonly number[]): boolean {
+  return MIGRATIONS.every((migration) => applied.includes(migration.version));
+}
+
+/** The applied versions, or undefined when the version table does not exist; a newer store is refused. */
+async function currentVersions(query: SqlQuery): Promise<number[] | undefined> {
+  const present = await query(
+    "select to_regclass('facetdb.store_migrations') is not null as present",
+  );
+  if (present[0]?.["present"] !== true) {
+    return undefined;
+  }
+  const applied = await appliedVersions(query);
+  refuseNewer(applied);
+  return applied;
 }
 
 async function appliedVersions(query: SqlQuery): Promise<number[]> {

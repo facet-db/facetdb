@@ -154,17 +154,12 @@ async function snapshot(): Promise<unknown> {
   };
 }
 
-/** The decision log as a worker would have left it: no install creates it yet. */
+/** The decision log as a worker would have left it, in the table the install made. */
 async function decisionLog(rows: readonly (readonly [source: string, key: string])[]) {
-  await q(`create table facetdb.decisions (
-  id bigserial primary key,
-  source_id text not null,
-  record_key text not null,
-  kind text not null
-)`);
   for (const [source, key] of rows) {
     await q(
-      `insert into facetdb.decisions (source_id, record_key, kind) values ($1, $2, 'answer')`,
+      `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+       values ($1, $2, 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
       [source, key],
     );
   }
@@ -436,6 +431,57 @@ describe("uninstall", () => {
     expect(await count(`select 1 from facetdb.jobs`)).toBe(2);
     expect(await columns("orders")).toContain("is_scam");
     expect(await columns()).toEqual(APP_COLUMNS);
+  });
+
+  it("keeps the store's shared tables and their rows while another project (a polling one, no table owner) remains", async () => {
+    await freshWorld();
+    await install();
+    // A project the worker registered for a polling-mode source: no table_owners row, no source.
+    await q(`insert into facetdb.projects (id, name) values ('proj_polling', 'Polling')`);
+    await q(
+      `insert into facetdb.usage (project_id, month, input_tokens) values ('proj_polling', '2026-11', 4200)`,
+    );
+    await q(
+      `insert into facetdb.cursors (run, cursor, done) values ('proj_polling', 'c-17', false)`,
+    );
+    await q(`insert into facetdb.heartbeats (project, at) values ('proj_polling', 1)`);
+
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(await q(`select id from facetdb.projects`)).toEqual([{ id: "proj_polling" }]);
+    expect(await q(`select input_tokens::int as n from facetdb.usage`)).toEqual([{ n: 4200 }]);
+    expect(await q(`select cursor from facetdb.cursors`)).toEqual([{ cursor: "c-17" }]);
+    expect(await q(`select at::int as at from facetdb.heartbeats`)).toEqual([{ at: 1 }]);
+    for (const kept of [
+      "facetdb.usage_reservations",
+      "facetdb.usage_alerts",
+      "facetdb.alerts",
+      "facetdb.alert_history",
+      "facetdb.install",
+      "facetdb.store_migrations",
+      "facetdb.sources",
+    ]) {
+      expect(await present(kept)).toBe(true);
+    }
+  });
+
+  it("keeps the uninstalling project's own usage and heartbeats when it also runs a polling source", async () => {
+    await freshWorld();
+    await install();
+    // The same project as the uninstalled table, with state from a polling-mode source (no table owner).
+    await q(
+      `insert into facetdb.usage (project_id, month, input_tokens) values ('${project.id}', '2026-11', 4200)`,
+    );
+    await q(`insert into facetdb.heartbeats (project, at) values ('${project.id}', 1)`);
+    await q(`insert into facetdb.cursors (run, cursor, done) values ('v1', 'c-17', false)`);
+
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(await q(`select id from facetdb.projects`)).toEqual([{ id: project.id }]);
+    expect(await q(`select input_tokens::int as n from facetdb.usage`)).toEqual([{ n: 4200 }]);
+    expect(await q(`select at::int as at from facetdb.heartbeats`)).toEqual([{ at: 1 }]);
+    expect(await q(`select cursor from facetdb.cursors`)).toEqual([{ cursor: "c-17" }]);
+    expect(await present("facetdb.table_owners")).toBe(false);
   });
 
   it("in side-table mode drops the side table and the view and leaves the table as it was", async () => {

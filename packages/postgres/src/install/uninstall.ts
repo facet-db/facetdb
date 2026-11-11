@@ -7,6 +7,7 @@ import {
   quoteTable,
   type SqlConnect,
 } from "../sql/index.ts";
+import { STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
 import {
   type InstalledTable,
   plain,
@@ -58,7 +59,29 @@ export type UninstallTarget = Pick<
   "schema" | "table" | "project" | "marked" | "sideColumns" | "viewMarked"
 > & { readonly sourceId: string };
 
-const STORE_ABSENT = `to_regclass('facetdb.store_migrations') is null`;
+/**
+ * Install now creates the store's tables in every database it touches, so their presence says
+ * nothing; a store is in use when a plugin or API source, a stored credential or an API key lives in
+ * it. The `do` blocks that care declare `in_use` with this prelude (the tables are read through
+ * `execute`, since an install from before the store was part of the script has none of them).
+ */
+const IN_USE_DECLARE = `declare
+  in_use boolean := false;
+  t text;
+begin
+  foreach t in array array['sources', 'credentials', 'api_keys'] loop
+    if to_regclass(format('facetdb.%I', t)) is not null then
+      execute format('select exists (select 1 from facetdb.%I)', t) into in_use;
+      exit when in_use;
+    end if;
+  end loop;`;
+
+const STORE_ABSENT = "not in_use";
+
+/** The store's tables that are not the decision log, one `drop` each (the log and its versions are the customer's). */
+const BOOKKEEPING_TABLES = STORE_TABLES.filter(
+  (name) => !["decisions", "question_set_versions", "jobs", "projects"].includes(name),
+);
 
 /** The uninstall script for one table, in the order it runs. */
 export function uninstallSql(
@@ -129,13 +152,26 @@ begin
     execute format('revoke usage on schema %I from %I', ${sourceSchema}, ${worker});
   end if;
 end $$`),
-    // The project marker, when the project has no other table here (a store's projects are its own).
+    // The project marker, when the project has no other table here and no state of its own in the
+    // store. A polling-mode source has no table owner but keeps usage and heartbeats under the
+    // project: its row stays, so the shared tables below still see a project that remains.
     plain(`do $$
-begin
-  if ${STORE_ABSENT}
-     and not exists (select 1 from facetdb.table_owners where project_id = ${project}) then
-    delete from facetdb.projects where id = ${project};
-  end if;
+${IN_USE_DECLARE}
+  declare
+    has_state boolean := false;
+  begin
+    foreach t in array array['usage:project_id', 'usage_reservations:project_id', 'usage_alerts:project_id', 'heartbeats:project'] loop
+      if to_regclass(format('facetdb.%I', split_part(t, ':', 1))) is not null then
+        execute format('select exists (select 1 from facetdb.%I where %I = $1)', split_part(t, ':', 1), split_part(t, ':', 2))
+          into has_state using ${project};
+        exit when has_state;
+      end if;
+    end loop;
+    if ${STORE_ABSENT} and not has_state
+       and not exists (select 1 from facetdb.table_owners where project_id = ${project}) then
+      delete from facetdb.projects where id = ${project};
+    end if;
+  end;
 end $$`),
     // The trigger functions are shared by every table of the database: each goes once no trigger calls it.
     plain(`do $$
@@ -152,26 +188,37 @@ begin
 end $$`),
     // The queue and the marker tables, once no installed table and no store is left to use them.
     plain(`do $$
-begin
+${IN_USE_DECLARE}
   if ${STORE_ABSENT} and not exists (select 1 from facetdb.table_owners) then
     if not exists (select 1 from ${JOBS_TABLE}) then
       drop table ${JOBS_TABLE};
     end if;
     drop table facetdb.table_owners;
+    -- The store's other tables are shared by every project: they go only when no project remains
+    -- (a polling-mode project has no table owner but keeps its usage, cursors and heartbeats).
     if not exists (select 1 from facetdb.projects) then
+      drop table if exists ${["sources", "credentials", "api_keys"].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
       drop table facetdb.projects;
+      drop table if exists ${[...BOOKKEEPING_TABLES, STORE_VERSION_TABLE].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
     end if;
   end if;
 end $$`),
     ...(options.purge
       ? [
           // The decision log: this source's rows, and the table once no row of anyone's is left.
+          // Its question-set versions go with it: they only explain the log's version numbers.
           plain(`do $$
-begin
+${IN_USE_DECLARE}
   if to_regclass('facetdb.decisions') is not null then
     delete from facetdb.decisions where source_id = current_setting('${SOURCE_SETTING}');
     if ${STORE_ABSENT} and not exists (select 1 from facetdb.decisions) then
       drop table facetdb.decisions;
+    end if;
+  end if;
+  if to_regclass('facetdb.question_set_versions') is not null then
+    delete from facetdb.question_set_versions where source_id = current_setting('${SOURCE_SETTING}');
+    if ${STORE_ABSENT} and not exists (select 1 from facetdb.question_set_versions) then
+      drop table facetdb.question_set_versions;
     end if;
   end if;
 end $$`),

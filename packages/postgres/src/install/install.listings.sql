@@ -6,6 +6,63 @@ set local lock_timeout = '10s';
 
 create schema if not exists "facetdb";
 
+create table if not exists facetdb.store_migrations (
+  version integer primary key,
+  applied_at timestamptz not null default now()
+);
+
+create table if not exists facetdb.install (
+  key text primary key,
+  value text not null
+);
+
+create table if not exists facetdb.projects (
+  id text primary key,
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists facetdb.sources (
+  id text primary key,
+  project_id text not null references facetdb.projects (id),
+  name text not null,
+  kind text not null check (kind in ('plugin', 'api')),
+  created_at timestamptz not null default now(),
+  unique (project_id, name)
+);
+
+create table if not exists facetdb.question_set_versions (
+  source_id text not null,
+  version integer not null,
+  content_hash text not null,
+  question_set jsonb not null,
+  created_at timestamptz not null default now(),
+  primary key (source_id, version)
+);
+
+create table if not exists facetdb.decisions (
+  id bigserial primary key,
+  source_id text not null,
+  record_key text not null,
+  kind text not null check (kind in ('answer', 'human')),
+  version integer not null,
+  state_hash text not null,
+  model text,
+  answers jsonb,
+  usage jsonb,
+  question text,
+  value jsonb,
+  reviewer text,
+  note text,
+  at timestamptz not null,
+  check ((kind = 'answer' and model is not null and answers is not null and usage is not null)
+      or (kind = 'human' and question is not null and value is not null and reviewer is not null))
+);
+
+create index if not exists decisions_by_record on facetdb.decisions (source_id, record_key, id);
+
+create schema if not exists "facetdb";
+
 create table if not exists "facetdb"."jobs" (
   record_key text primary key,
   enqueued_at timestamptz not null default now(),
@@ -15,11 +72,81 @@ create table if not exists "facetdb"."jobs" (
 
 create index if not exists "jobs_queue" on "facetdb"."jobs" (enqueued_at, record_key);
 
-create table if not exists "facetdb"."projects" (
-  id text primary key,
-  name text not null,
-  created_at timestamptz not null default now()
+create table if not exists facetdb.records (
+  source_id text not null,
+  record_key text not null,
+  state jsonb not null,
+  hash text not null,
+  status text not null,
+  decision jsonb,
+  reviewed boolean not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (source_id, record_key)
 );
+
+create table if not exists facetdb.credentials (
+  project_id text not null references facetdb.projects (id),
+  name text not null,
+  ciphertext text not null,
+  updated_at timestamptz not null default now(),
+  primary key (project_id, name)
+);
+
+create table if not exists facetdb.api_keys (
+  id text primary key,
+  project_id text not null references facetdb.projects (id),
+  name text not null,
+  key_hash text not null unique,
+  created_at timestamptz not null default now(),
+  revoked_at timestamptz
+);
+
+create table if not exists facetdb.usage (
+  project_id text not null,
+  month text not null,
+  input_tokens bigint not null default 0,
+  primary key (project_id, month)
+);
+
+create table if not exists facetdb.usage_reservations (
+  id uuid primary key default gen_random_uuid(),
+  project_id text not null,
+  month text not null,
+  tokens bigint not null,
+  expires_at bigint not null
+);
+
+create index if not exists usage_reservations_by_month on facetdb.usage_reservations (project_id, month);
+
+create table if not exists facetdb.usage_alerts (
+  project_id text not null,
+  month text not null,
+  kind text not null,
+  primary key (project_id, month, kind)
+);
+
+create table if not exists facetdb.alerts (
+  key text primary key,
+  state jsonb not null
+);
+
+create table if not exists facetdb.alert_history (
+  id bigserial primary key,
+  record jsonb not null
+);
+
+create table if not exists facetdb.heartbeats (
+  project text primary key,
+  at bigint not null
+);
+
+create table if not exists facetdb.cursors (
+  run text primary key,
+  cursor text,
+  done boolean not null
+);
+
+insert into facetdb.store_migrations (version) values (1) on conflict (version) do nothing;
 
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
@@ -161,6 +288,42 @@ end $$;
 
 grant usage on schema "facetdb" to "facetdb_worker";
 
+grant select, insert, update, delete on "facetdb"."api_keys" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."credentials" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."sources" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."projects" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."question_set_versions" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."decisions" to "facetdb_worker";
+
 grant select, insert, update, delete on "facetdb"."jobs" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."records" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."usage" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."usage_reservations" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."usage_alerts" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."alerts" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."alert_history" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."heartbeats" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."cursors" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."install" to "facetdb_worker";
+
+grant select on "facetdb"."store_migrations" to "facetdb_worker";
+
+grant usage, select on sequence "facetdb"."decisions_id_seq" to "facetdb_worker";
+
+grant usage, select on sequence "facetdb"."alert_history_id_seq" to "facetdb_worker";
 
 commit;

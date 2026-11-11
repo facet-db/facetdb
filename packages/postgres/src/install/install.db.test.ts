@@ -1,7 +1,9 @@
 import type { QuestionSet } from "@facetdb/core";
+import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { connectPostgres, type SqlClient } from "../sql/index.ts";
-import { createScratchDatabase, type ScratchDatabase } from "../testing/index.ts";
+import { connectPostgres, type SqlClient, type SqlQuery } from "../sql/index.ts";
+import { createStore } from "../store/index.ts";
+import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { ENQUEUE_ROLE, WORKER_ROLE } from "./sql.ts";
 
@@ -155,6 +157,68 @@ describe("the worker login on a real Postgres", () => {
     } finally {
       await login.close();
     }
+  });
+
+  it("opens the store, records a heartbeat, appends a decision and claims a job: no create, no ownership", async () => {
+    // The worker's first start on a database `migrate` installed. The login holds no CREATE on the
+    // database or the schema and owns nothing, and the store issues no DDL.
+    const rights = await admin.query(
+      `select has_database_privilege($1, current_database(), 'create') as database,
+              has_schema_privilege($1, 'facetdb', 'create') as schema,
+              (select count(*)::int from pg_class c
+                where c.relnamespace = 'facetdb'::regnamespace and c.relowner = $1::regrole) as owned`,
+      [WORKER_ROLE],
+    );
+    expect(rights[0]).toEqual({ database: false, schema: false, owned: 0 });
+
+    const base = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
+    const statements: string[] = [];
+    const record =
+      (query: SqlQuery): SqlQuery =>
+      (text, params) => {
+        statements.push(text);
+        return query(text, params);
+      };
+    const recording: SqlClient = {
+      query: record(base.query),
+      transaction: (work) => base.transaction((query) => work(record(query))),
+      close: () => base.close(),
+    };
+    const store = await createStore({
+      url: scratch.as(WORKER_ROLE, PASSWORD),
+      connect: () => recording,
+      secret: TEST_SECRET,
+      clock: new FakeClock(1_700_000_000_000),
+      allowInsecure: true,
+    });
+    try {
+      await store.ensureProject({ id: "proj_listings", name: "Listings" });
+      await store.alerts.saveHeartbeat("proj_listings", 1_700_000_000_000);
+      expect(await store.alerts.lastHeartbeat("proj_listings")).toBe(1_700_000_000_000);
+      await store.log("src_listings").appendAnswer({
+        kind: "answer",
+        key: "1",
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash: "a".repeat(64),
+        answers: { is_scam: { type: "noul", probability: 0.25 } },
+        usage: { inputTokens: 10, outputTokens: 2 },
+        at: new Date("2026-11-01T20:00:00Z"),
+      });
+      const queue = store.connector({
+        sourceId: "src_listings",
+        fields: ["title"],
+        workerId: "w1",
+      });
+      await queue.enqueue(["k1"]);
+      expect(await queue.claim(1)).toEqual(["k1"]);
+    } finally {
+      await store.close();
+    }
+    expect(statements.length).toBeGreaterThan(0);
+    expect(
+      statements.filter((text) => /^\s*(create|alter|drop|grant|revoke)\b/i.test(text)),
+    ).toEqual([]);
   });
 
   it("a password given on a later run is the one that logs in", async () => {

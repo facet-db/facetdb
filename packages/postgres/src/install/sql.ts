@@ -23,7 +23,13 @@ import {
   VIEW_NAME_SETTING,
   VIEW_SCHEMA_SETTING,
 } from "../scan/index.ts";
-import { JOBS_TABLE, jobsTableSql, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
+import { JOBS_TABLE, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
+import {
+  STORE_SEQUENCES,
+  STORE_TABLES,
+  STORE_VERSION_TABLE,
+  storeInstallStatements,
+} from "../store/index.ts";
 import { scramVerifier } from "./scram.ts";
 
 /**
@@ -268,14 +274,10 @@ export function installSql(
     // The `alter table` statements take ACCESS EXCLUSIVE on the customer's table: better a failed
     // migrate after ten seconds than the application's queries piling up behind it.
     plain("set local lock_timeout = '10s'"),
-    // The schema and the queue, shared with the store: one definition (sql/jobs.ts).
-    ...jobsTableSql().map(plain),
-    // The project marker: which project installed on which table.
-    plain(`create table if not exists ${PROJECTS_TABLE} (
-  id text primary key,
-  name text not null,
-  created_at timestamptz not null default now()
-)`),
+    // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
+    // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
+    ...storeInstallStatements().map(plain),
+    // The project marker: which project installed on which table; `facetdb.projects` is the store's.
     plain(`create table if not exists ${OWNERS_TABLE} (
   table_schema text not null,
   table_name text not null,
@@ -433,7 +435,19 @@ end $$`),
     // Side-table mode: row-level security on the side table, now that both roles exist.
     ...(side ? sideTableSecurityStatements(source, WORKER_ROLE, ENQUEUE_ROLE).map(plain) : []),
     plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
-    plain(`grant select, insert, update, delete on ${JOBS_TABLE} to ${worker}`),
+    // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
+    // The version table is read-only, so the worker can see the store is current and never migrates.
+    ...STORE_TABLES.map((name) =>
+      plain(
+        `grant select, insert, update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+      ),
+    ),
+    plain(`grant select on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_VERSION_TABLE)} to ${worker}`),
+    ...STORE_SEQUENCES.map((name) =>
+      plain(
+        `grant usage, select on sequence ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+      ),
+    ),
   ];
 }
 

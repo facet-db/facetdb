@@ -349,7 +349,7 @@ const workerHeartbeat: Check = {
       if (/does not exist/i.test(message)) {
         return fail(
           `the store has no heartbeats table yet: ${message}`,
-          "start the worker with facetdb worker: it creates the store on its first start",
+          "run facetdb migrate with the admin credential: it installs the store's tables, and the worker only uses them",
         );
       }
       return fail(`the store could not be read: ${message}`, DATABASE_URL_FIX);
