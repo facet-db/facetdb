@@ -112,6 +112,7 @@ const errorBody = z.object({
 export function createClient<Sources extends AnySources = AnySources>(
   options: ClientOptions,
 ): FacetdbClient<Sources> {
+  requireSecureUrl(options.url);
   const endpoint = `${options.url.replace(/\/+$/, "")}/${API_VERSION}/check`;
 
   return {
@@ -161,6 +162,23 @@ export function createClient<Sources extends AnySources = AnySources>(
       throw new FacetdbApiError(response.status, code, message, fix, requestId);
     },
   };
+}
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** The bearer key travels on every call, so cleartext `http://` is for this machine only. */
+function requireSecureUrl(url: string): void {
+  const parsed = URL.parse(url);
+  if (parsed === null || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+    throw new TypeError(
+      `The url "${url}" is not a web address. Give createClient the address of your FacetDB server, such as https://facetdb.example.com.`,
+    );
+  }
+  if (parsed.protocol === "http:" && !LOOPBACK_HOSTS.has(parsed.hostname)) {
+    throw new TypeError(
+      `The url "${url}" is plain http://, and the API key would cross the network in cleartext. Use https:// (http:// is accepted only for localhost, 127.0.0.1 and [::1]).`,
+    );
+  }
 }
 
 /** `retry-after` in seconds, as the server sends it; anything else is treated as absent. */

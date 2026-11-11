@@ -4,7 +4,7 @@ import {
   type PluginManifest,
   parseQuestionSet,
 } from "@facetdb/core";
-import { ZodObject, type ZodType } from "zod";
+import { ZodObject } from "zod";
 import type {
   ActionDefinition,
   ChannelDefinition,
@@ -13,7 +13,7 @@ import type {
   SourceDefinition,
 } from "./kinds.ts";
 import { isValidRange, isValidVersion } from "./semver.ts";
-import { type Infer, isSecretField } from "./zod.ts";
+import { type Infer, secretPaths } from "./zod.ts";
 
 /** What an author passes to `definePlugin`. */
 export type PluginDefinition<Schema extends ZodObject> = {
@@ -71,11 +71,54 @@ const PACKAGE_PREFIXES = ["@facetdb/", "facetdb-plugin-"] as const;
 
 /** `@facetdb/github` and `facetdb-plugin-github` are both `github`; a bare `github` is itself. */
 export function shortName(name: string): string | undefined {
-  const short = PACKAGE_PREFIXES.reduce((rest, prefix) => rest.replace(prefix, ""), name);
-  return SHORT_NAME.test(short) &&
-    (short === name || PACKAGE_PREFIXES.some((p) => name.startsWith(p)))
-    ? short
-    : undefined;
+  const prefix = PACKAGE_PREFIXES.find((p) => name.startsWith(p));
+  const short = prefix === undefined ? name : name.slice(prefix.length);
+  return SHORT_NAME.test(short) ? short : undefined;
+}
+
+/**
+ * Checks the four manifest fields an author writes (name, version, core range, config schema),
+ * whatever their source: `definePlugin` runs it on the definition and the loader on the manifest of
+ * a plugin it imported, so both refuse the same things with the same words.
+ */
+export function checkManifestFields(
+  fields: {
+    readonly name: unknown;
+    readonly version: unknown;
+    readonly range: unknown;
+    readonly config: unknown;
+  },
+  issues: PluginIssue[],
+): void {
+  if (typeof fields.name !== "string" || shortName(fields.name) === undefined) {
+    issues.push({
+      field: "name",
+      message:
+        'must be the short name ("github") or the package name (`@facetdb/github`, `facetdb-plugin-github`), in lowercase letters, digits and dashes',
+    });
+  }
+  if (typeof fields.version !== "string" || !isValidVersion(fields.version)) {
+    issues.push({
+      field: "version",
+      message: 'must be a semver version such as "1.0.0"',
+    });
+  }
+  if (typeof fields.range !== "string" || !isValidRange(fields.range)) {
+    issues.push({
+      field: "facetdb",
+      message:
+        'must be the semver range of FacetDB core versions the plugin supports, such as "^1.0.0"',
+    });
+  }
+  if (!(fields.config instanceof ZodObject)) {
+    issues.push({
+      field: "config",
+      message:
+        fields.config === undefined
+          ? "is missing: a plugin declares one config schema, `z.object({ ... })`, which validates the config file and draws the settings form"
+          : "must be a `z.object({ ... })` schema",
+    });
+  }
 }
 
 export function definePlugin<Schema extends ZodObject>(
@@ -87,38 +130,10 @@ export function definePlugin<Schema extends ZodObject>(
   const issues: PluginIssue[] = [];
 
   const name = input["name"];
-  if (typeof name !== "string" || shortName(name) === undefined) {
-    issues.push({
-      field: "name",
-      message:
-        'must be the short name ("github") or the package name (`@facetdb/github`, `facetdb-plugin-github`), in lowercase letters, digits and dashes',
-    });
-  }
   const version = input["version"];
-  if (typeof version !== "string" || !isValidVersion(version)) {
-    issues.push({
-      field: "version",
-      message: 'must be a semver version such as "1.0.0"',
-    });
-  }
   const range = input["facetdb"];
-  if (typeof range !== "string" || !isValidRange(range)) {
-    issues.push({
-      field: "facetdb",
-      message:
-        'must be the semver range of FacetDB core versions the plugin supports, such as "^1.0.0"',
-    });
-  }
   const config = input["config"];
-  if (!(config instanceof ZodObject)) {
-    issues.push({
-      field: "config",
-      message:
-        config === undefined
-          ? "is missing: a plugin declares one config schema, `z.object({ ... })`, which validates the config file and draws the settings form"
-          : "must be a `z.object({ ... })` schema",
-    });
-  }
+  checkManifestFields({ name, version, range, config }, issues);
 
   const sources = entries(input, "sources", issues);
   const actions = entries(input, "actions", issues);
@@ -161,9 +176,7 @@ export function definePlugin<Schema extends ZodObject>(
     );
   }
 
-  const secrets = Object.entries(config.shape as Record<string, ZodType>)
-    .filter(([, field]) => isSecretField(field))
-    .map(([field]) => field);
+  const secrets = secretPaths(config);
 
   return {
     [PLUGIN_BRAND]: true,

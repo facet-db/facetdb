@@ -24,7 +24,7 @@ const PROJECT = "project-1";
 const SOURCE = "support_tickets";
 const SOURCE_ID = "src-support-tickets";
 const FIELDS = ["subject", "body"] as const;
-const URL = "http://facetdb.test";
+const URL = "https://facetdb.test";
 
 const UNLIMITED: SpendingGate = {
   allowsWork: () => Promise.resolve(true),
@@ -263,6 +263,28 @@ describe("the SDK's reading of the server's answers", () => {
         body: { source: "support_tickets", id: "T-1", record: ticket },
       },
     ]);
+  });
+
+  it("accepts plain http:// only for this machine, and says to use https:// otherwise", () => {
+    const build = (url: string) => () =>
+      createClient<Sources>({ url, apiKey: "key", fetch: respond(200, {}) });
+    for (const url of [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000/",
+      "http://[::1]:3000",
+      "https://facetdb.example.com",
+    ]) {
+      expect(build(url)).not.toThrow();
+    }
+    for (const url of [
+      "http://facetdb.example.com",
+      "http://localhost.evil.test",
+      "http://127.0.0.1.evil.test",
+      "http://user@evil.test",
+    ]) {
+      expect(build(url)).toThrow(/use https:\/\//i);
+    }
+    expect(build("facetdb.example.com")).toThrow(/not a web address/);
   });
 
   it("refuses an answer in a shape it does not know, and an error without a body", async () => {

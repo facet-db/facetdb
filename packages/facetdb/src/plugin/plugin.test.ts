@@ -14,6 +14,7 @@ import { runConnectorContract } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { noul, score } from "../config/index.ts";
 import { VERSION } from "../index.ts";
+import { PLUGIN_BRAND, shortName } from "./define.ts";
 import {
   action,
   channel,
@@ -114,6 +115,41 @@ describe("definePlugin", () => {
     });
     expect(plugin.manifest.secrets).toEqual(["webhook", "token"]);
     expect(plugin.manifest.kinds).toEqual(["channel"]);
+  });
+
+  it("lists secrets by dotted path through every wrapper and nested object", () => {
+    const plugin = definePlugin({
+      name: "chat",
+      version: "0.1.0",
+      facetdb: "^0.0.0",
+      config: z.object({
+        channel: z.string(),
+        direct: z.secret(),
+        optional: z.secret().optional(),
+        nullable: z.secret().nullable(),
+        defaulted: z.secret().default("x"),
+        piped: z.secret().pipe(z.string()),
+        transformed: z.secret().transform((value) => value.trim()),
+        auth: z.object({
+          user: z.string(),
+          password: z.secret(),
+          deeper: z.object({ key: z.secret().optional() }).optional(),
+        }),
+        maybe: z.object({ token: z.secret() }).nullable().default({ token: "t" }),
+      }),
+      channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+    });
+    expect(plugin.manifest.secrets).toEqual([
+      "direct",
+      "optional",
+      "nullable",
+      "defaulted",
+      "piped",
+      "transformed",
+      "auth.password",
+      "auth.deeper.key",
+      "maybe.token",
+    ]);
   });
 
   it("refuses a missing config schema and names the field", () => {
@@ -284,6 +320,93 @@ describe("loadPlugin", () => {
     await expect(
       loadPlugin("slack", modules({ "@facetdb/slack": { default: githubPlugin() } })),
     ).rejects.toThrow(/calls itself "github", not "slack"/);
+  });
+
+  it("re-checks the manifest of a branded object, naming the field and printing no stack", async () => {
+    const forged = (manifest: unknown) => ({
+      [PLUGIN_BRAND]: true,
+      manifest,
+      sources: {},
+      actions: {},
+      channels: {},
+      providers: {},
+      packs: {},
+    });
+    const good = githubPlugin().manifest;
+    const fields = async (manifest: unknown) => {
+      const error = await loadPlugin(
+        "github",
+        modules({ "@facetdb/github": { default: forged(manifest) } }),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(PluginError);
+      expect((error as PluginError).message).not.toMatch(/\n\s+at /);
+      return (error as PluginError).issues.map((issue) => issue.field);
+    };
+    expect(await fields(undefined)).toEqual(["manifest"]);
+    expect(await fields({ ...good, version: "one" })).toEqual(["version"]);
+    expect(await fields({ ...good, coreVersions: undefined })).toEqual(["facetdb"]);
+    expect(await fields({ ...good, config: {} })).toEqual(["config"]);
+    expect(await fields({ ...good, kinds: ["database"] })).toEqual(["kinds"]);
+    expect(await fields({ ...good, secrets: [1] })).toEqual(["secrets"]);
+    expect(await fields({ ...good, name: 7, version: undefined })).toEqual(["name", "version"]);
+  });
+
+  it("binds a manifest's name to the package it was loaded from", async () => {
+    const named = (name: string) =>
+      definePlugin({
+        name,
+        version: "1.0.0",
+        facetdb: "^0.0.0",
+        config: z.object({}),
+        packs: { triage: pack({ questions: { urgent: noul("Is it urgent?") } }) },
+      });
+    // `@facetdb/github` loads only from a package named `@facetdb/github`.
+    await expect(
+      loadPlugin(
+        "github",
+        modules({ "facetdb-plugin-github": { default: named("@facetdb/github") } }),
+      ),
+    ).rejects.toThrow(/name: .*"@facetdb\/github", the name of a different package/);
+    await expect(
+      loadPlugin(
+        "facetdb-plugin-github",
+        modules({ "facetdb-plugin-github": { default: named("@facetdb/github") } }),
+      ),
+    ).rejects.toThrow(PluginError);
+    await expect(
+      loadPlugin(
+        "github",
+        modules({ "@facetdb/github": { default: named("facetdb-plugin-github") } }),
+      ),
+    ).rejects.toThrow(/different package/);
+    for (const [spec, packageName, declared] of [
+      ["github", "@facetdb/github", "@facetdb/github"],
+      ["github", "@facetdb/github", "github"],
+      ["github", "facetdb-plugin-github", "github"],
+      ["github", "facetdb-plugin-github", "facetdb-plugin-github"],
+    ] as const) {
+      const plugin = named(declared);
+      expect(await loadPlugin(spec, modules({ [packageName]: { default: plugin } }))).toBe(plugin);
+    }
+  });
+
+  it("does not normalise a prefix found in the middle of a name", async () => {
+    expect(shortName("facetdb-plugin-gi@facetdb/thub")).toBeUndefined();
+    expect(shortName("gi@facetdb/thub")).toBeUndefined();
+    expect(shortName("@facetdb/facetdb-plugin-github")).toBe("facetdb-plugin-github");
+    expect(shortName("facetdb-plugin-github")).toBe("github");
+    expect(() =>
+      definePlugin({
+        name: "facetdb-plugin-gi@facetdb/thub",
+        version: "1.0.0",
+        facetdb: "^0.0.0",
+        config: z.object({}),
+        packs: { triage: pack({ questions: { urgent: noul("Is it urgent?") } }) },
+      }),
+    ).toThrow(/name: must be the short name/);
+    await expect(loadPlugin("facetdb-plugin-gi@facetdb/thub", modules({}))).rejects.toThrow(
+      /name: a plugin is named/,
+    );
   });
 
   it("lets a plugin that breaks while loading fail as itself", async () => {
