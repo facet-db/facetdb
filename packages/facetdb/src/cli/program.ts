@@ -1,5 +1,7 @@
+import type { PGlite } from "@electric-sql/pglite";
 import type { BackfillDeps, Clock, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
+import type { WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
@@ -113,6 +115,38 @@ export type CliDeps = {
     source: SourceConfig,
     mode: { readonly dryRun: boolean },
   ) => Promise<BackfillSetup>;
+  /** Binds the HTTP surface on a port (`facetdb worker`); the composition root uses `node:http`. */
+  readonly serve: (handler: HttpHandler, port: number) => Promise<HttpListener>;
+  /** Aborts when the process is asked to stop (SIGINT, SIGTERM); a test aborts its own. */
+  readonly stopSignal: () => AbortSignal;
+  /** Sends a webhook from the outbox: `fetch` in the process, a recording fake in a test. */
+  readonly webhookFetch: WebhookFetch;
+  /** A number in [0, 1), as `Math.random`, for the model backoff's jitter. */
+  readonly random: () => number;
+  /** The embedded Postgres of `facetdb dev`, kept in a directory of the project. */
+  readonly embedded: EmbeddedDatabases;
+};
+
+/** One request in, one response out: the shape of a Hono app's `fetch`. */
+export type HttpHandler = (request: Request) => Response | Promise<Response>;
+
+/** A bound HTTP server: the port it listens on, and how to stop listening. */
+export type HttpListener = {
+  readonly port: number;
+  close(): Promise<void>;
+};
+
+/** An embedded database opened on a data directory; closing it flushes the directory. */
+export type EmbeddedDatabase = {
+  readonly pglite: PGlite;
+  close(): Promise<void>;
+};
+
+export type EmbeddedDatabases = {
+  /** Opens (creating when missing) the database kept in `dir`, an absolute path. */
+  open(dir: string): Promise<EmbeddedDatabase>;
+  /** Deletes the directory and everything in it; a missing one is fine. */
+  wipe(dir: string): Promise<void>;
 };
 
 /** What `CliDeps.backfill` hands the command: the engine's dependencies, and how to let go of them. */
@@ -308,6 +342,19 @@ export type CapturedRun = {
   readonly prompts: readonly string[];
 };
 
+/** What a test may leave out: each one fails the run, in words, if a command reaches for it. */
+type OptionalInTests =
+  | "store"
+  | "provider"
+  | "workspace"
+  | "clock"
+  | "backfill"
+  | "serve"
+  | "stopSignal"
+  | "webhookFetch"
+  | "random"
+  | "embedded";
+
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
  * output. `answers` are what a user types at each prompt, in order; a prompt with none left fails
@@ -315,8 +362,8 @@ export type CapturedRun = {
  */
 export async function runInProcess(
   argv: readonly string[],
-  deps: Omit<CliDeps, "io" | "store" | "provider" | "workspace" | "clock" | "backfill"> &
-    Partial<Pick<CliDeps, "store" | "provider" | "workspace" | "clock" | "backfill">> & {
+  deps: Omit<CliDeps, "io" | OptionalInTests> &
+    Partial<Pick<CliDeps, OptionalInTests>> & {
       readonly answers?: readonly string[];
     },
   commands: readonly RegisteredCommand[],
@@ -361,6 +408,18 @@ export async function runInProcess(
           throw new Error("this test gave the command no clock");
         },
         sleep: () => Promise.reject(new Error("this test gave the command no clock")),
+      },
+      serve: () => Promise.reject(new Error("this test gave the command no HTTP server")),
+      stopSignal: () => {
+        throw new Error("this test gave the command no stop signal");
+      },
+      webhookFetch: () => Promise.reject(new Error("this test gave the command no webhook fetch")),
+      random: () => {
+        throw new Error("this test gave the command no random numbers");
+      },
+      embedded: {
+        open: () => Promise.reject(new Error("this test gave the command no embedded database")),
+        wipe: () => Promise.reject(new Error("this test gave the command no embedded database")),
       },
       ...rest,
       io,

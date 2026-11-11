@@ -141,10 +141,12 @@ invocation.
 | `facetdb backfill` | Answers every existing row, paced and resumable, after showing the cost estimate (`--dry-run`, `--pace`, `--question`, `--yes`) |
 | `facetdb explain` | Prints one record's full history in words: every answer and every human decision (`facetdb explain <source> <key>`) |
 | `facetdb uninstall` | Shows the SQL that removes FacetDB from a source and asks you to type the project name before it runs (`--purge` also deletes the log) |
+| `facetdb worker` | Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API on port 7411 (`--port`, `--no-http`, `--once`); refuses to start without `TYPESAFE_API_KEY` or a `modelUrl` |
+| `facetdb dev` | Runs the worker offline on an embedded Postgres under `.facetdb/dev/` with the fake model, no key needed (`--model-url` for Ollama or another compatible server, `--reset` starts empty) |
 
 Other commands are not in this build yet; do not tell the user to run them as if
-they were: `facetdb worker`, `facetdb review`, `facetdb studio`, `facetdb add <plugin>`,
-`facetdb dev`, `facetdb types`, and `facetdb test`.
+they were: `facetdb review`, `facetdb studio`, `facetdb add <plugin>`, `facetdb types`, and
+`facetdb test`.
 
 Always show before doing: run `--dry-run` or read the printed SQL and estimate before anything
 writes. Never pass `--yes` for the user on a database you have not been told is safe to change.

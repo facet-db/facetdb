@@ -1,10 +1,12 @@
 import {
+  type Alerts,
   type BackfillDeps,
   type Clock,
   type Connector,
   createAlerts,
   createSpending,
   type ModelProvider,
+  type SpendingGate,
   spendingGate,
 } from "@facetdb/core";
 import type { ProjectRef, Store } from "@facetdb/postgres";
@@ -91,16 +93,6 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
   });
   const version = await store.questionSets.record(source.name, questionSet);
   const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
-  const spending = createSpending({
-    usageStore: store.usage,
-    clock,
-    alerts,
-    capLink: () => "https://docs.facetdb.dev/fix/spending-cap",
-  });
-  const cap =
-    config.spendingCap === undefined
-      ? NO_CAP
-      : { inputTokens: config.spendingCap, onCapReached: config.onCapReached };
   return {
     connector: wiring.connector,
     worker: wiring.provider,
@@ -115,6 +107,30 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
       source: source.name,
       link: "https://docs.facetdb.dev/fix/backfill",
     }),
-    spending: spendingGate(spending, project.id, () => Promise.resolve(cap)),
+    spending: projectSpending(config, store, alerts, clock, project.id),
   };
+}
+
+/**
+ * The project's spending gate: the config's cap, or none (the count is still kept). Every worker
+ * and backfill of the project shares one, so admissions are counted together.
+ */
+export function projectSpending(
+  config: ProjectConfig,
+  store: Pick<Store, "usage">,
+  alerts: Alerts,
+  clock: Clock,
+  projectId: string,
+): SpendingGate {
+  const spending = createSpending({
+    usageStore: store.usage,
+    clock,
+    alerts,
+    capLink: () => "https://docs.facetdb.dev/fix/spending-cap",
+  });
+  const cap =
+    config.spendingCap === undefined
+      ? NO_CAP
+      : { inputTokens: config.spendingCap, onCapReached: config.onCapReached };
+  return spendingGate(spending, projectId, () => Promise.resolve(cap));
 }

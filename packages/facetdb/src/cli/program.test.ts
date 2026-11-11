@@ -101,6 +101,18 @@ describe("the facetdb program", () => {
         },
         clock: { now: () => 0, sleep: () => Promise.resolve() },
         backfill: () => Promise.reject(new Error("unused")),
+        serve: () => Promise.reject(new Error("unused")),
+        stopSignal: () => {
+          throw new Error("unused");
+        },
+        webhookFetch: () => Promise.reject(new Error("unused")),
+        random: () => {
+          throw new Error("unused");
+        },
+        embedded: {
+          open: () => Promise.reject(new Error("unused")),
+          wipe: () => Promise.reject(new Error("unused")),
+        },
       },
       COMMANDS,
       { code: 0 },
@@ -114,6 +126,8 @@ describe("the facetdb program", () => {
       "preview",
       "backfill",
       "explain",
+      "worker",
+      "dev",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

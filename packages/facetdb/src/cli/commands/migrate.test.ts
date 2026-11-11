@@ -157,6 +157,18 @@ async function runSeeingPrompts(argv: readonly string[], answers: readonly strin
       },
       clock: { now: () => 0, sleep: () => Promise.resolve() },
       backfill: () => Promise.reject(new Error("no backfill")),
+      serve: () => Promise.reject(new Error("no HTTP server")),
+      stopSignal: () => {
+        throw new Error("no stop signal");
+      },
+      webhookFetch: () => Promise.reject(new Error("no webhook fetch")),
+      random: () => {
+        throw new Error("no random numbers");
+      },
+      embedded: {
+        open: () => Promise.reject(new Error("no embedded database")),
+        wipe: () => Promise.reject(new Error("no embedded database")),
+      },
     },
     COMMANDS,
   );
