@@ -1,0 +1,6 @@
+{
+  "name": "facetdb",
+  "description": "FacetDB integration craft for coding agents: the config file, the CLI, thresholds, record statuses and the plugin API.",
+  "version": "0.0.0",
+  "license": "MIT"
+}

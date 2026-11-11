@@ -1,0 +1,15 @@
+{
+  "name": "facetdb",
+  "owner": {
+    "name": "FacetDB"
+  },
+  "plugins": [
+    {
+      "name": "facetdb",
+      "source": "./",
+      "description": "FacetDB integration craft for coding agents: the config file, the CLI, thresholds, record statuses and the plugin API.",
+      "version": "0.0.0",
+      "license": "MIT"
+    }
+  ]
+}
