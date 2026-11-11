@@ -495,7 +495,7 @@ describe("side-table install", () => {
       `insert into facetdb.listings_answers (id, is_scam, facetdb_status) values (1, false, 'done'), (2, true, 'done')`,
     );
     await w.client.query(`update public.listings set title = 'changed' where id = 1`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
     expect(
       await w.client.query(
         `select id, facetdb_status, is_scam from facetdb.listings_answers order by id`,
@@ -507,7 +507,7 @@ describe("side-table install", () => {
     await w.client.query(
       `insert into public.listings (id, title, description) values (9, 'x', 'y')`,
     );
-    expect(await jobs()).toEqual(["15:public.listings:1", "15:public.listings:9"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1", "t:15:public.listings:9"]);
   });
 
   it("onChange keep leaves the stored status in place", async () => {
@@ -522,7 +522,7 @@ describe("side-table install", () => {
       { facetdb_status: "done" },
     ]);
     expect(await w.client.query(`select record_key from facetdb.jobs`)).toEqual([
-      { record_key: "15:public.listings:1" },
+      { record_key: "t:15:public.listings:1" },
     ]);
   });
 

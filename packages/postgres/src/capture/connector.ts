@@ -21,6 +21,7 @@ import { answerTarget, createScan } from "../scan/index.ts";
 import {
   CLAIM_LEASE_MS,
   connectPostgres,
+  createClaimLedger,
   jobsQueries,
   quoteIdent,
   quoteTable,
@@ -99,6 +100,7 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
   const prefix = queueKeyPrefix(source);
   const queued = (key: RecordKey): string => prefix + key;
   const unqueued = (queuedKey: string): RecordKey => queuedKey.slice(prefix.length);
+  const claims = createClaimLedger(client.query, workerId);
   const capabilities: Capabilities = {
     inlineColumns: true,
     pushWakeup: client.listen !== undefined,
@@ -333,37 +335,36 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     write,
     scan,
     async enqueue(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.enqueue, [keys.map(queued)]);
+      // One key per statement, as for ack: a multi-row insert would wait on a job row an
+      // application transaction inserted, holding the rows it already inserted.
+      for (const key of new Set(keys)) {
+        await client.query(jobsQueries.enqueue, [[queued(key)]]);
       }
     },
     async claim(limit) {
       if (limit < 1) {
         return [];
       }
+      const at = clock.now();
       const rows = await client.query(jobsQueries.claim, [
         prefix,
         workerId,
         limit,
-        clock.now(),
+        at,
         CLAIM_LEASE_MS,
       ]);
-      return rows.map((row) => unqueued(requireText(row["record_key"], "record_key")));
+      const claimed = rows.map((row) => requireText(row["record_key"], "record_key"));
+      claims.held(claimed, at);
+      return claimed.map(unqueued);
     },
     async claimKey(key) {
-      const rows = await client.query(jobsQueries.claimKey, [queued(key), workerId, clock.now()]);
+      const at = clock.now();
+      const rows = await client.query(jobsQueries.claimKey, [queued(key), workerId, at]);
+      claims.held(rows.length > 0 ? [queued(key)] : [], at);
       return rows.length > 0;
     },
-    async ack(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.ack, [workerId, keys.map(queued)]);
-      }
-    },
-    async release(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.release, [workerId, keys.map(queued)]);
-      }
-    },
+    ack: (keys) => claims.ack(keys.map(queued)),
+    release: (keys) => claims.release(keys.map(queued)),
     async close() {
       closed = true;
       wake?.();

@@ -101,14 +101,21 @@ values ($1, to_timestamp($3::double precision / 1000), $2)
 on conflict (record_key) do nothing
 returning record_key`,
 
-  /** `$1` worker, `$2` keys (text[]). Removes the worker's finished jobs. */
+  /**
+   * `$1` worker, `$2` key, `$3` the claim's time (ms). Removes one finished job, and only while
+   * the claim it was given still stands: the same worker and the very time it was claimed. A job
+   * granted again since (its lease ended, or a change cleared the claim and another batch took it)
+   * carries another time and stays queued for the batch that holds it now.
+   */
   ack: `delete from ${JOBS_TABLE}
- where claimed_by = $1 and record_key = any($2::text[])`,
+ where record_key = $2::text and claimed_by = $1
+   and claimed_at = to_timestamp($3::double precision / 1000)`,
 
-  /** `$1` worker, `$2` keys (text[]). Gives the worker's claims back for another attempt. */
+  /** `$1` worker, `$2` key, `$3` the claim's time (ms). Gives one claim back, and only that claim. */
   release: `update ${JOBS_TABLE}
    set claimed_at = null, claimed_by = null
- where claimed_by = $1 and record_key = any($2::text[])`,
+ where record_key = $2::text and claimed_by = $1
+   and claimed_at = to_timestamp($3::double precision / 1000)`,
 
   /** `$1` prefix, `$2` limit. The keys waiting for a worker, oldest first, without claiming them. */
   waiting: `select record_key from ${JOBS_TABLE}
@@ -116,3 +123,51 @@ returning record_key`,
  order by enqueued_at, record_key
  limit $2`,
 } as const;
+
+/**
+ * The claims one worker holds, so `ack` and `release` can name the time each was taken at. The
+ * connector contract settles keys, not claims; the ledger remembers every time a key was claimed
+ * and settles the oldest first, the order batches finish in. When a key was granted again, the older
+ * batch's settle finds a claim that no longer stands and changes nothing, and the newer batch's
+ * settle takes the job. The pairing is by order, not by token: a settle out of order, or two claims
+ * of one key within the same millisecond, can pair a batch with another's claim (a job asked twice,
+ * or settled early); the common case, a re-grant after a lease, is exact.
+ *
+ * Each key is settled in its own statement: a statement that touched several job rows would wait,
+ * holding some of them, for a row an application transaction holds (the trigger locks the job row
+ * for that transaction), and Postgres may abort the application's transaction to break the cycle.
+ */
+export type ClaimLedger = {
+  /** Records that `queuedKeys` were claimed at `atMs`. */
+  held(queuedKeys: readonly string[], atMs: number): void;
+  ack(queuedKeys: readonly string[]): Promise<void>;
+  release(queuedKeys: readonly string[]): Promise<void>;
+};
+
+export function createClaimLedger(
+  query: (text: string, params: readonly unknown[]) => Promise<unknown>,
+  workerId: string,
+): ClaimLedger {
+  const times = new Map<string, number[]>();
+  const settle = async (statement: string, queuedKeys: readonly string[]): Promise<void> => {
+    for (const key of queuedKeys) {
+      const pending = times.get(key);
+      const atMs = pending?.shift();
+      if (pending?.length === 0) {
+        times.delete(key);
+      }
+      if (atMs !== undefined) {
+        await query(statement, [workerId, key, atMs]);
+      }
+    }
+  };
+  return {
+    held(queuedKeys, atMs) {
+      for (const key of queuedKeys) {
+        times.set(key, [...(times.get(key) ?? []), atMs]);
+      }
+    },
+    ack: (queuedKeys) => settle(jobsQueries.ack, queuedKeys),
+    release: (queuedKeys) => settle(jobsQueries.release, queuedKeys),
+  };
+}

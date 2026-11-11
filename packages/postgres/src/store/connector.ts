@@ -13,7 +13,13 @@ import {
   stateHash,
   type WriteResult,
 } from "@facetdb/core";
-import { CLAIM_LEASE_MS, jobsQueries, type SqlClient, type SqlRow } from "../sql/index.ts";
+import {
+  CLAIM_LEASE_MS,
+  createClaimLedger,
+  jobsQueries,
+  type SqlClient,
+  type SqlRow,
+} from "../sql/index.ts";
 import { flag, fromMs, jsonObject, jsonOrNull, text } from "./rows.ts";
 import { migrateStore } from "./schema.ts";
 
@@ -101,6 +107,7 @@ export function createStoreConnector(
     throw new Error(`a page holds at least one row, not ${pageSize}`);
   }
   const prefix = queuePrefix(sourceId);
+  const claims = createClaimLedger(client.query, workerId);
   const queued = (key: RecordKey): string => prefix + key;
   const unqueued = (queuedKey: string): RecordKey => queuedKey.slice(prefix.length);
 
@@ -291,37 +298,36 @@ export function createStoreConnector(
       if (limit < 1) {
         return [];
       }
+      const at = clock.now();
       const rows = await client.query(jobsQueries.claim, [
         prefix,
         workerId,
         limit,
-        clock.now(),
+        at,
         CLAIM_LEASE_MS,
       ]);
-      return rows.map((row) => unqueued(text(row, "record_key")));
+      const claimed = rows.map((row) => text(row, "record_key"));
+      claims.held(claimed, at);
+      return claimed.map(unqueued);
     },
     async claimRecord(key) {
+      const at = clock.now();
       const rows = await client.query(jobsQueries.claimOne, [
         queued(key),
         workerId,
-        clock.now(),
+        at,
         CLAIM_LEASE_MS,
       ]);
+      claims.held(rows.length > 0 ? [queued(key)] : [], at);
       return rows.length > 0;
     },
     async claimKey(key) {
-      const rows = await client.query(jobsQueries.claimKey, [queued(key), workerId, clock.now()]);
+      const at = clock.now();
+      const rows = await client.query(jobsQueries.claimKey, [queued(key), workerId, at]);
+      claims.held(rows.length > 0 ? [queued(key)] : [], at);
       return rows.length > 0;
     },
-    async ack(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.ack, [workerId, keys.map(queued)]);
-      }
-    },
-    async release(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.release, [workerId, keys.map(queued)]);
-      }
-    },
+    ack: (keys) => claims.ack(keys.map(queued)),
+    release: (keys) => claims.release(keys.map(queued)),
   };
 }

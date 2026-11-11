@@ -343,7 +343,7 @@ describe("uninstall", () => {
     expect(await columns()).toContain("is_scam");
     await q(`update public.listings set title = 'c' where id = 1`);
     expect(await q(`select record_key from facetdb.jobs`)).toEqual([
-      { record_key: "15:public.listings:1" },
+      { record_key: "t:15:public.listings:1" },
     ]);
     expect(await count(`select 1 from facetdb.decisions`)).toBe(1);
   });
@@ -421,7 +421,7 @@ describe("uninstall", () => {
     const { result } = await runUninstall({ purge: true });
     expect(result).toMatchObject({ ok: true, applied: true });
     expect(await q(`select record_key from facetdb.jobs`)).toEqual([
-      { record_key: "13:public.orders:1" },
+      { record_key: "t:13:public.orders:1" },
     ]);
     expect(await q(`select id from facetdb.projects`)).toEqual([{ id: "proj_orders" }]);
     expect(await q(`select table_name from facetdb.table_owners`)).toEqual([

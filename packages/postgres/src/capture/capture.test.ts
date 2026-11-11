@@ -10,6 +10,7 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
 import type { StorageMode } from "../scan/index.ts";
+import { CLAIM_LEASE_MS } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { createPostgresConnector, type Installer, type PostgresConnector } from "./connector.ts";
 import { stateHashSql } from "./hash-sql.ts";
@@ -174,6 +175,15 @@ class World {
     return rows.map((row) => String(row["record_key"]));
   }
 
+  /** The worker holding a queued key, or null when it is waiting. */
+  async claimOf(queuedKey: string): Promise<string | null> {
+    const rows = await this.pg.client.query(
+      `select claimed_by from facetdb.jobs where record_key = $1`,
+      [queuedKey],
+    );
+    return rows[0] === undefined ? null : (rows[0]["claimed_by"] as string | null);
+  }
+
   async close(): Promise<void> {
     for (const connector of this.open.splice(0)) {
       await connector.close();
@@ -273,7 +283,7 @@ describe("postgres connector", () => {
       await connector.write("r1", decided(), hash);
       expect(await world.statusOf("r1")).toBe("done");
       await world.edit("r1", { title: "edited", body: "b" });
-      expect(await world.queued()).toEqual(["15:public.listings:r1"]);
+      expect(await world.queued()).toEqual(["t:15:public.listings:r1"]);
       expect(await world.statusOf("r1")).toBe(onChange === "reset" ? "pending" : "done");
       expect((await world.decisionOf("r1"))?.decisions).toEqual(decided().decisions);
     }
@@ -292,10 +302,76 @@ describe("postgres connector", () => {
       await world.edit("r1", { title: "edited meanwhile", body: "b" });
       await connector.ack(["r1"]);
       // The job survived the ack and is claimable again: nothing is lost.
-      expect(await world.queued()).toEqual(["15:public.listings:r1"]);
+      expect(await world.queued()).toEqual(["t:15:public.listings:r1"]);
       expect(await connector.claim(10)).toEqual(["r1"]);
       expect(await world.statusOf("r1")).toBe("pending");
     }
+  });
+
+  it("an ack after the job was granted again deletes nothing: the job stays for the second batch", async () => {
+    const world = await newWorld();
+    const connector = world.connector();
+    await connector.install();
+    await world.edit("r1", { title: "a", body: "b" });
+    expect(await connector.claim(10)).toEqual(["r1"]);
+    // The first batch outlives its lease; the same worker is granted the job again for a second batch.
+    world.clock.advance(CLAIM_LEASE_MS + 1);
+    expect(await connector.claim(10)).toEqual(["r1"]);
+    await connector.ack(["r1"]);
+    expect(await world.queued()).toEqual(["t:15:public.listings:r1"]);
+    expect(await world.claimOf("t:15:public.listings:r1")).toBe("w1");
+    // The second batch's ack finds its own claim and takes the job.
+    await connector.ack(["r1"]);
+    expect(await world.queued()).toEqual([]);
+  });
+
+  it("a release after the job was granted again leaves the new claim alone", async () => {
+    const world = await newWorld();
+    const connector = world.connector();
+    await connector.install();
+    await world.edit("r1", { title: "a", body: "b" });
+    expect(await connector.claim(10)).toEqual(["r1"]);
+    world.clock.advance(CLAIM_LEASE_MS + 1);
+    expect(await connector.claim(10)).toEqual(["r1"]);
+    await connector.release(["r1"]);
+    expect(await world.claimOf("t:15:public.listings:r1")).toBe("w1");
+    expect(await connector.claim(10)).toEqual([]);
+    await connector.release(["r1"]);
+    expect(await world.claimOf("t:15:public.listings:r1")).toBeNull();
+    expect(await connector.claim(10)).toEqual(["r1"]);
+  });
+
+  it("an ack and a release settle each key in a statement of its own", async () => {
+    const world = await newWorld();
+    const statements: string[] = [];
+    const connector = createPostgresConnector({
+      workerUrl: "pglite://worker",
+      source: world.source,
+      questionSet,
+      clock: world.clock,
+      workerId: "w1",
+      installer: world.installer(),
+      connect: () => ({
+        ...world.pg.client,
+        query: (text, params) => {
+          statements.push(text);
+          return world.pg.client.query(text, params);
+        },
+      }),
+    });
+    await connector.install();
+    await world.edit("r1", { title: "a", body: "b" });
+    await world.edit("r2", { title: "a", body: "b" });
+    expect([...(await connector.claim(10))].sort()).toEqual(["r1", "r2"]);
+    statements.length = 0;
+    await connector.release(["r1", "r2"]);
+    expect(statements).toHaveLength(2);
+    expect([...(await connector.claim(10))].sort()).toEqual(["r1", "r2"]);
+    statements.length = 0;
+    await connector.ack(["r1", "r2"]);
+    expect(statements).toHaveLength(2);
+    expect(await world.queued()).toEqual([]);
+    await connector.close();
   });
 
   it("writes only FacetDB's own columns, named one by one", async () => {

@@ -230,7 +230,7 @@ revoke create on schema "facetdb" from "facetdb_enqueue";
 drop trigger if exists "facetdb_listings" on "public"."listings";
 
 create trigger "facetdb_listings" before insert or update of "title", "description"
-  on "public"."listings" for each row execute function "facetdb"."enqueue"('id', '15:public.listings:');
+  on "public"."listings" for each row execute function "facetdb"."enqueue"('id', 't:15:public.listings:');
 
 -- the worker password: set by `facetdb migrate` for the transaction, never printed;
 -- run by hand, this script stops at the role below with a FacetDB message and changes nothing;

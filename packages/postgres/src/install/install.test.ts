@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { SqlClient, SqlConnect } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { type MigratePlan, type MigrateResult, migrate } from "./migrate.ts";
-import { ENQUEUE_ROLE, installSql, renderSql, WORKER_ROLE } from "./sql.ts";
+import { ENQUEUE_ROLE, installSql, queueKeyPrefix, renderSql, WORKER_ROLE } from "./sql.ts";
 
 /**
  * The listings example: public.listings keyed by id, the state columns title and description, one
@@ -223,12 +223,21 @@ describe("installSql", () => {
     );
     const texts = statements.map((s) => s.text).join("\n");
     expect(texts).toContain('"My Schema"."odd""na$$me"');
-    expect(texts).toContain("'Id', '20:My Schema.odd\"na$$me:'");
+    expect(texts).toContain("'Id', 't:20:My Schema.odd\"na$$me:'");
     const inBlocks = statements.filter((s) => s.text.startsWith("do $$")).map((s) => s.text);
     for (const block of inBlocks) {
       expect(block).not.toContain("odd");
       expect(block).not.toContain("My Schema");
     }
+  });
+
+  it("gives no table a queue prefix that another table's keys start with", () => {
+    const plain = queueKeyPrefix({ table: "a" });
+    const colon = queueKeyPrefix({ table: "a:b" });
+    expect(plain).toBe("t:8:public.a:");
+    expect(colon.startsWith(plain)).toBe(false);
+    expect(`${colon}1`.startsWith(plain)).toBe(false);
+    expect(queueKeyPrefix({ table: "a", schema: "s" })).not.toBe(plain);
   });
 });
 
@@ -297,7 +306,7 @@ describe("migrate on PGlite", () => {
     await listingsTable();
     await run();
     await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
     expect(await status(1)).toBe("pending");
     await world.client.query(`delete from facetdb.jobs`);
     await world.client.query(
@@ -308,10 +317,10 @@ describe("migrate on PGlite", () => {
     await world.client.query(`update public.listings set secret = 'x' where id = 1`);
     expect(await jobs()).toEqual([]);
     await world.client.query(`update public.listings set title = 'changed' where id = 1`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
     expect(await status(1)).toBe("pending");
     await world.client.query(`update public.listings set description = 'again' where id = 1`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
   });
 
   it("onChange keep enqueues the change and leaves the status", async () => {
@@ -321,7 +330,7 @@ describe("migrate on PGlite", () => {
     await world.client.query(`delete from facetdb.jobs`);
     await world.client.query(`update public.listings set facetdb_status = 'done' where id = 1`);
     await world.client.query(`update public.listings set title = 'changed' where id = 1`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
     expect(await status(1)).toBe("done");
   });
 
@@ -332,7 +341,7 @@ describe("migrate on PGlite", () => {
     await world.client.query(
       `insert into public."price$$""list" (title, description) values ('a', 'b')`,
     );
-    expect(await jobs()).toEqual(['19:public.price$$"list:1']);
+    expect(await jobs()).toEqual(['t:19:public.price$$"list:1']);
     const policies = await world.client.query(
       `select policyname from pg_policies where tablename = $1 order by 1`,
       ['price$$"list'],
@@ -451,7 +460,7 @@ describe("migrate on PGlite", () => {
     );
     expect(create).toEqual([{ can_create: false }]);
     await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
   });
 
   it("refuses a password that would lock another project out, unless rotated on purpose", async () => {
@@ -534,7 +543,7 @@ describe("migrate on PGlite", () => {
     await listingsTable();
     await run();
     await world.client.query(`insert into public.listings (title, description) values ('a', 'b')`);
-    expect(await jobs()).toEqual(["15:public.listings:1"]);
+    expect(await jobs()).toEqual(["t:15:public.listings:1"]);
   });
 
   it("refuses a marked column whose question changed type", async () => {

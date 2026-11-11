@@ -162,17 +162,19 @@ export function triggerName(source: Pick<TableSource, "table">): string {
 }
 
 /**
- * What the trigger writes into `facetdb.jobs` for a record: the table's qualified name, a colon
- * and the key as text (`::text`, so a numeric key reads `42` and a uuid its canonical form; the
- * connector runtime compares keys in that form). The queue table is shared by every table of the
- * database (and by the store, which prefixes its sources the same way), so a bare key from two
+ * What the trigger writes into `facetdb.jobs` for a record: `t:`, the table's qualified name, a
+ * colon and the key as text (`::text`, so a numeric key reads `42` and a uuid its canonical form;
+ * the connector runtime compares keys in that form). The queue table is shared by every table of
+ * the database (and by the store, which prefixes its sources the same way), so a bare key from two
  * tables would collide; the runtime claims with this prefix (`jobsQueries.claim`, `$1`).
  */
 export function queueKeyPrefix(source: Pick<TableSource, "table" | "schema">): string {
-  // Length-prefixed, as the store's `queuePrefix` is: `public.listings` and a table named
-  // `listings:1` can never read as one another's keys.
+  // The `t:` marks a table of the customer's database; the store's prefixes begin with a digit
+  // (`N:<id>:`), so a store source whose id reads `schema.table` can never share a prefix with it.
+  // The length makes the prefix self-delimiting: `public.a` and a table named `a:b` can never read
+  // as one another's keys (`t:8:public.a:` is not a prefix of `t:10:public.a:b:`).
   const qualified = `${source.schema ?? "public"}.${source.table}`;
-  return `${qualified.length}:${qualified}:`;
+  return `t:${qualified.length}:${qualified}:`;
 }
 
 function functionName(onChange: OnChange): string {

@@ -96,6 +96,21 @@ async function drainQueue(): Promise<void> {
   await admin.query(`delete from facetdb.jobs`);
 }
 
+/** Returns once some session waits for a lock, as the worker's ack does behind the open transaction. */
+async function waitForALockWait(): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const waiting = await admin.query(
+      `select 1 from pg_stat_activity where datname = current_database() and usename = $1 and wait_event_type = 'Lock'`,
+      [WORKER_ROLE],
+    );
+    if (waiting.length > 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("the worker's ack never waited for the application's transaction");
+}
+
 describe("two workers on one queue", () => {
   it("never claim the same key, and together take them all", async () => {
     await drainQueue();
@@ -125,6 +140,34 @@ describe("two workers on one queue", () => {
     });
     expect([...(await later.claim(10))].sort()).toEqual(keys);
     await later.ack(keys);
+  });
+
+  it("an ack meeting an application transaction that edits the keys in the other order finishes, with no deadlock", async () => {
+    await drainQueue();
+    const [a, b] = await seed("order", 2);
+    const w = worker("order-w");
+    expect([...(await w.claim(10))].sort()).toEqual([a, b]);
+    let acked: Promise<void> | undefined;
+    // The application edits B first, then A, in one transaction; its trigger holds each job row
+    // until the commit. The worker acks A, then B, while the transaction is open: B's ack must wait
+    // for the application alone, holding nothing the application needs next.
+    await admin.transaction(async (query) => {
+      await query(`update public.listings set title = 'edited' where id = $1`, [b]);
+      acked = w.ack([a ?? "", b ?? ""]);
+      await waitForALockWait();
+      await query(`update public.listings set title = 'edited' where id = $1`, [a]);
+    });
+    await acked;
+    // Both edits queued their keys again; the worker's claims were cleared by the triggers.
+    expect(
+      await admin.query(
+        `select record_key, claimed_by from facetdb.jobs where starts_with(record_key, 't:15:public.listings:order-') order by 1`,
+      ),
+    ).toEqual([
+      { record_key: `t:15:public.listings:${a}`, claimed_by: null },
+      { record_key: `t:15:public.listings:${b}`, claimed_by: null },
+    ]);
+    await drainQueue();
   });
 
   it("@timing LISTEN across connections wakes a watch long before its poll", async () => {
@@ -198,6 +241,85 @@ describe("the worker login on a side-table source", () => {
         `select title, facetdb_status from public.notes_with_answers where id = 'n1'`,
       ),
     ).toEqual([{ title: "a note", facetdb_status: "needs_review" }]);
+  });
+});
+
+// The connector hands keys around as text; the server infers the key column's type for every
+// parameter that is compared with it (`id = $1`, `id = any($1)`). Text keys alone would never show
+// a cast that goes wrong, so an integer and a uuid key take the same path here.
+describe.each([
+  { table: "items_serial", definition: "id serial primary key", key: (n: number) => String(n) },
+  {
+    table: "items_uuid",
+    definition: "id uuid primary key default gen_random_uuid()",
+    key: undefined,
+  },
+])("a $table key through install, watch, read, write and ack", ({ table, definition, key }) => {
+  it("is queued, read, written under the hash guard and acked as text", async () => {
+    await admin.query(`create table public.${table} (${definition}, title text, body text)`);
+    const installed = await migrate({
+      adminUrl: scratch.url,
+      print: () => undefined,
+      plan: {
+        source: { table },
+        questionSet,
+        project: { id: "proj_listings", name: "Listings" },
+      },
+    });
+    if (!installed.ok) {
+      throw new Error(installed.reason);
+    }
+    const inserted = await admin.query(
+      `insert into public.${table} (title, body) values ('a', 'b') returning id::text as id`,
+    );
+    const id = String(inserted[0]?.["id"]);
+    if (key !== undefined) {
+      expect(id).toBe(key(1));
+    } else {
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    }
+    const w = createPostgresConnector({
+      workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+      source: { table, key: "id" },
+      questionSet,
+      clock: realClock,
+      pollMs: POLL_MS,
+      workerId: `typed-${table}`,
+    });
+    open.push(w);
+    const iterator = w.watch()[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.done).toBe(false);
+    expect(first.value).toEqual([id]);
+    await iterator.return?.();
+    expect(await w.claim(10)).toEqual([id]);
+    const { rows, missing } = await w.read([id]);
+    expect(missing).toEqual([]);
+    expect(rows[0]?.key).toBe(id);
+    expect(
+      await w.write(
+        id,
+        {
+          decisions: {
+            not_priority: { kind: "decided", value: true, probabilityOrConfidence: 0.9 },
+          },
+          status: "done",
+        },
+        rows[0]?.hash ?? "",
+      ),
+    ).toEqual({ written: true });
+    expect(await w.write(id, { decisions: {}, status: "pending" }, "stale")).toEqual({
+      written: false,
+    });
+    await w.ack([id]);
+    expect(
+      await admin.query(`select record_key from facetdb.jobs where record_key like $1`, [
+        `t:%:public.${table}:%`,
+      ]),
+    ).toEqual([]);
+    expect(await admin.query(`select not_priority, facetdb_status from public.${table}`)).toEqual([
+      { not_priority: true, facetdb_status: "done" },
+    ]);
   });
 });
 
