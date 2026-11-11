@@ -148,6 +148,37 @@ function holdLock(statement: string, params: readonly unknown[]) {
   return { holding: holding.promise, release: () => release.resolve(), done };
 }
 
+describe("the decision log on a real Postgres", () => {
+  it("reads back the answers it wrote as objects, not as a JSON string of them", async () => {
+    // postgres.js learns that `$6::jsonb` is jsonb and ran JSON.stringify on the already
+    // stringified answers, so the stored value was a JSON string and every read failed with
+    // "expected a JSON object" (seen on Supabase, 2026-11-01). PGlite never serialized.
+    const store = await newStore();
+    const log = store.log("listings");
+    const answers = {
+      is_scam: { type: "noul", probability: 0.25 },
+      category: { type: "choice", top: "flat", probabilities: [0, 1, 0] },
+    } as const;
+    await log.appendAnswer({
+      kind: "answer",
+      key: "1990",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "a".repeat(64),
+      answers,
+      usage: { inputTokens: 125, outputTokens: 20 },
+      at: new Date("2026-11-01T20:00:00.123456Z"),
+    });
+    const latest = await log.latestAnswer("1990");
+    expect(latest?.answers).toEqual(answers);
+    expect(latest?.usage).toEqual({ inputTokens: 125, outputTokens: 20 });
+    const stored = await open().query(
+      "select jsonb_typeof(answers) as kind from facetdb.decisions where record_key = '1990'",
+    );
+    expect(stored[0]?.["kind"]).toBe("object");
+  });
+});
+
 describe("reserve on a real Postgres", () => {
   it("waits for the lock on the month's usage row, so it counts what the holder commits", async () => {
     const store = await newStore();
