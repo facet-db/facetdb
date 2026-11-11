@@ -45,7 +45,9 @@ there, it does not exist: say so and suggest the nearest one that does.
 
 The model key, the store key and the API key are never in the config file. They come from the
 environment: `TYPESAFE_API_KEY`, `FACETDB_SECRET`, `FACETDB_API_KEY`. A connection string is read
-from the environment too (`process.env.DATABASE_URL`).
+from the environment too (`process.env.DATABASE_URL`). The worker logs in as `facetdb_worker`; a
+connection pooler's suffixed user is fine (the Supabase session pooler wants
+`facetdb_worker.<project ref>`), and `migrate` and `doctor` accept it.
 
 ## The config file
 

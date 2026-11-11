@@ -336,6 +336,21 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
     expect(lineFor(result.stdout, "install")).toMatch(/^skip.*database check did not pass/);
   });
 
+  it("database: a pooler-suffixed worker login passes and the line names the suffix", async () => {
+    await beat(0);
+    const pooled = configWith({
+      database: `postgres://${WORKER_ROLE}.jkqrabcd:s3cret-worker-password@aws-0.pooler.supabase.com:5432/postgres`,
+    });
+    const result = await doctor([], { config: pooled });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    const database = lineFor(result.stdout, "database");
+    expect(database).toMatch(/^ok/);
+    expect(database).toContain(
+      `logged in as ${WORKER_ROLE} (through a pooler as ${WORKER_ROLE}.jkqrabcd)`,
+    );
+    expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
+  });
+
   it("database: a login that is not the worker's", async () => {
     const result = await doctor([], { connect: asWorker(null) });
     expect(result.code).toBe(1);

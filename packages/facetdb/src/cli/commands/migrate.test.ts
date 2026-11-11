@@ -1,3 +1,4 @@
+import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
 import type { SqlConnect } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -305,6 +306,77 @@ describe("facetdb migrate", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("fix: set DATABASE_URL to postgres://facetdb_worker:");
     expect(result.stderr).toContain("https://docs.facetdb.dev/fix/worker-login");
+  });
+
+  function configLoggingInAs(database: string): ProjectConfig {
+    return facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database,
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+  }
+
+  it("accepts a pooler-suffixed worker login on the first install and takes the password from it", async () => {
+    const config = configLoggingInAs(
+      "postgres://facetdb_worker.jkqrabcd:pooled-password@aws-0.pooler.supabase.com:5432/postgres",
+    );
+    const bound: unknown[] = [];
+    const connect: SqlConnect = (url) => {
+      const inner = world.connect(url);
+      return {
+        ...inner,
+        transaction: (work) =>
+          inner.transaction((query) =>
+            work((text, params) => {
+              bound.push(...(params ?? []));
+              return query(text, params);
+            }),
+          ),
+      };
+    };
+    const result = await run(["migrate", "--yes", "--admin-url", ADMIN_URL], { config, connect });
+    expect(result.code, result.stderr).toBe(0);
+    // The password never reaches the server: the install binds a SCRAM verifier of it. Recompute the
+    // verifier from the salt the install chose, with the password written in the URL.
+    const verifier = bound.find(
+      (value): value is string => typeof value === "string" && value.startsWith("SCRAM-SHA-256$"),
+    );
+    expect(verifier).toBeDefined();
+    const salt = Buffer.from(String(verifier).split("$")[1]?.split(":")[1] ?? "", "base64");
+    const salted = pbkdf2Sync("pooled-password", salt, 4096, 32, "sha256");
+    const storedKey = createHash("sha256")
+      .update(createHmac("sha256", salted).update("Client Key").digest())
+      .digest("base64");
+    expect(verifier).toContain(`$${storedKey}:`);
+    const roles = await world.client.query(
+      "select 1 from pg_catalog.pg_roles where rolname = 'facetdb_worker'",
+    );
+    expect(roles).toHaveLength(1);
+    expect(result.stdout).not.toContain("pooled-password");
+  });
+
+  it.each([
+    ["an empty suffix", "postgres://facetdb_worker.:pw-pw-pw@localhost/app"],
+    ["a longer role name", "postgres://facetdb_workerx:pw-pw-pw@localhost/app"],
+    ["a longer role name with a suffix", "postgres://facetdb_workerx.abc:pw-pw-pw@localhost/app"],
+    ["two dots", "postgres://facetdb_worker.a.b:pw-pw-pw@localhost/app"],
+    ["the admin through the pooler", "postgres://postgres.jkqrabcd:pw-pw-pw@localhost/app"],
+  ])("refuses %s as the worker login, showing both accepted forms", async (_name, database) => {
+    const result = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL], {
+      config: configLoggingInAs(database),
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("fix: set DATABASE_URL to postgres://facetdb_worker:");
+    expect(result.stderr).toContain("postgres://facetdb_worker.<suffix>:");
+    expect(result.stderr).toContain("https://docs.facetdb.dev/fix/worker-login");
+    expect(await facetdbSchemaExists()).toBe(false);
   });
 
   it("drops a removed question's columns with --prune, after showing it", async () => {

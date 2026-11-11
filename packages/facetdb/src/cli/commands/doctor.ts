@@ -10,7 +10,7 @@ import {
 } from "@facetdb/postgres";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, defineCommand } from "../program.ts";
-import { databaseLabel, projectRef, questionSetOf } from "./database.ts";
+import { databaseLabel, projectRef, questionSetOf, workerLoginOf } from "./database.ts";
 
 /**
  * `facetdb doctor`: runs the checks in order, prints one line each with the fix, and exits 1 naming
@@ -164,6 +164,7 @@ const databaseReachable: Check = {
     const problems: string[] = [];
     let fix = "";
     const reached: string[] = [];
+    const pooled = new Set<string>();
     for (const source of sources) {
       const { url, variable } = connectionOf(source, deps.env);
       if (url === undefined) {
@@ -182,6 +183,10 @@ const databaseReachable: Check = {
           );
           fix = `set ${variable} to ${WORKER_URL_SHAPE}; facetdb migrate creates that login with the password in it, and it is the only login the worker needs`;
         } else {
+          const suffix = workerLoginOf(url)?.suffix;
+          if (suffix !== undefined) {
+            pooled.add(`${WORKER_ROLE}.${suffix}`);
+          }
           reached.push(`${source.name} on ${databaseLabel(url)}`);
         }
       } catch (error) {
@@ -192,7 +197,9 @@ const databaseReachable: Check = {
       }
     }
     return problems.length === 0
-      ? ok(`logged in as ${WORKER_ROLE}: ${reached.join(", ")}`)
+      ? ok(
+          `logged in as ${WORKER_ROLE}${pooled.size === 0 ? "" : ` (through a pooler as ${[...pooled].join(", ")})`}: ${reached.join(", ")}`,
+        )
       : fail(problems.join("; "), fix);
   },
 };

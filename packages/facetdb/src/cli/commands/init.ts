@@ -265,7 +265,7 @@ export const initCommand = defineCommand<InitOptions>("init", {
         [
           "Next:",
           `  1. Edit ${options.config}: the columns to read and your own question.`,
-          "  2. Set DATABASE_URL to the connection string. The worker logs in as facetdb_worker, so use postgres://facetdb_worker:<a long random password>@host/database; facetdb migrate creates that login with that password.",
+          "  2. Set DATABASE_URL to the connection string. The worker logs in as facetdb_worker, so use postgres://facetdb_worker:<a long random password>@host/database; facetdb migrate creates that login with that password. A connection pooler's suffixed user is fine (the Supabase session pooler wants facetdb_worker.<project ref>).",
           "  3. facetdb doctor checks the setup, facetdb preview answers 20 rows without changing anything, facetdb migrate shows the SQL before it runs.",
         ].join("\n"),
       );

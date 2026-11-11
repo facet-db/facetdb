@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { QuestionSet } from "@facetdb/core";
-import type { ProjectRef } from "@facetdb/postgres";
+import { type ProjectRef, WORKER_ROLE } from "@facetdb/postgres";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -139,6 +139,28 @@ export async function adminUrl(deps: CliDeps, given: string | undefined): Promis
     );
   }
   return url.trim();
+}
+
+/** `facetdb_worker`, or `facetdb_worker.<suffix>` with one dot and a suffix of letters, digits, `_`, `-`. */
+const WORKER_LOGIN = new RegExp(`^${WORKER_ROLE}(?:\\.([A-Za-z0-9_-]+))?$`);
+
+/**
+ * The worker login a connection string names. A connection pooler routes by the user (Supabase's
+ * session pooler wants `facetdb_worker.<project ref>`) while Postgres still reports the role as
+ * `facetdb_worker`, so the user is the role alone or the role plus a pooler suffix. Any other user,
+ * `postgres.<ref>` (the admin through the pooler) included, is not the worker login: `undefined`.
+ */
+export function workerLoginOf(
+  url: string,
+): { readonly role: string; readonly suffix: string | undefined } | undefined {
+  let username: string;
+  try {
+    username = decodeURIComponent(new URL(url).username);
+  } catch {
+    return undefined;
+  }
+  const match = WORKER_LOGIN.exec(username);
+  return match === null ? undefined : { role: WORKER_ROLE, suffix: match[1] };
 }
 
 /** Where a connection string points, without its user or password: what a confirmation names. */

@@ -18,6 +18,7 @@ import {
   sameAsShown,
   type TableTarget,
   tableTargets,
+  workerLoginOf,
 } from "./database.ts";
 
 /**
@@ -62,7 +63,7 @@ async function workerRoleExists(deps: CliDeps, url: string): Promise<boolean> {
  */
 function workerPassword(target: TableTarget): string {
   const variable = target.source.databaseEnv ?? "DATABASE_URL";
-  const fix = `set ${variable} to postgres://${WORKER_ROLE}:<a long random password>@<host>/<database>; migrate creates that login with that password, and the worker connects with it`;
+  const fix = `set ${variable} to postgres://${WORKER_ROLE}:<a long random password>@<host>/<database> (or postgres://${WORKER_ROLE}.<suffix>:… when a connection pooler such as the Supabase session pooler asks for a suffixed user); migrate creates that login with that password, and the worker connects with it`;
   if (target.source.database === undefined) {
     throw new CliError(
       "worker-login",
@@ -76,7 +77,7 @@ function workerPassword(target: TableTarget): string {
   } catch {
     throw new CliError("worker-login", `the connection string in ${variable} is not a URL`, fix);
   }
-  if (decodeURIComponent(url.username) !== WORKER_ROLE || url.password === "") {
+  if (workerLoginOf(target.source.database) === undefined || url.password === "") {
     throw new CliError(
       "worker-login",
       `the worker login ${WORKER_ROLE} does not exist yet, and ${variable} does not log in as it with a password`,
