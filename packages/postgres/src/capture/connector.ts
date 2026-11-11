@@ -106,7 +106,11 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     sideTable: true,
     multipleWorkers: true,
   };
+  // `close()` sets the flag while `watch` awaits; the loop reads it through a call because
+  // TypeScript narrows a bare flag to `false` inside `while (!closed)` and would call the later
+  // check dead.
   let closed = false;
+  const isClosed = () => closed;
   let wake: (() => void) | undefined;
 
   // Every state column is cast to text in SQL so the hash is over the database's own text.
@@ -137,14 +141,14 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
   async function* watch(): AsyncGenerator<readonly RecordKey[], void, undefined> {
     // A notification sets the flag; a pass that found it skips the sleep. Keys already announced
     // and still waiting are not announced again; a key claimed and queued again is.
-    let signalled = false;
+    let signalled = false as boolean; // set by the listener below
     const unlisten = await client.listen?.(JOBS_CHANNEL, () => {
       signalled = true;
       wake?.();
     });
     try {
       let announced = new Set<RecordKey>();
-      while (!closed) {
+      while (!isClosed()) {
         const rows = await client.query(jobsQueries.waiting, [prefix, WATCH_BATCH]);
         const waiting = rows.map((row) => unqueued(requireText(row["record_key"], "record_key")));
         const fresh = waiting.filter((key) => !announced.has(key));
@@ -152,7 +156,7 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
         if (fresh.length > 0) {
           yield fresh;
         }
-        if (closed) {
+        if (isClosed()) {
           return;
         }
         if (!signalled) {
@@ -168,7 +172,7 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
       }
     } finally {
       // After `close()` the connection is gone and so is the subscription; nothing to undo.
-      if (!closed) {
+      if (!isClosed()) {
         await unlisten?.();
       }
     }

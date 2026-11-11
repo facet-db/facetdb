@@ -25,7 +25,10 @@ export function checkRoute(service: CheckService): Hono<AppEnv> {
         400,
         "invalid_request",
         `The request body is not valid: ${body.error.issues
-          .map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`)
+          .map(
+            (issue) =>
+              `${issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue.message}`,
+          )
           .join("; ")}.`,
         'Send {"source": "<source name>", "id": "<record id>", "record": {"<field>": "<text or null>"}}.',
       );

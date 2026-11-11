@@ -1,7 +1,7 @@
 import type { QuestionSet } from "@facetdb/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { connectPostgres, type SqlClient } from "../sql/index.ts";
-import { createScratchDatabase, type ScratchDatabase } from "../testing/postgres.ts";
+import { createScratchDatabase, type ScratchDatabase } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { ENQUEUE_ROLE, WORKER_ROLE } from "./sql.ts";
 
@@ -30,6 +30,8 @@ const PASSWORD = "a-long-random-password-for-tests";
 let scratch: ScratchDatabase;
 let admin: SqlClient;
 let worker: SqlClient;
+/** Every connection opened so far, closed in afterAll even when beforeAll stopped halfway. */
+const open: SqlClient[] = [];
 
 async function dropRole(): Promise<void> {
   await scratch.admin(`drop role if exists ${WORKER_ROLE}`).catch(() => undefined);
@@ -40,6 +42,7 @@ beforeAll(async () => {
   scratch = await createScratchDatabase();
   await dropRole();
   admin = connectPostgres(scratch.url);
+  open.push(admin);
   await admin.query(
     `create table public.listings (id serial primary key, title text, description text, secret text)`,
   );
@@ -60,12 +63,16 @@ beforeAll(async () => {
     throw new Error(result.reason);
   }
   worker = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
+  open.push(worker);
 });
 
 afterAll(async () => {
-  await worker?.close();
-  await admin?.close();
-  await scratch?.drop();
+  // Newest first, so the worker's connection is gone before the admin's and the scratch database
+  // can be dropped; a beforeAll that failed before `worker` existed still cleans up what it opened.
+  for (const connection of open.splice(0).reverse()) {
+    await connection.close();
+  }
+  await scratch.drop();
   await dropRole();
 });
 

@@ -2,7 +2,7 @@ import type { Clock, QuestionSet, RecordKey } from "@facetdb/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ENQUEUE_ROLE, migrate, WORKER_ROLE } from "../install/index.ts";
 import { CLAIM_LEASE_MS, connectPostgres, type SqlClient } from "../sql/index.ts";
-import { createScratchDatabase, type ScratchDatabase } from "../testing/postgres.ts";
+import { createScratchDatabase, type ScratchDatabase } from "../testing/index.ts";
 import { createPostgresConnector, type PostgresConnector } from "./connector.ts";
 
 /**
@@ -75,8 +75,8 @@ afterAll(async () => {
   for (const connector of open.splice(0)) {
     await connector.close();
   }
-  await admin?.close();
-  await scratch?.drop();
+  await admin.close();
+  await scratch.drop();
   await dropRoles();
 });
 

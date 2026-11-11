@@ -10,7 +10,7 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
 import type { StorageMode } from "../scan/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/pglite.ts";
+import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { createPostgresConnector, type Installer, type PostgresConnector } from "./connector.ts";
 import { stateHashSql } from "./hash-sql.ts";
 

@@ -275,7 +275,9 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     }
 
     /** Set when the spending cap refuses a request: no record after it is asked, in this run. */
-    let paused = false;
+    // `as boolean`: the flag is set inside `settle`, a flow TypeScript does not follow, so a bare
+    // `false` would be narrowed to the literal and every later read read as always false.
+    let paused = false as boolean;
 
     async function settle(row: ReadRow): Promise<void> {
       if (paused) {

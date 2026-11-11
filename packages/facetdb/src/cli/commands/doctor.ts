@@ -249,9 +249,10 @@ async function installProblems(
         missing.push(`the trigger ${triggerName({ table })} on ${label} is disabled`);
       }
       const expected = [...source.read].sort().join(",");
-      if (String(trigger["columns"]) !== expected) {
+      const watched = String(trigger["columns"]);
+      if (watched !== expected) {
         missing.push(
-          `the trigger on ${label} watches ${String(trigger["columns"]) || "no columns"}, not the columns the questions read (${expected})`,
+          `the trigger on ${label} watches ${watched === "" ? "no columns" : watched}, not the columns the questions read (${expected})`,
         );
       }
     }

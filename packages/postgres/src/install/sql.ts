@@ -453,7 +453,7 @@ function renderStatement(statement: InstallStatement): string {
   if (statement.params.length === 0) {
     return statement.text;
   }
-  if (statement.redacted) {
+  if (statement.redacted === true) {
     // Not rendered at all, not even with a placeholder: inside the printed transaction a
     // placeholder would become the login's password when a human runs the script. Without the
     // setting, the role block raises FacetDB's own message and the transaction rolls back.

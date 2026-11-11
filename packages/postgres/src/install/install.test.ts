@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import type { QuestionSet } from "@facetdb/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SqlClient, SqlConnect } from "../sql/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/pglite.ts";
+import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { type MigratePlan, type MigrateResult, migrate } from "./migrate.ts";
 import { ENQUEUE_ROLE, installSql, renderSql, WORKER_ROLE } from "./sql.ts";
 
@@ -77,9 +77,10 @@ async function listingsTable(
   world = await createPgliteWorld();
   worlds.push(world);
   const name = options.table ?? "listings";
-  const key = options.compositeKey ? "id integer, region text" : "id serial primary key";
+  const composite = options.compositeKey === true;
+  const key = composite ? "id integer, region text" : "id serial primary key";
   await world.client.query(
-    `create table public."${name.replaceAll('"', '""')}" (${key}, title text, description text, secret text${options.extraColumns ?? ""}${options.compositeKey ? ", primary key (id, region)" : ""})`,
+    `create table public."${name.replaceAll('"', '""')}" (${key}, title text, description text, secret text${options.extraColumns ?? ""}${composite ? ", primary key (id, region)" : ""})`,
   );
   return world;
 }

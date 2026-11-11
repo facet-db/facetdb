@@ -110,7 +110,11 @@ export function createPollingConnector(options: PollingConnectorOptions): Pollin
   // The in-process queue: one entry per record, waiting or claimed by this worker.
   const waiting = new Set<RecordKey>();
   const claimed = new Set<RecordKey>();
+  // `close()` sets the flag while `watch` awaits; the loop reads it through a call because
+  // TypeScript narrows a bare flag to `false` inside `while (!closing)` and would call the later
+  // check dead.
   let closing = false;
+  const isClosing = () => closing;
 
   // Every column is cast to text in SQL so the hash is over the database's own text.
   const stateColumns = fields.map((field, index) => `${quoteIdent(field)}::text as s${index}`);
@@ -230,12 +234,12 @@ export function createPollingConnector(options: PollingConnectorOptions): Pollin
       );
     }
     let cursor: string | null = null;
-    while (!closing) {
+    while (!isClosing()) {
       let polled: { keys: RecordKey[]; cursor: string | null };
       try {
         polled = await detect(cursor);
       } catch (error) {
-        if (closing) {
+        if (isClosing()) {
           return;
         }
         throw error;

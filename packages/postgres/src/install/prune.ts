@@ -148,7 +148,7 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
     }
     const sql = renderSql(statements);
     options.print(sql);
-    if (options.dryRun) {
+    if (options.dryRun === true) {
       return { ok: true, dropped, statements, sql, applied: false };
     }
     await client.transaction(async (query) => {

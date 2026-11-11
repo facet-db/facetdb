@@ -32,11 +32,33 @@
         "useImportType": "error",
         "useExportType": "error",
         "noNonNullAssertion": "error",
-        "useConsistentTypeDefinitions": { "level": "error", "options": { "style": "type" } }
+        "useConsistentTypeDefinitions": { "level": "error", "options": { "style": "type" } },
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "patterns": [
+              {
+                "group": ["../**", "!../**/index.ts", "!../*", "!../../*", "!../../../*"],
+                "message": "This import reaches inside another module. Import it through the module's barrel, ../<module>/index.ts: the barrel is the only cross-module door. Across packages, import the package by name."
+              }
+            ]
+          }
+        }
       },
       "complexity": { "useOptionalChain": "error" },
       "nursery": { "noFloatingPromises": "error", "noMisusedPromises": "error" }
     }
   },
-  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "overrides": [
+    {
+      "includes": [
+        "packages/model/**",
+        "packages/server/**",
+        "packages/facetdb/src/e2e/listings.e2e.test.ts",
+        "packages/facetdb/src/skill/skill.test.ts"
+      ],
+      "linter": { "rules": { "style": { "noRestrictedImports": "off" } } }
+    }
+  ]
 }

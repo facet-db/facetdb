@@ -11,5 +11,7 @@ export default defineConfig({
     // cold checkout still boots slower than a warm one: 15 s leaves a hang failing.
     globalSetup: ["./src/testing/global-setup.ts"],
     testTimeout: 15_000,
+    // Same cap as the root config (an uncapped run spawns one worker per core; see vitest.config.ts).
+    maxWorkers: 4,
   },
 });

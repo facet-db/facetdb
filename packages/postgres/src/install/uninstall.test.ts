@@ -1,7 +1,7 @@
 import type { QuestionSet } from "@facetdb/core";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SqlClient, SqlConnect, SqlQuery } from "../sql/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/pglite.ts";
+import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { type MigrateSource, migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
 import { type InstallStatement, type ProjectRef, renderSql } from "./sql.ts";

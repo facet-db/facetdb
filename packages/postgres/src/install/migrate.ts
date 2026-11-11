@@ -228,7 +228,7 @@ async function inspect(
       ? undefined
       : viewRows[0]?.["mark"] == null
         ? null
-        : String(viewRows[0]?.["mark"]);
+        : String(viewRows[0]["mark"]);
   const viewDependents =
     viewRows.length === 0
       ? 0
@@ -364,7 +364,7 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   if (!worker.exists && plan.workerPassword === undefined) {
     return `the worker role ${WORKER_ROLE} does not exist yet and no password was given for it; pass workerPassword on the first install.`;
   }
-  if (worker.exists && plan.workerPassword !== undefined && !plan.rotateWorkerPassword) {
+  if (worker.exists && plan.workerPassword !== undefined && plan.rotateWorkerPassword !== true) {
     const others = [
       ...inspection.otherProjects.map((id) => `project ${id} in this database`),
       ...(inspection.usedElsewhere ? ["another database on this server"] : []),
@@ -412,7 +412,7 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       plan.source.storage === "side-table" ? inspection.sideColumns : inspection.marked;
     const changed = installOwnedColumns(plan.questionSet).some((name) => !present.includes(name));
     const workerPasswordApplied = plan.workerPassword !== undefined;
-    if (options.dryRun) {
+    if (options.dryRun === true) {
       return { ok: true, key, statements, sql, applied: false, changed, workerPasswordApplied };
     }
     await client.transaction(async (query) => {

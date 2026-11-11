@@ -11,5 +11,7 @@ export default defineConfig({
     // The `facetdb types` tests spawn tsc on the generated declaration: seconds alone, more on
     // a loaded machine (6 s at load 15, 2026-11-01). A hang still fails at 30 s.
     testTimeout: 30_000,
+    // Same cap as the root config (an uncapped run spawns one worker per core; see vitest.config.ts).
+    maxWorkers: 4,
   },
 });

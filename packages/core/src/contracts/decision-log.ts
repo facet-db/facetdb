@@ -1,4 +1,4 @@
-import type { AnswerEntry, HumanEntry, LogEntry } from "../log/model.ts";
+import type { AnswerEntry, HumanEntry, LogEntry } from "../log/index.ts";
 import type { RecordKey } from "./connector.ts";
 
 /**

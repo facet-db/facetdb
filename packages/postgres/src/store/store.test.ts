@@ -11,7 +11,7 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { pgliteClient } from "../polling/index.ts";
 import { CLAIM_LEASE_MS, jobsTableSql } from "../sql/index.ts";
-import { freshPglite } from "../testing/pglite.ts";
+import { freshPglite } from "../testing/index.ts";
 import { createCrypto, newSalt } from "./crypto.ts";
 import { createStore, requireTls, type Store } from "./store.ts";
 

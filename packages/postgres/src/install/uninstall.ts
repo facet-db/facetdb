@@ -237,7 +237,7 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
     );
     const sql = renderSql(statements);
     options.print(sql);
-    if (options.dryRun) {
+    if (options.dryRun === true) {
       return { ok: true, statements, sql, applied: false };
     }
     const typed = await options.confirm({ project: installed.project });

@@ -213,7 +213,7 @@ export function runConnectorContract(
         ctx.skip();
         return;
       }
-      if (!fx.peer) {
+      if (fx.peer === undefined) {
         throw new Error("the fixture must supply a peer worker for the claim cases");
       }
       await fx.connector.install();
@@ -232,7 +232,7 @@ export function runConnectorContract(
         ctx.skip();
         return;
       }
-      if (!fx.peer) {
+      if (fx.peer === undefined) {
         throw new Error("the fixture must supply a peer worker for the claim cases");
       }
       await fx.connector.install();

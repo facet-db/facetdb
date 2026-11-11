@@ -7,5 +7,7 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
+    // Same cap as the root config (an uncapped run spawns one worker per core; see vitest.config.ts).
+    maxWorkers: 4,
   },
 });

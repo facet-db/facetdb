@@ -3,7 +3,7 @@ import type { Connector, QuestionSet, RecordDecision, RecordKey, StateValue } fr
 import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SqlClient } from "../sql/index.ts";
-import { freshPglite } from "../testing/pglite.ts";
+import { freshPglite } from "../testing/index.ts";
 import { createPollingConnector, type PollingConnector, pollingInstallSql } from "./index.ts";
 import { pgliteClient } from "./pglite-client.ts";
 

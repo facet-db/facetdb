@@ -9,7 +9,7 @@ import {
   renderSql,
 } from "../install/index.ts";
 import type { SqlQuery } from "../sql/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/pglite.ts";
+import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { createScan, type ScanOptions } from "./scan.ts";
 import { answerTarget, sideTableName, sideViewName } from "./side-table.ts";
 
@@ -68,7 +68,7 @@ async function migrateOn(
       source: overrides.source ?? { table: "listings", storage: "side-table" },
       questionSet: listings,
       project: overrides.project ?? project,
-      ...(overrides.reuseWorker ? {} : { workerPassword: "a-long-random-password" }),
+      ...(overrides.reuseWorker === true ? {} : { workerPassword: "a-long-random-password" }),
     },
   });
 }
