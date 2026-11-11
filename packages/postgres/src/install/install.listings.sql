@@ -63,7 +63,7 @@ grant usage on schema "facetdb" to "facetdb_enqueue";
 
 grant insert on "facetdb"."jobs" to "facetdb_enqueue";
 
-grant select (record_key) on "facetdb"."jobs" to "facetdb_enqueue";
+grant select (record_key), update (claimed_at, claimed_by) on "facetdb"."jobs" to "facetdb_enqueue";
 
 create or replace function "facetdb"."enqueue"() returns trigger
 language plpgsql security definer set search_path = '' as $$
@@ -74,7 +74,7 @@ begin
   new."facetdb_status" := 'pending';
   insert into "facetdb"."jobs" (record_key)
   values (tg_argv[1] || key)
-  on conflict (record_key) do nothing;
+  on conflict (record_key) do update set claimed_at = null, claimed_by = null;
   perform pg_notify('facetdb_jobs', '');
   return new;
 end $$;
@@ -87,7 +87,7 @@ begin
   execute format('select ($1).%I::text', tg_argv[0]) into key using new;
   insert into "facetdb"."jobs" (record_key)
   values (tg_argv[1] || key)
-  on conflict (record_key) do nothing;
+  on conflict (record_key) do update set claimed_at = null, claimed_by = null;
   perform pg_notify('facetdb_jobs', '');
   return new;
 end $$;

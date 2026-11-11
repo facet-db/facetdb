@@ -20,6 +20,12 @@ export function pgliteClient(db: PGlite): SqlClient {
           return result.rows;
         }),
       ),
+    async listen(channel, onNotify) {
+      // PGlite delivers a NOTIFY raised in this same instance to its listeners: enough to prove
+      // the wake-up path; two real connections are a *.db.test.ts matter.
+      const unlisten = await db.listen(channel, onNotify);
+      return () => unlisten();
+    },
     close: () => Promise.resolve(),
   };
 }

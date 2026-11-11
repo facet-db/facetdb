@@ -15,6 +15,11 @@ export type SqlClient = {
   readonly query: SqlQuery;
   /** Runs `work` in one transaction; it commits when `work` resolves and rolls back when it throws. */
   transaction<T>(work: (query: SqlQuery) => Promise<T>): Promise<T>;
+  /**
+   * `LISTEN channel`: `onNotify` runs on every notification until the returned function is
+   * awaited. Optional: a driver without it (a handwritten fake) leaves a connector to its poll.
+   */
+  listen?(channel: string, onNotify: (payload: string) => void): Promise<() => Promise<void>>;
   close(): Promise<void>;
 };
 
@@ -40,6 +45,12 @@ export const connectPostgres: SqlConnect = (url) => {
         });
         return result as never;
       }) as Promise<never>,
+    async listen(channel, onNotify) {
+      // postgres.js keeps one dedicated connection for every LISTEN and resubscribes after a
+      // reconnect; `unlisten` lets go of this channel's subscription.
+      const { unlisten } = await sql.listen(channel, onNotify);
+      return () => unlisten();
+    },
     close: () => sql.end(),
   };
 };

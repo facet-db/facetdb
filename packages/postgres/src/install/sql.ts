@@ -180,8 +180,10 @@ const SIDE_FUNCTION = `${quoteIdent(SCHEMA)}.${quoteIdent("enqueue_side")}`;
  * only the trigger. Both run as `facetdb_enqueue` with an empty search path (pg_catalog is
  * implicit), read only the key column named in the trigger's first argument (never the whole row:
  * converting every column would run every column type's code as the definer), insert the prefixed
- * key with `on conflict do nothing` (several changes before the worker arrives are asked once) and
- * notify, all inside the app's transaction. `enqueue` sets the status back to pending;
+ * key and notify, all inside the app's transaction. One row per record: several changes before a
+ * worker arrives are asked once; a change while a worker holds the job clears the claim instead
+ * (`on conflict … do update`), so that worker's `ack`, which deletes only its own claims, leaves the
+ * job for the new state to be asked (the store's `requeue` does the same). `enqueue` sets the status back to pending;
  * `enqueue_keep` leaves it, so a decided record keeps its decision until the new one lands.
  */
 function enqueueFunctions(side: boolean): readonly string[] {
@@ -195,7 +197,7 @@ begin
   execute format('select ($1).%I::text', tg_argv[0]) into key using new;
 ${onChange === "reset" ? `  new.${quoteIdent(STATUS_COLUMN)} := 'pending';\n` : ""}  insert into ${JOBS_TABLE} (record_key)
   values (tg_argv[1] || key)
-  on conflict (record_key) do nothing;
+  on conflict (record_key) do update set claimed_at = null, claimed_by = null;
   perform pg_notify('facetdb_jobs', '');
   return new;
 end $$`;
@@ -222,7 +224,7 @@ begin
                  tg_argv[2], tg_argv[3], ${status}, tg_argv[0], tg_argv[0], ${status}) using new;
   insert into ${JOBS_TABLE} (record_key)
   values (tg_argv[1] || key)
-  on conflict (record_key) do nothing;
+  on conflict (record_key) do update set claimed_at = null, claimed_by = null;
   perform pg_notify('facetdb_jobs', '');
   return new;
 end $$`;
@@ -333,8 +335,11 @@ end $$`),
     plain(`grant ${enqueuer} to current_user`),
     plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
     plain(`grant insert on ${JOBS_TABLE} to ${enqueuer}`),
-    // `on conflict (record_key)` reads the arbiter column, so the inserter needs select on it.
-    plain(`grant select (record_key) on ${JOBS_TABLE} to ${enqueuer}`),
+    // `on conflict (record_key)` reads the arbiter column, so the inserter needs select on it, and
+    // its `do update` clears the claim, so it needs update on those two columns and nothing else.
+    plain(
+      `grant select (record_key), update (claimed_at, claimed_by) on ${JOBS_TABLE} to ${enqueuer}`,
+    ),
     ...(side ? sideTableEnqueuerGrants(source, enqueuer).map(plain) : []),
     // Change capture: the functions and the trigger on the state columns only.
     ...enqueueFunctions(side).map(plain),
