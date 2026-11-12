@@ -135,7 +135,11 @@ function run(
 }
 
 /** Runs a command and records, at each prompt, everything printed so far: what the user had seen. */
-async function runSeeingPrompts(argv: readonly string[], answers: readonly string[]) {
+async function runSeeingPrompts(
+  argv: readonly string[],
+  answers: readonly string[],
+  config: ProjectConfig = fullConfig,
+) {
   let stdout = "";
   let stderr = "";
   const seen: string[] = [];
@@ -160,7 +164,7 @@ async function runSeeingPrompts(argv: readonly string[], answers: readonly strin
       },
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(fullConfig),
+      loadConfig: () => Promise.resolve(config),
       connect: world.connect,
       store: () => Promise.reject(new Error("no store")),
       provider: () => {
@@ -417,6 +421,119 @@ describe("facetdb migrate", () => {
     expect(pruned.code).toBe(0);
     expect(await columns()).not.toContain("category");
     expect(await columns()).toContain("is_scam");
+  });
+
+  it("--prune names each column to drop, kept or revoked with the reason, before and after the run", async () => {
+    const configReading = (read: readonly string[], storeProbabilities: boolean, urgent: boolean) =>
+      facetdb({
+        model: "jev-1.14.0",
+        sources: [
+          {
+            name: "listings",
+            database: WORKER_URL,
+            table: "listings",
+            read: [...read],
+            questions: {
+              is_scam: noul("Is this listing a scam?"),
+              category: choice(
+                "Which category is this listing?",
+                { car: "A car", flat: "A flat" },
+                { storeProbabilities },
+              ),
+              ...(urgent ? { urgent: noul("Does this listing need a reply today?") } : {}),
+            },
+          },
+        ],
+      });
+    const before = configReading(["title", "description"], true, true);
+    expect(
+      (await run(["migrate", "--yes", "--admin-url", ADMIN_URL], { config: before })).code,
+    ).toBe(0);
+    expect(await columns()).toContain("category_probabilities");
+    const after = configReading(["title"], false, false);
+    const lines = (done: boolean) =>
+      [
+        `${done ? "Pruned" : "Prune of"} public.listings:`,
+        `  urgent: ${done ? "dropped" : "to drop"} (no question asks it any more)`,
+        `  urgent_probability: ${done ? "dropped" : "to drop"} (no question asks it any more)`,
+        "  category_probabilities: kept (storeProbabilities is off)",
+        `  description: the worker login's read ${done ? "revoked" : "to revoke"} (read no longer lists it)`,
+        "",
+      ].join("\n");
+    const dry = await run(["migrate", "--prune", "--dry-run", "--admin-url", ADMIN_URL], {
+      config: after,
+    });
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain(`revoke select ("description")`);
+    expect(dry.stdout).toContain(lines(false));
+    expect(dry.stdout).not.toContain("Pruned public.listings");
+    // The column list comes after the prune script it describes.
+    expect(dry.stdout.indexOf("Prune of")).toBeGreaterThan(dry.stdout.indexOf("revoke select"));
+    const pruned = await runSeeingPrompts(
+      ["migrate", "--prune", "--admin-url", ADMIN_URL],
+      ["yes"],
+      after,
+    );
+    expect(pruned.code, pruned.stderr).toBe(0);
+    // Before the confirmation, what is to happen; after the run, what happened.
+    expect(pruned.seen[0]).toContain(lines(false));
+    expect(pruned.seen[0]).not.toContain("Pruned public.listings");
+    expect(pruned.stdout.slice(pruned.seen[0]?.length)).toContain(lines(true));
+    expect(await columns()).toContain("category_probabilities");
+    expect(await columns()).not.toContain("urgent");
+    // Nothing left to drop or revoke: the kept column is still named, with no script for it.
+    const again = await run(["migrate", "--prune", "--dry-run", "--admin-url", ADMIN_URL], {
+      config: after,
+    });
+    expect(again.stdout).not.toContain("-- facetdb migrate --prune");
+    expect(again.stdout).toContain(
+      "Prune of public.listings:\n  category_probabilities: kept (storeProbabilities is off)\n",
+    );
+  });
+
+  it("--prune prints the connector's notes, and a revoked column another role still grants says so", async () => {
+    expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    // A DBA granted the worker the same column on its own: FacetDB's revoke cannot take that back.
+    await world.client.query("create role table_dba");
+    await world.client.query(
+      "grant select (description) on public.listings to table_dba with grant option",
+    );
+    await world.client.query("set role table_dba");
+    try {
+      await world.client.query("grant select (description) on public.listings to facetdb_worker");
+    } finally {
+      await world.client.query("reset role");
+    }
+    const titleOnly = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: WORKER_URL,
+          table: "listings",
+          read: ["title"],
+          questions: {
+            is_scam: noul("Is this listing a scam?"),
+            category: choice("Which category is this listing?", { car: "A car", flat: "A flat" }),
+          },
+        },
+      ],
+    });
+    const result = await run(["migrate", "--prune", "--yes", "--admin-url", ADMIN_URL], {
+      config: titleOnly,
+    });
+    expect(result.code, result.stderr).toBe(0);
+    for (const prefix of ["Prune of", "Pruned"]) {
+      expect(result.stdout).toContain(
+        [
+          `${prefix} public.listings:`,
+          `  description: FacetDB's grant ${prefix === "Pruned" ? "revoked" : "to revoke"} (a grant by table_dba remains, see note)`,
+          "note: description: a grant by table_dba remains; only that role can revoke it",
+          "",
+        ].join("\n"),
+      );
+    }
+    expect(result.stdout).not.toContain("description: the worker login's read");
   });
 
   it("never prints a raw probability", async () => {

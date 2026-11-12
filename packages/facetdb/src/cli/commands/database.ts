@@ -298,12 +298,12 @@ const WORKER_LOGIN = new RegExp(`^${WORKER_ROLE}(?:\\.([A-Za-z0-9_-]+))?$`);
 /**
  * The worker login a connection string names. A connection pooler routes by the user (Supabase's
  * session pooler wants `facetdb_worker.<project ref>`) while Postgres still reports the role as
- * `facetdb_worker`, so the user is the role alone or the role plus a pooler suffix. Any other user,
- * `postgres.<ref>` (the admin through the pooler) included, is not the worker login: `undefined`.
+ * `facetdb_worker`, so the user is the role alone or the role plus a pooler suffix: this returns the
+ * suffix (undefined for the role alone). Any other user, `postgres.<ref>` (the admin through the
+ * pooler) included, is not the worker login: `undefined` instead of an object. It reads only the
+ * URL; whether the login really is the worker's is `current_user`'s to say (doctor asks it).
  */
-export function workerLoginOf(
-  url: string,
-): { readonly role: string; readonly suffix: string | undefined } | undefined {
+export function workerLoginOf(url: string): { readonly suffix: string | undefined } | undefined {
   let username: string;
   try {
     username = decodeURIComponent(new URL(url).username);
@@ -311,7 +311,7 @@ export function workerLoginOf(
     return undefined;
   }
   const match = WORKER_LOGIN.exec(username);
-  return match === null ? undefined : { role: WORKER_ROLE, suffix: match[1] };
+  return match === null ? undefined : { suffix: match[1] };
 }
 
 /** Where a connection string points, without its user or password: what a confirmation names. */

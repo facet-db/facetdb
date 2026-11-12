@@ -7,6 +7,8 @@ export {
   migrate,
 } from "./migrate.ts";
 export {
+  type DroppedColumn,
+  type ForeignGrant,
   type PruneCatalog,
   type PruneOptions,
   type PruneResult,
@@ -31,8 +33,11 @@ export {
 export {
   type LogOnlyPurge,
   type OtherSourceLog,
+  type OtherTable,
   type ProjectKeptBy,
   type SourceLog,
+  type TableName,
+  type TableRemoval,
   type UninstallOptions,
   type UninstallPlan,
   type UninstallResult,

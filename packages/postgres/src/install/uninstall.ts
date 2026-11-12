@@ -121,6 +121,34 @@ export type ProjectKeptBy =
 /** The command that deletes a log left behind by a plain uninstall, once nothing uses its source. */
 export type LogOnlyPurge = { readonly source: string; readonly command: string };
 
+/** An installed table other than the one uninstalled, as `schema.table`, with its project. */
+export type OtherTable = {
+  readonly name: string;
+  readonly schema: string;
+  readonly projectId: string;
+};
+
+/** A table by schema and name, as a run of several uninstalls names its other tables. */
+export type TableName = { readonly schema: string; readonly table: string };
+
+/** What the script removes from the table itself, each only when the catalog shows it there. */
+export type TableRemoval = {
+  /** FacetDB's marked columns on the table (inline mode). */
+  readonly columns: readonly string[];
+  /** The side table, as `schema.table`, in side-table mode. */
+  readonly sideTable: string | undefined;
+  /** FacetDB's marked view beside the table, as `schema.view`. */
+  readonly view: string | undefined;
+  /** The change-capture trigger, when it is on the table. */
+  readonly trigger: string | undefined;
+  /** FacetDB's row-level policies on the table. */
+  readonly policies: readonly string[];
+  /** Whether the worker login exists, so its rights on the table are revoked. */
+  readonly workerGrants: boolean;
+  /** Whether the worker loses its usage on the table's schema (no other installed table in it). */
+  readonly schemaUsage: boolean;
+};
+
 /**
  * What the script does beyond the printed SQL, as read from the database before it runs (the script
  * decides again at run time; these are for the words the CLI prints).
@@ -132,24 +160,71 @@ export type UninstallPlan = {
   readonly table: string;
   /** The project whose marker the script may remove: the table's, or the purged source's. */
   readonly projectId: string;
+  /**
+   * The name the confirmation must have typed back: the project's name for a table, the source's
+   * for a log-only purge.
+   */
+  readonly confirmName: string;
+  /** What the script removes from the table; undefined for a log-only purge (nothing is left on it). */
+  readonly tableRemoval: TableRemoval | undefined;
   /** Whether `--purge` was asked. The log's rows are deleted only when it was and `log` is found. */
   readonly purge: boolean;
   readonly log: SourceLog;
+  /**
+   * Whether the decision log's tables (`facetdb.decisions`, `facetdb.question_set_versions`) are
+   * dropped: only by a purge, once no row of any source is left in them and no store uses them.
+   */
+  readonly logTablesDropped: boolean;
   /** Empty: the project's marker row goes. Otherwise every reason it stays. */
   readonly projectKeptBy: readonly ProjectKeptBy[];
   /**
-   * Whether the store's shared tables (usage, alerts, heartbeats, cursors, records, the webhook
-   * outbox, the queue, the marker tables) are dropped: only when no project and no store use is left.
+   * Whether the store's shared tables (usage, alerts and their history, heartbeats, cursors,
+   * records, the webhook outbox, the projects) are dropped: only when no project, no installed
+   * table, no store use and no pending delivery is left.
    */
   readonly sharedTablesDropped: boolean;
+  /** Whether `facetdb.table_owners` is there and dropped: no installed table and no store use is left. */
+  readonly markerTablesDropped: boolean;
+  /**
+   * Whether `facetdb.jobs` is there and dropped: as the marker table, and only while it holds no
+   * other table's entry and no trigger anywhere calls a function that writes to it.
+   */
+  readonly jobsTableDropped: boolean;
+  /** Whether the enqueue trigger functions are there and go: no trigger outside this run calls them. */
+  readonly queueFunctionsDropped: boolean;
+  /** Queued jobs of tables outside this run; any keeps `facetdb.jobs`. */
+  readonly queuedElsewhere: number;
+  /**
+   * Tables outside this run (`schema.table`) with a trigger calling the enqueue functions, owner
+   * row or not: each keeps those functions, `facetdb.jobs` and so the schema.
+   */
+  readonly queueTriggers: readonly string[];
+  /** Whether the `facetdb` schema goes too: a purge that leaves nothing in it. */
+  readonly schemaDropped: boolean;
+  /**
+   * The schemas whose usage the worker login loses by the end of the run: each table's of the run,
+   * once no installed table outside the run is in it (`tableRemoval.schemaUsage` is this script's).
+   */
+  readonly schemaUsageRevoked: readonly string[];
+  /**
+   * The installed tables other than this one (and the other tables of this run), of any project;
+   * any keeps the shared tables.
+   */
+  readonly otherTables: readonly OtherTable[];
+  /** The other projects of the store; any keeps the shared tables. */
+  readonly otherProjects: readonly string[];
   /** Webhook deliveries of the project still pending; they and their project row stay. */
   readonly pendingDeliveries: number;
+  /** Webhook deliveries of other projects still pending; any keeps the shared tables. */
+  readonly pendingElsewhere: number;
   /** After a plain uninstall that leaves a log nothing else uses, the command that deletes it. */
   readonly logOnlyPurge: LogOnlyPurge | undefined;
   /** The run keys of unfinished backfill cursors (they keep every project and the shared tables). */
   readonly unfinishedCursors: readonly string[];
   /** With `--purge`: the project's other sources whose logs stay (none deleted but `log`'s). */
   readonly otherSourceLogs: readonly OtherSourceLog[];
+  /** FacetDB objects the script leaves in place on purpose (an orphan side table), as `schema.table`. */
+  readonly leftInPlace: readonly string[];
 };
 
 /**
@@ -597,6 +672,12 @@ export type UninstallOptions = {
   readonly confirm: (request: { readonly project: ProjectRef }) => Promise<string>;
   /** Print and stop: nothing is asked and nothing runs. */
   readonly dryRun?: boolean;
+  /**
+   * The other tables a caller uninstalls in the same run (before or after this one): the plan
+   * counts them as gone, so it says what the whole run leaves. The script is not changed by it; it
+   * decides again at run time from what is installed then.
+   */
+  readonly alsoUninstalling?: readonly TableName[];
   readonly connect?: SqlConnect;
 };
 
@@ -850,16 +931,62 @@ async function resolveLogOnlyTarget(
 /** The store as the script will find it, read before it runs. */
 type StoreForecast = Pick<
   UninstallPlan,
-  "projectKeptBy" | "sharedTablesDropped" | "pendingDeliveries" | "unfinishedCursors"
-> & {
-  /** Another table, of any project, stays installed. */
-  readonly otherTables: boolean;
-};
+  | "projectKeptBy"
+  | "sharedTablesDropped"
+  | "logTablesDropped"
+  | "otherTables"
+  | "otherProjects"
+  | "pendingDeliveries"
+  | "pendingElsewhere"
+  | "unfinishedCursors"
+  | "markerTablesDropped"
+  | "jobsTableDropped"
+  | "queueFunctionsDropped"
+  | "queuedElsewhere"
+  | "queueTriggers"
+  | "schemaDropped"
+>;
+
+/** The tables, owner row or not, with a trigger calling a function that writes to the queue. */
+const QUEUE_TRIGGERS = `select distinct n.nspname as schema, c.relname as name
+  from pg_catalog.pg_trigger t
+  join pg_catalog.pg_proc p on p.oid = t.tgfoid
+  join pg_catalog.pg_class c on c.oid = t.tgrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+ where p.pronamespace = to_regnamespace('facetdb')
+   and p.proname in ('enqueue', 'enqueue_keep', 'enqueue_side')
+   and not t.tgisinternal
+ order by 1, 2`;
+
+const inRun = (run: readonly TableName[], schema: string, table: string) =>
+  run.some((item) => item.schema === schema && item.table === table);
 
 /**
- * What the marker and sweep blocks will decide, read before the script runs: the same conditions
- * on the same tables, with the purged source's registration (which the script deletes first)
- * already discounted. `schema`/`table` is the table whose owner row the script deletes.
+ * The rows of a store table matching `condition`, ordered by the first column selected; none while
+ * the store has no such table. The table, selection and condition are this module's constants.
+ */
+async function storeNames(
+  query: SqlQuery,
+  table: string,
+  select: string,
+  condition: string,
+  params: readonly unknown[],
+): Promise<readonly SqlRow[]> {
+  if (!(await relationPresent(query, `facetdb.${table}`))) {
+    return [];
+  }
+  return query(
+    `select ${select} from facetdb.${quoteIdent(table)} where ${condition} order by 1`,
+    params,
+  );
+}
+
+/**
+ * What the marker, purge and sweep blocks will decide, read before the script runs: the same
+ * conditions on the same tables, with the purged source's registration and log rows (which the
+ * script deletes first) already discounted. `schema`/`table` is the table whose owner row the
+ * script deletes; `alsoUninstalling` are the other tables of the caller's run, counted as gone,
+ * so the forecast is the run's.
  */
 async function forecastStore(
   query: SqlQuery,
@@ -867,21 +994,45 @@ async function forecastStore(
     readonly schema: string;
     readonly table: string;
     readonly projectId: string;
+    readonly purge: boolean;
     readonly purgedSourceId: string | undefined;
+    readonly alsoUninstalling: readonly TableName[];
   },
 ): Promise<StoreForecast> {
   const project = target.projectId;
-  const otherOwners = "not (table_schema = $1 and table_name = $2)";
-  const projectTables = await storeRows(
-    query,
-    "table_owners",
-    `project_id = $3 and ${otherOwners}`,
-    [target.schema, target.table, project],
-  );
-  const anyTables = await storeRows(query, "table_owners", otherOwners, [
-    target.schema,
-    target.table,
-  ]);
+  const run: readonly TableName[] = [
+    { schema: target.schema, table: target.table },
+    ...target.alsoUninstalling,
+  ];
+  const otherTables = (
+    await storeNames(
+      query,
+      "table_owners",
+      "table_schema || '.' || table_name as name, project_id, table_schema, table_name",
+      "true",
+      [],
+    )
+  )
+    .filter((row) => !inRun(run, String(row["table_schema"]), String(row["table_name"])))
+    .map((row) => ({
+      name: String(row["name"]),
+      schema: String(row["table_schema"]),
+      projectId: String(row["project_id"]),
+    }));
+  const queueTriggers = (await query(QUEUE_TRIGGERS))
+    .filter((row) => !inRun(run, String(row["schema"]), String(row["name"])))
+    .map((row) => `${String(row["schema"])}.${String(row["name"])}`);
+  // The queue's entries of every table of the run go with their tables.
+  const runEntries = run
+    .map((item) => `starts_with(record_key, ${quoteLiteral(queueKeyPrefix(item))})`)
+    .join(" or ");
+  const queuedElsewhere = (await relationPresent(query, JOBS_TABLE))
+    ? Number(
+        (
+          await query(`select count(*)::int as n from ${JOBS_TABLE} where not (${runEntries})`)
+        )[0]?.["n"],
+      )
+    : 0;
   const sources =
     (await storeRows(query, "sources", "true")) - (target.purgedSourceId === undefined ? 0 : 1);
   const inUse =
@@ -900,7 +1051,10 @@ async function forecastStore(
       keptBy.push(reason);
     }
   };
-  keep("another-table", projectTables > 0);
+  keep(
+    "another-table",
+    otherTables.some((other) => other.projectId === project),
+  );
   keep("store-in-use", inUse);
   for (const [table, column, reason] of PROJECT_STATE) {
     keep(reason, (await storeRows(query, table, `${quoteIdent(column)} = $1`, [project])) > 0);
@@ -921,19 +1075,104 @@ async function forecastStore(
     : 0;
   keep("records", projectRecords > 0);
   keep("pending-deliveries", pendingDeliveries > 0);
-  const otherProjects = await storeRows(query, "projects", "id <> $1", [project]);
-  const pendingAnywhere = await storeRows(query, "webhook_outbox", PENDING_DELIVERY);
+  const otherProjects = (await storeNames(query, "projects", "id", "id <> $1", [project])).map(
+    (row) => String(row["id"]),
+  );
+  const pendingElsewhere = await storeRows(
+    query,
+    "webhook_outbox",
+    `project_id <> $1 and ${PENDING_DELIVERY}`,
+    [project],
+  );
+  // The purge block drops each log table once no row of anyone's is left in it and no store uses it.
+  const others = target.purgedSourceId === undefined ? "true" : "source_id <> $1";
+  const othersParams = target.purgedSourceId === undefined ? [] : [target.purgedSourceId];
+  const logTablesDropped =
+    target.purge &&
+    !inUse &&
+    (await storeRows(query, "decisions", others, othersParams)) === 0 &&
+    (await storeRows(query, "question_set_versions", others, othersParams)) === 0;
+  const sharedTablesDropped =
+    !inUse &&
+    otherTables.length === 0 &&
+    keptBy.length === 0 &&
+    otherProjects.length === 0 &&
+    pendingDeliveries + pendingElsewhere === 0;
+  // The sweep's first branch: no store use and no owned table left (`sharedTablesStatement`).
+  const sweeps = !inUse && otherTables.length === 0;
+  const markerTablesDropped = sweeps && (await relationPresent(query, "facetdb.table_owners"));
+  const jobsTableDropped =
+    sweeps &&
+    queuedElsewhere === 0 &&
+    queueTriggers.length === 0 &&
+    (await relationPresent(query, JOBS_TABLE));
+  const queueFunctionsDropped =
+    queueTriggers.length === 0 &&
+    flag(
+      await query(
+        `select exists (select 1 from pg_catalog.pg_proc
+                         where pronamespace = to_regnamespace('facetdb')
+                           and proname in ('enqueue', 'enqueue_keep', 'enqueue_side')) as present`,
+      ),
+    );
   return {
     projectKeptBy: keptBy,
-    sharedTablesDropped:
-      !inUse &&
-      anyTables === 0 &&
-      keptBy.length === 0 &&
-      otherProjects === 0 &&
-      pendingAnywhere === 0,
+    sharedTablesDropped,
+    logTablesDropped,
+    markerTablesDropped,
+    jobsTableDropped,
+    queueFunctionsDropped,
+    queuedElsewhere,
+    queueTriggers,
+    // The schema goes only empty: everything above gone, the trigger functions included.
+    schemaDropped:
+      target.purge &&
+      logTablesDropped &&
+      sharedTablesDropped &&
+      queueTriggers.length === 0 &&
+      queuedElsewhere === 0,
+    otherTables,
+    otherProjects,
     pendingDeliveries,
+    pendingElsewhere,
     unfinishedCursors,
-    otherTables: anyTables > 0,
+  };
+}
+
+/** What the script removes from the table itself, read from the catalog before it runs. */
+async function tableRemoval(query: SqlQuery, installed: InstalledTable): Promise<TableRemoval> {
+  // This script's own revoke decides on the tables installed now, whatever else the run removes.
+  const neighbours = await storeRows(
+    query,
+    "table_owners",
+    "table_schema = $1 and table_name <> $2",
+    [installed.schema, installed.table],
+  );
+  const facts = await query(
+    `select exists (select 1 from pg_catalog.pg_trigger t
+                     where t.tgrelid = format('%I.%I', $1::text, $2::text)::regclass
+                       and t.tgname = $3 and not t.tgisinternal) as trigger,
+            exists (select 1 from pg_catalog.pg_roles where rolname = $4) as worker,
+            array(select p.policyname::text from pg_catalog.pg_policies p
+                   where p.schemaname = $1 and p.tablename = $2
+                     and p.policyname in ('facetdb_reads', 'facetdb_writes') order by 1) as policies`,
+    [installed.schema, installed.table, triggerName(installed), WORKER_ROLE],
+  );
+  const row = facts[0];
+  const worker = row?.["worker"] === true;
+  const policies = row?.["policies"];
+  return {
+    columns: installed.marked,
+    sideTable:
+      installed.sideColumns === undefined
+        ? undefined
+        : `${SIDE_TABLE_SCHEMA}.${installed.table}_answers`,
+    view: installed.viewMarked ? `${installed.schema}.${sideViewName(installed.table)}` : undefined,
+    trigger: row?.["trigger"] === true ? triggerName(installed) : undefined,
+    policies: Array.isArray(policies) ? policies.map(String) : [],
+    workerGrants: worker,
+    // As the script's revoke: never on the `facetdb` schema, and not while another table is in it.
+    schemaUsage: worker && installed.schema !== "facetdb" && neighbours === 0,
   };
 }
 
@@ -974,8 +1213,7 @@ function cursorNote(forecast: StoreForecast, projectId: string): string | undefi
   return `the project ${projectId} and the store's shared tables stay because of an unfinished backfill cursor (run ${forecast.unfinishedCursors.join(", ")}); it keeps the shared tables until the backfill finishes or the cursor is deleted.`;
 }
 
-function pendingNote(forecast: StoreForecast, projectId: string): string | undefined {
-  const n = forecast.pendingDeliveries;
+function pendingNote(n: number, projectId: string): string | undefined {
   if (n === 0) {
     return undefined;
   }
@@ -989,14 +1227,14 @@ const SIDE_TABLE_FACTS = `select obj_description(c.oid, 'pg_class') as mark,
 
 /**
  * A side table of FacetDB's (its mark) with no foreign key at all can no longer be tied to the
- * table being uninstalled, so the script leaves it in place; this says so, and how to remove it.
- * A same-named table installed in another schema shares the side table's name, so then it may be
- * that table's, and it is not named at all.
+ * table being uninstalled, so the script leaves it in place; this names it (`schema.table`, for the
+ * plan) and says how to remove it (the note). A same-named table installed in another schema
+ * shares the side table's name, so then it may be that table's, and it is not named at all.
  */
 async function orphanSideTable(
   query: SqlQuery,
   installed: InstalledTable,
-): Promise<string | undefined> {
+): Promise<{ readonly name: string; readonly note: string } | undefined> {
   if (installed.sideColumns !== undefined) {
     return undefined;
   }
@@ -1016,7 +1254,10 @@ async function orphanSideTable(
     return undefined;
   }
   const side = quoteTable({ schema: SIDE_TABLE_SCHEMA, name });
-  return `left in place: ${side} is FacetDB's side table but has no foreign key to ${installed.schema}.${installed.table} (dropped by hand?), so it was not tied to this table. Drop it yourself when sure: drop table ${side};`;
+  return {
+    name: `${SIDE_TABLE_SCHEMA}.${name}`,
+    note: `left in place: ${side} is FacetDB's side table but has no foreign key to ${installed.schema}.${installed.table} (dropped by hand?), so it was not tied to this table. Drop it yourself when sure: drop table ${side};`,
+  };
 }
 
 /**
@@ -1092,7 +1333,9 @@ async function logOnlyPurge(
     schema,
     table,
     projectId,
+    purge: true,
     purgedSourceId: log.sourceId,
+    alsoUninstalling: options.alsoUninstalling ?? [],
   });
   const statements = logOnlyPurgeSql({ schema, table, projectId, sourceId: log.sourceId });
   const sql = renderSql(statements);
@@ -1102,19 +1345,20 @@ async function logOnlyPurge(
     schema,
     table,
     projectId,
+    confirmName: given,
+    tableRemoval: undefined,
+    schemaUsageRevoked: [],
     purge: true,
     log,
-    projectKeptBy: forecast.projectKeptBy,
-    sharedTablesDropped: forecast.sharedTablesDropped,
-    pendingDeliveries: forecast.pendingDeliveries,
+    ...forecast,
     logOnlyPurge: undefined,
-    unfinishedCursors: forecast.unfinishedCursors,
     otherSourceLogs: [],
+    leftInPlace: [],
   };
-  const pending = pendingNote(forecast, projectId);
+  const pending = pendingNote(plan.pendingDeliveries, projectId);
   const cursor = cursorNote(forecast, projectId);
   const notes = (applied: boolean) => [
-    `${label} has no FacetDB install left; only the decision log was purged.`,
+    `${label} has no FacetDB install left; only the decision log ${applied ? "was" : "is"} purged.`,
     purgeNote(applied, log),
     ...(pending === undefined ? [] : [pending]),
     ...(cursor === undefined ? [] : [cursor]),
@@ -1182,33 +1426,54 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
       schema: installed.schema,
       table: installed.table,
       projectId: installed.project.id,
+      purge,
       purgedSourceId,
+      alsoUninstalling: options.alsoUninstalling ?? [],
     });
     const later: LogOnlyPurge | undefined =
-      !purge && log.status === "found" && log.decisions + log.versions > 0 && !forecast.otherTables
+      !purge &&
+      log.status === "found" &&
+      log.decisions + log.versions > 0 &&
+      forecast.otherTables.length === 0
         ? { source: log.given, command: `facetdb uninstall --purge --source ${log.given}` }
         : undefined;
     const others =
       purgedSourceId === undefined
         ? []
         : await otherSourceLogs(client.query, installed.project.id, purgedSourceId);
+    const orphan = await orphanSideTable(client.query, installed);
+    const removal = await tableRemoval(client.query, installed);
+    // The schemas whose usage the run takes from the worker: each run table's, once no table
+    // outside the run is left in it (the last script in that schema revokes it).
+    const runSchemas = [
+      installed.schema,
+      ...(options.alsoUninstalling ?? []).map((other) => other.schema),
+    ];
+    const schemaUsageRevoked = removal.workerGrants
+      ? [...new Set(runSchemas)].filter(
+          (schema) =>
+            schema !== "facetdb" && !forecast.otherTables.some((other) => other.schema === schema),
+        )
+      : [];
     const plan: UninstallPlan = {
       mode: "table",
       schema: installed.schema,
       table: installed.table,
       projectId: installed.project.id,
+      confirmName: installed.project.name,
+      tableRemoval: removal,
+      schemaUsageRevoked,
       purge,
       log,
-      projectKeptBy: forecast.projectKeptBy,
-      sharedTablesDropped: forecast.sharedTablesDropped,
-      pendingDeliveries: forecast.pendingDeliveries,
+      ...forecast,
+      // An orphan side table left in place keeps the schema from being empty.
+      schemaDropped: forecast.schemaDropped && orphan === undefined,
       logOnlyPurge: later,
-      unfinishedCursors: forecast.unfinishedCursors,
       otherSourceLogs: others,
+      leftInPlace: orphan === undefined ? [] : [orphan.name],
     };
-    const orphan = await orphanSideTable(client.query, installed);
     const kept = purge ? undefined : keptLogNote(log, later);
-    const pending = pendingNote(forecast, installed.project.id);
+    const pending = pendingNote(plan.pendingDeliveries, installed.project.id);
     const cursor = cursorNote(forecast, installed.project.id);
     const notes = (applied: boolean): readonly string[] => [
       ...(purge ? [purgeNote(applied, log)] : []),
@@ -1216,7 +1481,7 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
       ...(kept === undefined ? [] : [kept]),
       ...(pending === undefined ? [] : [pending]),
       ...(cursor === undefined ? [] : [cursor]),
-      ...(orphan === undefined ? [] : [orphan]),
+      ...(orphan === undefined ? [] : [orphan.note]),
     ];
     const sql = renderSql(statements);
     options.print(sql);

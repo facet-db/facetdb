@@ -185,6 +185,42 @@ export function prunedColumns(
   );
 }
 
+/** A worker grant on a revoked column made by another role: only that role can take it back. */
+export type ForeignGrant = { readonly column: string; readonly grantor: string };
+
+/** A column the prune drops, and why, in words the CLI prints as they are. */
+export type DroppedColumn = { readonly column: string; readonly reason: string };
+
+/** Every column a question of this name could have, whatever its type (`answerColumns` of each). */
+function columnsOfAnyType(name: string): ReadonlySet<string> {
+  const base = { name, instructions: "", stakes: "low" } as const;
+  return new Set(
+    [
+      answerColumns({ ...base, type: "noul" }),
+      answerColumns({ ...base, type: "choice", options: [], storeProbabilities: true }),
+      answerColumns({ ...base, type: "score", levels: [] }),
+    ].flatMap((columns) => columns.map((column) => column.name)),
+  );
+}
+
+/**
+ * Why a pruned column goes: a column a question still in the set had under another type (its
+ * question changed type), or one no question of the set asks about any more.
+ */
+export function droppedColumns(
+  source: Pick<TableSource, "key">,
+  questionSet: QuestionSet,
+  catalog: PruneCatalog,
+): readonly DroppedColumn[] {
+  const stillAsked = questionSet.questions.map((question) => columnsOfAnyType(question.name));
+  return prunedColumns(source, questionSet, catalog).map((column) => ({
+    column,
+    reason: stillAsked.some((columns) => columns.has(column))
+      ? "its question changed type"
+      : "no question asks it any more",
+  }));
+}
+
 /**
  * The prune script: one `drop column` per answer column of a removed question, or no statement at
  * all when there is none. In side-table mode the columns are on `facetdb.<table>_answers` and the
@@ -266,15 +302,22 @@ export type PruneOptions = {
 export type PruneResult =
   | {
       readonly ok: true;
-      /** The columns dropped (or that would be, on a dry run); empty when nothing was left to prune. */
-      readonly dropped: readonly string[];
+      /** The columns dropped (or to drop, on a dry run), each with why; empty when nothing was left to prune. */
+      readonly dropped: readonly DroppedColumn[];
       /** Marked columns that stay, one line each with the reason: `<column>: kept (storeProbabilities is off)`. */
       readonly kept: readonly string[];
+      /**
+       * The source table's columns whose select the worker loses (a state column `read` no longer
+       * lists), the same list the script's `revoke` statements are made from.
+       */
+      readonly revoked: readonly string[];
       /**
        * What the prune could not do, one line each: a worker grant on a removed state column made by
        * another role (`<column>: a grant by <role> remains; only that role can revoke it`).
        */
       readonly notes: readonly string[];
+      /** The grants the notes are about: a revoked column the worker still reads through another role. */
+      readonly foreignGrants: readonly ForeignGrant[];
       readonly statements: readonly InstallStatement[];
       /** The printed script; empty, and nothing printed or run, when there is nothing to prune. */
       readonly sql: string;
@@ -310,31 +353,42 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
     };
     const catalog = {
       columns: installed.sideColumns ?? installed.marked,
-      workerSelect: (
-        await client.query(WORKER_SELECT_QUERY, [installed.schema, installed.table, WORKER_ROLE])
-      ).map((row) => String(row["name"])),
+      // One row per grantor: a column two roles granted is one column to revoke, listed once.
+      workerSelect: [
+        ...new Set(
+          (
+            await client.query(WORKER_SELECT_QUERY, [
+              installed.schema,
+              installed.table,
+              WORKER_ROLE,
+            ])
+          ).map((row) => String(row["name"])),
+        ),
+      ],
     };
-    const dropped = prunedColumns(source, options.questionSet, catalog);
+    const dropped = droppedColumns(source, options.questionSet, catalog);
     const kept = keptColumns(source, options.questionSet, catalog).map(
       (name) => `${name}: ${KEPT_NOTE}`,
     );
-    const revoked = new Set(revokedColumns(source, options.questionSet, catalog));
-    const notes = (
+    const revoked = revokedColumns(source, options.questionSet, catalog);
+    const foreignGrants = (
       await client.query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, WORKER_ROLE])
     )
-      .filter((row) => revoked.has(String(row["name"])))
-      .map(
-        (row) =>
-          `${String(row["name"])}: a grant by ${String(row["grantor"])} remains; only that role can revoke it`,
-      );
+      .map((row) => ({ column: String(row["name"]), grantor: String(row["grantor"]) }))
+      .filter((grant) => revoked.includes(grant.column));
+    const notes = foreignGrants.map(
+      ({ column, grantor }) =>
+        `${column}: a grant by ${grantor} remains; only that role can revoke it`,
+    );
+    const listed = { dropped, kept, revoked, notes, foreignGrants };
     const statements = pruneSql(source, options.questionSet, catalog);
     if (statements.length === 0) {
-      return { ok: true, dropped, kept, notes, statements, sql: "", applied: false };
+      return { ok: true, ...listed, statements, sql: "", applied: false };
     }
     const sql = renderSql(statements);
     options.print(sql);
     if (options.dryRun === true) {
-      return { ok: true, dropped, kept, notes, statements, sql, applied: false };
+      return { ok: true, ...listed, statements, sql, applied: false };
     }
     try {
       await client.transaction(async (query) => {
@@ -349,7 +403,7 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
       }
       throw error;
     }
-    return { ok: true, dropped, kept, notes, statements, sql, applied: true };
+    return { ok: true, ...listed, statements, sql, applied: true };
   } finally {
     await client.close();
   }

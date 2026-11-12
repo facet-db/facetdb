@@ -6,7 +6,7 @@ import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { type MigrateSource, migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
 import { type InstallStatement, type ProjectRef, renderSql } from "./sql.ts";
-import { type UninstallResult, uninstall } from "./uninstall.ts";
+import { type TableName, type UninstallResult, uninstall } from "./uninstall.ts";
 
 /**
  * `migrate --prune` and `uninstall` on PGlite: these statements destroy data on purpose, so every
@@ -186,6 +186,7 @@ async function runUninstall(
     readonly table?: string;
     readonly sourceId?: string;
     readonly connect?: SqlConnect;
+    readonly alsoUninstalling?: readonly TableName[];
   } = {},
 ): Promise<{
   readonly result: UninstallResult;
@@ -200,6 +201,9 @@ async function runUninstall(
     source: { table: options.table ?? "listings", sourceId: options.sourceId ?? SOURCE_ID },
     ...(options.purge === undefined ? {} : { purge: options.purge }),
     ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+    ...(options.alsoUninstalling === undefined
+      ? {}
+      : { alsoUninstalling: options.alsoUninstalling }),
     print: (sql) => {
       events.push("print");
       printed.push(sql);
@@ -228,7 +232,11 @@ describe("migrate --prune", () => {
       print: (sql) => printed.push(sql),
     });
     const gone = ["category", "category_confidence", "category_probabilities"];
-    expect(result).toMatchObject({ ok: true, applied: true, dropped: gone });
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      dropped: gone.map((column) => ({ column, reason: "no question asks it any more" })),
+    });
     expect(await columns()).toEqual(before.filter((c) => !gone.includes(c)));
     // The printed script is the statements that ran, as one string, with no parameter anywhere.
     expect(printed).toEqual([renderSql(executed)]);
@@ -369,6 +377,25 @@ describe("uninstall", () => {
     await decisionLog([[SOURCE_ID, "1"]]);
     const { result } = await runUninstall({ purge: true });
     expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      confirmName: "Listings",
+      tableRemoval: {
+        columns: expect.arrayContaining(["is_scam", "facetdb_status"]),
+        sideTable: undefined,
+        view: undefined,
+        trigger: "facetdb_listings",
+      },
+      logTablesDropped: true,
+      sharedTablesDropped: true,
+      markerTablesDropped: true,
+      jobsTableDropped: true,
+      queueTriggers: [],
+      schemaDropped: true,
+      otherTables: [],
+      otherProjects: [],
+      pendingElsewhere: 0,
+      leftInPlace: [],
+    });
     expect(await present("facetdb.decisions")).toBe(false);
     expect((await q(`select to_regnamespace('facetdb') is null as gone`))[0]?.["gone"]).toBe(true);
     expect(await columns()).toEqual(APP_COLUMNS);
@@ -384,6 +411,7 @@ describe("uninstall", () => {
     ]);
     const { result } = await runUninstall({ purge: true });
     expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan.logTablesDropped).toBe(false);
     expect(await q(`select source_id, record_key from facetdb.decisions`)).toEqual([
       { source_id: "src_other", record_key: "7" },
     ]);
@@ -457,6 +485,17 @@ describe("uninstall", () => {
     await q(`insert into public.orders (title) values ('o')`);
     const { result } = await runUninstall({ purge: true });
     expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      otherTables: [{ name: "public.orders", schema: "public", projectId: "proj_orders" }],
+      otherProjects: ["proj_orders"],
+      projectKeptBy: [],
+      sharedTablesDropped: false,
+      markerTablesDropped: false,
+      jobsTableDropped: false,
+      queuedElsewhere: 1,
+      queueTriggers: ["public.orders"],
+      schemaDropped: false,
+    });
     expect(await q(`select record_key from facetdb.jobs`)).toEqual([
       { record_key: "t:13:public.orders:1" },
     ]);
@@ -532,6 +571,15 @@ describe("uninstall", () => {
     await q(`insert into public.listings (title) values ('a')`);
     const { result } = await runUninstall();
     expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan.tableRemoval).toEqual({
+      columns: [],
+      sideTable: "facetdb.listings_answers",
+      view: "public.listings_with_answers",
+      trigger: "facetdb_listings",
+      policies: ["facetdb_reads"],
+      workerGrants: true,
+      schemaUsage: true,
+    });
     expect(await present("public.listings_with_answers")).toBe(false);
     expect(await present("facetdb.listings_answers")).toBe(false);
     expect(await columns()).toEqual(APP_COLUMNS);
@@ -827,6 +875,39 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
   });
 });
 
+describe("a run of several uninstalls (alsoUninstalling)", () => {
+  it("forecasts what the whole run leaves, not what this table's script alone leaves", async () => {
+    await freshWorld(["listings", "orders"]);
+    await install();
+    await install({ table: "orders" });
+    await q(`insert into public.orders (title) values ('o')`);
+    const alone = await runUninstall({ dryRun: true });
+    expect(alone.result.ok && alone.result.plan).toMatchObject({
+      otherTables: [{ name: "public.orders", schema: "public", projectId: project.id }],
+      projectKeptBy: ["another-table"],
+      sharedTablesDropped: false,
+      jobsTableDropped: false,
+    });
+    const before = await snapshot();
+    const run = await runUninstall({
+      dryRun: true,
+      alsoUninstalling: [{ schema: "public", table: "orders" }],
+    });
+    expect(run.result.ok && run.result.plan).toMatchObject({
+      otherTables: [],
+      projectKeptBy: [],
+      sharedTablesDropped: true,
+      markerTablesDropped: true,
+      jobsTableDropped: true,
+      queuedElsewhere: 0,
+      queueTriggers: [],
+    });
+    // The script is the same either way: the run's other tables only change the forecast.
+    expect(run.printed).toEqual(alone.printed);
+    expect(await snapshot()).toEqual(before);
+  });
+});
+
 describe("uninstall keeps what is still in use", () => {
   it("drops facetdb.projects after the purge block", async () => {
     await freshWorld();
@@ -853,6 +934,13 @@ describe("uninstall keeps what is still in use", () => {
       await q(`delete from facetdb.table_owners where table_name = 'orders'`);
       const { result } = await runUninstall({ purge: true });
       expect(result).toMatchObject({ ok: true, applied: true });
+      // The plan says so: the queue and its functions stay for the trigger, and so does the schema.
+      expect(result.ok && result.plan).toMatchObject({
+        markerTablesDropped: true,
+        jobsTableDropped: false,
+        queueTriggers: ["public.orders"],
+        schemaDropped: false,
+      });
       expect(await present("facetdb.jobs")).toBe(true);
       await q(`insert into public.orders (title) values ('o')`);
       expect(await count(`select 1 from facetdb.jobs`)).toBe(1);
@@ -883,6 +971,7 @@ describe("uninstall keeps what is still in use", () => {
     expect(result.ok && result.notes.join("\n")).toContain(
       `left in place: "facetdb"."listings_answers" is FacetDB's side table but has no foreign key to public.listings`,
     );
+    expect(result.ok && result.plan.leftInPlace).toEqual(["facetdb.listings_answers"]);
     expect(await present("facetdb.listings_answers")).toBe(true);
     expect(await present("public.listings_with_answers")).toBe(false);
   });
@@ -1025,7 +1114,9 @@ describe("uninstall --purge finds the log by the source's id", () => {
     const command = "facetdb uninstall --purge --source t_listings";
     expect(result.ok && result.plan).toMatchObject({
       mode: "table",
+      confirmName: "Listings",
       purge: false,
+      logTablesDropped: false,
       log: { status: "found", sourceId: "t_listings", decisions: 1, versions: 0 },
       logOnlyPurge: { source: "t_listings", command },
       // The source's registration keeps the store in use until the log is purged.
@@ -1039,7 +1130,9 @@ describe("uninstall --purge finds the log by the source's id", () => {
     const later = await runUninstall({ purge: true, sourceId: "t_listings", typed: "t_listings" });
     expect(later.result).toMatchObject({ ok: true, applied: true, plan: { mode: "log-only" } });
     expect(later.result.ok && later.result.plan).toMatchObject({
+      confirmName: "t_listings",
       log: { status: "found", sourceId: "t_listings", decisions: 1 },
+      logTablesDropped: true,
       projectKeptBy: [],
       sharedTablesDropped: true,
     });
@@ -1255,7 +1348,12 @@ describe("uninstall keeps a project's pending state", () => {
     );
     const { result } = await runUninstall();
     expect(result).toMatchObject({ ok: true, applied: true });
-    expect(result.ok && result.plan.sharedTablesDropped).toBe(false);
+    expect(result.ok && result.plan).toMatchObject({
+      sharedTablesDropped: false,
+      pendingDeliveries: 0,
+      pendingElsewhere: 1,
+      otherProjects: [],
+    });
     expect(await count(`select 1 from facetdb.webhook_outbox`)).toBe(1);
   });
 

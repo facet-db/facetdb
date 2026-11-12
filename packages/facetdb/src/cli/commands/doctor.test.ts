@@ -369,6 +369,23 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
     );
   });
 
+  it("database: a pooler-suffixed worker URL whose login is another role fails on current_user", async () => {
+    // The URL names the worker login through a pooler, but the server says the session is another
+    // role's: the check believes `current_user`, never the user written in the URL.
+    const pooled = configWith({
+      database: `postgres://${WORKER_ROLE}.jkqrabcd:s3cret-worker-password@aws-0.pooler.supabase.com:5432/postgres?sslmode=require`,
+    });
+    const result = await doctor([], { config: pooled, connect: asWorker(null) });
+    expect(result.code).toBe(1);
+    const database = lineFor(result.stdout, "database");
+    expect(database).toMatch(/^FAIL/);
+    expect(database).toContain(
+      `"listings" logs in as postgres on aws-0.pooler.supabase.com:5432/postgres, not as the worker login ${WORKER_ROLE}`,
+    );
+    expect(database).not.toContain("through a pooler");
+    expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
+  });
+
   it("database: a connection string the environment does not hold", async () => {
     const { database: _written, ...rest } = configWith()
       .sources[0] as ProjectConfig["sources"][number];

@@ -1,4 +1,6 @@
 import {
+  type DroppedColumn,
+  type ForeignGrant,
   type MigratePlan,
   type MigrateSource,
   migrate,
@@ -38,13 +40,60 @@ type MigrateOptions = {
   readonly allowInsecure?: boolean;
 };
 
+/** What `--prune` does to a table's columns, as the connector listed it. */
+type Pruned = {
+  /** Each column with the connector's reason for dropping it. */
+  readonly dropped: readonly DroppedColumn[];
+  /** `<column>: kept (<why>)`, in the connector's words. */
+  readonly kept: readonly string[];
+  /** State columns whose select the worker login loses. */
+  readonly revoked: readonly string[];
+  /** What the prune cannot do (a grant another role made), in the connector's words. */
+  readonly notes: readonly string[];
+  /** The grants those notes are about, so a revoked column's line does not claim too much. */
+  readonly foreignGrants: readonly ForeignGrant[];
+};
+
+const prunedOf = (result: Pruned): Pruned => ({
+  dropped: result.dropped,
+  kept: result.kept,
+  revoked: result.revoked,
+  notes: result.notes,
+  foreignGrants: result.foreignGrants,
+});
+
+/** A revoked column's line: the worker loses the read, unless another role's grant still gives it. */
+function revokedLine(pruned: Pruned, column: string, done: boolean): string {
+  const foreign = pruned.foreignGrants.filter((grant) => grant.column === column);
+  return foreign.length === 0
+    ? `  ${column}: the worker login's read ${done ? "revoked" : "to revoke"} (read no longer lists it)`
+    : `  ${column}: FacetDB's grant ${done ? "revoked" : "to revoke"} (a grant by ${foreign.map((grant) => grant.grantor).join(", ")} remains, see note)`;
+}
+
 /** One table's scripts, as shown: the prune (when `--prune` has something to drop) and the install. */
 type Shown = {
   readonly target: TableTarget;
   readonly plan: MigratePlan;
   readonly pruneSql: string;
+  /** Undefined without `--prune`, or when the table is not installed yet. */
+  readonly pruned: Pruned | undefined;
   readonly sql: string;
 };
+
+/**
+ * One line per column the prune touches or keeps, with what happens to it and why: "to drop"
+ * before the confirmation, "dropped" after the run; then each of the connector's notes.
+ */
+function pruneLines(pruned: Pruned, done: boolean): readonly string[] {
+  return [
+    ...pruned.dropped.map(
+      ({ column, reason }) => `  ${column}: ${done ? "dropped" : "to drop"} (${reason})`,
+    ),
+    ...pruned.kept.map((line) => `  ${line}`),
+    ...pruned.revoked.map((column) => revokedLine(pruned, column, done)),
+    ...pruned.notes.map((note) => `note: ${note}`),
+  ];
+}
 
 const QUERY_WORKER_ROLE = "select 1 from pg_catalog.pg_roles where rolname = $1";
 
@@ -118,8 +167,9 @@ async function show(
   withPrune: boolean,
 ): Promise<Shown> {
   let pruneSql = "";
+  let pruned: Pruned | undefined;
   if (withPrune) {
-    const pruned = await prune({
+    const result = await prune({
       adminUrl: url,
       source: { table: target.table, schema: target.schema },
       questionSet: plan.questionSet,
@@ -129,7 +179,10 @@ async function show(
       connect: deps.connect,
     });
     // Not installed yet: a first install has nothing to prune.
-    pruneSql = pruned.ok ? pruned.sql : "";
+    if (result.ok) {
+      pruneSql = result.sql;
+      pruned = prunedOf(result);
+    }
   }
   const result = await migrate({
     adminUrl: url,
@@ -141,13 +194,17 @@ async function show(
   if (!result.ok) {
     throw refused("migrate-refused", result.reason);
   }
-  return { target, plan, pruneSql, sql: result.sql };
+  return { target, plan, pruneSql, pruned, sql: result.sql };
 }
 
-/** The confirmed run of one table: the prune first, from the catalog it was shown from, then install. */
-async function apply(deps: CliDeps, url: string, shown: Shown): Promise<void> {
+/**
+ * The confirmed run of one table: the prune first, from the catalog it was shown from, then
+ * install. Returns what the prune did, as the run reports it.
+ */
+async function apply(deps: CliDeps, url: string, shown: Shown): Promise<Pruned | undefined> {
+  let pruned: Pruned | undefined;
   if (shown.pruneSql !== "") {
-    const pruned = await prune({
+    const result = await prune({
       adminUrl: url,
       source: { table: shown.target.table, schema: shown.target.schema },
       questionSet: shown.plan.questionSet,
@@ -155,9 +212,10 @@ async function apply(deps: CliDeps, url: string, shown: Shown): Promise<void> {
       print: sameAsShown(shown.pruneSql),
       connect: deps.connect,
     });
-    if (!pruned.ok) {
-      throw refused("prune-refused", pruned.reason);
+    if (!result.ok) {
+      throw refused("prune-refused", result.reason);
     }
+    pruned = prunedOf(result);
   }
   const result = await migrate({
     adminUrl: url,
@@ -168,6 +226,7 @@ async function apply(deps: CliDeps, url: string, shown: Shown): Promise<void> {
   if (!result.ok) {
     throw refused("migrate-refused", result.reason);
   }
+  return pruned;
 }
 
 function label(target: TableTarget): string {
@@ -210,6 +269,13 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         print(`-- facetdb migrate --prune: ${item.target.source.name} (${label(item.target)})`);
         print(item.pruneSql);
       }
+      // What the prune drops, keeps and revokes, column by column; a kept column is named even
+      // when there is no script, so nothing stays without a word.
+      const lines = item.pruned === undefined ? [] : pruneLines(item.pruned, false);
+      if (lines.length > 0) {
+        print(`Prune of ${label(item.target)}:`);
+        print(lines.join("\n"));
+      }
       print(`-- facetdb migrate: ${item.target.source.name} (${label(item.target)})`);
       print(item.sql);
     }
@@ -220,6 +286,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         source: item.target.source.name,
         table: label(item.target),
         ...(item.pruneSql === "" ? {} : { pruneSql: item.pruneSql }),
+        ...(item.pruned === undefined ? {} : { pruned: item.pruned }),
         sql: item.sql,
         applied,
       })),
@@ -241,7 +308,12 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       }
     }
     for (const item of shown) {
-      await apply(deps, url, item);
+      const pruned = await apply(deps, url, item);
+      const lines = pruned === undefined ? [] : pruneLines(pruned, true);
+      if (lines.length > 0) {
+        print(`Pruned ${label(item.target)}:`);
+        print(lines.join("\n"));
+      }
       print(`Installed on ${label(item.target)} (source ${item.target.source.name}).`);
     }
     return summary(true);

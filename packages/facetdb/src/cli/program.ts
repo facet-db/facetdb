@@ -228,7 +228,7 @@ function errorJson(error: CliError): string {
 }
 
 /** Anything else that escapes a command is still reported in plain words, with somewhere to go. */
-function asCliError(error: unknown): CliError {
+export function asCliError(error: unknown): CliError {
   if (error instanceof CliError) {
     return error;
   }

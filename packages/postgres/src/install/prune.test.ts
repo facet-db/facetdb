@@ -44,6 +44,10 @@ const choice = (storeProbabilities: boolean): QuestionSet["questions"][number] =
   storeProbabilities,
 });
 
+/** Dropped columns of a question no longer in the set, as `PruneResult.dropped` lists them. */
+const unasked = (...columns: readonly string[]) =>
+  columns.map((column) => ({ column, reason: "no question asks it any more" }));
+
 const withProbabilities: QuestionSet = { ...both, questions: [...both.questions, choice(true)] };
 const probabilitiesOff: QuestionSet = { ...both, questions: [...both.questions, choice(false)] };
 
@@ -103,7 +107,12 @@ describe("migrate --prune revokes the worker's select on a removed state column"
     expect(await workerSelect()).toContain("description");
 
     const { result, printed } = await runPrune(titleOnly);
-    expect(result).toMatchObject({ ok: true, applied: true, dropped: [] });
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      dropped: [],
+      revoked: ["description"],
+    });
     expect(printed[0]).toContain(
       `revoke select ("description") on "public"."listings" from "facetdb_worker"`,
     );
@@ -125,7 +134,7 @@ describe("migrate --prune revokes the worker's select on a removed state column"
     await installed();
     const before = await workerSelect();
     const { result, printed } = await runPrune(both);
-    expect(result).toMatchObject({ ok: true, applied: false, sql: "" });
+    expect(result).toMatchObject({ ok: true, applied: false, revoked: [], sql: "" });
     expect(printed).toEqual([]);
     expect(await workerSelect()).toEqual(before);
   });
@@ -230,13 +239,30 @@ describe("migrate --prune drops the columns of removed questions only", () => {
     );
   });
 
+  it("says a column went because its question changed type", async () => {
+    // `category` was a choice; now it is a yes-or-no question of the same name.
+    await installed({ table: "listings" }, withProbabilities);
+    const asNoul: QuestionSet = {
+      ...both,
+      questions: [
+        ...both.questions,
+        { type: "noul", name: "category", instructions: "A car?", stakes: "low" },
+      ],
+    };
+    const { result } = await runPrune(asNoul, { dryRun: true });
+    expect(result.ok && result.dropped).toEqual([
+      { column: "category_confidence", reason: "its question changed type" },
+      { column: "category_probabilities", reason: "its question changed type" },
+    ]);
+  });
+
   it("drops all of a removed question's columns, and none of a kept one's", async () => {
     await installed({ table: "listings" }, withProbabilities);
     const { result, printed } = await runPrune(both);
     expect(result).toMatchObject({
       ok: true,
       applied: true,
-      dropped: ["category", "category_confidence", "category_probabilities"],
+      dropped: unasked("category", "category_confidence", "category_probabilities"),
       kept: [],
     });
     expect(printed[0]).toContain(`drop column "category_probabilities"`);
@@ -260,7 +286,7 @@ describe("migrate --prune drops the columns of removed questions only", () => {
     expect(result).toMatchObject({
       ok: true,
       applied: true,
-      dropped: ["quality", "quality_confidence", "quality_expected"],
+      dropped: unasked("quality", "quality_confidence", "quality_expected"),
       kept: ["category_probabilities: kept (storeProbabilities is off)"],
     });
     const after = await columnNames("listings");
@@ -284,7 +310,7 @@ describe("migrate --prune drops the columns of removed questions only", () => {
     expect(result).toMatchObject({
       ok: true,
       applied: true,
-      dropped: ["quality", "quality_confidence", "quality_expected"],
+      dropped: unasked("quality", "quality_confidence", "quality_expected"),
       kept: ["category_probabilities: kept (storeProbabilities is off)"],
     });
     expect(await columnNames("listings_answers", "facetdb")).toContain("category_probabilities");
