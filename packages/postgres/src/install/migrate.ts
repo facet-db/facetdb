@@ -90,6 +90,8 @@ type RoleFacts = {
 };
 
 type Inspection = {
+  /** Side-table mode and a role besides the owner holds select on the source. */
+  readonly sourceReaders: boolean;
   readonly primaryKey: readonly string[];
   /** The primary key column's SQL type as `format_type` prints it; side-table mode creates its key with it. */
   readonly keyType: string | undefined;
@@ -164,6 +166,14 @@ const DEPENDENTS_QUERY = `select count(distinct r.ev_class)::int as n
   from pg_catalog.pg_depend d
   join pg_catalog.pg_rewrite r on r.oid = d.objid
  where d.refobjid = format('%I.%I', $1::text, $2::text)::regclass and r.ev_class <> d.refobjid`;
+
+/** Roles other than the owner that hold table-level select on the source (what the reader grants copy). */
+const READERS_QUERY = `select 1
+  from pg_catalog.pg_class c
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  cross join lateral pg_catalog.aclexplode(c.relacl) a
+ where n.nspname = $1 and c.relname = $2 and a.privilege_type = 'SELECT' and a.grantee <> c.relowner
+ limit 1`;
 
 const OWNERS_EXISTS_QUERY = `select 1 from information_schema.tables where table_schema = 'facetdb' and table_name = 'table_owners'`;
 
@@ -258,7 +268,11 @@ async function inspect(
   const enqueuer = await roleFacts(query, ENQUEUE_ROLE);
   const usedElsewhere =
     worker.exists && (await query(USED_ELSEWHERE_QUERY, [WORKER_ROLE])).length > 0;
+  const sourceReaders =
+    source.storage === "side-table" &&
+    (await query(READERS_QUERY, [schema, source.table])).length > 0;
   return {
+    sourceReaders,
     primaryKey,
     keyType,
     sideColumns,
@@ -277,6 +291,13 @@ async function inspect(
     usedElsewhere,
   };
 }
+
+function anotherProject(table: string, owner: string): string {
+  return `${table} already carries FacetDB columns from another project (${owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
+}
+
+/** Thrown inside the install transaction to roll it back with a refusal's words. */
+class Refused extends Error {}
 
 function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   const { source, project } = plan;
@@ -352,7 +373,7 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
     return `facetdb.${source.table}_answers already exists and no install of FacetDB on ${table} made it; rename it or point this source at another table.`;
   }
   if (inspection.owner !== null && inspection.owner !== project.id) {
-    return `${table} already carries FacetDB columns from another project (${inspection.owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
+    return anotherProject(table, inspection.owner);
   }
   const { worker, enqueuer } = inspection;
   if (worker.superuser || worker.bypassRls || worker.createRole || worker.createDb) {
@@ -404,6 +425,7 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       ...(inspection.keyType === undefined ? {} : { keyType: inspection.keyType }),
     };
     const statements = installSql(source, plan.questionSet, plan.project, {
+      sourceReaders: inspection.sourceReaders,
       ...(plan.workerPassword === undefined ? {} : { workerPassword: plan.workerPassword }),
     });
     const sql = renderSql(statements);
@@ -415,11 +437,29 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
     if (options.dryRun === true) {
       return { ok: true, key, statements, sql, applied: false, changed, workerPasswordApplied };
     }
-    await client.transaction(async (query) => {
-      for (const statement of statements) {
-        await query(statement.text, statement.params);
+    const schema = plan.source.schema ?? "public";
+    try {
+      await client.transaction(async (query) => {
+        for (const statement of statements) {
+          await query(statement.text, statement.params);
+          if (statement.claimsOwner === true) {
+            // The inspection ran before this transaction: another project may have claimed the table
+            // since. The claim above did nothing then, so the owner now read is the truth, and
+            // nothing after it (columns, trigger, grants) has run yet.
+            const rows = await query(OWNER_QUERY, [schema, plan.source.table]);
+            const owner = String(rows[0]?.["project_id"]);
+            if (owner !== plan.project.id) {
+              throw new Refused(anotherProject(`${schema}.${plan.source.table}`, owner));
+            }
+          }
+        }
+      });
+    } catch (error) {
+      if (error instanceof Refused) {
+        return { ok: false, reason: error.message };
       }
-    });
+      throw error;
+    }
     return { ok: true, key, statements, sql, applied: true, changed, workerPasswordApplied };
   } finally {
     await client.close();

@@ -1,5 +1,6 @@
 import type { QuestionSet } from "@facetdb/core";
 import {
+  CREATION_COLUMN,
   SIDE_TABLE_SETTING,
   sideTableName,
   sideTableRelation,
@@ -19,6 +20,7 @@ import {
   SCHEMA_SETTING,
   TABLE_SETTING,
   type TableSource,
+  WORKER_ROLE,
 } from "./sql.ts";
 
 /**
@@ -29,10 +31,40 @@ import {
  * back, with Postgres's own message naming the view).
  */
 
+/** The columns of a table on which a role holds a column-level select (grants made to that role itself). */
+const WORKER_SELECT_QUERY = `select a.attname as name
+  from pg_catalog.pg_attribute a
+  cross join lateral pg_catalog.aclexplode(a.attacl) x
+ where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass
+   and a.attnum > 0 and not a.attisdropped
+   and x.privilege_type = 'SELECT'
+   and x.grantee = (select oid from pg_catalog.pg_roles where rolname = $3)
+ order by a.attnum`;
+
 /** The FacetDB columns the catalog shows: marked ones on the table, or the side table's. */
 export type PruneCatalog = {
   readonly columns: readonly string[];
+  /** The source table's columns on which the worker login holds a column-level select. */
+  readonly workerSelect?: readonly string[];
 };
+
+/**
+ * The columns the worker may still read that the question set no longer asks about: a state column
+ * removed from `read`. The key, FacetDB's own columns and the creation marker `scan` orders by stay.
+ */
+export function revokedColumns(
+  source: Pick<TableSource, "key">,
+  questionSet: QuestionSet,
+  catalog: PruneCatalog,
+): readonly string[] {
+  const kept = new Set([
+    source.key,
+    CREATION_COLUMN,
+    ...questionSet.read,
+    ...installOwnedColumns(questionSet),
+  ]);
+  return (catalog.workerSelect ?? []).filter((name) => !kept.has(name));
+}
 
 /** The catalog's columns that the question set no longer owns: the ones `prune` drops. */
 export function prunedColumns(
@@ -57,13 +89,21 @@ export function pruneSql(
   catalog: PruneCatalog,
 ): readonly InstallStatement[] {
   const removed = prunedColumns(source, questionSet, catalog);
-  if (removed.length === 0) {
+  const revoked = revokedColumns(source, questionSet, catalog);
+  if (removed.length === 0 && revoked.length === 0) {
     return [];
   }
+  const table = quoteTable({ schema: source.schema, name: source.table });
+  const revokes = revoked.map((name) =>
+    plain(`revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(WORKER_ROLE)}`),
+  );
+  if (removed.length === 0) {
+    return [...SCRIPT_HEADER, ...revokes];
+  }
   if (source.storage !== "side-table") {
-    const table = quoteTable({ schema: source.schema, name: source.table });
     return [
       ...SCRIPT_HEADER,
+      ...revokes,
       ...removed.map((name) => plain(`alter table ${table} drop column ${quoteIdent(name)}`)),
     ];
   }
@@ -72,6 +112,7 @@ export function pruneSql(
   const remaining = ownedColumnDefinitions(questionSet).filter(([name]) => present.has(name));
   return [
     ...SCRIPT_HEADER,
+    ...revokes,
     settingsStatement([
       [VIEW_SCHEMA_SETTING, source.schema ?? "public"],
       [VIEW_NAME_SETTING, sideViewName(source.table)],
@@ -140,7 +181,12 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
       keyType: installed.keyType,
       storage: side ? "side-table" : "inline",
     };
-    const catalog = { columns: installed.sideColumns ?? installed.marked };
+    const catalog = {
+      columns: installed.sideColumns ?? installed.marked,
+      workerSelect: (
+        await client.query(WORKER_SELECT_QUERY, [installed.schema, installed.table, WORKER_ROLE])
+      ).map((row) => String(row["name"])),
+    };
     const dropped = prunedColumns(source, options.questionSet, catalog);
     const statements = pruneSql(source, options.questionSet, catalog);
     if (statements.length === 0) {

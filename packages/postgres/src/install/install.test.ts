@@ -391,6 +391,92 @@ describe("migrate on PGlite", () => {
     expect(same.result).toMatchObject({ ok: true });
   });
 
+  it("refuses inside the transaction when another project claims the table after the inspection", async () => {
+    await listingsTable();
+    await world.client.query(
+      `create table public.elsewhere (id serial primary key, title text, description text)`,
+    );
+    // Another project installs on a different table, so the store's tables exist.
+    const first = await migrate({
+      adminUrl: "postgres://admin@unused/listings",
+      connect: world.connect,
+      print: () => undefined,
+      plan: {
+        source: { table: "elsewhere" },
+        questionSet: listings,
+        project: { id: "proj_other", name: "Other" },
+        workerPassword: "a-long-random-password",
+      },
+    });
+    expect(first.ok).toBe(true);
+    const before = await catalog();
+    // Between this project's inspection and its transaction, the other project claims listings.
+    const racing: SqlConnect = () => ({
+      query: world.client.query,
+      transaction: async (work) => {
+        await world.client.query(
+          `insert into facetdb.table_owners (table_schema, table_name, project_id) values ('public', 'listings', 'proj_other')`,
+        );
+        return world.client.transaction(work);
+      },
+      close: async () => undefined,
+    });
+    const { result } = await run({ workerPassword: undefined }, { connect: racing });
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.reason).toContain("another project (proj_other)");
+    }
+    // Nothing changed beyond the other project's own row: no columns, no trigger, no grants.
+    const after = (await catalog()) as { owners: unknown[] } & Record<string, unknown>;
+    const { owners: afterOwners, ...afterRest } = after;
+    const { owners: beforeOwners, ...beforeRest } = before as { owners: unknown[] } & Record<
+      string,
+      unknown
+    >;
+    expect(afterRest).toEqual(beforeRest);
+    expect(afterOwners).toHaveLength(beforeOwners.length + 1);
+    const status = await world.client.query(
+      `select 1 from information_schema.columns where table_name = 'listings' and column_name = 'facetdb_status'`,
+    );
+    expect(status).toHaveLength(0);
+  });
+
+  it("tells readers granted after the install to migrate again, in side-table mode with readers only", async () => {
+    const note = "granted after this install need `facetdb migrate` again";
+    await listingsTable();
+    const side = { table: "listings", storage: "side-table" } as const;
+    const withoutReaders = await run({ source: side }, { dryRun: true });
+    expect(withoutReaders.printed[0]).not.toContain(note);
+    await world.client.query(`create role app_reader`);
+    await world.client.query(`grant select on public.listings to app_reader`);
+    const withReaders = await run({ source: side }, { dryRun: true });
+    expect(withReaders.printed[0]).toContain(note);
+    const inline = await run({}, { dryRun: true });
+    expect(inline.printed[0]).not.toContain(note);
+  });
+
+  it("never writes a table name into a comment of the printed script, so a newline in it injects nothing", async () => {
+    const hostile = "t\nalter role facetdb_worker superuser;\n--";
+    await listingsTable({ table: hostile });
+    await world.client.query(`create role app_reader`);
+    await world.client.query(
+      `grant select on public."${hostile.replaceAll('"', '""')}" to app_reader`,
+    );
+    const { result, printed } = await run({ source: { table: hostile, storage: "side-table" } });
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(printed[0]).toContain("granted after this install need `facetdb migrate` again");
+    // The only places the name may appear are quoted identifiers and literals, never a comment.
+    const comments = (printed[0]?.split("\n") ?? []).filter((line) => line.startsWith("--"));
+    expect(
+      comments.filter((line) => line.includes("alter role") || line.includes(hostile)),
+    ).toEqual([]);
+    expect(comments.some((line) => line.startsWith("-- Readers of the source table"))).toBe(true);
+    const roles = await world.client.query(
+      `select rolsuper from pg_roles where rolname = 'facetdb_worker'`,
+    );
+    expect(roles).toEqual([{ rolsuper: false }]);
+  });
+
   it("refuses a first install without a worker password, and a superuser worker role", async () => {
     await listingsTable();
     const { result } = await run({ workerPassword: undefined });

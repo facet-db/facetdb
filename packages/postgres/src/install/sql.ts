@@ -75,6 +75,12 @@ export type InstallStatement = {
   readonly text: string;
   readonly params: readonly unknown[];
   readonly redacted?: boolean;
+  /**
+   * The statement that claims the table for the project (`insert … on conflict do nothing`): `migrate`
+   * reads the owner back right after it, inside the same transaction, and rolls everything back when
+   * the row belongs to another project (two installs racing on one table).
+   */
+  readonly claimsOwner?: boolean;
 };
 
 /** The one login FacetDB creates in a customer's database; the only credential it ever stores. */
@@ -248,7 +254,11 @@ export function installSql(
   source: TableSource,
   questionSet: QuestionSet,
   project: ProjectRef,
-  options: { readonly workerPassword?: string } = {},
+  options: {
+    readonly workerPassword?: string;
+    /** Side-table mode: roles other than the owner hold select on the source now (migrate looked). */
+    readonly sourceReaders?: boolean;
+  } = {},
 ): readonly InstallStatement[] {
   const schema = source.schema ?? "public";
   const table = quoteTable({ schema, name: source.table });
@@ -294,6 +304,7 @@ export function installSql(
     {
       text: `insert into ${OWNERS_TABLE} (table_schema, table_name, project_id) values ($1, $2, $3) on conflict (table_schema, table_name) do nothing`,
       params: [schema, source.table, project.id],
+      claimsOwner: true,
     },
     ...(side
       ? // Side-table mode: the application's table is not altered. The side table carries the
@@ -314,7 +325,15 @@ export function installSql(
           ...sideTableStatements(source, columns).map(plain),
           // Whoever may read the source table may read its answers: the table's readers get select
           // on the side table and usage on the schema, or the security-invoker view would refuse them.
-          plain(sideTableReaderGrants()),
+          plain(
+            `${
+              options.sourceReaders === true
+                ? // No table or schema name here: a name with a newline would end the comment and
+                  // run the rest as SQL.
+                  "-- Readers of the source table granted after this install need `facetdb migrate` again\n-- to see its answers view.\n"
+                : ""
+            }${sideTableReaderGrants()}`,
+          ),
         ]
       : [
           // The answer and status columns, marked as FacetDB's (a later install adopts marked
