@@ -13,6 +13,7 @@ import { pgliteClient } from "../polling/index.ts";
 import { CLAIM_LEASE_MS, jobsTableSql } from "../sql/index.ts";
 import { freshPglite } from "../testing/index.ts";
 import { createCrypto, newSalt } from "./crypto.ts";
+import { SCHEMA_VERSION } from "./schema.ts";
 import { createStore, requireTls, type Store } from "./store.ts";
 
 const SECRET = "a-long-random-secret-for-tests-only";
@@ -68,14 +69,16 @@ async function catalog(db: PGlite): Promise<string[]> {
 }
 
 describe("store migrations", () => {
-  it("are idempotent: starting again changes nothing and records one migration", async () => {
+  it("are idempotent: starting again changes nothing and records each migration once", async () => {
     const { db } = await newStore();
     const before = await catalog(db);
     expect(before.length).toBeGreaterThan(40);
     await newStore(db);
     await newStore(db);
     expect(await catalog(db)).toEqual(before);
-    expect(await scalar(db, "select count(*)::int from facetdb.store_migrations")).toBe(1);
+    expect(await scalar(db, "select count(*)::int from facetdb.store_migrations")).toBe(
+      SCHEMA_VERSION,
+    );
     expect(await scalar(db, "select count(*)::int from facetdb.install")).toBe(1);
   });
 

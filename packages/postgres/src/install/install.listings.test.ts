@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import type { QuestionSet } from "@facetdb/core";
 import { describe, expect, it } from "vitest";
-import { STORE_SEQUENCES, STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
+import {
+  SCHEMA_VERSION,
+  STORE_SEQUENCES,
+  STORE_TABLES,
+  STORE_VERSION_TABLE,
+} from "../store/index.ts";
 import { installSql, renderSql, WORKER_ROLE } from "./sql.ts";
 
 /**
@@ -53,7 +58,11 @@ describe("the printed install script and the store's tables", () => {
             ),
           );
         }
-        expect(sql).toContain("insert into facetdb.store_migrations (version) values (1)");
+        for (let version = 1; version <= SCHEMA_VERSION; version += 1) {
+          expect(sql).toContain(
+            `insert into facetdb.store_migrations (version) values (${version})`,
+          );
+        }
       });
 
       it("grants the store to facetdb_worker only, with no create privilege and no ownership", async () => {

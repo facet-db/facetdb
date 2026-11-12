@@ -280,7 +280,6 @@ export async function runWorkers(
         return Promise.resolve();
       },
     });
-    await outbox.install();
 
     if (options.http) {
       const app = createServer({

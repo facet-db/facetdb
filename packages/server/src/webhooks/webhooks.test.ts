@@ -10,7 +10,7 @@ import type {
 } from "@facetdb/core";
 import { configureAction, createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, pgliteClient } from "@facetdb/postgres";
+import { createStore, migrateStore, pgliteClient } from "@facetdb/postgres";
 import { freshPglite, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
@@ -228,9 +228,6 @@ async function rig() {
       return Promise.resolve();
     },
   });
-  await outbox.install();
-  // Installing twice changes nothing.
-  await outbox.install();
 
   const provider = new ScriptedProvider();
   const connectorOf = (workerId: string) =>
@@ -859,10 +856,11 @@ describe("a delivery is claim-safe", () => {
     expect(Number((await t.row(id))["gave_up_at"])).toBe(START + GIVE_UP_AFTER_MS);
   });
 
-  it("adds claimed_by to an outbox table made before it existed", async () => {
+  it("the store's migration adds claimed_by to an outbox table a worker made before it existed", async () => {
     const t = await rig();
     await t.client.query("alter table facetdb.webhook_outbox drop column claimed_by");
-    await t.outbox.install();
+    await t.client.query("delete from facetdb.store_migrations where version = 2");
+    await migrateStore(t.client);
     const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
     expect(await t.outbox.deliverDue(START)).toMatchObject({ delivered: [id] });
   });

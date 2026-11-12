@@ -1,6 +1,6 @@
 import type { ActionRecord } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { pgliteClient } from "@facetdb/postgres";
+import { migrateStore, pgliteClient } from "@facetdb/postgres";
 import { freshPglite } from "@facetdb/postgres/testing";
 import {
   createOutbox,
@@ -31,20 +31,21 @@ async function sender() {
   const clock = new FakeClock(START);
   const pglite = await freshPglite();
   closers.push(() => pglite.close());
-  await pglite.query("create schema if not exists facetdb");
+  const client = pgliteClient(pglite);
+  // The outbox table is the store's: made by its migrations, never by the outbox.
+  await migrateStore(client);
   const sent: Sent[] = [];
   const send: WebhookFetch = (_url, init) => {
     sent.push({ headers: { ...init.headers }, body: init.body });
     return Promise.resolve({ status: 204 });
   };
   const outbox = createOutbox({
-    client: pgliteClient(pglite),
+    client,
     clock,
     fetch: send,
     secretFor: () => Promise.resolve(SECRET),
     onGiveUp: () => Promise.resolve(),
   });
-  await outbox.install();
   const action = createWebhookAction({ outbox, projectId: "project-1", source: "tickets", clock });
   return { clock, outbox, action, sent };
 }

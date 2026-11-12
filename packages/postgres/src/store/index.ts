@@ -2,6 +2,7 @@ export type { StoreConnector, StoreConnectorOptions, StoredRecord } from "./conn
 export type { Crypto } from "./crypto.ts";
 export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.ts";
 export {
+  migrateStore,
   SCHEMA_VERSION,
   STORE_SEQUENCES,
   STORE_TABLES,

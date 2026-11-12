@@ -1,5 +1,5 @@
 import { FakeClock } from "@facetdb/core/testing";
-import { connectPostgres, type SqlClient } from "@facetdb/postgres";
+import { connectPostgres, migrateStore, type SqlClient } from "@facetdb/postgres";
 import { createScratchDatabase, type ScratchDatabase } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createOutbox, DELIVERY_BATCH, type Outbox, type WebhookFetch } from "./outbox.ts";
@@ -37,6 +37,8 @@ beforeEach(async () => {
   const admin = open();
   await admin.query("drop schema if exists facetdb cascade");
   await admin.query("create schema facetdb");
+  // The outbox table is the store's (migration 2); the outbox itself creates nothing.
+  await migrateStore(admin);
 });
 
 afterEach(async () => {
@@ -75,9 +77,6 @@ describe("webhook_outbox claims on a real Postgres", () => {
   it("never hands one row to two loops claiming at once", async () => {
     const a = loop("loop-a");
     const b = loop("loop-b");
-    await a.outbox.install();
-    // Installing from the other connection changes nothing.
-    await b.outbox.install();
     const ids = await queue(a.outbox, DELIVERY_BATCH * 2);
 
     const [reportA, reportB] = await Promise.all([
@@ -97,7 +96,6 @@ describe("webhook_outbox claims on a real Postgres", () => {
 
   it("passes over a row another connection holds instead of waiting for it", async () => {
     const a = loop("loop-a");
-    await a.outbox.install();
     const [held, ...others] = await queue(a.outbox, 3);
     if (held === undefined) {
       throw new Error("nothing was queued");

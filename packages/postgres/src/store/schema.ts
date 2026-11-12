@@ -128,6 +128,31 @@ const MIGRATIONS: readonly Migration[] = [
 )`,
     ],
   },
+  {
+    version: 2,
+    statements: [
+      // The webhook outbox (retried with backoff for 24 hours). It lives in the store so
+      // `facetdb migrate` makes it with the admin credential: the worker login holds no CREATE
+      // on the schema (found on Supabase, when the worker made it).
+      `create table if not exists facetdb.webhook_outbox (
+  id bigserial primary key,
+  project_id text not null,
+  endpoint text not null,
+  payload text not null,
+  attempts integer not null default 0,
+  created_at bigint not null,
+  next_attempt_at bigint not null,
+  delivered_at bigint,
+  gave_up_at bigint,
+  last_error text,
+  claimed_by text
+)`,
+      // An outbox a worker made before outcomes were checked against the claim has no `claimed_by`.
+      `alter table facetdb.webhook_outbox add column if not exists claimed_by text`,
+      `create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
+  where delivered_at is null and gave_up_at is null`,
+    ],
+  },
 ];
 
 /** The newest migration number this version of FacetDB knows. */
@@ -156,13 +181,18 @@ export const STORE_TABLES: readonly string[] = [
   "heartbeats",
   "cursors",
   "install",
+  "webhook_outbox",
 ];
 
 /** The version table: the worker reads it to see that nothing is left to migrate, and writes nothing. */
 export const STORE_VERSION_TABLE = "store_migrations";
 
 /** The sequences behind the store's `bigserial` columns; the worker needs `usage, select` on them. */
-export const STORE_SEQUENCES: readonly string[] = ["decisions_id_seq", "alert_history_id_seq"];
+export const STORE_SEQUENCES: readonly string[] = [
+  "decisions_id_seq",
+  "alert_history_id_seq",
+  "webhook_outbox_id_seq",
+];
 
 const VERSION_TABLE_SQL = `create table if not exists facetdb.store_migrations (
   version integer primary key,

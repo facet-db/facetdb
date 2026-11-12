@@ -105,32 +105,17 @@ export type DeliveryReport = {
   readonly alertFailures: readonly unknown[];
 };
 
+/**
+ * The outbox reads and writes `facetdb.webhook_outbox` and never creates it: the table is a store
+ * migration (@facetdb/postgres, `store/schema.ts`), made by `facetdb migrate` with the admin
+ * credential and granted to the worker login, which may not create tables.
+ */
 export type Outbox = {
-  /** Creates `facetdb.webhook_outbox` when it is missing. */
-  install(): Promise<void>;
   /** Queues a webhook for delivery now; returns its delivery id. */
   enqueue(webhook: NewWebhook): Promise<string>;
   /** Sends every webhook whose `next_attempt_at` is at or before `now`; the worker loop calls it each pass. */
   deliverDue(now: number): Promise<DeliveryReport>;
 };
-
-const TABLE = `create table if not exists facetdb.webhook_outbox (
-  id bigserial primary key,
-  project_id text not null,
-  endpoint text not null,
-  payload text not null,
-  attempts integer not null default 0,
-  created_at bigint not null,
-  next_attempt_at bigint not null,
-  delivered_at bigint,
-  gave_up_at bigint,
-  last_error text,
-  claimed_by text
-)`;
-// A table made before outcomes were checked against the claim has no `claimed_by`.
-const CLAIMED_BY = "alter table facetdb.webhook_outbox add column if not exists claimed_by text";
-const INDEX = `create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
-  where delivered_at is null and gave_up_at is null`;
 
 type Claimed = {
   readonly id: string;
@@ -239,12 +224,6 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   }
 
   return {
-    async install() {
-      await client.query(TABLE);
-      await client.query(CLAIMED_BY);
-      await client.query(INDEX);
-    },
-
     async enqueue(webhook) {
       const url = new URL(webhook.endpoint);
       if (url.protocol !== "https:" && url.protocol !== "http:") {

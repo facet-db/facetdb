@@ -148,6 +148,27 @@ create table if not exists facetdb.cursors (
 
 insert into facetdb.store_migrations (version) values (1) on conflict (version) do nothing;
 
+create table if not exists facetdb.webhook_outbox (
+  id bigserial primary key,
+  project_id text not null,
+  endpoint text not null,
+  payload text not null,
+  attempts integer not null default 0,
+  created_at bigint not null,
+  next_attempt_at bigint not null,
+  delivered_at bigint,
+  gave_up_at bigint,
+  last_error text,
+  claimed_by text
+);
+
+alter table facetdb.webhook_outbox add column if not exists claimed_by text;
+
+create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
+  where delivered_at is null and gave_up_at is null;
+
+insert into facetdb.store_migrations (version) values (2) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -419,10 +440,14 @@ grant select, insert, update, delete on "facetdb"."cursors" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."install" to "facetdb_worker";
 
+grant select, insert, update, delete on "facetdb"."webhook_outbox" to "facetdb_worker";
+
 grant select on "facetdb"."store_migrations" to "facetdb_worker";
 
 grant usage, select on sequence "facetdb"."decisions_id_seq" to "facetdb_worker";
 
 grant usage, select on sequence "facetdb"."alert_history_id_seq" to "facetdb_worker";
+
+grant usage, select on sequence "facetdb"."webhook_outbox_id_seq" to "facetdb_worker";
 
 commit;

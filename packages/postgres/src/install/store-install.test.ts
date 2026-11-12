@@ -116,9 +116,12 @@ describe("the install script and the store", () => {
       [...STORE_TABLES, STORE_VERSION_TABLE].sort(),
     );
     expect((await names(world, "S")).sort()).toEqual([...STORE_SEQUENCES].sort());
+    // Every migration is recorded, so a worker start sees a current store and runs no DDL.
     expect(
-      await world.client.query(`select version::int as version from facetdb.store_migrations`),
-    ).toEqual([{ version: SCHEMA_VERSION }]);
+      await world.client.query(
+        `select version::int as version from facetdb.store_migrations order by version`,
+      ),
+    ).toEqual(Array.from({ length: SCHEMA_VERSION }, (_, n) => ({ version: n + 1 })));
   });
 
   it("grants the worker row access to the store and the version table read-only", async () => {
@@ -206,5 +209,53 @@ describe("the install script and the store", () => {
     } finally {
       await world.client.query(`reset role`);
     }
+  });
+
+  it("a store at version 1 (installed before the outbox moved in) names its version, and migrate brings it to 2", async () => {
+    // The state every install made before this migration is in (the Supabase project of the
+    // example among them): the worker login says how far behind it is and what to run; the
+    // admin's second `facetdb migrate` adds the outbox and the worker's rights on it.
+    const world = await installed();
+    await world.client.query(`delete from facetdb.store_migrations where version = 2`);
+    await world.client.query(`drop table facetdb.webhook_outbox`);
+    await world.client.query(`create role plain_login login`);
+    await world.client.query(`grant usage on schema facetdb to plain_login`);
+    await world.client.query(`grant select on facetdb.store_migrations to plain_login`);
+    await world.client.query(`set role plain_login`);
+    try {
+      await expect(
+        createStore({
+          url: "postgres://plain_login@localhost/listings",
+          connect: () => world.client,
+          secret: TEST_SECRET,
+          clock: new FakeClock(),
+        }),
+      ).rejects.toThrow(/at schema version 1, behind this FacetDB \(2\).*facetdb migrate/);
+    } finally {
+      await world.client.query(`reset role`);
+    }
+    await install(world);
+    expect(
+      await world.client.query(
+        `select version::int as version from facetdb.store_migrations order by 1`,
+      ),
+    ).toEqual([{ version: 1 }, { version: 2 }]);
+    expect(await names(world, "r")).toContain("webhook_outbox");
+    expect(
+      await world.client.query(
+        `select privilege_type from information_schema.table_privileges
+          where table_schema = 'facetdb' and table_name = 'webhook_outbox' and grantee = 'facetdb_worker' order by 1`,
+      ),
+    ).toEqual([
+      { privilege_type: "DELETE" },
+      { privilege_type: "INSERT" },
+      { privilege_type: "SELECT" },
+      { privilege_type: "UPDATE" },
+    ]);
+    expect(
+      await world.client.query(
+        `select has_sequence_privilege('facetdb_worker', 'facetdb.webhook_outbox_id_seq', 'usage') as may`,
+      ),
+    ).toEqual([{ may: true }]);
   });
 });

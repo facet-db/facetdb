@@ -212,6 +212,21 @@ describe("the worker login on a real Postgres", () => {
       });
       await queue.enqueue(["k1"]);
       expect(await queue.claim(1)).toEqual(["k1"]);
+      // The webhook outbox (@facetdb/server) is a store table too; the worker queues and claims
+      // in it with the same login (a run on Supabase failed here: the worker had created it).
+      const reserved = await recording.query(
+        "select nextval(pg_get_serial_sequence('facetdb.webhook_outbox', 'id'))::text as id",
+      );
+      await recording.query(
+        `insert into facetdb.webhook_outbox (id, project_id, endpoint, payload, created_at, next_attempt_at)
+         values ($1::bigint, 'proj_listings', 'https://hooks.example.com/f', '{}', 1, 1)`,
+        [reserved[0]?.["id"]],
+      );
+      const claimedRows = await recording.query(
+        `update facetdb.webhook_outbox set attempts = attempts + 1, claimed_by = 'w1'
+          where delivered_at is null returning id::text as id`,
+      );
+      expect(claimedRows).toEqual([{ id: String(reserved[0]?.["id"]) }]);
     } finally {
       await store.close();
     }
