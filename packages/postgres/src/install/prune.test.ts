@@ -32,7 +32,33 @@ afterEach(async () => {
   }
 });
 
-async function installed(source: MigrateSource = { table: "listings" }): Promise<void> {
+const choice = (storeProbabilities: boolean): QuestionSet["questions"][number] => ({
+  type: "choice",
+  name: "category",
+  instructions: "Which category?",
+  options: [
+    { name: "car", description: "A car" },
+    { name: "flat", description: "A flat" },
+  ],
+  stakes: "low",
+  storeProbabilities,
+});
+
+const withProbabilities: QuestionSet = { ...both, questions: [...both.questions, choice(true)] };
+const probabilitiesOff: QuestionSet = { ...both, questions: [...both.questions, choice(false)] };
+
+async function columnNames(relation: string, schema = "public"): Promise<string[]> {
+  const rows = await world.client.query(
+    `select column_name from information_schema.columns where table_schema = $1 and table_name = $2 order by ordinal_position`,
+    [schema, relation],
+  );
+  return rows.map((row) => String(row["column_name"]));
+}
+
+async function installed(
+  source: MigrateSource = { table: "listings" },
+  questionSet: QuestionSet = both,
+): Promise<void> {
   world = await createPgliteWorld();
   worlds.push(world);
   await world.client.query(
@@ -42,7 +68,7 @@ async function installed(source: MigrateSource = { table: "listings" }): Promise
     adminUrl: "postgres://admin@unused/app",
     connect: world.connect,
     print: () => undefined,
-    plan: { source, questionSet: both, project, workerPassword: "a-long-random-password" },
+    plan: { source, questionSet, project, workerPassword: "a-long-random-password" },
   });
   expect(result).toMatchObject({ ok: true, applied: true });
 }
@@ -121,5 +147,87 @@ describe("migrate --prune revokes the worker's select on a removed state column"
       `revoke select ("description") on "public"."listings" from "facetdb_worker"`,
     );
     expect(await workerSelect()).not.toContain("description");
+  });
+});
+
+describe("migrate --prune drops the columns of removed questions only", () => {
+  it("keeps the _probabilities column of a question still in the set and names it", async () => {
+    await installed({ table: "listings" }, withProbabilities);
+    expect(await columnNames("listings")).toContain("category_probabilities");
+
+    const { result, printed } = await runPrune(probabilitiesOff);
+    expect(result).toMatchObject({
+      ok: true,
+      applied: false,
+      dropped: [],
+      kept: ["category_probabilities: kept (storeProbabilities is off)"],
+      sql: "",
+    });
+    expect(printed).toEqual([]);
+    expect(await columnNames("listings")).toEqual(
+      expect.arrayContaining(["category", "category_confidence", "category_probabilities"]),
+    );
+  });
+
+  it("drops all of a removed question's columns, and none of a kept one's", async () => {
+    await installed({ table: "listings" }, withProbabilities);
+    const { result, printed } = await runPrune(both);
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      dropped: ["category", "category_confidence", "category_probabilities"],
+      kept: [],
+    });
+    expect(printed[0]).toContain(`drop column "category_probabilities"`);
+    expect(await columnNames("listings")).not.toContain("category_probabilities");
+    expect(await columnNames("listings")).toContain("is_scam");
+  });
+
+  it("drops a removed question's columns and keeps the kept probabilities of another", async () => {
+    const other: QuestionSet["questions"][number] = {
+      type: "score",
+      name: "quality",
+      instructions: "How good?",
+      levels: [{ name: "poor" }, { name: "fine" }, { name: "great" }],
+      stakes: "low",
+    };
+    await installed(
+      { table: "listings" },
+      { ...withProbabilities, questions: [...withProbabilities.questions, other] },
+    );
+    const { result } = await runPrune(probabilitiesOff);
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      dropped: ["quality", "quality_confidence", "quality_expected"],
+      kept: ["category_probabilities: kept (storeProbabilities is off)"],
+    });
+    const after = await columnNames("listings");
+    expect(after).toContain("category_probabilities");
+    expect(after).not.toContain("quality");
+  });
+
+  it("in side-table mode keeps the column in the side table and in the rebuilt view", async () => {
+    const other: QuestionSet["questions"][number] = {
+      type: "score",
+      name: "quality",
+      instructions: "How good?",
+      levels: [{ name: "poor" }, { name: "fine" }],
+      stakes: "low",
+    };
+    await installed(
+      { table: "listings", storage: "side-table" },
+      { ...withProbabilities, questions: [...withProbabilities.questions, other] },
+    );
+    const { result } = await runPrune(probabilitiesOff);
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      dropped: ["quality", "quality_confidence", "quality_expected"],
+      kept: ["category_probabilities: kept (storeProbabilities is off)"],
+    });
+    expect(await columnNames("listings_answers", "facetdb")).toContain("category_probabilities");
+    expect(await columnNames("listings_with_answers")).toContain("category_probabilities");
+    expect(await columnNames("listings_with_answers")).not.toContain("quality");
   });
 });

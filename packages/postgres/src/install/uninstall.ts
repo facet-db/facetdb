@@ -1,11 +1,14 @@
-import { SIDE_TABLE_SCHEMA, sideViewName } from "../scan/index.ts";
+import { SIDE_MARK, SIDE_TABLE_SCHEMA, sideViewName } from "../scan/index.ts";
 import {
   connectPostgres,
   JOBS_TABLE,
   quoteIdent,
   quoteLiteral,
   quoteTable,
+  type SqlClient,
   type SqlConnect,
+  type SqlQuery,
+  type SqlRow,
 } from "../sql/index.ts";
 import { STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
 import {
@@ -49,15 +52,22 @@ export type UninstallSource = {
   readonly table: string;
   /** Defaults to `public`. */
   readonly schema?: string;
-  /** The source's id in `facetdb.decisions`: what `purge` deletes. */
+  /**
+   * The source's name or id as the caller knows it. `purge` never deletes by this alone: it is
+   * resolved against the table's owner row and the store's `sources` (see `resolvePurgeSource`).
+   */
   readonly sourceId: string;
 };
 
-/** What uninstall removes, as the catalog showed it, and which source's log rows `purge` deletes. */
+/**
+ * What uninstall removes, as the catalog showed it, and which source's log rows `purge` deletes:
+ * `sourceId` is the id already resolved against the database, or undefined when no source was
+ * found (the purge then deletes no row).
+ */
 export type UninstallTarget = Pick<
   InstalledTable,
   "schema" | "table" | "project" | "marked" | "sideColumns" | "viewMarked"
-> & { readonly sourceId: string };
+> & { readonly sourceId: string | undefined };
 
 /**
  * Install now creates the store's tables in every database it touches, so their presence says
@@ -100,7 +110,7 @@ export function uninstallSql(
       [SCHEMA_SETTING, source.schema],
       [TABLE_SETTING, source.table],
       [PROJECT_SETTING, source.project.id],
-      [SOURCE_SETTING, source.sourceId],
+      [SOURCE_SETTING, source.sourceId ?? ""],
     ]),
     // Change capture first, so nothing is queued while the rest goes.
     plain(`drop trigger if exists ${quoteIdent(triggerName(source))} on ${table}`),
@@ -190,7 +200,15 @@ end $$`),
     plain(`do $$
 ${IN_USE_DECLARE}
   if ${STORE_ABSENT} and not exists (select 1 from facetdb.table_owners) then
-    if not exists (select 1 from ${JOBS_TABLE}) then
+    -- The queue stays while a trigger anywhere in the database still calls a function that writes to
+    -- it (a table whose owner row is gone, or one installed by hand), and while it holds an entry.
+    if not exists (select 1 from ${JOBS_TABLE})
+       and not exists (
+         select 1 from pg_catalog.pg_trigger t
+           join pg_catalog.pg_proc p on p.oid = t.tgfoid
+          where p.pronamespace = to_regnamespace('facetdb')
+            and p.proname in ('enqueue', 'enqueue_keep', 'enqueue_side')
+            and not t.tgisinternal) then
       drop table ${JOBS_TABLE};
     end if;
     drop table facetdb.table_owners;
@@ -198,16 +216,23 @@ ${IN_USE_DECLARE}
     -- (a polling-mode project has no table owner but keeps its usage, cursors and heartbeats).
     if not exists (select 1 from facetdb.projects) then
       drop table if exists ${["sources", "credentials", "api_keys"].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
-      drop table facetdb.projects;
       drop table if exists ${[...BOOKKEEPING_TABLES, STORE_VERSION_TABLE].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
     end if;
   end if;
 end $$`),
-    ...(options.purge
-      ? [
-          // The decision log: this source's rows, and the table once no row of anyone's is left.
-          // Its question-set versions go with it: they only explain the log's version numbers.
-          plain(`do $$
+    ...(options.purge ? [purgeStatement()] : []),
+    projectsTableStatement(),
+    ...(options.purge ? [dropSchemaStatement()] : []),
+  ];
+}
+
+/**
+ * The decision log: this source's rows (the id resolved against the database, or none), and the
+ * table once no row of anyone's is left. Its question-set versions go with it: they only explain
+ * the log's version numbers.
+ */
+function purgeStatement(): InstallStatement {
+  return plain(`do $$
 ${IN_USE_DECLARE}
   if to_regclass('facetdb.decisions') is not null then
     delete from facetdb.decisions where source_id = current_setting('${SOURCE_SETTING}');
@@ -221,16 +246,47 @@ ${IN_USE_DECLARE}
       drop table facetdb.question_set_versions;
     end if;
   end if;
-end $$`),
-          // The schema, only when empty: a plain drop refuses while anything is in it.
-          plain(`do $$
+end $$`);
+}
+
+/**
+ * `facetdb.projects` goes last among the store's tables, after the purge block: once no project
+ * remains and nothing that references it is left (the first sweep dropped those with it empty).
+ */
+function projectsTableStatement(): InstallStatement {
+  return plain(`do $$
+begin
+  if to_regclass('facetdb.projects') is not null
+     and not exists (select 1 from facetdb.projects)
+     and to_regclass('facetdb.table_owners') is null
+     and to_regclass('facetdb.sources') is null
+     and to_regclass('facetdb.credentials') is null
+     and to_regclass('facetdb.api_keys') is null then
+    drop table facetdb.projects;
+  end if;
+end $$`);
+}
+
+/** The schema, only when empty: a plain drop refuses while anything is in it. */
+function dropSchemaStatement(): InstallStatement {
+  return plain(`do $$
 begin
   drop schema if exists facetdb;
 exception when dependent_objects_still_exist then
   null;
-end $$`),
-        ]
-      : []),
+end $$`);
+}
+
+/**
+ * The script of a log-only purge: the table was uninstalled earlier (its owner row is gone), so
+ * only the source's rows of the decision log (and their question-set versions) are deleted.
+ */
+export function logOnlyPurgeSql(sourceId: string): readonly InstallStatement[] {
+  return [
+    ...SCRIPT_HEADER,
+    settingsStatement([[SOURCE_SETTING, sourceId]]),
+    purgeStatement(),
+    dropSchemaStatement(),
   ];
 }
 
@@ -259,12 +315,195 @@ export type UninstallResult =
       readonly sql: string;
       /** False on a dry run. */
       readonly applied: boolean;
+      /**
+       * What the caller must be told besides the script: which source's log the purge deletes (or
+       * that it deletes none), and objects left in place on purpose.
+       */
+      readonly notes: readonly string[];
     }
   | {
       /** Nothing was changed. The reason says why and what to do. */
       readonly ok: false;
       readonly reason: string;
     };
+
+const flag = (rows: readonly SqlRow[]) => rows[0]?.["present"] === true;
+
+const relationPresent = async (query: SqlQuery, name: string) =>
+  flag(await query(`select to_regclass($1) is not null as present`, [name]));
+
+/** Whether `facetdb.table_owners` has a row for the table: the mark that install claimed it. */
+async function hasOwnerRow(query: SqlQuery, source: UninstallSource): Promise<boolean> {
+  if (!(await relationPresent(query, "facetdb.table_owners"))) {
+    return false;
+  }
+  const rows = await query(
+    "select true as present from facetdb.table_owners where table_schema = $1 and table_name = $2",
+    [source.schema ?? "public", source.table],
+  );
+  return flag(rows);
+}
+
+/** The ids of the store's `sources` rows matching a condition (none while the store has no such table). */
+async function storeSourceIds(
+  query: SqlQuery,
+  condition: string,
+  params: readonly string[],
+): Promise<readonly string[]> {
+  if (!(await relationPresent(query, "facetdb.sources"))) {
+    return [];
+  }
+  const rows = await query(`select id from facetdb.sources where ${condition} order by id`, params);
+  return rows.map((row) => String(row["id"]));
+}
+
+/**
+ * The source whose log the purge deletes, for a table with an owner row. A database table's log
+ * lives under the table's own name (`facetdb init` names a database source after its table), and
+ * the store's `sources` hold only plugin and API sources, which can never be this table. So the
+ * caller's id counts only when it is the owner row's table name, and not when a live store source
+ * has that id (that log is not this table's). Anything else resolves to nothing, and the purge
+ * deletes no row.
+ */
+async function resolveOwnedPurgeSource(
+  query: SqlQuery,
+  installed: InstalledTable,
+  given: string,
+): Promise<string | undefined> {
+  if (given !== installed.table) {
+    return undefined;
+  }
+  return (await storeSourceIds(query, "id = $1", [given])).length > 0 ? undefined : given;
+}
+
+/**
+ * The source for a log-only purge, when the table's owner row is gone. Only the table's own name
+ * counts (the same rule as for an installed table), so a mistyped table or schema cannot reach
+ * another source's log; and it resolves to nothing while that name is still live: a plugin or API
+ * source in the store's `sources`, or an installed table of that name in any schema. The log must
+ * hold rows for it.
+ */
+async function resolveLogOnlySource(
+  query: SqlQuery,
+  source: UninstallSource,
+): Promise<string | undefined> {
+  const given = source.sourceId;
+  if (given !== source.table) {
+    return undefined;
+  }
+  if ((await storeSourceIds(query, "id = $1 or name = $1", [given])).length > 0) {
+    return undefined;
+  }
+  if (await relationPresent(query, "facetdb.table_owners")) {
+    const installedElsewhere = await query(
+      "select true as present from facetdb.table_owners where table_name = $1",
+      [given],
+    );
+    if (flag(installedElsewhere)) {
+      return undefined;
+    }
+  }
+  return (await logCounts(query, given)).decisions > 0 ? given : undefined;
+}
+
+type LogCounts = { readonly decisions: number; readonly versions: number };
+
+/** How many rows of a source's decision log, and of its question-set versions, a purge deletes. */
+async function logCounts(query: SqlQuery, sourceId: string): Promise<LogCounts> {
+  const count = async (relation: "decisions" | "question_set_versions") =>
+    (await relationPresent(query, `facetdb.${relation}`))
+      ? Number(
+          (
+            await query(`select count(*)::int as n from facetdb.${relation} where source_id = $1`, [
+              sourceId,
+            ])
+          )[0]?.["n"],
+        )
+      : 0;
+  return { decisions: await count("decisions"), versions: await count("question_set_versions") };
+}
+
+function purgeNote(
+  applied: boolean,
+  given: string,
+  resolved: string | undefined,
+  counts: LogCounts | undefined,
+): string {
+  if (resolved === undefined || counts === undefined) {
+    return `purge: no source named "${given}" belongs to this table or its project, so no decision was deleted.`;
+  }
+  return `purge: ${applied ? "deleted" : "will delete"} ${counts.decisions} decision(s) and ${counts.versions} question-set version(s) of source "${resolved}".`;
+}
+
+const SIDE_TABLE_FACTS = `select obj_description(c.oid, 'pg_class') as mark,
+       exists (select 1 from pg_catalog.pg_constraint k where k.conrelid = c.oid and k.contype = 'f') as present
+  from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = $1 and c.relname = $2 and c.relkind in ('r', 'p')`;
+
+/**
+ * A side table of FacetDB's (its mark) with no foreign key at all can no longer be tied to the
+ * table being uninstalled, so the script leaves it in place; this says so, and how to remove it.
+ */
+async function orphanSideTable(
+  query: SqlQuery,
+  installed: InstalledTable,
+): Promise<string | undefined> {
+  if (installed.sideColumns !== undefined) {
+    return undefined;
+  }
+  const name = `${installed.table}_answers`;
+  const rows = await query(SIDE_TABLE_FACTS, [SIDE_TABLE_SCHEMA, name]);
+  const row = rows[0];
+  if (row === undefined || row["mark"] !== SIDE_MARK || flag(rows)) {
+    return undefined;
+  }
+  const side = quoteTable({ schema: SIDE_TABLE_SCHEMA, name });
+  return `left in place: ${side} is FacetDB's side table but has no foreign key to ${installed.schema}.${installed.table} (dropped by hand?), so it was not tied to this table. Drop it yourself when sure: drop table ${side};`;
+}
+
+/**
+ * A purge after the table was uninstalled earlier (no owner row): only the decision log of the
+ * source whose name matches is deleted, the script says exactly that, and the name typed back is
+ * the source's. It refuses, changing nothing, when the log holds nothing for that name.
+ */
+async function logOnlyPurge(
+  client: SqlClient,
+  options: UninstallOptions,
+): Promise<UninstallResult> {
+  const given = options.source.sourceId;
+  const label = `${options.source.schema ?? "public"}.${options.source.table}`;
+  const resolved = await resolveLogOnlySource(client.query, options.source);
+  if (resolved === undefined) {
+    return {
+      ok: false,
+      reason: `FacetDB is not installed on ${label} (facetdb.table_owners has no row for it), and no leftover decision log is named "${options.source.table}" (the source must carry the table's name, and not be live in the store or on an installed table); there is nothing to purge. Check the table and schema.`,
+    };
+  }
+  const counts = await logCounts(client.query, resolved);
+  const statements = logOnlyPurgeSql(resolved);
+  const sql = renderSql(statements);
+  options.print(sql);
+  const notes = (applied: boolean) => [
+    `${label} has no FacetDB install left; only the decision log was purged.`,
+    purgeNote(applied, given, resolved, counts),
+  ];
+  if (options.dryRun === true) {
+    return { ok: true, statements, sql, applied: false, notes: notes(false) };
+  }
+  const typed = await options.confirm({ project: { id: resolved, name: given } });
+  if (typed.trim() !== given) {
+    return {
+      ok: false,
+      reason: `the name typed is not the source's name (${given}); nothing was changed. Type the source name exactly to purge its decision log.`,
+    };
+  }
+  await client.transaction(async (query) => {
+    for (const statement of statements) {
+      await query(statement.text, statement.params);
+    }
+  });
+  return { ok: true, statements, sql, applied: true, notes: notes(true) };
+}
 
 /**
  * Reads what install left on the table, prints the script, asks for the project name, and runs the
@@ -274,18 +513,28 @@ export type UninstallResult =
 export async function uninstall(options: UninstallOptions): Promise<UninstallResult> {
   const client = (options.connect ?? connectPostgres)(options.adminUrl);
   try {
+    const purge = options.purge ?? false;
+    if (purge && !(await hasOwnerRow(client.query, options.source))) {
+      return await logOnlyPurge(client, options);
+    }
     const installed = await readInstalled(client.query, options.source);
     if ("reason" in installed) {
       return { ok: false, reason: installed.reason };
     }
-    const statements = uninstallSql(
-      { ...installed, sourceId: options.source.sourceId },
-      { purge: options.purge ?? false },
-    );
+    const resolved = purge
+      ? await resolveOwnedPurgeSource(client.query, installed, options.source.sourceId)
+      : undefined;
+    const statements = uninstallSql({ ...installed, sourceId: resolved }, { purge });
+    const orphan = await orphanSideTable(client.query, installed);
+    const counts = resolved === undefined ? undefined : await logCounts(client.query, resolved);
+    const notes = (applied: boolean): readonly string[] => [
+      ...(purge ? [purgeNote(applied, options.source.sourceId, resolved, counts)] : []),
+      ...(orphan === undefined ? [] : [orphan]),
+    ];
     const sql = renderSql(statements);
     options.print(sql);
     if (options.dryRun === true) {
-      return { ok: true, statements, sql, applied: false };
+      return { ok: true, statements, sql, applied: false, notes: notes(false) };
     }
     const typed = await options.confirm({ project: installed.project });
     if (typed.trim() !== installed.project.name) {
@@ -299,7 +548,7 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
         await query(statement.text, statement.params);
       }
     });
-    return { ok: true, statements, sql, applied: true };
+    return { ok: true, statements, sql, applied: true, notes: notes(true) };
   } finally {
     await client.close();
   }

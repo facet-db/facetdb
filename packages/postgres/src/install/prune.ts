@@ -1,4 +1,4 @@
-import type { QuestionSet } from "@facetdb/core";
+import { answerColumns, type QuestionSet } from "@facetdb/core";
 import {
   CREATION_COLUMN,
   SIDE_TABLE_SETTING,
@@ -62,18 +62,51 @@ export function revokedColumns(
     CREATION_COLUMN,
     ...questionSet.read,
     ...installOwnedColumns(questionSet),
+    // A column that stays (see `keptColumns`) is left exactly as it is, its grants included.
+    ...keptColumns(source, questionSet, catalog),
   ]);
   return (catalog.workerSelect ?? []).filter((name) => !kept.has(name));
 }
 
-/** The catalog's columns that the question set no longer owns: the ones `prune` drops. */
+/** What the output says about a marked column that stays although the set no longer owns it. */
+export const KEPT_NOTE = "kept (storeProbabilities is off)";
+
+/**
+ * The marked columns of questions still in the set that the set no longer owns: a choice
+ * question's `_probabilities` column after `storeProbabilities` went off. The operator turned off
+ * the storing, not the question, so the column and what it holds stay.
+ */
+export function keptColumns(
+  source: Pick<TableSource, "key">,
+  questionSet: QuestionSet,
+  catalog: PruneCatalog,
+): readonly string[] {
+  const owned = new Set(installOwnedColumns(questionSet));
+  const probabilities = new Set(
+    questionSet.questions.flatMap((question) =>
+      question.type === "choice"
+        ? answerColumns({ ...question, storeProbabilities: true })
+            .filter((column) => column.role === "probabilities")
+            .map((column) => column.name)
+        : [],
+    ),
+  );
+  return catalog.columns.filter(
+    (name) => name !== source.key && !owned.has(name) && probabilities.has(name),
+  );
+}
+
+/** The catalog's columns of questions no longer in the set: the ones `prune` drops. */
 export function prunedColumns(
   source: Pick<TableSource, "key">,
   questionSet: QuestionSet,
   catalog: PruneCatalog,
 ): readonly string[] {
-  const kept = new Set(installOwnedColumns(questionSet));
-  return catalog.columns.filter((name) => name !== source.key && !kept.has(name));
+  const owned = new Set(installOwnedColumns(questionSet));
+  const kept = new Set(keptColumns(source, questionSet, catalog));
+  return catalog.columns.filter(
+    (name) => name !== source.key && !owned.has(name) && !kept.has(name),
+  );
 }
 
 /**
@@ -109,7 +142,13 @@ export function pruneSql(
   }
   const side = sideTableRelation(source);
   const present = new Set(catalog.columns);
-  const remaining = ownedColumnDefinitions(questionSet).filter(([name]) => present.has(name));
+  const keptNames = new Set(keptColumns(source, questionSet, catalog));
+  const remaining = [
+    ...ownedColumnDefinitions(questionSet).filter(([name]) => present.has(name)),
+    ...catalog.columns
+      .filter((name) => keptNames.has(name))
+      .map((name): readonly [string, string] => [name, "jsonb"]),
+  ];
   return [
     ...SCRIPT_HEADER,
     ...revokes,
@@ -148,6 +187,8 @@ export type PruneResult =
       readonly ok: true;
       /** The columns dropped (or that would be, on a dry run); empty when nothing was left to prune. */
       readonly dropped: readonly string[];
+      /** Marked columns that stay, one line each with the reason: `<column>: kept (storeProbabilities is off)`. */
+      readonly kept: readonly string[];
       readonly statements: readonly InstallStatement[];
       /** The printed script; empty, and nothing printed or run, when there is nothing to prune. */
       readonly sql: string;
@@ -188,21 +229,24 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
       ).map((row) => String(row["name"])),
     };
     const dropped = prunedColumns(source, options.questionSet, catalog);
+    const kept = keptColumns(source, options.questionSet, catalog).map(
+      (name) => `${name}: ${KEPT_NOTE}`,
+    );
     const statements = pruneSql(source, options.questionSet, catalog);
     if (statements.length === 0) {
-      return { ok: true, dropped, statements, sql: "", applied: false };
+      return { ok: true, dropped, kept, statements, sql: "", applied: false };
     }
     const sql = renderSql(statements);
     options.print(sql);
     if (options.dryRun === true) {
-      return { ok: true, dropped, statements, sql, applied: false };
+      return { ok: true, dropped, kept, statements, sql, applied: false };
     }
     await client.transaction(async (query) => {
       for (const statement of statements) {
         await query(statement.text, statement.params);
       }
     });
-    return { ok: true, dropped, statements, sql, applied: true };
+    return { ok: true, dropped, kept, statements, sql, applied: true };
   } finally {
     await client.close();
   }
