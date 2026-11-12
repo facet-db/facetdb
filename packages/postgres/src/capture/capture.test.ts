@@ -10,7 +10,12 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
 import type { StorageMode } from "../scan/index.ts";
-import { CLAIM_LEASE_MS } from "../sql/index.ts";
+import {
+  CLAIM_LEASE_MS,
+  ENQUEUE_STATEMENT_TIMEOUT_SQL,
+  jobsQueries,
+  type SqlClient,
+} from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { createPostgresConnector, type Installer, type PostgresConnector } from "./connector.ts";
 import { stateHashSql } from "./hash-sql.ts";
@@ -209,6 +214,52 @@ const decided = (): RecordDecision => ({
   status: "done",
 });
 
+/**
+ * A connector whose client records the text of every statement it sends, those inside a
+ * transaction marked so, through the same `connect` parameter production uses.
+ */
+function recordingConnector(world: World): {
+  connector: PostgresConnector;
+  statements: string[];
+} {
+  const statements: string[] = [];
+  const inner = world.pg.client;
+  const client: SqlClient = {
+    ...inner,
+    query: (text, params) => {
+      statements.push(text);
+      return inner.query(text, params);
+    },
+    transaction: (work) =>
+      inner.transaction((query) =>
+        work((text, params) => {
+          statements.push(`in transaction: ${text}`);
+          return query(text, params);
+        }),
+      ),
+  };
+  const connector = createPostgresConnector({
+    workerUrl: "pglite://worker",
+    source: world.source,
+    questionSet,
+    clock: world.clock,
+    workerId: "w1",
+    installer: world.installer(),
+    connect: () => client,
+  });
+  world.open.push(connector);
+  return { connector, statements };
+}
+
+/** The application inserts `count` records; the trigger queues each. Returns their keys, sorted. */
+async function editMany(world: World, count: number): Promise<RecordKey[]> {
+  const keys = Array.from({ length: count }, (_, i) => `r${String(i + 1).padStart(2, "0")}`);
+  for (const key of keys) {
+    await world.edit(key, { title: "a", body: "b" });
+  }
+  return keys;
+}
+
 async function withTimeout<T>(pending: Promise<T>, ms: number): Promise<T | "quiet"> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const quiet = new Promise<"quiet">((resolve) => {
@@ -341,37 +392,65 @@ describe("postgres connector", () => {
     expect(await connector.claim(10)).toEqual(["r1"]);
   });
 
-  it("an ack and a release settle each key in a statement of its own", async () => {
+  it("a batch ack and a batch release of 20 keys are one statement each when no row is held", async () => {
     const world = await newWorld();
-    const statements: string[] = [];
-    const connector = createPostgresConnector({
-      workerUrl: "pglite://worker",
-      source: world.source,
-      questionSet,
-      clock: world.clock,
-      workerId: "w1",
-      installer: world.installer(),
-      connect: () => ({
-        ...world.pg.client,
-        query: (text, params) => {
-          statements.push(text);
-          return world.pg.client.query(text, params);
-        },
-      }),
-    });
+    const { connector, statements } = recordingConnector(world);
     await connector.install();
-    await world.edit("r1", { title: "a", body: "b" });
-    await world.edit("r2", { title: "a", body: "b" });
-    expect([...(await connector.claim(10))].sort()).toEqual(["r1", "r2"]);
+    const keys = await editMany(world, 20);
+    expect([...(await connector.claim(20))].sort()).toEqual(keys);
     statements.length = 0;
-    await connector.release(["r1", "r2"]);
-    expect(statements).toHaveLength(2);
-    expect([...(await connector.claim(10))].sort()).toEqual(["r1", "r2"]);
+    await connector.release(keys);
+    expect(statements).toEqual([jobsQueries.releaseBatch]);
+    expect(await world.claimOf(`t:15:public.listings:${keys[0]}`)).toBeNull();
+    // The released keys left the ledger: releasing them again names nothing.
     statements.length = 0;
-    await connector.ack(["r1", "r2"]);
-    expect(statements).toHaveLength(2);
+    await connector.release(keys);
+    expect(statements).toEqual([]);
+
+    expect([...(await connector.claim(20))].sort()).toEqual(keys);
+    statements.length = 0;
+    await connector.ack(keys);
+    expect(statements).toEqual([jobsQueries.ackBatch]);
     expect(await world.queued()).toEqual([]);
-    await connector.close();
+    statements.length = 0;
+    await connector.ack(keys);
+    expect(statements).toEqual([]);
+  });
+
+  it("a batch ack after one key was granted again deletes nothing for that key", async () => {
+    const world = await newWorld();
+    const { connector, statements } = recordingConnector(world);
+    await connector.install();
+    const keys = await editMany(world, 20);
+    expect([...(await connector.claim(20))].sort()).toEqual(keys);
+    // The first batch outlives its lease and one of its keys is granted again to a second batch.
+    world.clock.advance(CLAIM_LEASE_MS + 1);
+    const [regranted] = await connector.claim(1);
+    expect(regranted).toBeDefined();
+    statements.length = 0;
+    await connector.ack(keys);
+    // The batch skips the re-granted key; the ledger tries it alone, which finds no standing claim.
+    expect(statements).toEqual([jobsQueries.ackBatch, jobsQueries.ack]);
+    expect(await world.queued()).toEqual([`t:15:public.listings:${regranted}`]);
+    expect(await world.claimOf(`t:15:public.listings:${regranted}`)).toBe("w1");
+    // The second batch's ack finds its own claim and takes the job.
+    await connector.ack([regranted ?? ""]);
+    expect(await world.queued()).toEqual([]);
+  });
+
+  it("an enqueue of 60 keys is one statement", async () => {
+    const world = await newWorld();
+    const { connector, statements } = recordingConnector(world);
+    await connector.install();
+    const keys = Array.from({ length: 60 }, (_, i) => `page-${String(i).padStart(2, "0")}`);
+    statements.length = 0;
+    await connector.enqueue(keys);
+    // The statement runs in its own transaction, after the statement timeout it runs under.
+    expect(statements).toEqual([
+      `in transaction: ${ENQUEUE_STATEMENT_TIMEOUT_SQL}`,
+      `in transaction: ${jobsQueries.enqueue}`,
+    ]);
+    expect(await world.queued()).toEqual(keys.map((key) => `t:15:public.listings:${key}`));
   });
 
   it("writes only FacetDB's own columns, named one by one", async () => {

@@ -22,6 +22,7 @@ import {
   CLAIM_LEASE_MS,
   connectPostgres,
   createClaimLedger,
+  enqueueJobs,
   jobsQueries,
   quoteIdent,
   quoteTable,
@@ -334,13 +335,9 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     read,
     write,
     scan,
-    async enqueue(keys) {
-      // One key per statement, as for ack: a multi-row insert would wait on a job row an
-      // application transaction inserted, holding the rows it already inserted.
-      for (const key of new Set(keys)) {
-        await client.query(jobsQueries.enqueue, [[queued(key)]]);
-      }
-    },
+    // A batch per statement, under a statement timeout with a fallback to one key per statement
+    // (`enqueueJobs`): an application transaction may hold one of these job rows.
+    enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
     async claim(limit) {
       if (limit < 1) {
         return [];

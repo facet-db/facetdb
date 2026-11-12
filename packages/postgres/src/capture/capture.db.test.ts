@@ -96,19 +96,52 @@ async function drainQueue(): Promise<void> {
   await admin.query(`delete from facetdb.jobs`);
 }
 
-/** Returns once some session waits for a lock, as the worker's ack does behind the open transaction. */
+/** Returns once the worker login waits for a lock, as its one-key statement does behind the open transaction. */
 async function waitForALockWait(): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt++) {
+  await until("the worker never waited for the application's transaction", async () => {
     const waiting = await admin.query(
       `select 1 from pg_stat_activity where datname = current_database() and usename = $1 and wait_event_type = 'Lock'`,
       [WORKER_ROLE],
     );
-    if (waiting.length > 0) {
+    return waiting.length > 0;
+  });
+}
+
+/** Polls `holds` every 25 ms, for up to 5 seconds, and fails with `never` if it never does. */
+async function until(never: string, holds: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (await holds()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("the worker's ack never waited for the application's transaction");
+  throw new Error(never);
+}
+
+/** The queued keys among `queuedKeys` another session can see, that is, committed. */
+/** A promise the test resolves by hand, to step concurrent transactions in a fixed order. */
+function gate(): { opened: Promise<void>; open(): void } {
+  let open: () => void = () => undefined;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open: () => open() };
+}
+
+/** How many sessions on the scratch database wait for a lock right now, any role. */
+async function lockWaiters(): Promise<number> {
+  const rows = await admin.query(
+    `select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+  );
+  return Number(rows[0]?.["n"]);
+}
+
+async function committed(queuedKeys: readonly string[]): Promise<number> {
+  const rows = await admin.query(
+    `select count(*)::int as n from facetdb.jobs where record_key = any($1::text[])`,
+    [queuedKeys],
+  );
+  return Number(rows[0]?.["n"]);
 }
 
 describe("two workers on one queue", () => {
@@ -149,12 +182,14 @@ describe("two workers on one queue", () => {
     expect([...(await w.claim(10))].sort()).toEqual([a, b]);
     let acked: Promise<void> | undefined;
     // The application edits B first, then A, in one transaction; its trigger holds each job row
-    // until the commit. The worker acks A, then B, while the transaction is open: B's ack must wait
-    // for the application alone, holding nothing the application needs next.
+    // until the commit. The worker acks A, then B, while the transaction is open: the batch takes A
+    // and skips B, and B's own ack must wait for the application alone, holding nothing the
+    // application needs next.
     await admin.transaction(async (query) => {
       await query(`update public.listings set title = 'edited' where id = $1`, [b]);
       acked = w.ack([a ?? "", b ?? ""]);
       await waitForALockWait();
+      expect(await committed([`t:15:public.listings:${a}`])).toBe(0);
       await query(`update public.listings set title = 'edited' where id = $1`, [a]);
     });
     await acked;
@@ -167,6 +202,102 @@ describe("two workers on one queue", () => {
       { record_key: `t:15:public.listings:${a}`, claimed_by: null },
       { record_key: `t:15:public.listings:${b}`, claimed_by: null },
     ]);
+    await drainQueue();
+  });
+
+  it("a page enqueue meeting a job row an application transaction holds finishes after the commit, by the one-key fallback, and never aborts the application", async () => {
+    await drainQueue();
+    const keys = Array.from({ length: 100 }, (_, i) => `page-${String(i).padStart(3, "0")}`);
+    const held = keys[50] ?? "";
+    const before = keys.slice(0, 50).map((key) => `t:15:public.listings:${key}`);
+    const w = worker("page-w");
+    let enqueued: Promise<void> | undefined;
+    let finished = false;
+    // The application inserts a record in an open transaction; its trigger inserts that record's
+    // job row and holds it until the commit. The worker enqueues a page with that key in the middle.
+    await admin.transaction(async (query) => {
+      await query(`insert into public.listings (id, title, body) values ($1, 'held', 'body')`, [
+        held,
+      ]);
+      enqueued = w.enqueue(keys).then(() => {
+        finished = true;
+      });
+      // The batch waits on the held row, holding the 50 rows before it, until its statement
+      // timeout; rolled back, it queues key by key, and each of those 50 commits on its own while the
+      // call still waits on the held key. A batch could never show them before it finished.
+      await until("the enqueue never fell back to one key per statement", async () => {
+        return (await committed(before)) === before.length;
+      });
+      await waitForALockWait();
+      expect(finished).toBe(false);
+      // The application goes on in the same transaction and commits.
+      await query(`update public.listings set body = 'still the application''s' where id = $1`, [
+        held,
+      ]);
+    });
+    await enqueued;
+    expect(finished).toBe(true);
+    expect(await committed(keys.map((key) => `t:15:public.listings:${key}`))).toBe(100);
+    expect(
+      await admin.query(`select title, body from public.listings where id = $1`, [held]),
+    ).toEqual([{ title: "held", body: "still the application's" }]);
+    await drainQueue();
+  });
+
+  it("a page enqueue caught between two application transactions ends itself, never the application", async () => {
+    // Three sessions. The page is [x, w, y]. Application C holds w's job row and
+    // application A holds y's. The batch inserts x and waits on w; A then edits record x, so its
+    // trigger waits on the batch's uncommitted x, and A is now the older waiter. C commits, the
+    // batch moves on to y, held by A: a cycle in which A has waited longer. Postgres aborts the
+    // session whose deadlock check fires first. A batch bounded per wait (`lock_timeout = '1s'`,
+    // equal to the default deadlock_timeout) lost that race in every run: A got 40P01. Bounded as
+    // a whole statement to half the deadlock_timeout, the batch rolls back first and A commits.
+    await drainQueue();
+    const [x, w, y] = ["cycle-x", "cycle-w", "cycle-y"];
+    const page = worker("cycle-w");
+    const appA = connectPostgres(scratch.url);
+    const appC = connectPostgres(scratch.url);
+    try {
+      const aMayTouchX = gate();
+      const cMayCommit = gate();
+      const aHoldsY = gate();
+      const cHoldsW = gate();
+      const insertListing = `insert into public.listings (id, title, body) values ($1, 'app', 'body')`;
+      const cDone = appC.transaction(async (query) => {
+        await query(insertListing, [w]);
+        cHoldsW.open();
+        await cMayCommit.opened;
+      });
+      const aDone = appA.transaction(async (query) => {
+        await query(insertListing, [y]);
+        aHoldsY.open();
+        await aMayTouchX.opened;
+        await query(insertListing, [x]);
+      });
+      await Promise.all([aHoldsY.opened, cHoldsW.opened]);
+      const enqueued = page.enqueue([x, w, y]);
+      await waitForALockWait(); // the batch inserted x and waits on C's w
+      aMayTouchX.open();
+      await until("the application never waited on the batch's x", async () => {
+        return (await lockWaiters()) >= 2;
+      });
+      // Let A's wait be clearly the older one before the batch begins its wait on y.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      cMayCommit.open();
+      const [a, c] = await Promise.allSettled([aDone, cDone]);
+      expect(a).toEqual({ status: "fulfilled", value: undefined });
+      expect(c).toEqual({ status: "fulfilled", value: undefined });
+      await enqueued;
+      expect(await committed([x, w, y].map((key) => `t:15:public.listings:${key}`))).toBe(3);
+      expect(
+        await admin.query(`select id from public.listings where id = any($1::text[]) order by 1`, [
+          [x, w, y],
+        ]),
+      ).toEqual([{ id: w }, { id: x }, { id: y }]);
+    } finally {
+      await appA.close();
+      await appC.close();
+    }
     await drainQueue();
   });
 

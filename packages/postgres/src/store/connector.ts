@@ -16,6 +16,7 @@ import {
 import {
   CLAIM_LEASE_MS,
   createClaimLedger,
+  enqueueJobs,
   jobsQueries,
   type SqlClient,
   type SqlRow,
@@ -289,11 +290,9 @@ export function createStoreConnector(
     scan,
     upsertRecord,
     getRecord,
-    async enqueue(keys) {
-      if (keys.length > 0) {
-        await client.query(jobsQueries.enqueue, [keys.map(queued)]);
-      }
-    },
+    // The same batches as the customer's database: `upsertRecord` holds a job row in its
+    // transaction while it writes that record.
+    enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
     async claim(limit) {
       if (limit < 1) {
         return [];
