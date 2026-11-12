@@ -26,6 +26,7 @@ export { createServer } from "./main.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
 export type {
+  AlertFailure,
   DeliveryReport,
   NewWebhook,
   Outbox,
@@ -36,6 +37,7 @@ export type {
 } from "./webhooks/outbox.ts";
 export {
   createOutbox,
+  DEFAULT_FETCH_TIMEOUT_MS,
   GIVE_UP_AFTER_MS,
   RETRY_FIRST_MS,
   RETRY_MAX_MS,

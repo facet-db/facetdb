@@ -23,7 +23,12 @@ describe("FakeClock", () => {
 describe("FakeAction and FakeChannel", () => {
   it("record every call and reject exactly once when told to fail", async () => {
     const action = new FakeAction<{ add: string[] }>();
-    const record = { key: "r1", state: { title: "x" }, status: "done" as const };
+    const record = {
+      key: "r1",
+      state: { title: "x" },
+      status: "done" as const,
+      decidedAt: new Date(0),
+    };
     await action.run(record, {}, { add: ["Not Priority"] });
     expect(action.calls).toHaveLength(1);
     expect(action.calls[0]?.config).toEqual({ add: ["Not Priority"] });

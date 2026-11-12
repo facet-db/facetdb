@@ -20,10 +20,17 @@ export const GIVE_UP_AFTER_MS = 24 * 60 * 60_000;
 /** A claimed row is invisible to other loops this long; a crash mid-send retries after it. */
 export const CLAIM_LEASE_MS = 5 * 60_000;
 /**
- * One send gets this long (a constructor option): well below the lease, so the loop that claimed a
- * row has finished with it, one way or the other, before another loop may claim it again.
+ * One send, and one give-up alert, gets this long (a constructor option): well below the lease, so
+ * the loop that claimed a row has finished with it, one way or the other, before another loop may
+ * claim it again.
  */
 export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+/**
+ * Appended to `last_error` when the alert for a webhook given up on could not be raised: the row
+ * stays open for one more try of the alert alone (the webhook is not sent again), and that try
+ * closes it whatever the alert does.
+ */
+export const ALERT_NOT_RAISED = "the alert that it was given up on could not be raised";
 export const DELIVERY_BATCH = 20;
 
 /** How long to wait after the `attempt`th failed attempt (1 is the first): 10 s, 20 s, … capped at 1 h. */
@@ -60,17 +67,26 @@ export type OutboxDeps = {
   readonly clock: Clock;
   readonly fetch: WebhookFetch;
   /**
-   * How long one send may take before it counts as a failed attempt: above 0 and below
+   * How long one send, or one give-up alert, may take before it counts as failed: above 0 and below
    * `CLAIM_LEASE_MS` (anything else is refused when the outbox is created); defaults to
-   * `DEFAULT_FETCH_TIMEOUT_MS`. It is wall time, not the clock's.
+   * `DEFAULT_FETCH_TIMEOUT_MS`.
    */
   readonly fetchTimeoutMs?: number;
+  /**
+   * A signal that aborts `ms` milliseconds from now: the platform's timeout signal (unref'd, so it
+   * keeps no idle process alive), wired by the composition root; a fake on the test's clock in a
+   * test, so no real timer decides a test's outcome.
+   */
+  abortAfter(ms: number): AbortSignal;
   /** Names this loop on the rows it claims; defaults to a fresh UUID per outbox. */
   readonly loopId?: string;
   /** The signing secret of the project's endpoint, from the encrypted credential store. */
   secretFor(projectId: string, endpoint: string): Promise<string>;
-  /** Raises the alert event for a webhook given up on. May run twice for one webhook after a crash. */
-  onGiveUp(event: WebhookGaveUp): Promise<void>;
+  /**
+   * Raises the alert event for a webhook given up on, within the send timeout (`signal` aborts when
+   * it runs out). May run twice for one webhook after a crash, or after an alert that failed.
+   */
+  onGiveUp(event: WebhookGaveUp, signal: AbortSignal): Promise<void>;
 };
 
 export type NewWebhook = {
@@ -102,8 +118,30 @@ export type DeliveryReport = {
    */
   readonly lost: readonly string[];
   /** Alerts that could not be raised for a webhook given up on; reported, never swallowed. */
-  readonly alertFailures: readonly unknown[];
+  readonly alertFailures: readonly AlertFailure[];
 };
+
+/** A give-up alert that threw or outlived the timeout. */
+export type AlertFailure = {
+  readonly event: WebhookGaveUp;
+  readonly error: unknown;
+  /**
+   * False: the row stays open (in `retrying`) and its next attempt raises the alert again, without
+   * sending the webhook: its 24 hours are spent. True: that was the alert's one more try, and the
+   * row is closed (in `gaveUp`) without an alert.
+   */
+  readonly final: boolean;
+};
+
+/** The signing secret could not be read for an attempt. */
+class SecretUnreadable extends Error {}
+
+/** A send or an alert that outlived the outbox's timeout. */
+class TimedOut extends Error {
+  constructor(timeoutMs: number) {
+    super(`it did not finish within ${timeoutMs} ms`);
+  }
+}
 
 /**
  * The outbox reads and writes `facetdb.webhook_outbox` and never creates it: the table is a store
@@ -124,9 +162,17 @@ type Claimed = {
   readonly payload: string;
   readonly attempts: number;
   readonly createdAt: number;
+  /**
+   * Set when an earlier attempt gave up on the row but could not raise its alert: the send failure
+   * it recorded. This claim is the alert's one more try, and the webhook is not sent again.
+   */
+  readonly alertRetryOf: string | undefined;
 };
 
+const ALERT_NOTE = `; ${ALERT_NOT_RAISED}`;
+
 function claimed(row: SqlRow): Claimed {
+  const lastError = row["last_error"];
   return {
     id: String(row["id"]),
     projectId: String(row["project_id"]),
@@ -134,6 +180,10 @@ function claimed(row: SqlRow): Claimed {
     payload: String(row["payload"]),
     attempts: Number(row["attempts"]),
     createdAt: Number(row["created_at"]),
+    alertRetryOf:
+      typeof lastError === "string" && lastError.endsWith(ALERT_NOTE)
+        ? lastError.slice(0, -ALERT_NOTE.length)
+        : undefined,
   };
 }
 
@@ -158,7 +208,8 @@ export function createOutbox(deps: OutboxDeps): Outbox {
            order by next_attempt_at, id
            limit $3
              for update skip locked)
-        returning id::text as id, project_id, endpoint, payload, attempts, created_at::text as created_at`,
+        returning id::text as id, project_id, endpoint, payload, attempts, created_at::text as created_at,
+                  last_error`,
       [now, CLAIM_LEASE_MS, DELIVERY_BATCH, loopId],
     );
     return rows.map(claimed);
@@ -184,23 +235,50 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     return updated.length > 0;
   }
 
-  /** One attempt; undefined when it succeeded, else the reason, in words that carry no URL or secret. */
-  async function attempt(row: Claimed, now: number): Promise<string | undefined> {
-    let secret: string;
-    try {
-      secret = await deps.secretFor(row.projectId, row.endpoint);
-    } catch {
-      return "the signing secret could not be read";
+  /** Read through a call so a check before `work` ran does not narrow the signal to "not aborted". */
+  function isAborted(signal: AbortSignal): boolean {
+    return signal.aborted;
+  }
+
+  /**
+   * Runs `work` for at most the timeout: past it, `work`'s signal aborts and this rejects with
+   * `TimedOut` whether or not `work` honours the signal. The timeout bounds one send or one alert
+   * only; when to send is the row's `next_attempt_at`, never a timer.
+   */
+  async function withinTimeout<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const signal = deps.abortAfter(timeoutMs);
+    // An abort listener added after the abort never fires: a spent signal is a timeout at once.
+    if (signal.aborted) {
+      throw new TimedOut(timeoutMs);
     }
-    // The timeout bounds one send only; when to send is the row's `next_attempt_at`, never a timer.
-    // The platform's timeout signal is unref'd, so an idle process is not kept alive by it.
-    const signal = AbortSignal.timeout(timeoutMs);
     const deadline = new Promise<never>((_, reject) => {
-      signal.addEventListener("abort", () => reject(new Error("timeout")), { once: true });
+      signal.addEventListener("abort", () => reject(new TimedOut(timeoutMs)), { once: true });
     });
     try {
-      const response = await Promise.race([
-        deps.fetch(row.endpoint, {
+      // `work` runs inside the race even when it throws before returning a promise.
+      return await Promise.race([(async () => work(signal))(), deadline]);
+    } catch (error) {
+      // A `fetch` that honours the signal rejects on its own, maybe before `deadline` does. The
+      // signal is read again here, not narrowed by the check above: it aborts while `work` runs.
+      throw isAborted(signal) ? new TimedOut(timeoutMs) : error;
+    }
+  }
+
+  /** One attempt; undefined when it succeeded, else the reason, in words that carry no URL or secret. */
+  async function attempt(row: Claimed, now: number): Promise<string | undefined> {
+    // The secret is read inside the timeout too: a slow credential read cannot outlive the lease.
+    // `as boolean`: the flag is set inside the closure below, which TypeScript does not follow.
+    let sending = false as boolean;
+    try {
+      const response = await withinTimeout(async (signal) => {
+        let secret: string;
+        try {
+          secret = await deps.secretFor(row.projectId, row.endpoint);
+        } catch {
+          throw new SecretUnreadable();
+        }
+        sending = true;
+        return deps.fetch(row.endpoint, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -210,17 +288,87 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           body: row.payload,
           redirect: "manual",
           signal,
-        }),
-        deadline,
-      ]);
+        });
+      });
       return response.status >= 200 && response.status < 300
         ? undefined
         : `the receiver answered ${response.status}`;
-    } catch {
-      return signal.aborted
-        ? `the receiver did not answer within ${timeoutMs} ms`
+    } catch (error) {
+      if (error instanceof TimedOut) {
+        return sending
+          ? `the receiver did not answer within ${timeoutMs} ms`
+          : `the signing secret could not be read within ${timeoutMs} ms`;
+      }
+      return error instanceof SecretUnreadable
+        ? "the signing secret could not be read"
         : "the receiver could not be reached";
     }
+  }
+
+  /**
+   * The 24 hours are spent. Renews the lease, raises the alert under the timeout, then closes the
+   * row; an alert that fails keeps the row open for one more try of the alert alone. `failure` is
+   * the send failure the row ends on.
+   */
+  async function giveUp(
+    row: Claimed,
+    now: number,
+    failure: string,
+    report: {
+      readonly retrying: string[];
+      readonly gaveUp: string[];
+      readonly lost: string[];
+      readonly alertFailures: AlertFailure[];
+    },
+  ): Promise<void> {
+    // Renew the lease first, from the clock's time now (the send took some of the claim's), and
+    // never shorter than it was: it proves this loop still holds the row (a loop that lost it
+    // raises no alert) and keeps the row ours for a whole lease, longer than the alert may take.
+    // `last_error` is left alone: after a crash here it still says whether an earlier alert failed.
+    const renewed = await whileHeld(
+      row,
+      "next_attempt_at = greatest(next_attempt_at, $4::bigint)",
+      [clock.now() + CLAIM_LEASE_MS],
+    );
+    if (!renewed) {
+      report.lost.push(row.id);
+      return;
+    }
+    // The alert comes before the row is closed: a crash in between retries the row after the
+    // lease and alerts again, where the other order would lose the alert for good.
+    const retry = row.alertRetryOf !== undefined;
+    const event: WebhookGaveUp = {
+      projectId: row.projectId,
+      deliveryId: row.id,
+      host: new URL(row.endpoint).host,
+      // The alert's own retry claimed the row once more without sending.
+      attempts: retry ? row.attempts - 1 : row.attempts,
+      queuedAt: row.createdAt,
+    };
+    try {
+      await withinTimeout((signal) => deps.onGiveUp(event, signal));
+    } catch (error) {
+      // An alert that failed keeps the row open for one more try of the alert, and only one: the
+      // row says so in `last_error`, and that try closes it whatever happens.
+      report.alertFailures.push({ event, error, final: retry });
+      const note = `${failure}${ALERT_NOTE}`;
+      if (retry) {
+        const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [
+          now,
+          note,
+        ]);
+        (closed ? report.gaveUp : report.lost).push(row.id);
+      } else {
+        const kept = await whileHeld(row, "next_attempt_at = $4::bigint, last_error = $5", [
+          clock.now() + retryDelayMs(row.attempts),
+          note,
+        ]);
+        (kept ? report.retrying : report.lost).push(row.id);
+      }
+      return;
+    }
+    const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [now, failure]);
+    (closed ? report.gaveUp : report.lost).push(row.id);
   }
 
   return {
@@ -249,11 +397,18 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       const retrying: string[] = [];
       const gaveUp: string[] = [];
       const lost: string[] = [];
-      const alertFailures: unknown[] = [];
+      const alertFailures: AlertFailure[] = [];
+
+      const report = { retrying, gaveUp, lost, alertFailures };
 
       const rows = await claim(now);
       await Promise.all(
         rows.map(async (row) => {
+          if (row.alertRetryOf !== undefined) {
+            // The webhook's 24 hours were spent when its alert failed: only the alert is retried.
+            await giveUp(row, now, row.alertRetryOf, report);
+            return;
+          }
           const failure = await attempt(row, now);
           if (failure === undefined) {
             const held = await whileHeld(row, "delivered_at = $4::bigint, last_error = null", [
@@ -265,35 +420,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           // The last attempt falls exactly on the deadline; a failure at or after it is the end.
           const deadline = row.createdAt + GIVE_UP_AFTER_MS;
           if (now >= deadline) {
-            // Renew the lease first: it proves this loop still holds the row (a loop that lost it
-            // raises no alert) and keeps the row ours while the alert goes out.
-            const renewed = await whileHeld(
-              row,
-              "next_attempt_at = $4::bigint + $5::bigint, last_error = $6",
-              [now, CLAIM_LEASE_MS, failure],
-            );
-            if (!renewed) {
-              lost.push(row.id);
-              return;
-            }
-            // The alert comes before the row is closed: a crash in between retries the row after the
-            // lease and alerts again, where the other order would lose the alert for good.
-            try {
-              await deps.onGiveUp({
-                projectId: row.projectId,
-                deliveryId: row.id,
-                host: new URL(row.endpoint).host,
-                attempts: row.attempts,
-                queuedAt: row.createdAt,
-              });
-            } catch (error) {
-              alertFailures.push(error);
-            }
-            const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [
-              now,
-              failure,
-            ]);
-            (closed ? gaveUp : lost).push(row.id);
+            await giveUp(row, now, failure, report);
             return;
           }
           const next = Math.min(now + retryDelayMs(row.attempts), deadline);

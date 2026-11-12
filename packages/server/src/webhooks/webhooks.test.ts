@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type {
+  HumanEntry,
   ModelProvider,
   ProviderRequest,
   ProviderResponse,
@@ -20,6 +21,7 @@ import { createCheckStore } from "../check/store.ts";
 import { onlyRecord } from "../check/target.ts";
 import { createWebhookAction, type WebhookPayload } from "./action.ts";
 import {
+  ALERT_NOT_RAISED,
   CLAIM_LEASE_MS,
   createOutbox,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -29,6 +31,7 @@ import {
   type WebhookFetch,
   type WebhookGaveUp,
 } from "./outbox.ts";
+import { receiveFacetdbWebhook } from "./receiver.ts";
 import { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "./sign.ts";
 
 const PROJECT = "project-1";
@@ -115,6 +118,35 @@ describe("the retry schedule", () => {
     expect(GIVE_UP_AFTER_MS).toBe(86_400_000);
   });
 });
+
+/**
+ * Timeout signals on the fake clock, the outbox's `abortAfter` in these tests: `advance` moves the
+ * clock and aborts every signal whose time has come, so a send or an alert times out exactly when
+ * the test says, with no real timer.
+ */
+class FakeTimeouts {
+  readonly #clock: FakeClock;
+  readonly #armed: { readonly at: number; readonly controller: AbortController }[] = [];
+
+  constructor(clock: FakeClock) {
+    this.#clock = clock;
+  }
+
+  readonly abortAfter = (ms: number): AbortSignal => {
+    const controller = new AbortController();
+    this.#armed.push({ at: this.#clock.now() + ms, controller });
+    return controller.signal;
+  };
+
+  advance(ms: number): void {
+    this.#clock.advance(ms);
+    for (const timer of this.#armed) {
+      if (timer.at <= this.#clock.now()) {
+        timer.controller.abort(new Error("timed out on the fake clock"));
+      }
+    }
+  }
+}
 
 type Call = { url: string; headers: Record<string, string>; body: string; at: number };
 
@@ -213,12 +245,14 @@ async function rig() {
   await store.ensureSource({ id: SOURCE_ID, projectId: PROJECT, name: SOURCE, kind: "api" });
 
   const receiver = new Receiver(clock);
+  const timers = new FakeTimeouts(clock);
   const gaveUp: WebhookGaveUp[] = [];
   const secretLookups: string[] = [];
   const outbox = createOutbox({
     client,
     clock,
     fetch: receiver.fetch,
+    abortAfter: timers.abortAfter,
     loopId: "loop-main",
     secretFor: (projectId, endpoint) => {
       secretLookups.push(`${projectId} ${endpoint}`);
@@ -235,7 +269,7 @@ async function rig() {
     store.connector({ sourceId: SOURCE_ID, fields: FIELDS, workerId });
   const webhook = configureAction(
     "webhook",
-    createWebhookAction({ outbox, projectId: PROJECT, source: SOURCE, clock }),
+    createWebhookAction({ outbox, projectId: PROJECT, source: SOURCE }),
     { url: ENDPOINT },
   );
   const workerOver = (connector: ReturnType<typeof connectorOf> | ReturnType<typeof onlyRecord>) =>
@@ -305,6 +339,7 @@ async function rig() {
       client,
       clock,
       fetch: send,
+      abortAfter: timers.abortAfter,
       loopId,
       secretFor: () => Promise.resolve(SECRET),
       onGiveUp: (event) => {
@@ -316,6 +351,8 @@ async function rig() {
 
   return {
     clock,
+    timers,
+    log: store.log(SOURCE_ID),
     receiver,
     otherLoop,
     outbox,
@@ -493,6 +530,7 @@ describe("outbox delivery", () => {
       client: t.client,
       clock: t.clock,
       fetch: t.receiver.fetch,
+      abortAfter: t.timers.abortAfter,
       secretFor: () => Promise.reject(new Error("decryption failed for whsec-test-secret")),
       onGiveUp: () => Promise.resolve(),
     });
@@ -526,9 +564,10 @@ describe("outbox delivery", () => {
       t.outbox.enqueue({ projectId: PROJECT, endpoint: "not a url", payload: {} }),
     ).rejects.toThrow();
 
-    // Acceptance: the outbox row and the loop decide when to send, never a timer.
+    // Acceptance: the outbox row and the loop decide when to send, never a timer; even the send
+    // timeout comes from `abortAfter`, so the platform's own timer stays at the composition root.
     const source = readFileSync(new URL("./outbox.ts", import.meta.url), "utf8");
-    expect(source).not.toMatch(/setTimeout|setInterval/);
+    expect(source).not.toMatch(/setTimeout|setInterval|AbortSignal\.timeout/);
   });
 });
 
@@ -613,6 +652,18 @@ describe("a person's decision reaches the same endpoint", () => {
       throw new Error("the record has no decision");
     }
     t.clock.advance(1_000); // the person decides a second after the automatic decision
+    const decided: HumanEntry = {
+      kind: "human",
+      key: "T-1042",
+      question: "wants_refund",
+      value: true,
+      reviewer: "maya",
+      stateHash: stored.hash,
+      version: 1,
+      at: new Date(t.clock.now()),
+    };
+    await t.log.appendHuman(decided);
+    t.clock.advance(5_000); // the actions run a few seconds after the decision was logged
     const outcome = await t.loopWorker.onHumanDecision({
       key: "T-1042",
       stateHash: stored.hash,
@@ -621,6 +672,7 @@ describe("a person's decision reaches the same endpoint", () => {
         ...stored.decision.decisions,
         wants_refund: { kind: "decided", value: true, probabilityOrConfidence: 1 },
       },
+      decidedAt: decided.at,
     });
     expect(outcome).toEqual({ ran: true, failures: [] });
     await t.outbox.deliverDue(t.clock.now());
@@ -639,6 +691,8 @@ describe("a person's decision reaches the same endpoint", () => {
     const firstBody = JSON.parse(t.receiver.calls[0]?.body ?? "null") as WebhookPayload;
     const humanBody = JSON.parse(human?.body ?? "null") as WebhookPayload;
     expect(humanBody.decidedAt > firstBody.decidedAt).toBe(true);
+    // The person's logged decision time, not the time the action ran.
+    expect(humanBody.decidedAt).toBe(decided.at.toISOString());
     expect(humanBody.delivery).toBe(human?.headers["facetdb-delivery"]);
     expect(firstBody.delivery).toBe(t.receiver.calls[0]?.headers["facetdb-delivery"]);
     expect(JSON.parse(human?.body ?? "null")).toMatchObject({
@@ -660,6 +714,7 @@ describe("a person's decision reaches the same endpoint", () => {
       stateHash: "an-old-hash",
       status: "done",
       decisions: {},
+      decidedAt: new Date(t.clock.now()),
     });
     expect(outcome.ran).toBe(false);
     expect(await t.outbox.deliverDue(t.clock.now())).toMatchObject({ delivered: [] });
@@ -688,6 +743,37 @@ describe("the payload names its delivery and its decision time, under the signat
       ok: false,
       reason: "mismatch",
     });
+  });
+
+  it("@timing carries the decision log entry's time, not the run time, when the action runs late", async () => {
+    const t = await rig();
+    await t.post(CHARGED); // answered, logged and written at START
+    await t.outbox.deliverDue(t.clock.now());
+
+    // Ten minutes later the record is handed out again (a lost ack, a backfill that read the log
+    // first): the worker writes the logged decision again and the actions follow, late.
+    t.clock.advance(10 * 60_000);
+    await t.inspect.enqueue(["T-1042"]);
+    expect((await t.loopWorker.runOnce()).alreadyAnswered).toEqual(["T-1042"]);
+    await t.outbox.deliverDue(t.clock.now());
+
+    expect(t.receiver.calls).toHaveLength(2);
+    const [logged] = await t.log.history("T-1042");
+    if (logged === undefined) {
+      throw new Error("the answer was not logged");
+    }
+    const late = JSON.parse(t.receiver.calls[1]?.body ?? "null") as WebhookPayload;
+    expect(late.decidedAt).toBe(logged.at.toISOString());
+    expect(late.decidedAt).toBe(new Date(START).toISOString());
+    // Signed as sent, at the late time: the signature's timestamp is the send, decidedAt the decision.
+    expect(
+      verify(
+        SECRET,
+        t.receiver.calls[1]?.headers[WEBHOOK_SIGNATURE_HEADER],
+        t.receiver.calls[1]?.body ?? "",
+        t.clock.now(),
+      ),
+    ).toEqual({ ok: true });
   });
 
   it("keeps one delivery id and one set of bytes across the retries", async () => {
@@ -805,6 +891,7 @@ describe("a delivery is claim-safe", () => {
     t.receiver.respond = () => 500;
     const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
     const deadline = START + GIVE_UP_AFTER_MS;
+    t.clock.advance(GIVE_UP_AFTER_MS);
 
     // The row is still open while the alert goes out.
     const seenByAlert: unknown[] = [];
@@ -819,6 +906,7 @@ describe("a delivery is claim-safe", () => {
       },
       clock: t.clock,
       fetch: t.receiver.fetch,
+      abortAfter: t.timers.abortAfter,
       loopId: "loop-crash",
       secretFor: () => Promise.resolve(SECRET),
       onGiveUp: async (event) => {
@@ -839,22 +927,176 @@ describe("a delivery is claim-safe", () => {
     expect(Number((await t.row(id))["gave_up_at"])).toBe(deadline + CLAIM_LEASE_MS);
   });
 
-  it("reports an alert that could not be raised and still closes the row", async () => {
+  it("@timing keeps the row open for one more attempt when the alert throws, then closes it whatever that alert does", async () => {
     const t = await rig();
     t.receiver.respond = () => 500;
     const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const down = new Error("the alert channel is down");
     const failing = createOutbox({
       client: t.client,
       clock: t.clock,
       fetch: t.receiver.fetch,
+      abortAfter: t.timers.abortAfter,
       loopId: "loop-alert",
       secretFor: () => Promise.resolve(SECRET),
-      onGiveUp: () => Promise.reject(new Error("the alert channel is down")),
+      onGiveUp: () => Promise.reject(down),
     });
-    const report = await failing.deliverDue(START + GIVE_UP_AFTER_MS);
-    expect(report.gaveUp).toEqual([id]);
-    expect(report.alertFailures).toHaveLength(1);
-    expect(Number((await t.row(id))["gave_up_at"])).toBe(START + GIVE_UP_AFTER_MS);
+    const deadline = START + GIVE_UP_AFTER_MS;
+    t.clock.advance(GIVE_UP_AFTER_MS);
+
+    // The alert fails: the failure is reported with its webhook, and the row stays open.
+    const first = await failing.deliverDue(deadline);
+    expect(first).toMatchObject({ gaveUp: [], retrying: [id], lost: [] });
+    expect(first.alertFailures).toEqual([
+      {
+        event: {
+          projectId: PROJECT,
+          deliveryId: id,
+          host: "hooks.example.com",
+          attempts: 1,
+          queuedAt: START,
+        },
+        error: down,
+        final: false,
+      },
+    ]);
+    const open = await t.row(id);
+    expect(open["gave_up_at"]).toBeNull();
+    expect(open["last_error"]).toBe(`the receiver answered 500; ${ALERT_NOT_RAISED}`);
+    expect(Number(open["next_attempt_at"])).toBe(deadline + retryDelayMs(1));
+
+    // The one more try is the alert's alone: the 24 hours are spent, so the webhook is not sent
+    // again. The alert fails again; the row closes anyway, on the send failure it gave up on.
+    const sentBefore = t.receiver.calls.length;
+    t.clock.advance(retryDelayMs(1));
+    const second = await failing.deliverDue(t.clock.now());
+    expect(t.receiver.calls).toHaveLength(sentBefore);
+    expect(second).toMatchObject({ gaveUp: [id], retrying: [], lost: [] });
+    expect(second.alertFailures).toMatchObject([
+      { event: { deliveryId: id, attempts: 1 }, final: true },
+    ]);
+    const closed = await t.row(id);
+    expect(Number(closed["gave_up_at"])).toBe(deadline + retryDelayMs(1));
+    expect(closed["last_error"]).toBe(`the receiver answered 500; ${ALERT_NOT_RAISED}`);
+
+    // Bounded: nothing is sent or alerted after that.
+    const sent = t.receiver.calls.length;
+    expect(await failing.deliverDue(t.clock.now() + 7 * 24 * 60 * 60_000)).toMatchObject({
+      gaveUp: [],
+      retrying: [],
+      alertFailures: [],
+    });
+    expect(t.receiver.calls).toHaveLength(sent);
+  });
+
+  it("@timing a give-up alert that outlives the lease is neither sent nor alerted again by a second loop", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const deadline = START + GIVE_UP_AFTER_MS;
+    t.clock.advance(GIVE_UP_AFTER_MS);
+
+    // A's send takes 280 s of its 299 s timeout, then fails; its alert never returns.
+    const timeoutMs = CLAIM_LEASE_MS - 1_000;
+    const sendMs = CLAIM_LEASE_MS - 20_000;
+    const alertStarted = gate();
+    const alertSignals: AbortSignal[] = [];
+    const loopA = createOutbox({
+      client: t.client,
+      clock: t.clock,
+      fetch: () => {
+        t.timers.advance(sendMs);
+        return Promise.resolve({ status: 500 });
+      },
+      fetchTimeoutMs: timeoutMs,
+      abortAfter: t.timers.abortAfter,
+      loopId: "loop-a",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: (_event, signal) => {
+        alertSignals.push(signal);
+        alertStarted.open();
+        return new Promise(() => undefined);
+      },
+    });
+    const alertsB: WebhookGaveUp[] = [];
+    t.receiver.respond = () => 500;
+    const loopB = t.otherLoop("loop-b", t.receiver.fetch, alertsB);
+
+    const pendingA = loopA.deliverDue(deadline);
+    await alertStarted.opened;
+    // The renewal counts a whole lease from the clock's time after the send, not from the claim.
+    expect(Number((await t.row(id))["next_attempt_at"])).toBe(deadline + sendMs + CLAIM_LEASE_MS);
+
+    // The claim's own lease has run out, A's alert is still out: B finds nothing to send or alert.
+    t.timers.advance(CLAIM_LEASE_MS - sendMs);
+    expect(t.clock.now()).toBe(deadline + CLAIM_LEASE_MS);
+    expect(await loopB.deliverDue(t.clock.now())).toMatchObject({
+      delivered: [],
+      retrying: [],
+      gaveUp: [],
+      lost: [],
+      alertFailures: [],
+    });
+    expect(t.receiver.calls).toEqual([]);
+    expect(alertsB).toEqual([]);
+
+    // A's alert runs out at the timeout, before the renewed lease does: A reports it and keeps the
+    // row for one more attempt, so B, at the renewed lease's end, still has nothing to do.
+    t.timers.advance(sendMs + timeoutMs - CLAIM_LEASE_MS);
+    const reportA = await pendingA;
+    expect(alertSignals.map((signal) => signal.aborted)).toEqual([true]);
+    expect(reportA).toMatchObject({
+      retrying: [id],
+      gaveUp: [],
+      lost: [],
+      alertFailures: [{ event: { deliveryId: id }, final: false }],
+    });
+    expect(String(reportA.alertFailures[0]?.error)).toContain(`within ${timeoutMs} ms`);
+    expect(t.clock.now()).toBeLessThan(deadline + sendMs + CLAIM_LEASE_MS);
+    t.timers.advance(deadline + sendMs + CLAIM_LEASE_MS - t.clock.now());
+    expect(await loopB.deliverDue(t.clock.now())).toMatchObject({ gaveUp: [], retrying: [] });
+    expect(t.receiver.calls).toEqual([]);
+    expect(alertsB).toEqual([]);
+
+    // The alert's one more try is due: one loop takes it and raises the alert once, without
+    // sending the webhook again (its 24 hours are spent).
+    const due = Number((await t.row(id))["next_attempt_at"]);
+    t.timers.advance(due - t.clock.now());
+    expect(await loopB.deliverDue(t.clock.now())).toMatchObject({
+      gaveUp: [id],
+      alertFailures: [],
+    });
+    expect(t.receiver.calls).toEqual([]);
+    expect(alertsB).toMatchObject([{ deliveryId: id, attempts: 1 }]);
+    expect((await t.row(id))["last_error"]).toBe("the receiver answered 500");
+  });
+
+  it("@timing never shortens the lease when it renews it for the alert", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const deadline = START + GIVE_UP_AFTER_MS;
+    t.receiver.respond = () => 500;
+    const alertStarted = gate();
+    const finishAlert = gate();
+    // This loop's clock lags the `now` it was given: clock + lease is earlier than the claim's lease.
+    const lagging = createOutbox({
+      client: t.client,
+      clock: t.clock,
+      fetch: t.receiver.fetch,
+      abortAfter: t.timers.abortAfter,
+      loopId: "loop-lagging",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: async () => {
+        alertStarted.open();
+        await finishAlert.opened;
+      },
+    });
+
+    const pending = lagging.deliverDue(deadline);
+    await alertStarted.opened;
+    expect(t.clock.now() + CLAIM_LEASE_MS).toBeLessThan(deadline + CLAIM_LEASE_MS);
+    expect(Number((await t.row(id))["next_attempt_at"])).toBe(deadline + CLAIM_LEASE_MS);
+    finishAlert.open();
+    expect(await pending).toMatchObject({ gaveUp: [id] });
   });
 
   it("the store's migration adds claimed_by to an outbox table a worker made before it existed", async () => {
@@ -868,31 +1110,93 @@ describe("a delivery is claim-safe", () => {
 });
 
 describe("the send timeout", () => {
-  it("counts a receiver that never answers as a failed attempt after the timeout, and aborts the request", async () => {
-    const t = await rig();
-    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
-    const signals: AbortSignal[] = [];
-    // Never settles and ignores the signal: the outbox does not wait for it.
-    const hung: WebhookFetch = (_url, init) => {
-      signals.push(init.signal);
-      return new Promise(() => undefined);
-    };
-    const loop = createOutbox({
+  /** A loop whose sends go to `send`, with a 20-second timeout on the rig's fake clock. */
+  function timedLoop(t: Awaited<ReturnType<typeof rig>>, send: WebhookFetch) {
+    return createOutbox({
       client: t.client,
       clock: t.clock,
-      fetch: hung,
-      fetchTimeoutMs: 20,
+      fetch: send,
+      fetchTimeoutMs: 20_000,
+      abortAfter: t.timers.abortAfter,
       loopId: "loop-hung",
       secretFor: () => Promise.resolve(SECRET),
       onGiveUp: () => Promise.resolve(),
     });
+  }
 
-    const report = await loop.deliverDue(START);
+  it("@timing counts a receiver that never answers as a failed attempt after the timeout, and aborts the request", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const signals: AbortSignal[] = [];
+    const sending = gate();
+    // Never settles and ignores the signal: the outbox does not wait for it.
+    const hung: WebhookFetch = (_url, init) => {
+      signals.push(init.signal);
+      sending.open();
+      return new Promise(() => undefined);
+    };
+
+    const pending = timedLoop(t, hung).deliverDue(START);
+    await sending.opened;
+    t.timers.advance(19_999);
+    expect(signals[0]?.aborted).toBe(false);
+    t.timers.advance(1);
+    const report = await pending;
 
     expect(report).toMatchObject({ retrying: [id], delivered: [], lost: [] });
     expect(signals).toHaveLength(1);
     expect(signals[0]?.aborted).toBe(true);
-    expect((await t.row(id))["last_error"]).toBe("the receiver did not answer within 20 ms");
+    expect((await t.row(id))["last_error"]).toBe("the receiver did not answer within 20000 ms");
+  });
+
+  it("@timing bounds the signing-secret read by the same timeout, so it cannot outlive the lease", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const reading = gate();
+    const loop = createOutbox({
+      client: t.client,
+      clock: t.clock,
+      fetch: t.receiver.fetch,
+      fetchTimeoutMs: 20_000,
+      abortAfter: t.timers.abortAfter,
+      loopId: "loop-slow-secret",
+      // The credential store never answers.
+      secretFor: () => {
+        reading.open();
+        return new Promise(() => undefined);
+      },
+      onGiveUp: () => Promise.resolve(),
+    });
+
+    const pending = loop.deliverDue(START);
+    await reading.opened;
+    t.timers.advance(20_000);
+
+    expect(await pending).toMatchObject({ retrying: [id], lost: [] });
+    expect(t.receiver.calls).toEqual([]);
+    expect((await t.row(id))["last_error"]).toBe(
+      "the signing secret could not be read within 20000 ms",
+    );
+  });
+
+  it("@timing counts a send that honours the signal and rejects on abort as a timeout too", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const sending = gate();
+    // As the real `fetch` does: the abort rejects the request itself.
+    const honouring: WebhookFetch = (_url, init) => {
+      sending.open();
+      return new Promise((_, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("AbortError")));
+      });
+    };
+
+    const pending = timedLoop(t, honouring).deliverDue(START);
+    await sending.opened;
+    t.timers.advance(20_000);
+
+    expect(await pending).toMatchObject({ retrying: [id] });
+    expect((await t.row(id))["last_error"]).toBe("the receiver did not answer within 20000 ms");
   });
 
   it("is a constructor option that must stay below the claim lease", () => {
@@ -900,6 +1204,7 @@ describe("the send timeout", () => {
       client: { query: () => Promise.resolve([]) },
       clock: new FakeClock(START),
       fetch: () => Promise.resolve({ status: 204 }),
+      abortAfter: () => new AbortController().signal,
       secretFor: () => Promise.resolve(SECRET),
       onGiveUp: () => Promise.resolve(),
     };
@@ -919,11 +1224,61 @@ describe("the send timeout", () => {
   });
 });
 
-describe("the receiver snippet", () => {
-  it("handles an unset FACETDB_WEBHOOK_SECRET in the types, with no runtime throw inside the handler", () => {
+describe("the receiver snippet (receiver.ts, compiled by pnpm typecheck)", () => {
+  function delivered(call: Call | undefined, body = call?.body ?? ""): Request {
+    return new Request("https://app.example.com/facetdb", {
+      method: "POST",
+      headers: call?.headers ?? {},
+      body,
+    });
+  }
+
+  it("verifies what the outbox sent and hands over the signed event; a tampered body is a 400", async () => {
+    const t = await rig();
+    await t.post(CHARGED);
+    await t.outbox.deliverDue(t.clock.now());
+    const [call] = t.receiver.calls;
+    const env = { FACETDB_WEBHOOK_SECRET: SECRET };
+    const applied: WebhookPayload[] = [];
+    const apply = (event: WebhookPayload) => {
+      applied.push(event);
+      return Promise.resolve();
+    };
+
+    const response = await receiveFacetdbWebhook(delivered(call), apply, env, t.clock.now());
+    expect(response.status).toBe(204);
+    expect(applied).toEqual([JSON.parse(call?.body ?? "null")]);
+    expect(applied[0]).toMatchObject({ delivery: call?.headers["facetdb-delivery"] });
+
+    const tampered = delivered(call, `${call?.body} `);
+    const refused = await receiveFacetdbWebhook(tampered, apply, env, t.clock.now());
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toBe("mismatch");
+    expect(applied).toHaveLength(1);
+  });
+
+  it("reads the secret on each request: unset or empty, it answers 500 with the fix and throws nothing", async () => {
+    const never = () => Promise.reject(new Error("nothing unverified is applied"));
+    for (const env of [{}, { FACETDB_WEBHOOK_SECRET: "" }]) {
+      const response = await receiveFacetdbWebhook(delivered(undefined, "{}"), never, env, START);
+      expect(response.status).toBe(500);
+      expect(await response.text()).toContain("Set FACETDB_WEBHOOK_SECRET");
+    }
+    // The same module answers once the secret is set: nothing was read when it loaded.
+    const body = "{}";
+    const headers = { [WEBHOOK_SIGNATURE_HEADER]: sign(SECRET, Math.floor(START / 1000), body) };
+    const ok = await receiveFacetdbWebhook(
+      delivered({ url: "", headers, body, at: START }),
+      () => Promise.resolve(),
+      { FACETDB_WEBHOOK_SECRET: SECRET },
+      START,
+    );
+    expect(ok.status).toBe(204);
+  });
+
+  it("is what sign.ts points the reader to", () => {
     const source = readFileSync(new URL("./sign.ts", import.meta.url), "utf8");
-    expect(source).toContain("secret === undefined");
-    expect(source).not.toContain("verify(process.env.FACETDB_WEBHOOK_SECRET");
-    expect(source).toContain("decidedAt");
+    expect(source).toContain("receiveFacetdbWebhook");
+    expect(source).toContain("receiver.ts");
   });
 });

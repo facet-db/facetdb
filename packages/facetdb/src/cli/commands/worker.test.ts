@@ -1,7 +1,9 @@
 import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
+import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { createStore, migrate, type SqlConnect, type Store } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
+import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import type { HttpHandler } from "../program.ts";
@@ -9,7 +11,7 @@ import { runInProcess } from "../program.ts";
 import { openTableConnector } from "../table-connector.ts";
 import { projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
-import { DEFAULT_PORT, WORKER_CONNECTIONS } from "./worker.ts";
+import { DEFAULT_PORT, deliverUntil, WORKER_CONNECTIONS } from "./worker.ts";
 
 /**
  * `facetdb worker` through the in-process runner on PGlite: the table is installed as `facetdb
@@ -119,6 +121,7 @@ function run(
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly stop?: AbortSignal;
     readonly config?: ProjectConfig;
+    readonly abortAfter?: (ms: number) => AbortSignal;
   } = {},
 ) {
   return runInProcess(
@@ -155,6 +158,7 @@ function run(
         });
       },
       ...(options.stop === undefined ? {} : { stopSignal: () => options.stop as AbortSignal }),
+      ...(options.abortAfter === undefined ? {} : { abortAfter: options.abortAfter }),
     },
     COMMANDS,
   );
@@ -456,3 +460,87 @@ describe("facetdb worker", () => {
     expect(held[0]?.["n"]).toBe(0);
   });
 });
+
+describe("the worker's outbox loop", () => {
+  it("prints every give-up alert that could not be raised, and drops none", async () => {
+    const event = (deliveryId: string) => ({
+      projectId: "p",
+      deliveryId,
+      host: "hooks.example.com",
+      attempts: 31,
+      queuedAt: START,
+    });
+    const reports = [
+      {
+        alertFailures: [
+          { event: event("7"), error: new Error("the alert channel is down"), final: false },
+          { event: event("8"), error: "timed out", final: false },
+        ],
+      },
+      { alertFailures: [] },
+      { alertFailures: [{ event: event("7"), error: new Error("still down"), final: true }] },
+    ];
+    const stop = new AbortController();
+    const printed: string[] = [];
+    let passes = 0;
+
+    await deliverUntil(
+      stop.signal,
+      () => {
+        const report = reports[passes] ?? { alertFailures: [] };
+        passes += 1;
+        if (passes === reports.length) {
+          stop.abort();
+        }
+        return Promise.resolve(report);
+      },
+      new FakeClock(START),
+      (text) => printed.push(text),
+    );
+
+    expect(passes).toBe(3);
+    expect(printed).toEqual([
+      `webhook to hooks.example.com (delivery 7) was given up after 31 attempts in 24 hours, and its alert could not be raised: the alert channel is down. ${RETRIED}`,
+      `webhook to hooks.example.com (delivery 8) was given up after 31 attempts in 24 hours, and its alert could not be raised: timed out. ${RETRIED}`,
+      `webhook to hooks.example.com (delivery 7) was given up after 31 attempts in 24 hours, and its alert could not be raised: still down. ${CLOSED}`,
+    ]);
+  });
+
+  it("--once prints every give-up alert that could not be raised too, the last one included", async () => {
+    // A webhook queued 24 hours ago and due now: its send fails and so does its alert.
+    await world.client.query(
+      `insert into facetdb.webhook_outbox (project_id, endpoint, payload, created_at, next_attempt_at)
+       values ('p', 'https://hooks.example.com/facetdb', '{}', $1::bigint, $1::bigint)`,
+      [START - GIVE_UP_AFTER_MS],
+    );
+    // Every timeout has already run out: the send, and then the alert, outlive it.
+    const spent = () => AbortSignal.abort();
+
+    const first = await run(["worker", "--once", "--no-http"], { abortAfter: spent });
+    expect(first.code, first.stderr).toBe(0);
+    expect(alertLines(first.stdout)).toEqual([
+      `webhook to hooks.example.com (delivery 1) was given up after 1 attempt in 24 hours, and its alert could not be raised: it did not finish within ${DEFAULT_FETCH_TIMEOUT_MS} ms. ${RETRIED}`,
+    ]);
+
+    // The alert's one more try, due a retry delay later: it fails again, and the row closes.
+    clock.advance(RETRY_FIRST_MS);
+    const second = await run(["worker", "--once", "--no-http"], { abortAfter: spent });
+    expect(second.code, second.stderr).toBe(0);
+    expect(alertLines(second.stdout)).toEqual([
+      `webhook to hooks.example.com (delivery 1) was given up after 1 attempt in 24 hours, and its alert could not be raised: it did not finish within ${DEFAULT_FETCH_TIMEOUT_MS} ms. ${CLOSED}`,
+    ]);
+    const [row] = await world.client.query(
+      "select gave_up_at::text as gave_up_at from facetdb.webhook_outbox",
+    );
+    expect(Number(row?.["gave_up_at"])).toBe(START + RETRY_FIRST_MS);
+  });
+});
+
+const RETRIED =
+  "FacetDB tries the alert once more on the webhook's next attempt; the webhook itself is not sent again.";
+const CLOSED =
+  "That was the alert's last try: the webhook is closed, and this line is its only alert.";
+
+function alertLines(stdout: string): string[] {
+  return stdout.split("\n").filter((line) => line.startsWith("webhook to "));
+}

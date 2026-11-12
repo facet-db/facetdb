@@ -2,14 +2,23 @@ import { FakeClock } from "@facetdb/core/testing";
 import { connectPostgres, migrateStore, type SqlClient } from "@facetdb/postgres";
 import { createScratchDatabase, type ScratchDatabase } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOutbox, DELIVERY_BATCH, type Outbox, type WebhookFetch } from "./outbox.ts";
+import {
+  CLAIM_LEASE_MS,
+  createOutbox,
+  DELIVERY_BATCH,
+  GIVE_UP_AFTER_MS,
+  type Outbox,
+  type WebhookFetch,
+  type WebhookGaveUp,
+} from "./outbox.ts";
 
 /**
  * The outbox against a real Postgres (`pnpm test:db`, DATABASE_URL set). PGlite runs one connection,
  * so it serializes every statement and proves shape, never concurrency. What the outbox leans on the
  * database for is proven here, with separate connections: `claim` takes `for update skip locked`, so
  * two loops that claim at once get claims that never overlap, and a row another connection holds is
- * passed over instead of waited for or taken twice.
+ * passed over instead of waited for or taken twice; and the give-up renewal, a bigint computed from
+ * the clock after the send, keeps a second connection's loop off the row while the alert is out.
  */
 
 const SECRET = "whsec-test-secret";
@@ -58,6 +67,8 @@ function loop(loopId: string) {
     client: open(),
     clock: new FakeClock(START),
     fetch,
+    // Sends answer at once here: no timeout is ever reached, and no real timer is armed.
+    abortAfter: () => new AbortController().signal,
     loopId,
     secretFor: () => Promise.resolve(SECRET),
     onGiveUp: () => Promise.resolve(),
@@ -130,5 +141,70 @@ describe("webhook_outbox claims on a real Postgres", () => {
     // Free again, the row is delivered once, by whoever asks next.
     const c = loop("loop-c");
     expect((await c.outbox.deliverDue(START)).delivered).toEqual([held]);
+  });
+
+  it("keeps a row whose give-up alert is still out from a second loop, past the claim's own lease", async () => {
+    const clock = new FakeClock(START);
+    const never = () => new AbortController().signal;
+    const sendMs = 60_000;
+    let alertStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      alertStarted = resolve;
+    });
+    let finishAlert: () => void = () => undefined;
+    const finished = new Promise<void>((resolve) => {
+      finishAlert = resolve;
+    });
+    const a = createOutbox({
+      client: open(),
+      clock,
+      // The send takes a minute of the claim's lease, then fails at the deadline.
+      fetch: () => {
+        clock.advance(sendMs);
+        return Promise.resolve({ status: 500 });
+      },
+      abortAfter: never,
+      loopId: "loop-a",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: () => {
+        alertStarted();
+        return finished;
+      },
+    });
+    const sentByB: string[] = [];
+    const alertsByB: WebhookGaveUp[] = [];
+    const b = createOutbox({
+      client: open(),
+      clock,
+      fetch: (_url, init) => {
+        sentByB.push(init.headers["facetdb-delivery"] ?? "");
+        return Promise.resolve({ status: 500 });
+      },
+      abortAfter: never,
+      loopId: "loop-b",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: (event) => {
+        alertsByB.push(event);
+        return Promise.resolve();
+      },
+    });
+    const [id] = await queue(a, 1);
+    clock.advance(GIVE_UP_AFTER_MS);
+
+    const pendingA = a.deliverDue(clock.now());
+    await started;
+    // The claim's own lease is over; the renewal, counted after the send, still holds the row.
+    clock.advance(CLAIM_LEASE_MS - sendMs);
+    expect(await b.deliverDue(clock.now())).toMatchObject({
+      delivered: [],
+      retrying: [],
+      gaveUp: [],
+      lost: [],
+    });
+    expect(sentByB).toEqual([]);
+    expect(alertsByB).toEqual([]);
+
+    finishAlert();
+    expect(await pendingA).toMatchObject({ gaveUp: [id], lost: [], alertFailures: [] });
   });
 });

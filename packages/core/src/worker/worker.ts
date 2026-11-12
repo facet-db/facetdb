@@ -16,6 +16,7 @@ import {
   answersCurrentFor,
   decideRecord,
   recordAnswer,
+  standingHuman,
   statusOf,
 } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
@@ -167,6 +168,8 @@ export type HumanDecisionNotice = {
   readonly stateHash: string;
   readonly status: RecordStatus;
   readonly decisions: ActionDecisions;
+  /** The `at` of the person's logged decision: the time the actions report, not when they run. */
+  readonly decidedAt: Date;
 };
 
 export type HumanDecisionOutcome = {
@@ -228,8 +231,9 @@ export function createWorker(deps: WorkerDeps): Worker {
     row: ReadRow,
     status: RecordStatus,
     decisions: ActionDecisions,
+    decidedAt: Date,
   ): Promise<RecordFailure[]> {
-    const record: ActionRecord = { key: row.key, state: row.state, status };
+    const record: ActionRecord = { key: row.key, state: row.state, status, decidedAt };
     const failures: RecordFailure[] = [];
     // Step 7: one action failing does not keep the others from running.
     for (const step of actions) {
@@ -381,12 +385,13 @@ export function createWorker(deps: WorkerDeps): Worker {
    * cannot tell these apart, so it does what covers all of them: the logged answer's decisions
    * (with the people's decisions on this state laid over them), written again and followed by the
    * actions. Undefined when the record must be asked: no answer, another state, another version, or
-   * a question the answer lacks.
+   * a question the answer lacks. `decidedAt` is the latest logged entry behind the decisions: the
+   * answer, or a person's decision on its state made after it.
    */
   async function currentDecision(
     row: ReadRow,
     prior: AnswerEntry | undefined,
-  ): Promise<RecordDecision | undefined> {
+  ): Promise<{ readonly decision: RecordDecision; readonly decidedAt: Date } | undefined> {
     if (
       prior === undefined ||
       !answersCurrentFor(prior, {
@@ -397,13 +402,21 @@ export function createWorker(deps: WorkerDeps): Worker {
     ) {
       return undefined;
     }
-    const decisions = decideRecord(
-      questionSet,
-      questionSet.thresholds,
-      prior,
-      await log.history(row.key),
-    );
-    return decisions === undefined ? undefined : { decisions, status: statusOf(decisions) };
+    const history = await log.history(row.key);
+    const decisions = decideRecord(questionSet, questionSet.thresholds, prior, history);
+    if (decisions === undefined) {
+      return undefined;
+    }
+    // The later of the answer and the people's decisions that stand on it, by the rule
+    // `decideRecord` applies: a retired decision, or one on a question no longer asked, moves nothing.
+    let decidedAt = prior.at;
+    for (const question of questionSet.questions) {
+      const human = standingHuman(history, question.name, prior.stateHash);
+      if (human !== undefined && human.at > decidedAt) {
+        decidedAt = human.at;
+      }
+    }
+    return { decision: { decisions, status: statusOf(decisions) }, decidedAt };
   }
 
   async function processRecord(
@@ -433,7 +446,8 @@ export function createWorker(deps: WorkerDeps): Worker {
 
       const current = await currentDecision(row, prior);
       if (current !== undefined) {
-        const result = await connector.write(row.key, current, row.hash);
+        const { decision, decidedAt } = current;
+        const result = await connector.write(row.key, decision, row.hash);
         if (!result.written) {
           // The state changed since: the record is asked again with it, and nothing runs now.
           report.discarded.push(row.key);
@@ -441,8 +455,11 @@ export function createWorker(deps: WorkerDeps): Worker {
         }
         report.alreadyAnswered.push(row.key);
         // The actions follow every write that lands. After a lost ack they run again, at least
-        // once, as they did when the record was asked again.
-        report.failures.push(...(await runActions(row, current.status, current.decisions)));
+        // once, as they did when the record was asked again, and report the logged decision's time,
+        // not this run's.
+        report.failures.push(
+          ...(await runActions(row, decision.status, decision.decisions, decidedAt)),
+        );
         return "ack";
       }
 
@@ -541,7 +558,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       report.written.push(row.key);
 
       // The write above is the default action; the rest follow it.
-      report.failures.push(...(await runActions(row, written.status, written.decisions)));
+      report.failures.push(...(await runActions(row, written.status, written.decisions, entry.at)));
       return "ack";
     } catch (error) {
       report.failures.push({ key: row.key, stage, error });
@@ -658,7 +675,10 @@ export function createWorker(deps: WorkerDeps): Worker {
     if (row === undefined || row.hash !== notice.stateHash) {
       return { ran: false, failures: [] };
     }
-    return { ran: true, failures: await runActions(row, notice.status, notice.decisions) };
+    return {
+      ran: true,
+      failures: await runActions(row, notice.status, notice.decisions, notice.decidedAt),
+    };
   }
 
   return { runOnce, run, onHumanDecision };

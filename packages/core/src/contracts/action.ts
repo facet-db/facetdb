@@ -7,6 +7,12 @@ export type ActionRecord = {
   readonly key: RecordKey;
   readonly state: Readonly<Record<string, StateValue>>;
   readonly status: RecordStatus;
+  /**
+   * When the decision the action reports was made: the time of the decision log entry behind it
+   * (the answer, or a person's decision on it), never the time the action runs. An action run late
+   * or again carries the same time, so a receiver can order what it gets.
+   */
+  readonly decidedAt: Date;
 };
 
 /** The decision for each question name, as the record now holds them. */

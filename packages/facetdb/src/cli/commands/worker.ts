@@ -24,7 +24,14 @@ import {
   type Store,
   WORKER_ROLE,
 } from "@facetdb/postgres";
-import { createCheckStore, createOutbox, createServer, onlyRecord } from "@facetdb/server";
+import {
+  type AlertFailure,
+  createCheckStore,
+  createOutbox,
+  createServer,
+  type DeliveryReport,
+  onlyRecord,
+} from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
 import {
@@ -296,6 +303,7 @@ export async function runWorkers(
       client: parts.storeClient,
       clock,
       fetch: deps.webhookFetch,
+      abortAfter: deps.abortAfter,
       secretFor: async (projectId, endpoint) => {
         const secret = await store.credentials.get(projectId, `webhook:${endpoint}`);
         if (secret === undefined) {
@@ -390,7 +398,7 @@ export async function runWorkers(
           }
         }
       }
-      await outbox.deliverDue(clock.now());
+      printAlertFailures(await outbox.deliverDue(clock.now()), print);
     } else {
       // One loop failing (its database gone, say) stops the others too, so every claim is settled
       // before the connectors close; the first failure is what the run reports.
@@ -440,10 +448,14 @@ export async function runWorkers(
   };
 }
 
-/** The outbox's own loop: deliver what is due, wait, again, until the signal aborts. */
-async function deliverUntil(
+/**
+ * The outbox's own loop: deliver what is due, wait, again, until the signal aborts. A give-up
+ * alert that could not be raised is printed, every one: once real alert channels exist, this line
+ * is the only trace of an alert that never went out.
+ */
+export async function deliverUntil(
   signal: AbortSignal,
-  deliver: () => Promise<unknown>,
+  deliver: () => Promise<Pick<DeliveryReport, "alertFailures">>,
   clock: { sleep(ms: number): Promise<void> },
   print: (text: string) => void,
 ): Promise<void> {
@@ -456,12 +468,33 @@ async function deliverUntil(
   });
   while (!signal.aborted) {
     try {
-      await deliver();
+      printAlertFailures(await deliver(), print);
     } catch (error) {
       print(`webhook delivery failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     await Promise.race([clock.sleep(OUTBOX_EVERY_MS), aborted]);
   }
+}
+
+/** Every give-up alert of a delivery pass that could not be raised, one line each, none dropped. */
+function printAlertFailures(
+  report: Pick<DeliveryReport, "alertFailures">,
+  print: (text: string) => void,
+): void {
+  for (const failure of report.alertFailures) {
+    print(alertFailureLine(failure));
+  }
+}
+
+/** One alert that did not go out, in plain words: which webhook, why, and what happens next. */
+function alertFailureLine({ event, error, final }: AlertFailure): string {
+  const reason = error instanceof Error ? error.message : String(error);
+  const attempts = `${event.attempts} attempt${event.attempts === 1 ? "" : "s"}`;
+  return `webhook to ${event.host} (delivery ${event.deliveryId}) was given up after ${attempts} in 24 hours, and its alert could not be raised: ${reason}. ${
+    final
+      ? "That was the alert's last try: the webhook is closed, and this line is its only alert."
+      : "FacetDB tries the alert once more on the webhook's next attempt; the webhook itself is not sent again."
+  }`;
 }
 
 /** Without a model the worker would only fail: it refuses to start, and says what to set. */

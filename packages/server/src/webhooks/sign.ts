@@ -8,28 +8,11 @@ export const WEBHOOK_SIGNATURE_HEADER = "facetdb-signature";
  * string `<t>.<body>`: the timestamp is signed together with the exact bytes sent, so a captured
  * request cannot be replayed later and a tampered body does not verify.
  *
- * The receiver (Node; read the raw body, not a re-serialised one):
- *
- * ```ts
- * import { verify } from "@facetdb/server";
- *
- * const secret = process.env.FACETDB_WEBHOOK_SECRET; // string | undefined
- * if (secret === undefined || secret === "") {
- *   throw new Error("Set FACETDB_WEBHOOK_SECRET to the project's webhook secret.");
- * }
- *
- * app.post("/facetdb", express.raw({ type: "application/json" }), (req, res) => {
- *   const body = req.body.toString("utf8"); // the exact bytes FacetDB sent
- *   const result = verify(secret, req.get("facetdb-signature"), body, Date.now());
- *   if (!result.ok) return res.status(400).send(result.reason);
- *   // { event, delivery, source, id, status, decidedAt, answers }; every field is signed.
- *   const event = JSON.parse(body);
- *   // Answer 2xx quickly. Anything else is retried with backoff for 24 hours, so be idempotent:
- *   // `delivery` is the same on every retry of one webhook (the `facetdb-delivery` header repeats it),
- *   // and a retried older webhook can land after a newer one: keep the one with the later `decidedAt`.
- *   res.sendStatus(204);
- * });
- * ```
+ * The receiver is `receiveFacetdbWebhook` in `receiver.ts` beside this file, the snippet the docs
+ * show: real code that `pnpm typecheck` compiles and webhooks.test.ts runs. It reads the raw body
+ * (never a re-serialised one), reads `FACETDB_WEBHOOK_SECRET` on each request (typed
+ * `string | undefined`; unset, it answers 500 with the fix and nothing throws at load), verifies,
+ * and answers 2xx quickly, keyed by `delivery` and ordered by `decidedAt`.
  */
 export const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
 

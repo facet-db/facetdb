@@ -43,10 +43,12 @@ async function sender() {
     client,
     clock,
     fetch: send,
+    // The fake receiver answers at once: no timeout is reached, and no real timer is armed.
+    abortAfter: () => new AbortController().signal,
     secretFor: () => Promise.resolve(SECRET),
     onGiveUp: () => Promise.resolve(),
   });
-  const action = createWebhookAction({ outbox, projectId: "project-1", source: "tickets", clock });
+  const action = createWebhookAction({ outbox, projectId: "project-1", source: "tickets" });
   return { clock, outbox, action, sent };
 }
 
@@ -54,6 +56,7 @@ const record: ActionRecord = {
   key: "T-1042",
   state: { subject: "Remboursement", body: "Facturé deux fois ✓" },
   status: "done",
+  decidedAt: new Date(START),
 };
 
 describe("verifyWebhook accepts what the real sender sends", () => {

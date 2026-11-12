@@ -106,6 +106,9 @@ describe("the facetdb program", () => {
           throw new Error("unused");
         },
         webhookFetch: () => Promise.reject(new Error("unused")),
+        abortAfter: () => {
+          throw new Error("unused");
+        },
         random: () => {
           throw new Error("unused");
         },

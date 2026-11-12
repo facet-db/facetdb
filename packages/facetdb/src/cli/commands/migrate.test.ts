@@ -167,6 +167,9 @@ async function runSeeingPrompts(argv: readonly string[], answers: readonly strin
         throw new Error("no stop signal");
       },
       webhookFetch: () => Promise.reject(new Error("no webhook fetch")),
+      abortAfter: () => {
+        throw new Error("no timeout signal");
+      },
       random: () => {
         throw new Error("no random numbers");
       },

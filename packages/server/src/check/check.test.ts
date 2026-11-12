@@ -396,6 +396,17 @@ describe("POST /v1/check when the answer does not come", () => {
       expect(response.json).not.toMatchObject({
         error: { message: expect.stringContaining("stays queued") },
       });
+      // An error record is retried every 5 minutes and an unchecked one is answered when the
+      // model returns, so the 503 never tells the caller a webhook cannot come.
+      expect(response.json).toMatchObject({
+        error: {
+          message: expect.stringContaining(
+            "An error record is retried every 5 minutes and an unchecked one is answered when the model returns, so a webhook may still arrive",
+          ),
+          fix: expect.stringContaining("Send the same call again after 30 seconds"),
+        },
+      });
+      expect(JSON.stringify(response.json)).not.toMatch(/do not wait for a webhook/i);
       expect(await t.inspect.getRecord("T-1042")).toMatchObject({ status: verdict });
       // Out of the queue: nobody can claim it.
       expect(await t.holder.claimRecord("T-1042")).toBe(false);

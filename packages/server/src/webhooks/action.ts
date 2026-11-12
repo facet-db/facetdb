@@ -1,4 +1,4 @@
-import type { Action, Clock } from "@facetdb/core";
+import type { Action } from "@facetdb/core";
 import { type CheckedAnswer, checkedAnswer } from "../check/service.ts";
 import type { Outbox } from "./outbox.ts";
 
@@ -19,9 +19,10 @@ export type WebhookPayload = {
   readonly id: string;
   readonly status: string;
   /**
-   * When the decision this webhook reports was made (ISO 8601, UTC). A retried `needs_review`
-   * webhook can arrive after the `done` one a person's decision produced: apply the payload with
-   * the later `decidedAt` and ignore the other.
+   * When the decision this webhook reports was made (ISO 8601, UTC): the decision log entry's time,
+   * the same however late or often the action runs. A retried `needs_review` webhook can arrive
+   * after the `done` one a person's decision produced: apply the payload with the later `decidedAt`
+   * and ignore the other.
    */
   readonly decidedAt: string;
   /** Decided questions only, in the shape `POST /v1/check` answers with; a question left to a person is absent. */
@@ -38,8 +39,6 @@ export function createWebhookAction(deps: {
   readonly projectId: string;
   /** The source's name, as callers know it. */
   readonly source: string;
-  /** The action runs right after the decision is written, so its time is the decision's. */
-  readonly clock: Clock;
 }): Action<WebhookConfig> {
   return {
     async run(record, decisions, config) {
@@ -50,7 +49,9 @@ export function createWebhookAction(deps: {
           answers[name] = answer;
         }
       }
-      const decidedAt = new Date(deps.clock.now()).toISOString();
+      // The worker hands over the logged decision's time: an action run late (a lost ack, a
+      // backfill) or again must not make an old decision look newer than a person's later one.
+      const decidedAt = record.decidedAt.toISOString();
       await deps.outbox.enqueue({
         projectId: deps.projectId,
         endpoint: config.url,

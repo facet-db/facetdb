@@ -463,6 +463,7 @@ describe("the worker loop", () => {
       stateHash: hash,
       status: human.status,
       decisions: decided.decisions,
+      decidedAt: entry.at,
     });
 
     expect(outcome).toEqual({ ran: true, failures: [] });
@@ -470,7 +471,26 @@ describe("the worker loop", () => {
       ["needs_review", "#triage"],
       ["done", "#done"],
     ]);
+    // The second run reports the person's logged decision time, not the time it ran.
+    expect(slack.calls[1]?.record.decidedAt).toEqual(entry.at);
+
+    // Queued again at the same state (a backfill, a lost ack): the actions run again with the time
+    // of the latest logged entry behind the decisions, the person's, not the older answer's.
+    await test.deps.connector.enqueue(["a"]);
+    expect((await worker.runOnce()).alreadyAnswered).toEqual(["a"]);
+    expect(slack.calls[2]?.record).toMatchObject({ status: "done", decidedAt: entry.at });
+    expect((await test.log.latestAnswer("a"))?.at.getTime()).toBeLessThan(entry.at.getTime());
     expect(slack.calls[1]?.decisions["scam"]).toMatchObject({ kind: "decided", value: true });
+
+    // A later decision on a question the set no longer asks stands for nothing, so it moves nothing.
+    await test.log.appendHuman({
+      ...entry,
+      question: "removed_question",
+      at: new Date("2026-11-01T09:00:00Z"),
+    });
+    await test.deps.connector.enqueue(["a"]);
+    expect((await worker.runOnce()).alreadyAnswered).toEqual(["a"]);
+    expect(slack.calls[3]?.record.decidedAt).toEqual(entry.at);
   });
 
   it("does not run the actions for a decision on a record that changed since", async () => {
@@ -487,6 +507,7 @@ describe("the worker loop", () => {
       stateHash: stateHash(["body"], { body: "before" }),
       status: "done",
       decisions: {},
+      decidedAt: new Date(0),
     });
 
     expect(outcome).toEqual({ ran: false, failures: [] });
@@ -1031,11 +1052,27 @@ describe("a record already answered at its state", () => {
   it("brings a row whose write failed after its answer was logged up to the log, and runs its actions exactly once", async () => {
     const test = await recordingRig();
     const journal: string[] = [];
-    const worker = createWorker({ ...test.deps, actions: [journalStep(journal)] });
+    const clock = new FakeClock(1_000);
+    const decidedAt: Date[] = [];
+    const worker = createWorker({
+      ...test.deps,
+      clock,
+      actions: [
+        journalStep(journal),
+        {
+          name: "time",
+          run: (record) => {
+            decidedAt.push(record.decidedAt);
+            return Promise.resolve();
+          },
+        },
+      ],
+    });
     test.db.edit("a", { body: "Cheap phone, pay by gift card" });
     test.connector.failWrites = 1;
 
     const first = await worker.runOnce();
+    clock.advance(60_000); // the late action runs a minute after the answer was logged
     expect(first.failures.map((failure) => failure.stage)).toEqual(["record"]);
     expect(test.db.decisionOf("a")).toBeNull();
     expect(test.db.jobs.get("a")).toEqual({ claimedBy: null });
@@ -1052,6 +1089,10 @@ describe("a record already answered at its state", () => {
       status: "done",
     });
     expect(journal).toEqual(["action a"]);
+    // The late action reports the logged answer's time, not the time it ran.
+    const [logged] = await test.log.history("a");
+    expect(logged?.at).toEqual(new Date(1_000));
+    expect(decidedAt).toEqual([new Date(1_000)]);
     expect(test.db.jobs.size).toBe(0);
   });
 
@@ -1228,7 +1269,12 @@ describe("telling the alerts module", () => {
 });
 
 describe("action conditions", () => {
-  const record: ActionRecord = { key: "a", state: { body: "x" }, status: "done" };
+  const record: ActionRecord = {
+    key: "a",
+    state: { body: "x" },
+    status: "done",
+    decidedAt: new Date(0),
+  };
   const decisions = {
     scam: { kind: "decided", value: true, probabilityOrConfidence: 0.8 },
     urgency: { kind: "needs_review" },

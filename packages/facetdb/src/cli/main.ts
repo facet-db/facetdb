@@ -164,6 +164,8 @@ export function processDeps(): CliDeps {
       return stop.signal;
     },
     webhookFetch: (url, init) => globalThis.fetch(url, init),
+    // Unref'd by the platform: a pending timeout keeps no idle process alive.
+    abortAfter: (ms) => AbortSignal.timeout(ms),
     random: Math.random,
     embedded: diskEmbedded,
     backfill: async (config, source, mode) => {

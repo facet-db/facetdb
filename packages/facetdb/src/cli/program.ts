@@ -129,6 +129,11 @@ export type CliDeps = {
   readonly stopSignal: () => AbortSignal;
   /** Sends a webhook from the outbox: `fetch` in the process, a recording fake in a test. */
   readonly webhookFetch: WebhookFetch;
+  /**
+   * A signal that aborts `ms` milliseconds from now, bounding one webhook send or give-up alert:
+   * the platform's timeout signal in the process, a fake on the test's clock in a test.
+   */
+  readonly abortAfter: (ms: number) => AbortSignal;
   /** A number in [0, 1), as `Math.random`, for the model backoff's jitter. */
   readonly random: () => number;
   /** The embedded Postgres of `facetdb dev`, kept in a directory of the project. */
@@ -360,6 +365,7 @@ type OptionalInTests =
   | "serve"
   | "stopSignal"
   | "webhookFetch"
+  | "abortAfter"
   | "random"
   | "embedded";
 
@@ -422,6 +428,9 @@ export async function runInProcess(
         throw new Error("this test gave the command no stop signal");
       },
       webhookFetch: () => Promise.reject(new Error("this test gave the command no webhook fetch")),
+      abortAfter: () => {
+        throw new Error("this test gave the command no timeout signal");
+      },
       random: () => {
         throw new Error("this test gave the command no random numbers");
       },
