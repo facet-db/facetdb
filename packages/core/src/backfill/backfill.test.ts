@@ -48,6 +48,7 @@ const UNLIMITED: SpendingGate = {
   admit: () => Promise.resolve("unlimited"),
   settle: () => Promise.resolve(),
   record: () => Promise.resolve(),
+  finish: () => Promise.resolve(),
 };
 
 /**
@@ -89,6 +90,11 @@ class CappedGate implements SpendingGate {
   record(inputTokens: number): Promise<void> {
     this.counted += inputTokens;
     return Promise.resolve();
+  }
+
+  async finish(reservation: string, inputTokens: number): Promise<void> {
+    await this.record(inputTokens);
+    await this.settle(reservation);
   }
 }
 

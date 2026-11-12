@@ -129,6 +129,12 @@ export type PassReport = {
   readonly written: readonly RecordKey[];
   /** Nothing to ask: every state field blank (written as skipped). */
   readonly skipped: readonly RecordKey[];
+  /**
+   * Already answered at this state under this question-set version, every question present (a
+   * backfill can queue a record the worker has just answered): no model call; the logged answer's
+   * decisions were written again, still guarded by the hash, the actions ran, and the job acked.
+   */
+  readonly alreadyAnswered: readonly RecordKey[];
   /** The record changed while the model was answering: the answer was discarded and the record queued again. */
   readonly discarded: readonly RecordKey[];
   /** Deleted before the worker reached them: left the queue, history stays in the log. */
@@ -231,10 +237,12 @@ export function createWorker(deps: WorkerDeps): Worker {
   /**
    * A record changed while waiting for review has its pending review withdrawn. The record counts
    * as waiting when its latest logged answer, with the people's decisions on it, still leaves a
-   * question to a person.
+   * question to a person. `prior` is that latest answer, read with the rest of the batch's.
    */
-  async function withdrawStaleReview(row: ReadRow): Promise<boolean> {
-    const prior = await log.latestAnswer(row.key);
+  async function withdrawStaleReview(
+    row: ReadRow,
+    prior: AnswerEntry | undefined,
+  ): Promise<boolean> {
     if (prior === undefined || prior.stateHash === row.hash) {
       return false;
     }
@@ -288,7 +296,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
   }
 
-  /** Releases a request's reservation. A failure is reported; it never drops the answer, which is already paid for. */
+  /** Releases the reservation of a request that produced no answer. A failure is reported. */
   async function release(
     report: MutablePass,
     key: RecordKey,
@@ -301,14 +309,18 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
   }
 
-  /** Counts one answer's input tokens. A failure is reported; the answer is still written, since it was paid for. */
+  /**
+   * Counts one answer's input tokens and releases its reservation, in one store call. A failure is
+   * reported; the answer is still written, since it was paid for.
+   */
   async function countSpend(
     report: MutablePass,
     key: RecordKey,
+    reservation: ReservationId,
     inputTokens: number,
   ): Promise<void> {
     try {
-      await spending.record(inputTokens);
+      await spending.finish(reservation, inputTokens);
     } catch (error) {
       // The count is stored before the alert is raised, so an alert failure leaves nothing uncounted.
       const stage = error instanceof SpendingAlertError ? "alert" : "spending";
@@ -354,10 +366,39 @@ export function createWorker(deps: WorkerDeps): Worker {
     return "ack";
   }
 
-  async function processRecord(row: ReadRow, report: MutablePass): Promise<Settled> {
+  /**
+   * A record answered at its current state under this version is not asked twice. A backfill can
+   * queue one the worker has just answered, a lost ack hands a whole answered batch out again, and
+   * a write that failed (or a crash) after the answer was logged leaves the row behind. The worker
+   * cannot tell these apart, so it does what covers all of them: the logged answer's decisions
+   * (with the people's decisions on this state laid over them), written again and followed by the
+   * actions. Undefined when the record must be asked: no answer, another state, another version, or
+   * a question the answer lacks.
+   */
+  async function currentDecision(
+    row: ReadRow,
+    prior: AnswerEntry | undefined,
+  ): Promise<RecordDecision | undefined> {
+    if (prior === undefined || prior.stateHash !== row.hash || prior.version !== version) {
+      return undefined;
+    }
+    const decisions = decideRecord(
+      questionSet,
+      questionSet.thresholds,
+      prior,
+      await log.history(row.key),
+    );
+    return decisions === undefined ? undefined : { decisions, status: statusOf(decisions) };
+  }
+
+  async function processRecord(
+    row: ReadRow,
+    prior: AnswerEntry | undefined,
+    report: MutablePass,
+  ): Promise<Settled> {
     let stage: FailureStage = "record";
     try {
-      if (await withdrawStaleReview(row)) {
+      if (await withdrawStaleReview(row, prior)) {
         report.withdrawn.push(row.key);
       }
 
@@ -372,6 +413,21 @@ export function createWorker(deps: WorkerDeps): Worker {
           return "release";
         }
         report.skipped.push(row.key);
+        return "ack";
+      }
+
+      const current = await currentDecision(row, prior);
+      if (current !== undefined) {
+        const result = await connector.write(row.key, current, row.hash);
+        if (!result.written) {
+          // The state changed since: the record is asked again with it, and nothing runs now.
+          report.discarded.push(row.key);
+          return "release";
+        }
+        report.alreadyAnswered.push(row.key);
+        // The actions follow every write that lands. After a lost ack they run again, at least
+        // once, as they did when the record was asked again.
+        report.failures.push(...(await runActions(row, current.status, current.decisions)));
         return "ack";
       }
 
@@ -413,30 +469,28 @@ export function createWorker(deps: WorkerDeps): Worker {
       stage = "ask";
       let response: ProviderResponse;
       try {
-        try {
-          response = await provider.ask({
-            model: questionSet.model,
-            state: row.state,
-            questions: questionSet.questions,
-          });
-        } catch (error) {
-          await tell(report, row.key, (signals) => signals.modelCall(false));
-          const verdict = outage?.failed(row.key, error) ?? "retry";
-          if (verdict === "retry") {
-            throw error;
-          }
-          // The failure stays in the report; the record is held instead of retried at once.
-          report.failures.push({ key: row.key, stage, error });
-          stage = "record";
-          return await hold(row, verdict, report);
-        }
-        await tell(report, row.key, (signals) => signals.modelCall(true));
-        await requeue(report, outage?.succeeded(row.key) ?? []);
-        await countSpend(report, row.key, response.usage.inputTokens);
-      } finally {
-        // Counted (or failed) by now: the reservation gives way to the count, or to nothing.
+        response = await provider.ask({
+          model: questionSet.model,
+          state: row.state,
+          questions: questionSet.questions,
+        });
+      } catch (error) {
+        // No answer, so nothing to count: the reservation gives way to nothing.
         await release(report, row.key, reservation);
+        await tell(report, row.key, (signals) => signals.modelCall(false));
+        const verdict = outage?.failed(row.key, error) ?? "retry";
+        if (verdict === "retry") {
+          throw error;
+        }
+        // The failure stays in the report; the record is held instead of retried at once.
+        report.failures.push({ key: row.key, stage, error });
+        stage = "record";
+        return await hold(row, verdict, report);
       }
+      // Paid for: the reservation gives way to the count, in one store call.
+      await countSpend(report, row.key, reservation, response.usage.inputTokens);
+      await tell(report, row.key, (signals) => signals.modelCall(true));
+      await requeue(report, outage?.succeeded(row.key) ?? []);
 
       stage = "record";
       const entry: AnswerEntry = {
@@ -449,12 +503,20 @@ export function createWorker(deps: WorkerDeps): Worker {
         usage: response.usage,
         at: new Date(clock.now()),
       };
-      // The only door to the database: `recordAnswer` logs, decides and writes with this hash.
+      // The only door to the database: `recordAnswer` logs, decides and writes with this hash. A record
+      // with no logged answer has no person's decision either (a person decides on a logged answer,
+      // applyHumanDecision), so its log before this entry is known to be empty and is not read again.
       const writes: RecordDecision[] = [];
-      const result = await recordAnswer(entry, questionSet, log, async (key, decision, hash) => {
-        writes.push(decision);
-        return connector.write(key, decision, hash);
-      });
+      const result = await recordAnswer(
+        entry,
+        questionSet,
+        log,
+        async (key, decision, hash) => {
+          writes.push(decision);
+          return connector.write(key, decision, hash);
+        },
+        prior === undefined ? [] : undefined,
+      );
       const [written] = writes;
       if (!result.written || written === undefined) {
         // The record changed while in flight: the answer is discarded and the record queued again.
@@ -497,12 +559,24 @@ export function createWorker(deps: WorkerDeps): Worker {
       await connector.release(keys);
       throw error;
     }
+    // The batch's latest answers in one call, not one per record: a far database charges every round
+    // trip, and a record needs its prior to withdraw a stale review, to skip itself, and to know its
+    // log is empty. A lookup that fails is a failed pass, as it was when each record looked itself
+    // up: the batch goes back to the queue whole and `run` waits a poll before the next pass.
+    let priors: ReadonlyMap<RecordKey, AnswerEntry>;
+    try {
+      priors = rows.length === 0 ? new Map() : await log.latestAnswers(rows.map((row) => row.key));
+    } catch (error) {
+      await connector.release(keys);
+      report.failures.push({ key: null, stage: "record", error });
+      return report;
+    }
     report.gone.push(...missing);
     const toAck: RecordKey[] = [...missing];
     const toRelease: RecordKey[] = [];
 
     await forEachLimited(rows, limits.maxInFlight, async (row) => {
-      const settled = await processRecord(row, report);
+      const settled = await processRecord(row, priors.get(row.key), report);
       (settled === "ack" ? toAck : toRelease).push(row.key);
     });
 
@@ -587,6 +661,7 @@ function newPass(claimed: number): MutablePass {
     paused: false,
     written: [],
     skipped: [],
+    alreadyAnswered: [],
     discarded: [],
     gone: [],
     withdrawn: [],

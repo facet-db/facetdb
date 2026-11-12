@@ -1,4 +1,5 @@
 import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
   type ActiveAlert,
@@ -22,6 +23,7 @@ import {
   monthOf,
   RESERVATION_LEASE_MS,
   type Spending,
+  SpendingAlertError,
   type SpendingAlertKind,
   type SpendingCap,
   type SpendingGate,
@@ -52,10 +54,11 @@ class MemoryUsageStore implements UsageStore {
   >();
   readonly #claimed = new Set<string>();
   #issued = 0;
+  /** How many `finish` calls reached the store. */
+  finishes = 0;
 
   add(projectId: string, month: string, inputTokens: number): Promise<void> {
-    const key = [projectId, month].join("|");
-    this.#totals.set(key, (this.#totals.get(key) ?? 0) + inputTokens);
+    this.#count(projectId, month, inputTokens);
     return Promise.resolve();
   }
 
@@ -89,10 +92,39 @@ class MemoryUsageStore implements UsageStore {
   }
 
   release(projectId: string, reservation: string): Promise<void> {
+    this.#release(projectId, reservation);
+    return Promise.resolve();
+  }
+
+  finish(
+    projectId: string,
+    month: string,
+    reservation: string,
+    inputTokens: number,
+  ): Promise<void> {
+    // One synchronous step, as the store's single statement: nothing runs between the two.
+    this.finishes += 1;
+    this.#count(projectId, month, inputTokens);
+    this.#release(projectId, reservation);
+    return Promise.resolve();
+  }
+
+  #count(projectId: string, month: string, inputTokens: number): void {
+    const key = [projectId, month].join("|");
+    this.#totals.set(key, (this.#totals.get(key) ?? 0) + inputTokens);
+  }
+
+  #release(projectId: string, reservation: string): void {
     if (this.#reservations.get(reservation)?.projectId === projectId) {
       this.#reservations.delete(reservation);
     }
-    return Promise.resolve();
+  }
+
+  /** The reservation table: the tokens each open reservation holds, by id. */
+  reservations(): Record<string, number> {
+    return Object.fromEntries(
+      [...this.#reservations].map(([id, held]) => [id, held.tokens] as const),
+    );
   }
 
   claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean> {
@@ -110,16 +142,32 @@ class MemoryUsageStore implements UsageStore {
   }
 }
 
-/** A usage store that refuses its next `failAdds` writes, as a database that is briefly down does. */
+/**
+ * A usage store that refuses its next `failWrites` count writes (`add` or `finish`), as a database
+ * that is briefly down does. A refused `finish` changes nothing, as a rolled-back statement.
+ */
 class FlakyUsageStore extends MemoryUsageStore {
-  failAdds = 0;
+  failWrites = 0;
 
   override add(projectId: string, month: string, inputTokens: number): Promise<void> {
-    if (this.failAdds > 0) {
-      this.failAdds -= 1;
+    if (this.failWrites > 0) {
+      this.failWrites -= 1;
       return Promise.reject(new Error("usage store down"));
     }
     return super.add(projectId, month, inputTokens);
+  }
+
+  override finish(
+    projectId: string,
+    month: string,
+    reservation: string,
+    inputTokens: number,
+  ): Promise<void> {
+    if (this.failWrites > 0) {
+      this.failWrites -= 1;
+      return Promise.reject(new Error("usage store down"));
+    }
+    return super.finish(projectId, month, reservation, inputTokens);
   }
 }
 
@@ -221,7 +269,7 @@ describe("spending: a count whose write failed", () => {
       capLink: (project) => `https://app.facetdb.test/projects/${project}/settings#spending`,
     });
 
-    usage.failAdds = 1;
+    usage.failWrites = 1;
     await expect(spending.record(PROJECT, 1_000)).rejects.toThrow("usage store down");
 
     // The store is back: the admission writes the held 1,000 first, which puts the project at its cap.
@@ -243,7 +291,7 @@ describe("spending: a count whose write failed", () => {
       `https://app.facetdb.test/projects/${project}/settings#spending`;
     const before = createSpending({ usageStore: usage, clock, alerts: new FakeAlerts(), capLink });
 
-    usage.failAdds = 1;
+    usage.failWrites = 1;
     await expect(before.record(PROJECT, 1_000)).rejects.toThrow("usage store down");
 
     // The process dies here; a new one starts on the same usage store and must still see the 1,000.
@@ -263,7 +311,7 @@ describe("spending: a count whose write failed", () => {
     const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
     // 600 is held (its write failed); 500 is the answer whose record is under test.
-    usage.failAdds = 1;
+    usage.failWrites = 1;
     await expect(spending.record(PROJECT, 600)).rejects.toThrow("usage store down");
     usage.holdWrites = true;
     let answerDone = false;
@@ -337,6 +385,94 @@ describe("spending: a reservation whose request died in flight", () => {
     await spending.settle(PROJECT, old);
 
     expect(await spending.admit(PROJECT, PAUSE_AT_1000, 600)).toBeUndefined();
+  });
+});
+
+describe("spending: finish is settle then record in one store call", () => {
+  it("leaves the cap, the 80% warning and the reservation table exactly as settle then record does", async () => {
+    // fast-check prints the seed and the shrunk sequence on failure.
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(PAUSE_AT_1000, CONTINUE_AT_1000),
+        fc.array(
+          fc.record({
+            requestTokens: fc.integer({ min: 1, max: 400 }),
+            inputTokens: fc.integer({ min: 0, max: 400 }),
+            answered: fc.boolean(),
+          }),
+          { maxLength: 12 },
+        ),
+        async (cap, steps) => {
+          const split = setup();
+          const joined = setup();
+          const splitGate = spendingGate(split.spending, PROJECT, () => Promise.resolve(cap));
+          const joinedGate = spendingGate(joined.spending, PROJECT, () => Promise.resolve(cap));
+          let finished = 0;
+          for (const step of steps) {
+            const before = await splitGate.admit(step.requestTokens);
+            const after = await joinedGate.admit(step.requestTokens);
+            expect(after).toEqual(before);
+            // An unanswered admission stays open, so the table holds reservations of both kinds.
+            if (before !== undefined && after !== undefined && step.answered) {
+              await splitGate.settle(before);
+              await splitGate.record(step.inputTokens);
+              await joinedGate.finish(after, step.inputTokens);
+              finished += 1;
+            }
+            expect(joined.usage.reservations()).toEqual(split.usage.reservations());
+            expect(await joined.spending.monthlyTotal(PROJECT)).toBe(
+              await split.spending.monthlyTotal(PROJECT),
+            );
+            expect(await joined.spending.status(PROJECT, cap)).toBe(
+              await split.spending.status(PROJECT, cap),
+            );
+            expect(joined.alerts.kinds()).toEqual(split.alerts.kinds());
+          }
+          expect(joined.usage.finishes).toBe(finished);
+          expect(split.usage.finishes).toBe(0);
+        },
+      ),
+    );
+  });
+
+  it("an alert that fails after the count leaves the tokens counted and the reservation released", async () => {
+    const { spending, usage, alerts } = setup();
+    const gate = spendingGate(spending, PROJECT, () => Promise.resolve(PAUSE_AT_1000));
+    await spending.record(PROJECT, 700);
+    const reservation = await admitted(spending, 150);
+    alerts.outage = "throw";
+
+    // 850 of 1000 crosses 80%: the warning is raised after the count, and its raise fails.
+    await expect(gate.finish(reservation, 150)).rejects.toBeInstanceOf(SpendingAlertError);
+
+    expect(await spending.monthlyTotal(PROJECT)).toBe(850);
+    expect(usage.reservations()).toEqual({});
+    expect(usage.finishes).toBe(1);
+  });
+
+  it("a finish whose write failed is written, count and release together, by the next admission", async () => {
+    const clock = new FakeClock(OCT_15);
+    const usage = new FlakyUsageStore();
+    const spending = createSpending({
+      usageStore: usage,
+      clock,
+      alerts: new FakeAlerts(),
+      capLink: (project) => `https://app.facetdb.test/projects/${project}/settings#spending`,
+    });
+    const reservation = await admitted(spending, 600);
+    usage.failWrites = 1;
+
+    await expect(spending.finish(PROJECT, reservation, 500)).rejects.toThrow("usage store down");
+    // Nothing reached the store: the reservation still holds the request's estimate.
+    expect(usage.reservations()).toEqual({ [reservation]: 600 });
+    expect(await usage.total(PROJECT, monthOf(OCT_15))).toBe(0);
+
+    // The store is back: the admission writes the held finish first, so the 500 is counted once and
+    // the 600 released, and 500 counted plus this 400 fits under the cap.
+    const next = await spending.admit(PROJECT, PAUSE_AT_1000, 400);
+    expect(next).toBeDefined();
+    expect(await spending.monthlyTotal(PROJECT)).toBe(500);
+    expect(Object.keys(usage.reservations())).toEqual([next]);
   });
 });
 
@@ -787,7 +923,8 @@ describe("spending in the worker", () => {
       allowsWork: () => Promise.resolve(true),
       admit: () => Promise.resolve("unlimited"),
       settle: () => Promise.resolve(),
-      record: () => Promise.reject(new Error("usage store down")),
+      record: () => Promise.resolve(),
+      finish: () => Promise.reject(new Error("usage store down")),
     };
     const { db, worker } = await workerWith(failing, provider, clock);
     db.edit("d", { body: "one more" });
@@ -798,6 +935,37 @@ describe("spending in the worker", () => {
     expect(report.failures).toHaveLength(4);
     expect(report.failures.every((failure) => failure.stage === "spending")).toBe(true);
     expect(db.decisionOf("a")).not.toBeNull();
+  });
+
+  it("an answer whose finish fails at the alert is reported at the alert stage, counted, released and written", async () => {
+    const { clock, spending, usage, alerts } = setup();
+    await spending.record(PROJECT, 700);
+    alerts.outage = "throw";
+    const provider = new CountingProvider(() => 120);
+    const gate = spendingGate(spending, PROJECT, () => Promise.resolve(CONTINUE_AT_1000));
+    const { db, worker } = await workerWith(gate, provider, clock, {
+      ...DEFAULT_WORKER_LIMITS,
+      maxInFlight: 1,
+    });
+
+    const report = await worker.runOnce();
+
+    // `a` takes the count to 820, past 80%: every finish from then on raises the warning, which fails.
+    expect(report.written).toEqual(["a", "b", "c"]);
+    expect(
+      report.failures
+        .filter((failure) => failure.key !== null)
+        .map((failure) => [failure.key, failure.stage]),
+    ).toEqual([
+      ["a", "alert"],
+      ["b", "alert"],
+      ["c", "alert"],
+    ]);
+    expect(report.failures.every((failure) => failure.stage === "alert")).toBe(true);
+    expect(await spending.monthlyTotal(PROJECT)).toBe(1_060);
+    expect(usage.finishes).toBe(3);
+    expect(usage.reservations()).toEqual({});
+    expect(db.decisionOf("c")).not.toBeNull();
   });
 
   it("an alert store outage at the warning does not stop a continuing project answering", async () => {

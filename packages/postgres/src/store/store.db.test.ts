@@ -254,6 +254,83 @@ describe("reserve on a real Postgres", () => {
   });
 });
 
+describe("finish on a real Postgres", () => {
+  it("counts and releases in one step, locking the usage row before the reservation, as reserve does", async () => {
+    const store = await newStore();
+    const admin = open();
+    await store.usage.add("p", MONTH, 10);
+    const id = await store.usage.reserve("p", MONTH, 50, 100, 0, 60_000);
+    expect(id).toBeDefined();
+    const lock = holdLock(
+      "select 1 from facetdb.usage where project_id = $1 and month = $2 for update",
+      ["p", MONTH],
+    );
+    await lock.holding;
+
+    let done = false;
+    const pending = store.usage.finish("p", MONTH, id ?? "", 30).then(() => {
+      done = true;
+    });
+    try {
+      await untilSomeoneWaitsForALock(admin);
+      expect(done).toBe(false);
+      // Waiting on the usage row, the finish has not touched its reservation yet: another connection
+      // can lock it at once. The other order could deadlock with a reserve clearing it after its lease.
+      await admin.query(
+        "select 1 from facetdb.usage_reservations where id = $1::uuid for update nowait",
+        [id],
+      );
+      const held = await admin.query(
+        "select count(*)::text as n from facetdb.usage_reservations where id = $1::uuid",
+        [id],
+      );
+      expect(Number(held[0]?.["n"])).toBe(1);
+    } finally {
+      lock.release();
+      await lock.done;
+    }
+    await pending;
+
+    expect(await store.usage.total("p", MONTH)).toBe(40);
+    const left = await admin.query("select count(*)::text as n from facetdb.usage_reservations");
+    expect(Number(left[0]?.["n"])).toBe(0);
+  });
+
+  it("finishes alongside reserves that clear the same expired reservations, from separate connections", async () => {
+    const workers = await Promise.all([newStore(), newStore(), newStore(), newStore()]);
+    const [first] = workers;
+    if (first === undefined) {
+      throw new Error("four stores were opened");
+    }
+    // Sixteen reservations whose lease ends at 1,000; the reserves below run at 2,000 and clear them.
+    const ids: string[] = [];
+    for (let n = 0; n < 16; n++) {
+      const id = await first.usage.reserve("p", MONTH, 5, 1_000_000, 0, 1_000);
+      if (id === undefined) {
+        throw new Error("a reservation under the cap was refused");
+      }
+      ids.push(id);
+    }
+
+    await Promise.all(
+      ids.flatMap((id, n) => {
+        const store = workers[n % workers.length] ?? first;
+        return [
+          store.usage.finish("p", MONTH, id, 3),
+          store.usage.reserve("p", MONTH, 1, 1_000_000, 2_000, 60_000),
+        ];
+      }),
+    );
+
+    expect(await first.usage.total("p", MONTH)).toBe(48);
+    const rows = await open().query(
+      "select count(*)::text as n from facetdb.usage_reservations where id = any($1::uuid[])",
+      [ids],
+    );
+    expect(Number(rows[0]?.["n"])).toBe(0);
+  });
+});
+
 describe("claim on a real Postgres", () => {
   const SOURCE = "src";
 

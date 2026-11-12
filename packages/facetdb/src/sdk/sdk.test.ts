@@ -31,6 +31,7 @@ const UNLIMITED: SpendingGate = {
   admit: () => Promise.resolve("unlimited"),
   settle: () => Promise.resolve(),
   record: () => Promise.resolve(),
+  finish: () => Promise.resolve(),
 };
 
 const questionSet: QuestionSet = {

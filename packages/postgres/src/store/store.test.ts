@@ -632,6 +632,55 @@ describe("usage", () => {
     await store.usage.release("p", id ?? "");
   });
 
+  it("finishes a request in one statement: the tokens are counted and the reservation released", async () => {
+    const db = await newDb();
+    const inner = pgliteClient(db);
+    const sent: string[] = [];
+    const store = await createStore({
+      url: "postgres://localhost/facetdb",
+      secret: SECRET,
+      clock: new TurningClock(1_700_000_000_000),
+      connect: () => ({
+        ...inner,
+        query: (text, params) => {
+          sent.push(text);
+          return inner.query(text, params);
+        },
+        transaction: (work) => {
+          sent.push("transaction");
+          return inner.transaction(work);
+        },
+      }),
+    });
+    stores.push(store);
+    await store.usage.add("p", MONTH, 10);
+    const id = await store.usage.reserve("p", MONTH, 90, 100, 0, 60_000);
+    expect(id).toBeDefined();
+    // 10 counted + 90 reserved is the cap: nothing more goes out until the request is finished.
+    expect(await store.usage.reserve("p", MONTH, 1, 100, 0, 60_000)).toBeUndefined();
+    sent.length = 0;
+
+    await store.usage.finish("p", MONTH, id ?? "", 40);
+
+    expect(sent).toHaveLength(1);
+    expect(await store.usage.total("p", MONTH)).toBe(50);
+    // 50 counted and nothing reserved: the 90 gave way to the 40 it cost.
+    expect(await store.usage.reserve("p", MONTH, 49, 100, 0, 60_000)).toBeDefined();
+  });
+
+  it("counts a finish whose reservation is already released, and agrees with add then release", async () => {
+    const { store } = await newStore();
+    const id = await store.usage.reserve("p", MONTH, 30, 100, 0, 60_000);
+    await store.usage.release("p", id ?? "");
+    await store.usage.finish("p", MONTH, id ?? "", 25);
+    await store.usage.finish("p", OTHER, id ?? "", 5);
+    await store.usage.add("q", MONTH, 25);
+
+    expect(await store.usage.total("p", MONTH)).toBe(25);
+    expect(await store.usage.total("p", OTHER)).toBe(5);
+    expect(await store.usage.total("p", MONTH)).toBe(await store.usage.total("q", MONTH));
+  });
+
   it("claims each alert once a month and lets a released claim be taken again", async () => {
     const { store } = await newStore();
     expect(await store.usage.claimAlert("p", MONTH, "spending_80")).toBe(true);

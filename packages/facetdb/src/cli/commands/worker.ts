@@ -92,6 +92,7 @@ export type WorkerSummary = {
   readonly sources: readonly {
     readonly source: string;
     readonly answered: number;
+    readonly alreadyAnswered: number;
     readonly failed: number;
   }[];
 };
@@ -132,6 +133,8 @@ type Running = {
   readonly worker: Worker;
   close(): Promise<void>;
   answered: number;
+  /** Queued again at a state already answered under this version: written again, no model call. */
+  alreadyAnswered: number;
   failed: number;
 };
 
@@ -243,6 +246,7 @@ export async function runWorkers(
           worker,
           close: () => Promise.resolve(),
           answered: 0,
+          alreadyAnswered: 0,
           failed: 0,
         });
         continue;
@@ -269,6 +273,7 @@ export async function runWorkers(
         worker: workerFor(source, connector, true),
         close: () => connector.close(),
         answered: 0,
+        alreadyAnswered: 0,
         failed: 0,
       });
     }
@@ -329,9 +334,15 @@ export async function runWorkers(
 
     const tally = (entry: Running) => (report: PassReport) => {
       entry.answered += report.written.length + report.skipped.length;
+      entry.alreadyAnswered += report.alreadyAnswered.length;
       entry.failed += report.failures.length;
       if (report.written.length > 0) {
         print(`${entry.source}: answered ${report.written.join(", ")}`);
+      }
+      if (report.alreadyAnswered.length > 0) {
+        print(
+          `${entry.source}: already answered ${report.alreadyAnswered.join(", ")} at this state, so the model was not asked again`,
+        );
       }
       for (const failure of report.failures) {
         const message =
@@ -353,6 +364,7 @@ export async function runWorkers(
           const settled =
             report.written.length +
             report.skipped.length +
+            report.alreadyAnswered.length +
             report.gone.length +
             report.held.length +
             report.refused.length +
@@ -389,6 +401,11 @@ export async function runWorkers(
       }
       print("Stopped: every claim was settled.");
     }
+    for (const entry of running) {
+      print(
+        `${entry.source}: answered ${entry.answered}, already answered ${entry.alreadyAnswered}, failed ${entry.failed}`,
+      );
+    }
   } finally {
     await listener?.close();
     for (const entry of running) {
@@ -398,7 +415,12 @@ export async function runWorkers(
   return {
     ok: true,
     http: listener === undefined ? null : { port: listener.port },
-    sources: running.map(({ source, answered, failed }) => ({ source, answered, failed })),
+    sources: running.map(({ source, answered, alreadyAnswered, failed }) => ({
+      source,
+      answered,
+      alreadyAnswered,
+      failed,
+    })),
   };
 }
 

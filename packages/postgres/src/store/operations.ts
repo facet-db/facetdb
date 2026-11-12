@@ -77,6 +77,26 @@ export function createUsageStore(client: SqlClient): UsageStore {
       );
     },
 
+    /**
+     * One statement, so one round trip and one atomic step: the count and the release commit together.
+     * The delete reads the count's output, so the month's `usage` row is locked before the reservation
+     * row, the order `reserve` takes them in; the other order could deadlock with a `reserve` clearing
+     * this reservation after its lease. A data-modifying `with` runs to completion either way, so the
+     * tokens are counted even when the reservation is already gone.
+     */
+    async finish(projectId, month, reservation, inputTokens) {
+      await client.query(
+        `with counted as (
+           insert into facetdb.usage (project_id, month, input_tokens) values ($1, $2, $4)
+           on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens + excluded.input_tokens
+           returning 1
+         )
+         delete from facetdb.usage_reservations
+          where project_id = $1 and id = $3::uuid and exists (select 1 from counted)`,
+        [projectId, month, reservation, inputTokens],
+      );
+    },
+
     async claimAlert(projectId, month, kind) {
       const rows = await client.query(
         `insert into facetdb.usage_alerts (project_id, month, kind) values ($1, $2, $3)

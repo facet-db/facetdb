@@ -58,6 +58,18 @@ export type UsageStore = {
    * or expired is left as it is.
    */
   release(projectId: string, reservation: ReservationId): Promise<void>;
+  /**
+   * `add` and `release` in one atomic step (one statement or one transaction in a database): counts
+   * an answer's input tokens and releases its request's reservation, so the reservation gives way to
+   * the count with no moment where both or neither hold the headroom, in one round trip. A
+   * reservation already released or expired is left as it is; the tokens are counted either way.
+   */
+  finish(
+    projectId: string,
+    month: string,
+    reservation: ReservationId,
+    inputTokens: number,
+  ): Promise<void>;
   /** True only for the first claim of this alert in this month; false for every later one. */
   claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean>;
   /** Gives a claim back when the alert reached no channel, so the next check raises it again. */
@@ -91,7 +103,7 @@ export type Spending = {
    * Admits one request of the project against `cap`, for every process whose spending shares the usage
    * store. The store counts the open reservations of the requests admitted before it (not yet counted or
    * expired), so one request may cross the cap and no more follow. Resolves the admitted request's
-   * reservation, which holds `requestTokens` until `settle` or until its lease ends; undefined when
+   * reservation, which holds `requestTokens` until `finish` or `settle`, or until its lease ends; undefined when
    * refused. `onAlertFailure` hears an alert that could not be raised; the decision stands either way.
    */
   admit(
@@ -100,15 +112,22 @@ export type Spending = {
     requestTokens: number,
     onAlertFailure?: (error: SpendingAlertError) => void,
   ): Promise<ReservationId | undefined>;
-  /** Releases a request's reservation once its answer is counted, or has failed. */
+  /** Releases the reservation of a request that produced no answer. */
   settle(projectId: string, reservation: ReservationId): Promise<void>;
+  /**
+   * `record` and `settle` for an answered request in one store call: counts the answer's input tokens
+   * and releases its reservation together. A write that fails is held and retried, reservation and
+   * all, by the next call that reads the count, exactly as `record` holds a count; never dropped.
+   */
+  finish(projectId: string, reservation: ReservationId, inputTokens: number): Promise<void>;
 };
 
 /**
  * What the worker needs from spending, bound to one project. `allowsWork` is checked before every
- * claim, `admit` before every request, and `settle` after it; `record` runs after every answer and
- * re-checks the cap so the warning goes out at once. The reservations live in the usage store, so
- * every process on the same store shares them.
+ * claim and `admit` before every request. An answered request ends with `finish`, which counts the
+ * answer, releases the reservation and re-checks the cap so the warning goes out at once; a request
+ * with no answer ends with `settle`. `record` counts tokens with no reservation to release. The
+ * reservations live in the usage store, so every process on the same store shares them.
  */
 export type SpendingGate = {
   /**
@@ -116,13 +135,19 @@ export type SpendingGate = {
    * failed alert never lets a project past its cap.
    */
   allowsWork(onAlertFailure?: (error: SpendingAlertError) => void): Promise<boolean>;
-  /** Resolves the reservation of an admitted request, until `settle`; see `Spending.admit`. */
+  /** Resolves the reservation of an admitted request, until `finish` or `settle`; see `Spending.admit`. */
   admit(
     requestTokens: number,
     onAlertFailure?: (error: SpendingAlertError) => void,
   ): Promise<ReservationId | undefined>;
   settle(reservation: ReservationId): Promise<void>;
   record(inputTokens: number): Promise<void>;
+  /**
+   * Counts an answered request's input tokens and releases its reservation in one store call, then
+   * re-checks the cap. The count is stored before any alert is raised, so a `SpendingAlertError`
+   * from here leaves nothing uncounted.
+   */
+  finish(reservation: ReservationId, inputTokens: number): Promise<void>;
 };
 
 /**
@@ -142,11 +167,15 @@ export class SpendingAlertError extends Error {
 /** An alert about every source of a project names no source. */
 const EVERY_SOURCE = "all sources";
 
-/** A count of input tokens and the month it belongs to, held until the store takes it. */
+/**
+ * A count of input tokens and the month it belongs to, held until the store takes it, with the
+ * reservation of the request it paid for when that is released in the same write.
+ */
 type Uncounted = {
   readonly projectId: string;
   readonly month: string;
   readonly inputTokens: number;
+  readonly reservation?: ReservationId;
 };
 
 /** The UTC calendar month of a clock reading, as `YYYY-MM`. */
@@ -205,7 +234,11 @@ export function createSpending(deps: SpendingDeps): Spending {
     const next = previous.then(async () => {
       for (let held = takeHeld(projectId); held !== undefined; held = takeHeld(projectId)) {
         try {
-          await usageStore.add(held.projectId, held.month, held.inputTokens);
+          if (held.reservation === undefined) {
+            await usageStore.add(held.projectId, held.month, held.inputTokens);
+          } else {
+            await usageStore.finish(held.projectId, held.month, held.reservation, held.inputTokens);
+          }
         } catch (error) {
           uncounted.push(held);
           throw error;
@@ -346,7 +379,21 @@ export function createSpending(deps: SpendingDeps): Spending {
     return usageStore.release(projectId, reservation);
   }
 
-  return { record, monthlyTotal, status, admit, settle };
+  /**
+   * Through the held list, as `record`: a write that fails keeps the count and its reservation for
+   * the next call that reads the count, so the cap never misses a paid answer. Until then the
+   * reservation still holds the request's estimate, which errs toward the cap, never past it.
+   */
+  async function finish(
+    projectId: string,
+    reservation: ReservationId,
+    inputTokens: number,
+  ): Promise<void> {
+    uncounted.push({ projectId, month: monthOf(clock.now()), inputTokens, reservation });
+    await countOwed(projectId);
+  }
+
+  return { record, monthlyTotal, status, admit, settle, finish };
 }
 
 /**
@@ -371,6 +418,11 @@ export function spendingGate(
     },
     async record(inputTokens) {
       await spending.record(projectId, inputTokens);
+      await spending.status(projectId, await readCap());
+    },
+    async finish(reservation, inputTokens) {
+      // The count is stored before the status raises any alert, so an alert failure loses nothing.
+      await spending.finish(projectId, reservation, inputTokens);
       await spending.status(projectId, await readCap());
     },
   };

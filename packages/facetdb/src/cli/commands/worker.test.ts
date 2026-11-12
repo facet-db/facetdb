@@ -286,6 +286,25 @@ describe("facetdb worker", () => {
     expect(text).toContain("--allow-insecure");
   });
 
+  it("--once counts a record queued again at a state already answered apart from the answered ones, with no model call", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    expect((await run(["worker", "--once", "--no-http"])).code).toBe(0);
+    // The app writes the same title again: the trigger queues the record, its state is unchanged.
+    await world.client.query("update public.listings set title = 'A red car' where id = 'r1'");
+
+    const result = await run(["worker", "--once", "--no-http"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "listings: already answered r1 at this state, so the model was not asked again",
+    );
+    expect(result.stdout).toContain("listings: answered 0, already answered 1, failed 0");
+    expect(provider.callCount).toBe(1);
+    expect(await listing("r1")).toMatchObject({ is_scam: false, facetdb_status: "done" });
+    const jobs = await world.client.query("select count(*)::int as n from facetdb.jobs");
+    expect(jobs[0]?.["n"]).toBe(0);
+  });
+
   it("--once with nothing queued asks nothing and exits 0", async () => {
     const result = await run(["worker", "--once", "--no-http", "--json"]);
 
@@ -294,7 +313,7 @@ describe("facetdb worker", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
       http: null,
-      sources: [{ source: "listings", answered: 0, failed: 0 }],
+      sources: [{ source: "listings", answered: 0, alreadyAnswered: 0, failed: 0 }],
     });
   });
 

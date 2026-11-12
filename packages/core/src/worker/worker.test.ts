@@ -15,7 +15,13 @@ import type {
   ProviderResponse,
   RecordKey,
 } from "../contracts/index.ts";
-import { applyHumanDecision, type HumanEntry, type ReviewedRecord } from "../log/index.ts";
+import {
+  type AnswerEntry,
+  applyHumanDecision,
+  type HumanEntry,
+  type LogEntry,
+  type ReviewedRecord,
+} from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { stateHash } from "../records/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
@@ -47,6 +53,7 @@ const UNLIMITED: SpendingGate = {
   admit: () => Promise.resolve("unlimited"),
   settle: () => Promise.resolve(),
   record: () => Promise.resolve(),
+  finish: () => Promise.resolve(),
 };
 
 const questionSet: QuestionSet = {
@@ -730,6 +737,432 @@ describe("the worker loop", () => {
       stop.abort();
       await running;
     });
+  });
+});
+
+/** Every store call a pass makes, by name, shared by the recording fakes below. */
+class Calls {
+  readonly #counts = new Map<string, number>();
+
+  note(name: string): void {
+    this.#counts.set(name, (this.#counts.get(name) ?? 0) + 1);
+  }
+
+  of(name: string): number {
+    return this.#counts.get(name) ?? 0;
+  }
+
+  all(): Record<string, number> {
+    return Object.fromEntries(this.#counts);
+  }
+
+  reset(): void {
+    this.#counts.clear();
+  }
+}
+
+/** The fake log, counting each call that would be a round trip to the store; `down` fails `latestAnswers`. */
+class RecordingLog extends FakeDecisionLog {
+  readonly #calls: Calls;
+  down: Error | undefined;
+
+  constructor(calls: Calls) {
+    super();
+    this.#calls = calls;
+  }
+
+  override appendAnswer(entry: AnswerEntry): Promise<void> {
+    this.#calls.note("appendAnswer");
+    return super.appendAnswer(entry);
+  }
+
+  override latestAnswer(key: RecordKey): Promise<AnswerEntry | undefined> {
+    this.#calls.note("latestAnswer");
+    return super.latestAnswer(key);
+  }
+
+  override latestAnswers(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, AnswerEntry>> {
+    this.#calls.note("latestAnswers");
+    return this.down === undefined ? super.latestAnswers(keys) : Promise.reject(this.down);
+  }
+
+  override history(key: RecordKey): Promise<readonly LogEntry[]> {
+    this.#calls.note("history");
+    return super.history(key);
+  }
+}
+
+/**
+ * The fake connector, counting each call; `failWrites` refuses that many writes, as a dropped
+ * connection, and `beforeWrite` runs just before a write reaches the database.
+ */
+class RecordingConnector extends FakeConnector {
+  readonly #calls: Calls;
+  failWrites = 0;
+  beforeWrite: (() => void) | undefined;
+
+  constructor(database: FakeDatabase, calls: Calls) {
+    super(database);
+    this.#calls = calls;
+  }
+
+  override claim(limit: number): Promise<readonly RecordKey[]> {
+    this.#calls.note("claim");
+    return super.claim(limit);
+  }
+
+  override read(keys: readonly RecordKey[]): ReturnType<FakeConnector["read"]> {
+    this.#calls.note("read");
+    return super.read(keys);
+  }
+
+  override write(...args: Parameters<FakeConnector["write"]>): ReturnType<FakeConnector["write"]> {
+    this.#calls.note("write");
+    if (this.failWrites > 0) {
+      this.failWrites -= 1;
+      return Promise.reject(new Error("connection reset"));
+    }
+    this.beforeWrite?.();
+    return super.write(...args);
+  }
+
+  override ack(keys: readonly RecordKey[]): Promise<void> {
+    this.#calls.note("ack");
+    return super.ack(keys);
+  }
+
+  override release(keys: readonly RecordKey[]): Promise<void> {
+    this.#calls.note("release");
+    return super.release(keys);
+  }
+}
+
+/** An unlimited gate that counts its calls. */
+function recordingGate(calls: Calls): SpendingGate {
+  const note = (name: string) => {
+    calls.note(name);
+    return Promise.resolve();
+  };
+  return {
+    allowsWork: () => note("allowsWork").then(() => true),
+    admit: () => note("admit").then(() => "reservation"),
+    settle: () => note("settle"),
+    record: () => note("record"),
+    finish: () => note("finish"),
+  };
+}
+
+/** The rig with every store dependency counting its calls into one `Calls`. */
+async function recordingRig(provider: ScriptedProvider = ScriptedProvider.always(SURE_YES)) {
+  const calls = new Calls();
+  const db = new FakeDatabase({ fields: ["body"] });
+  const connector = new RecordingConnector(db, calls);
+  await connector.install();
+  const log = new RecordingLog(calls);
+  const deps: WorkerDeps = {
+    connector,
+    provider,
+    log,
+    reviews: new FakeReviews(),
+    actions: [],
+    clock: new FakeClock(),
+    limits: DEFAULT_WORKER_LIMITS,
+    questionSet,
+    version: 3,
+    spending: recordingGate(calls),
+  };
+  return { db, calls, connector, log, provider, deps };
+}
+
+describe("round trips per record", () => {
+  it("a batch of 20 records answered for the first time costs one latestAnswers, and per record exactly admit, appendAnswer, write and finish", async () => {
+    const test = await recordingRig();
+    for (let index = 0; index < 20; index += 1) {
+      test.db.edit(`k${index}`, { body: `listing ${index}` });
+    }
+
+    const report = await createWorker(test.deps).runOnce();
+
+    expect(report.written).toHaveLength(20);
+    // No logged answer means no person's decision either, so the log is not read after the append.
+    expect(test.calls.all()).toEqual({
+      allowsWork: 1,
+      claim: 1,
+      read: 1,
+      latestAnswers: 1,
+      admit: 20,
+      appendAnswer: 20,
+      write: 20,
+      finish: 20,
+      ack: 1,
+    });
+    expect(test.calls.of("latestAnswer")).toBe(0);
+    expect(test.calls.of("history")).toBe(0);
+    expect(test.calls.of("settle")).toBe(0);
+    expect(test.calls.of("record")).toBe(0);
+  });
+
+  it("a batch of 20 records answered before and changed since also reads each record's log twice", async () => {
+    const test = await recordingRig();
+    const worker = createWorker(test.deps);
+    for (let index = 0; index < 20; index += 1) {
+      test.db.edit(`k${index}`, { body: `listing ${index}` });
+    }
+    await worker.runOnce();
+    for (let index = 0; index < 20; index += 1) {
+      test.db.edit(`k${index}`, { body: `listing ${index}, edited` });
+    }
+    test.calls.reset();
+
+    const report = await worker.runOnce();
+
+    expect(report.written).toHaveLength(20);
+    expect(test.calls.all()).toEqual({
+      allowsWork: 1,
+      claim: 1,
+      read: 1,
+      latestAnswers: 1,
+      // Per record: one read to see whether a review waits on the old state, one after the append
+      // so a person's decision on this state stands.
+      history: 40,
+      admit: 20,
+      appendAnswer: 20,
+      write: 20,
+      finish: 20,
+      ack: 1,
+    });
+  });
+
+  it("a record whose model call fails costs admit and settle only", async () => {
+    const test = await recordingRig(
+      new ScriptedProvider(() => Promise.reject(new Error("529: overloaded"))),
+    );
+    test.db.edit("a", { body: "hello" });
+
+    const report = await createWorker(test.deps).runOnce();
+
+    expect(report.failures.map((failure) => failure.stage)).toEqual(["ask"]);
+    expect(test.calls.all()).toEqual({
+      allowsWork: 1,
+      claim: 1,
+      read: 1,
+      latestAnswers: 1,
+      admit: 1,
+      settle: 1,
+      release: 1,
+    });
+  });
+
+  it("a batch whose answers cannot be read goes back to the queue whole, as a failed pass", async () => {
+    const test = await recordingRig();
+    const down = new Error("the log is unreachable");
+    test.log.down = down;
+    test.db.edit("a", { body: "hello" });
+    test.db.edit("b", { body: "world" });
+
+    const report = await createWorker(test.deps).runOnce();
+
+    expect(report.claimed).toBe(2);
+    expect(report.failures).toEqual([{ key: null, stage: "record", error: down }]);
+    expect(test.provider.requests).toEqual([]);
+    expect(test.db.jobs.entries().every(([, job]) => job.claimedBy === null)).toBe(true);
+    expect(test.db.jobs.size).toBe(2);
+  });
+
+  it("keeps running when the answers cannot be read: it waits out the poll, then answers once the log is back", async () => {
+    const clock = new ManualClock();
+    const test = await recordingRig();
+    test.log.down = new Error("the log is unreachable");
+    test.db.edit("a", { body: "hello" });
+    const stop = new AbortController();
+    const failures: unknown[] = [];
+    const running = createWorker({ ...test.deps, clock }).run(stop.signal, (report) => {
+      failures.push(...report.failures.map((failure) => failure.error));
+    });
+
+    await until(() => failures.length === 1);
+    await flush();
+    // One failed pass, then a wait for the poll: no tight loop against a down log.
+    expect(test.calls.of("latestAnswers")).toBe(1);
+    expect(clock.requested).toEqual([2000]);
+
+    test.log.down = undefined;
+    clock.tick();
+    await until(() => test.db.decisionOf("a") !== null);
+    stop.abort();
+    await running;
+    expect(test.db.decisionOf("a")?.status).toBe("done");
+  });
+});
+
+describe("a record already answered at its state", () => {
+  it("a re-queue after a successful pass is not asked or paid for again, and runs the actions again, at least once, as before", async () => {
+    const test = await recordingRig();
+    const journal: string[] = [];
+    const worker = createWorker({ ...test.deps, actions: [journalStep(journal)] });
+    test.db.edit("a", { body: "Cheap phone, pay by gift card" });
+    await worker.runOnce();
+    const decided = test.db.decisionOf("a");
+
+    // A backfill that read the log before the worker answered queues the record again.
+    await test.deps.connector.enqueue(["a"]);
+    test.calls.reset();
+    const report = await worker.runOnce();
+
+    expect(report.alreadyAnswered).toEqual(["a"]);
+    expect(report.written).toEqual([]);
+    expect(report.failures).toEqual([]);
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.calls.all()).toEqual({
+      allowsWork: 1,
+      claim: 1,
+      read: 1,
+      latestAnswers: 1,
+      history: 1,
+      write: 1,
+      ack: 1,
+    });
+    expect(test.db.decisionOf("a")).toEqual(decided);
+    // The worker cannot tell this from a write that never landed, so the actions follow the write.
+    expect(journal).toEqual(["action a", "action a"]);
+    expect(test.db.jobs.size).toBe(0);
+  });
+
+  it("brings a row whose write failed after its answer was logged up to the log, and runs its actions exactly once", async () => {
+    const test = await recordingRig();
+    const journal: string[] = [];
+    const worker = createWorker({ ...test.deps, actions: [journalStep(journal)] });
+    test.db.edit("a", { body: "Cheap phone, pay by gift card" });
+    test.connector.failWrites = 1;
+
+    const first = await worker.runOnce();
+    expect(first.failures.map((failure) => failure.stage)).toEqual(["record"]);
+    expect(test.db.decisionOf("a")).toBeNull();
+    expect(test.db.jobs.get("a")).toEqual({ claimedBy: null });
+    // The answer is logged, but its write threw: no action ran for it.
+    expect(await test.log.history("a")).toHaveLength(1);
+    expect(journal).toEqual([]);
+
+    const second = await worker.runOnce();
+
+    expect(second.alreadyAnswered).toEqual(["a"]);
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.db.decisionOf("a")).toEqual({
+      decisions: { scam: { kind: "decided", value: true, probabilityOrConfidence: SURE_YES } },
+      status: "done",
+    });
+    expect(journal).toEqual(["action a"]);
+    expect(test.db.jobs.size).toBe(0);
+  });
+
+  it("runs nothing when the record changed before its rewrite landed, and asks it again with the new state", async () => {
+    const test = await recordingRig();
+    const journal: string[] = [];
+    const worker = createWorker({ ...test.deps, actions: [journalStep(journal)] });
+    test.db.edit("a", { body: "first" });
+    await worker.runOnce();
+    await test.deps.connector.enqueue(["a"]);
+    // The rewrite is refused: the state changes between the read and the write.
+    test.connector.beforeWrite = () => {
+      test.connector.beforeWrite = undefined;
+      test.db.edit("a", { body: "second" });
+    };
+
+    const report = await worker.runOnce();
+
+    expect(report.alreadyAnswered).toEqual([]);
+    expect(report.discarded).toEqual(["a"]);
+    expect(journal).toEqual(["action a"]);
+    expect(test.db.jobs.get("a")).toEqual({ claimedBy: null });
+
+    const next = await worker.runOnce();
+    expect(next.written).toEqual(["a"]);
+    expect(test.provider.requests.map((request) => request.state)).toEqual([
+      { body: "first" },
+      { body: "second" },
+    ]);
+    expect(journal).toEqual(["action a", "action a"]);
+  });
+
+  it("keeps a person's decision on this state when the record is queued again", async () => {
+    const test = await recordingRig(ScriptedProvider.always(UNSURE));
+    const worker = createWorker(test.deps);
+    test.db.edit("a", { body: "borderline" });
+    await worker.runOnce();
+    const hash = stateHash(["body"], { body: "borderline" });
+    const stored = test.db.decisionOf("a");
+    const answer = (await test.log.latestAnswer("a"))?.answers;
+    if (stored === null || answer === undefined) {
+      throw new Error("the first pass should have written and logged the record");
+    }
+    await applyHumanDecision(
+      {
+        kind: "human",
+        key: "a",
+        question: "scam",
+        value: false,
+        reviewer: "maya",
+        stateHash: hash,
+        version: 3,
+        at: new Date("2026-10-31T12:00:00Z"),
+      },
+      {
+        key: "a",
+        hash,
+        status: "needs_review",
+        questions: [scam],
+        decisions: stored.decisions,
+        answers: answer,
+      },
+      test.log,
+      (key, decision, expected) => test.deps.connector.write(key, decision, expected),
+    );
+
+    await test.deps.connector.enqueue(["a"]);
+    const report = await worker.runOnce();
+
+    expect(report.alreadyAnswered).toEqual(["a"]);
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.db.decisionOf("a")?.status).toBe("done");
+    expect(test.db.decisionOf("a")?.decisions["scam"]).toMatchObject({
+      kind: "decided",
+      value: false,
+    });
+  });
+
+  it("is asked again when its answer was logged under another question-set version", async () => {
+    const test = await recordingRig();
+    test.db.edit("a", { body: "hello" });
+    await createWorker(test.deps).runOnce();
+
+    await test.deps.connector.enqueue(["a"]);
+    const report = await createWorker({ ...test.deps, version: 4 }).runOnce();
+
+    expect(report.alreadyAnswered).toEqual([]);
+    expect(report.written).toEqual(["a"]);
+    expect(test.provider.requests).toHaveLength(2);
+    expect((await test.log.latestAnswer("a"))?.version).toBe(4);
+  });
+
+  it("is asked again when its logged answer lacks a question of the set", async () => {
+    const test = await recordingRig();
+    await test.log.appendAnswer({
+      kind: "answer",
+      key: "a",
+      version: 3,
+      model: "jev-1.14.0",
+      stateHash: stateHash(["body"], { body: "hello" }),
+      answers: {},
+      usage: { inputTokens: 90, outputTokens: 2 },
+      at: new Date("2026-10-31T12:00:00Z"),
+    });
+    test.db.edit("a", { body: "hello" });
+
+    const report = await createWorker(test.deps).runOnce();
+
+    expect(report.alreadyAnswered).toEqual([]);
+    expect(report.written).toEqual(["a"]);
+    expect(test.provider.requests).toHaveLength(1);
   });
 });
 

@@ -141,6 +141,7 @@ function depsFor(provider: FakeProvider, connector: Connector = world.connector)
       admit: () => Promise.resolve("reservation"),
       settle: () => Promise.resolve(),
       record: () => Promise.resolve(),
+      finish: () => Promise.resolve(),
     },
   };
 }

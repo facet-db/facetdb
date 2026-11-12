@@ -76,6 +76,7 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
       admit: () => neverDoes("asks the model"),
       settle: () => neverDoes("asks the model"),
       record: () => neverDoes("counts tokens"),
+      finish: () => neverDoes("counts tokens"),
     },
   };
 }
