@@ -362,7 +362,9 @@ export async function runWorkers(
         const message =
           failure.error instanceof Error ? failure.error.message : String(failure.error);
         print(
-          `${entry.source}: ${failure.key ?? "the pass"} failed at ${failure.stage}: ${message}`,
+          failure.stage === "log"
+            ? `${entry.source}: the decision log could not be read: ${message}`
+            : `${entry.source}: ${failure.key ?? "the pass"} failed at ${failure.stage}: ${message}`,
         );
       }
     };

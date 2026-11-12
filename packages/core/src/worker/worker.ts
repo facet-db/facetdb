@@ -11,7 +11,13 @@ import type {
   RecordDecision,
   RecordKey,
 } from "../contracts/index.ts";
-import { type AnswerEntry, decideRecord, recordAnswer, statusOf } from "../log/index.ts";
+import {
+  type AnswerEntry,
+  answersCurrentFor,
+  decideRecord,
+  recordAnswer,
+  statusOf,
+} from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
 import { checkStateSize, estimateRequestTokens, estimateTokens } from "../requests/index.ts";
@@ -103,9 +109,11 @@ export type WorkerDeps = {
 /**
  * Where in a record's path something failed: the model call, the log and write, one action, the
  * alerts module (a failed alert never changes what happened to the record), or the spending cap
- * (an unreadable cap claims nothing; an uncounted answer is still written and reported).
+ * (an unreadable cap claims nothing; an uncounted answer is still written and reported). `log` is
+ * the pass reading a batch's prior answers from the decision log, which failed: the whole batch
+ * went back to the queue (`key` is null).
  */
-export type FailureStage = "ask" | "record" | "action" | "alert" | "spending";
+export type FailureStage = "ask" | "record" | "action" | "alert" | "spending" | "log";
 
 export type RecordFailure = {
   readonly key: RecordKey | null;
@@ -379,7 +387,14 @@ export function createWorker(deps: WorkerDeps): Worker {
     row: ReadRow,
     prior: AnswerEntry | undefined,
   ): Promise<RecordDecision | undefined> {
-    if (prior === undefined || prior.stateHash !== row.hash || prior.version !== version) {
+    if (
+      prior === undefined ||
+      !answersCurrentFor(prior, {
+        stateHash: row.hash,
+        questions: questionSet.questions,
+        version,
+      })
+    ) {
       return undefined;
     }
     const decisions = decideRecord(
@@ -568,7 +583,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       priors = rows.length === 0 ? new Map() : await log.latestAnswers(rows.map((row) => row.key));
     } catch (error) {
       await connector.release(keys);
-      report.failures.push({ key: null, stage: "record", error });
+      report.failures.push({ key: null, stage: "log", error });
       return report;
     }
     report.gone.push(...missing);

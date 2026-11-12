@@ -9,7 +9,7 @@ import type {
   RecordKey,
   ScanCursor,
 } from "../contracts/index.ts";
-import { type AnswerEntry, recordAnswer } from "../log/index.ts";
+import { type AnswerEntry, answersCurrentFor, recordAnswer } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type StateValue, shouldSkip } from "../records/index.ts";
 import {
@@ -295,7 +295,13 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     ): Promise<void> {
       const due: RecordKey[] = [];
       for (const row of rows) {
-        if (isCurrent(priors.get(row.key), row, asked, version)) {
+        if (
+          answersCurrentFor(priors.get(row.key), {
+            stateHash: row.hash,
+            questions: asked,
+            version,
+          })
+        ) {
           report.alreadyAnswered.push(row.key);
         } else {
           due.push(row.key);
@@ -333,7 +339,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         if (shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded }).skip) {
           return;
         }
-        if (hasAll(prior, row, asked)) {
+        if (answersCurrentFor(prior, { stateHash: row.hash, questions: asked })) {
           report.alreadyAnswered.push(row.key);
           return;
         }
@@ -358,7 +364,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         }
         // Read again under the claim: the worker may have answered the record since the first read.
         const held = await log.latestAnswer(row.key);
-        if (hasAll(held, row, asked)) {
+        if (answersCurrentFor(held, { stateHash: row.hash, questions: asked })) {
           await connector.ack([row.key]);
           report.alreadyAnswered.push(row.key);
           return;
@@ -604,28 +610,6 @@ function recordTokens(set: QuestionSet, state: State): number {
   }
   const characters = Array.from(JSON.stringify(buildRequest(set, state))).length;
   return Math.ceil(characters / CHARACTERS_PER_TOKEN);
-}
-
-/** Already answered whole: same state, same version, every question present. */
-function isCurrent(
-  prior: AnswerEntry | undefined,
-  row: ReadRow,
-  asked: QuestionSet["questions"],
-  version: number,
-): boolean {
-  return prior !== undefined && prior.version === version && hasAll(prior, row, asked);
-}
-
-function hasAll(
-  prior: AnswerEntry | undefined,
-  row: ReadRow,
-  asked: QuestionSet["questions"],
-): boolean {
-  return (
-    prior !== undefined &&
-    prior.stateHash === row.hash &&
-    asked.every((question) => prior.answers[question.name] !== undefined)
-  );
 }
 
 /** Why an added-question run cannot merge into this record, or undefined when it can. */

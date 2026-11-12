@@ -963,7 +963,7 @@ describe("round trips per record", () => {
     const report = await createWorker(test.deps).runOnce();
 
     expect(report.claimed).toBe(2);
-    expect(report.failures).toEqual([{ key: null, stage: "record", error: down }]);
+    expect(report.failures).toEqual([{ key: null, stage: "log", error: down }]);
     expect(test.provider.requests).toEqual([]);
     expect(test.db.jobs.entries().every(([, job]) => job.claimedBy === null)).toBe(true);
     expect(test.db.jobs.size).toBe(2);

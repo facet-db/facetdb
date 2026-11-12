@@ -5,6 +5,7 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import type { Answer } from "../thresholds/index.ts";
 import {
   type AnswerEntry,
+  answersCurrentFor,
   applyHumanDecision,
   type HumanEntry,
   humanDecisionStands,
@@ -524,5 +525,44 @@ describe("a human decision stands until the record's state changes", () => {
     expect(result.written).toBe(false);
     expect(writes).toEqual([]);
     expect(await humanDecisionStands(log, "r1", "scam", "h-newer")).toBe(false);
+  });
+});
+
+describe("a logged answer is current for a row (the worker's and the backfill's one rule)", () => {
+  const full = answerEntry(
+    "r1",
+    "h1",
+    {
+      scam: { type: "noul", probability: 0.9 },
+      team: { type: "choice", top: "billing", probabilities: [0.8, 0.2] },
+    },
+    3,
+  );
+  const target = { stateHash: "h1", questions: [scam, team], version: 3 };
+
+  it("is current for the same hash, the same version and every question present", () => {
+    expect(answersCurrentFor(full, target)).toBe(true);
+  });
+
+  it("is not current once the row's hash moved", () => {
+    expect(answersCurrentFor(full, { ...target, stateHash: "h2" })).toBe(false);
+  });
+
+  it("is not current under another question-set version, unless the caller leaves the version out", () => {
+    expect(answersCurrentFor(full, { ...target, version: 4 })).toBe(false);
+    expect(answersCurrentFor(full, { stateHash: "h1", questions: [scam, team] })).toBe(true);
+  });
+
+  it("is not current when a question asked has no answer", () => {
+    const partial = answerEntry("r1", "h1", { scam: { type: "noul", probability: 0.9 } }, 3);
+    expect(answersCurrentFor(partial, target)).toBe(false);
+    expect(answersCurrentFor(partial, { ...target, questions: [scam] })).toBe(true);
+  });
+
+  it("is not current for a record with no answer, as a history of only a person's decisions is", async () => {
+    const log = new FakeDecisionLog([]);
+    await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
+    expect(answersCurrentFor(await log.latestAnswer("r1"), target)).toBe(false);
+    expect(answersCurrentFor(undefined, target)).toBe(false);
   });
 });

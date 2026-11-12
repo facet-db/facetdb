@@ -345,6 +345,18 @@ describe("facetdb worker", () => {
     expect(jobs[0]?.["n"]).toBe(0);
   });
 
+  it("--once names the decision log when the lookup of a batch's prior answers fails", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    await world.client.query("alter table facetdb.decisions rename to decisions_gone");
+
+    const result = await run(["worker", "--once", "--no-http"]);
+
+    expect(result.stdout).toMatch(/listings: the decision log could not be read: .+/);
+    expect(result.stdout).not.toContain("the pass failed at");
+    expect(result.stdout).not.toContain("failed at log");
+    expect(provider.callCount).toBe(0);
+  });
+
   it("--once with nothing queued asks nothing and exits 0", async () => {
     const result = await run(["worker", "--once", "--no-http", "--json"]);
 
