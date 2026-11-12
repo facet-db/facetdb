@@ -216,7 +216,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
     }
 
     // Before the first connection: the worker's password does not cross a network in the clear.
-    requireSecureSource(source, options.allowInsecure);
+    requireSecureSource(source, options.allowInsecure, deps.env["PGHOST"]);
     const rows = await recentRows(deps, target, source, config, limit);
     if (rows.length === 0) {
       print(`${name} has no rows yet, so there is nothing to preview.`);

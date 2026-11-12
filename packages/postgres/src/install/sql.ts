@@ -25,6 +25,7 @@ import {
 } from "../scan/index.ts";
 import { JOBS_TABLE, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
 import {
+  STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
@@ -102,6 +103,19 @@ export const ENQUEUE_ROLE = "facetdb_enqueue";
 export const PASSWORD_SETTING = "facetdb.worker_password";
 export const SCHEMA_SETTING = "facetdb.install_schema";
 export const TABLE_SETTING = "facetdb.install_table";
+/** The installing project's id, for the owner check in the script (a value a `do` block cannot take). */
+export const PROJECT_SETTING = "facetdb.install_project";
+
+/**
+ * The SQLSTATE the script raises when the worker still holds update or delete on the logs after
+ * the revoke: `migrate` reports it as a refusal, not a failure.
+ */
+export const LOG_GRANTS_STATE = "FD052";
+
+/** The refusal when another project claimed the table first: `migrate` and the script say it. */
+export function anotherProject(table: string, owner: string): string {
+  return `${table} already carries FacetDB columns from another project (${owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
+}
 
 const SCHEMA = "facetdb";
 const PROJECTS_TABLE = `${quoteIdent(SCHEMA)}.${quoteIdent("projects")}`;
@@ -270,6 +284,7 @@ export function installSql(
   const enqueuer = quoteIdent(ENQUEUE_ROLE);
   const side = source.storage === "side-table";
   const onChange = source.onChange ?? "reset";
+  const appendOnly = new Set(STORE_APPEND_ONLY_TABLES);
   const plain = (text: string): InstallStatement => ({ text, params: [] });
   const policy = (name: string, command: "select" | "update") =>
     `  if not exists (select 1 from pg_catalog.pg_policies
@@ -307,6 +322,25 @@ export function installSql(
       params: [schema, source.table, project.id],
       claimsOwner: true,
     },
+    // The same owner check in the script itself, so the printed script run by hand later (after
+    // another project claimed the table) stops here and changes nothing. The claim above waited for
+    // a racing install to finish, so the row read here is the committed owner.
+    {
+      text: `select set_config('${SCHEMA_SETTING}', $1, true), set_config('${TABLE_SETTING}', $2, true), set_config('${PROJECT_SETTING}', $3, true)`,
+      params: [schema, source.table, project.id],
+    },
+    plain(`do $$
+declare
+  owner text;
+begin
+  select o.project_id into owner from ${OWNERS_TABLE} o
+   where o.table_schema = current_setting('${SCHEMA_SETTING}')
+     and o.table_name = current_setting('${TABLE_SETTING}');
+  if owner is distinct from current_setting('${PROJECT_SETTING}') then
+    raise exception using message = format(${quoteLiteral(`FacetDB: ${anotherProject("%s.%s", "%s")}`)},
+      current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), owner);
+  end if;
+end $$`),
     ...(side
       ? // Side-table mode: the application's table is not altered. The side table carries the
         // same columns, keyed by the same key, and the view joins them; both are FacetDB's whole.
@@ -458,12 +492,41 @@ end $$`),
     ...(side ? sideTableSecurityStatements(source, WORKER_ROLE, ENQUEUE_ROLE).map(plain) : []),
     plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
     // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
-    // The version table is read-only, so the worker can see the store is current and never migrates.
+    // The logs are append-only (read and insert); the version table is read-only, so the worker can
+    // see the store is current and never migrates.
     ...STORE_TABLES.map((name) =>
       plain(
-        `grant select, insert, update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+        `grant ${appendOnly.has(name) ? "select, insert" : "select, insert, update, delete"} on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
       ),
     ),
+    // An earlier install granted update and delete on the logs too: taken back, so an existing
+    // install converges on the same rights (revoking what is not held changes nothing).
+    ...STORE_APPEND_ONLY_TABLES.map((name) =>
+      plain(`revoke update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} from ${worker}`),
+    ),
+    // A revoke takes back only grants made by the role running it (or the owner's, for the owner or
+    // a member of its role), and the driver drops the warning when it takes nothing: so the script
+    // checks, and stops with who must run it (as prune does).
+    plain(`do $$
+declare
+  held text;
+  owner text;
+begin
+  select string_agg(format('%s on %s granted by %s', x.privilege_type, c.relname, pg_catalog.pg_get_userbyid(x.grantor)), '; '
+                    order by c.relname, x.privilege_type),
+         min(pg_catalog.pg_get_userbyid(c.relowner))
+    into held, owner
+    from pg_catalog.pg_class c
+    cross join lateral pg_catalog.aclexplode(c.relacl) x
+   where c.oid in (${STORE_APPEND_ONLY_TABLES.map((name) => `${quoteLiteral(`${quoteIdent(SCHEMA)}.${quoteIdent(name)}`)}::regclass`).join(", ")})
+     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(WORKER_ROLE)})
+     and x.privilege_type in ('UPDATE', 'DELETE');
+  if held is not null then
+    raise exception using errcode = ${quoteLiteral(LOG_GRANTS_STATE)}, message = format(${quoteLiteral(
+      `FacetDB: the worker login still holds %s on the append-only logs after the revoke; Postgres takes back only grants made by the role that runs it. Run facetdb migrate as the owner of the store's tables (%s) or a member of its role, or have the role that granted it revoke it; nothing was changed.`,
+    )}, held, owner);
+  end if;
+end $$`),
     plain(`grant select on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_VERSION_TABLE)} to ${worker}`),
     ...STORE_SEQUENCES.map((name) =>
       plain(

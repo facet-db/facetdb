@@ -264,6 +264,7 @@ async function withConnector<Result>(
     clock: wallClock,
     workerId: "e2e-review",
     allowInsecure: false,
+    pgHost: undefined,
   });
   try {
     return await work(connector);

@@ -1,7 +1,13 @@
 import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { createStore, migrate, type SqlConnect, type Store } from "@facetdb/postgres";
+import {
+  createStore,
+  migrate,
+  type SqlClient,
+  type SqlConnect,
+  type Store,
+} from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -122,8 +128,35 @@ function run(
     readonly stop?: AbortSignal;
     readonly config?: ProjectConfig;
     readonly abortAfter?: (ms: number) => AbortSignal;
+    /**
+     * Records every statement the command sends, the store's included: the store is then opened
+     * over the client the command hands it, as `facetdb worker` opens it, not the test's own.
+     */
+    readonly record?: string[];
   } = {},
 ) {
+  const { record } = options;
+  const recorded = (client: SqlClient): SqlClient =>
+    record === undefined
+      ? client
+      : {
+          ...client,
+          query: (text, params) => {
+            record.push(text);
+            return client.query(text, params);
+          },
+          transaction: (work) =>
+            client.transaction((query) =>
+              work((text, params) => {
+                record.push(text);
+                return query(text, params);
+              }),
+            ),
+          pipeline: (text, paramSets) => {
+            record.push(text);
+            return client.pipeline(text, paramSets);
+          },
+        };
   return runInProcess(
     argv,
     {
@@ -135,12 +168,21 @@ function run(
       loadConfig: () => Promise.resolve(options.config ?? config),
       connect: (url, connectOptions) => {
         poolsAsked.clients.push({ url, max: connectOptions?.max });
-        return world.connect(url, connectOptions);
+        return recorded(world.connect(url, connectOptions));
       },
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: (storeOptions) => {
         storeAsked.push(storeOptions?.allowInsecure === true);
         poolsAsked.store.push(storeOptions?.connect !== undefined);
+        if (record !== undefined && storeOptions?.connect !== undefined) {
+          return createStore({
+            url: "postgres://localhost:5432/facetdb",
+            pgHost: undefined,
+            connect: storeOptions.connect,
+            secret: TEST_SECRET,
+            clock,
+          });
+        }
         return Promise.resolve({ ...store, close: () => Promise.resolve() });
       },
       provider: () => provider,
@@ -192,6 +234,20 @@ describe("facetdb worker", () => {
     expect(jobs[0]?.["n"]).toBe(0);
     // The heartbeat doctor reads is saved under the project directory's name.
     expect(await heartbeat()).toBe(START);
+  });
+
+  it("starts and answers with no DDL and no grant: `facetdb migrate` gave the login its rights", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const statements: string[] = [];
+    const result = await run(["worker", "--once", "--no-http"], { record: statements });
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("listings: answered r1");
+    // The store (opened over the command's own client), the outbox and the table source all spoke.
+    expect(statements.some((text) => text.includes("facetdb.store_migrations"))).toBe(true);
+    expect(statements.some((text) => text.includes("facetdb.heartbeats"))).toBe(true);
+    expect(
+      statements.filter((text) => /^\s*(create|alter|drop|grant|revoke)\b/i.test(text)),
+    ).toEqual([]);
   });
 
   describe("opens a connection per lane plus two, and one pool per database", () => {
@@ -308,8 +364,48 @@ describe("facetdb worker", () => {
           clock,
           workerId: "w",
           allowInsecure: false,
+          pgHost: undefined,
         }),
       ).rejects.toThrow(/LISTINGS_URL reaches db.example.com without TLS/);
+    });
+
+    it("a URL whose host the driver and the check would read differently is refused, saying how to encode it", async () => {
+      const result = await refused(["worker", "--once", "--no-http"], {
+        env: {
+          DATABASE_URL: "postgres://x@evil.com,y@localhost/app",
+          TYPESAFE_API_KEY: "ts-test-key",
+        },
+      });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(
+        "error: DATABASE_URL has more than one @ before the path, so its host cannot be read for sure",
+      );
+      expect(result.stderr).toContain("fix: percent-encode every @ in the user and password");
+      expect(storeAsked).toEqual([]);
+    });
+
+    it("a URL with no host goes where the driver goes: PGHOST's host is refused naming PGHOST, its socket is not", async () => {
+      // The password comes from PGPASSWORD here: a URL with credentials needs a host to parse.
+      const noHost = "postgres:///app?user=facetdb_worker";
+      const remote = await refused(["worker", "--once", "--no-http"], {
+        env: { DATABASE_URL: noHost, PGHOST: "db.example.com", TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(remote.code).toBe(1);
+      expect(remote.stderr).toContain(
+        "error: DATABASE_URL names no host, so the driver reaches PGHOST (db.example.com) without TLS",
+      );
+      expect(remote.stderr).toContain(
+        "fix: add ?sslmode=require to DATABASE_URL, point PGHOST at this machine or a socket directory, or pass --allow-insecure",
+      );
+      expect(storeAsked).toEqual([]);
+      const socket = await run(["worker", "--once", "--no-http"], {
+        env: {
+          DATABASE_URL: noHost,
+          PGHOST: "/var/run/postgresql",
+          TYPESAFE_API_KEY: "ts-test-key",
+        },
+      });
+      expect(socket.code, socket.stderr).toBe(0);
     });
 
     it("--allow-insecure lets both through to the store", async () => {

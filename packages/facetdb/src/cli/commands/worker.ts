@@ -17,13 +17,7 @@ import {
   createResilientProvider,
   DEFAULT_MAX_MS,
 } from "@facetdb/model";
-import {
-  type ProjectRef,
-  type SqlClient,
-  type SqlConnect,
-  type Store,
-  WORKER_ROLE,
-} from "@facetdb/postgres";
+import type { ProjectRef, SqlClient, SqlConnect, Store } from "@facetdb/postgres";
 import {
   type AlertFailure,
   createCheckStore,
@@ -158,26 +152,10 @@ type Running = {
   failed: number;
 };
 
-/** The worker login may read the heartbeat, so `facetdb doctor` run as it can check the worker. */
-async function grantHeartbeats(client: SqlClient, print: (text: string) => void): Promise<void> {
-  try {
-    const role = await client.query("select 1 from pg_catalog.pg_roles where rolname = $1", [
-      WORKER_ROLE,
-    ]);
-    if (role.length > 0) {
-      await client.query(`grant select on facetdb.heartbeats to ${WORKER_ROLE}`);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    print(
-      `note: could not let ${WORKER_ROLE} read facetdb.heartbeats (${message}); facetdb doctor run as that login will say so`,
-    );
-  }
-}
-
 /**
  * Builds a worker per source, serves HTTP, and runs until stopped (or once). The caller has opened
- * `parts` and closes them afterwards.
+ * `parts` and closes them afterwards. The start issues no DDL and no grant: `facetdb migrate` gave
+ * the worker login its rights on every store table, the heartbeats included.
  */
 export async function runWorkers(
   context: CommandContext<WorkerOptions>,
@@ -194,7 +172,6 @@ export async function runWorkers(
   });
   const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
   await store.ensureProject(project);
-  await grantHeartbeats(parts.storeClient, print);
   const spending: SpendingGate = projectSpending(config, store, alerts, clock, project.id);
 
   /** The question-set version each source runs under, recorded once at start. */
@@ -279,6 +256,7 @@ export async function runWorkers(
         clock,
         workerId,
         allowInsecure: parts.allowInsecure,
+        pgHost: deps.env["PGHOST"],
         maxConnections: WORKER_CONNECTIONS,
       });
       // Its log and versions are kept in the store under the source's name, registered as a
@@ -531,10 +509,10 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     const allowInsecure = options.allowInsecure === true;
     // Before the store opens or anything connects: no worker password in the clear to another machine.
     if (storeUrl !== "") {
-      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure);
+      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
     }
     for (const source of config.sources) {
-      requireSecureSource(source, allowInsecure);
+      requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
     }
     // One pool for the store, the outbox, and every table source on the store's own database (the
     // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. Its borrowers close nothing.

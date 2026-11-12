@@ -213,6 +213,21 @@ insert into "facetdb"."projects" (id, name) values ('proj_listings', 'Listings')
 
 insert into "facetdb"."table_owners" (table_schema, table_name, project_id) values ('public', 'listings', 'proj_listings') on conflict (table_schema, table_name) do nothing;
 
+select set_config('facetdb.install_schema', 'public', true), set_config('facetdb.install_table', 'listings', true), set_config('facetdb.install_project', 'proj_listings', true);
+
+do $$
+declare
+  owner text;
+begin
+  select o.project_id into owner from "facetdb"."table_owners" o
+   where o.table_schema = current_setting('facetdb.install_schema')
+     and o.table_name = current_setting('facetdb.install_table');
+  if owner is distinct from current_setting('facetdb.install_project') then
+    raise exception using message = format('FacetDB: %s.%s already carries FacetDB columns from another project (%s); one table belongs to one project. Uninstall there first, or point this project at another table.',
+      current_setting('facetdb.install_schema'), current_setting('facetdb.install_table'), owner);
+  end if;
+end $$;
+
 select set_config('facetdb.install_view_schema', 'public', true), set_config('facetdb.install_view', 'listings_with_answers', true), set_config('facetdb.install_side_table', 'listings_answers', true), set_config('facetdb.install_schema', 'public', true), set_config('facetdb.install_table', 'listings', true);
 
 create table if not exists "facetdb"."listings_answers" (
@@ -448,9 +463,9 @@ grant select, insert, update, delete on "facetdb"."sources" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."projects" to "facetdb_worker";
 
-grant select, insert, update, delete on "facetdb"."question_set_versions" to "facetdb_worker";
+grant select, insert on "facetdb"."question_set_versions" to "facetdb_worker";
 
-grant select, insert, update, delete on "facetdb"."decisions" to "facetdb_worker";
+grant select, insert on "facetdb"."decisions" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."jobs" to "facetdb_worker";
 
@@ -473,6 +488,29 @@ grant select, insert, update, delete on "facetdb"."cursors" to "facetdb_worker";
 grant select, insert, update, delete on "facetdb"."install" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."webhook_outbox" to "facetdb_worker";
+
+revoke update, delete on "facetdb"."question_set_versions" from "facetdb_worker";
+
+revoke update, delete on "facetdb"."decisions" from "facetdb_worker";
+
+do $$
+declare
+  held text;
+  owner text;
+begin
+  select string_agg(format('%s on %s granted by %s', x.privilege_type, c.relname, pg_catalog.pg_get_userbyid(x.grantor)), '; '
+                    order by c.relname, x.privilege_type),
+         min(pg_catalog.pg_get_userbyid(c.relowner))
+    into held, owner
+    from pg_catalog.pg_class c
+    cross join lateral pg_catalog.aclexplode(c.relacl) x
+   where c.oid in ('"facetdb"."question_set_versions"'::regclass, '"facetdb"."decisions"'::regclass)
+     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = 'facetdb_worker')
+     and x.privilege_type in ('UPDATE', 'DELETE');
+  if held is not null then
+    raise exception using errcode = 'FD052', message = format('FacetDB: the worker login still holds %s on the append-only logs after the revoke; Postgres takes back only grants made by the role that runs it. Run facetdb migrate as the owner of the store''s tables (%s) or a member of its role, or have the role that granted it revoke it; nothing was changed.', held, owner);
+  end if;
+end $$;
 
 grant select on "facetdb"."store_migrations" to "facetdb_worker";
 

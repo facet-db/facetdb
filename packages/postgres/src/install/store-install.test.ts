@@ -5,6 +5,7 @@ import type { SqlClient, SqlConnect } from "../sql/index.ts";
 import {
   createStore,
   SCHEMA_VERSION,
+  STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
@@ -138,8 +139,15 @@ describe("the install script and the store", () => {
     );
     const byTable = new Map(rows.map((row) => [String(row["table_name"]), row["privileges"]]));
     for (const table of STORE_TABLES) {
-      expect(byTable.get(table)).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
+      expect(byTable.get(table)).toEqual(
+        STORE_APPEND_ONLY_TABLES.includes(table)
+          ? ["INSERT", "SELECT"]
+          : ["DELETE", "INSERT", "SELECT", "UPDATE"],
+      );
     }
+    // The append-only logs, by name: the decision log and the question-set versions.
+    expect(byTable.get("decisions")).toEqual(["INSERT", "SELECT"]);
+    expect(byTable.get("question_set_versions")).toEqual(["INSERT", "SELECT"]);
     expect(byTable.get(STORE_VERSION_TABLE)).toEqual(["SELECT"]);
     expect(byTable.has("table_owners")).toBe(false);
     // The store's function: the worker may call it, and no one else but its owner.
@@ -153,6 +161,70 @@ describe("the install script and the store", () => {
         ),
       ).toEqual([{ worker: true, other: false }]);
     }
+  });
+
+  it("an install made with the wider grant on the logs converges on select and insert", async () => {
+    // Every earlier install granted update and delete on the decision log and the versions.
+    const world = await installed();
+    for (const table of STORE_APPEND_ONLY_TABLES) {
+      await world.client.query(`grant update, delete on facetdb.${table} to facetdb_worker`);
+    }
+    await install(world);
+    expect(
+      await world.client.query(
+        `select table_name, array_agg(privilege_type order by privilege_type) as privileges
+           from information_schema.table_privileges
+          where table_schema = 'facetdb' and grantee = 'facetdb_worker'
+            and table_name in ('decisions', 'question_set_versions')
+          group by 1 order by 1`,
+      ),
+    ).toEqual([
+      { table_name: "decisions", privileges: ["INSERT", "SELECT"] },
+      { table_name: "question_set_versions", privileges: ["INSERT", "SELECT"] },
+    ]);
+  });
+
+  it("refuses, changing nothing, when the revoke on the logs took nothing back, and says who must run it", async () => {
+    const world = await installed();
+    // A DBA (not the owner of the store's tables) granted update and delete on the logs: the
+    // owner's revoke takes back only the owner's own grants, and Postgres merely warns.
+    await world.client.query(`create role store_dba`);
+    await world.client.query(`grant usage on schema facetdb to store_dba`);
+    await world.client.query(
+      `grant update, delete on facetdb.decisions to store_dba with grant option`,
+    );
+    await world.client.query(`set role store_dba`);
+    try {
+      await world.client.query(`grant update, delete on facetdb.decisions to facetdb_worker`);
+    } finally {
+      await world.client.query(`reset role`);
+    }
+    const before = await facetdbCatalog(world);
+    const result = await migrate({
+      adminUrl: "postgres://admin@unused/listings",
+      connect: world.connect,
+      print: () => undefined,
+      plan: {
+        source: { table: "listings" },
+        questionSet: listings,
+        project: { id: "proj_listings", name: "Listings" },
+      },
+    });
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.reason).toContain("still holds DELETE on decisions granted by store_dba");
+      expect(result.reason).toContain("as the owner of the store's tables");
+      expect(result.reason).toContain("nothing was changed");
+    }
+    expect(await facetdbCatalog(world)).toEqual(before);
+    // Once that role takes its grant back, migrate converges.
+    await world.client.query(`set role store_dba`);
+    try {
+      await world.client.query(`revoke update, delete on facetdb.decisions from facetdb_worker`);
+    } finally {
+      await world.client.query(`reset role`);
+    }
+    await install(world);
   });
 
   it("a store at version 2 (before reserve was one statement) is brought up by migrate, with the worker's EXECUTE", async () => {
@@ -186,6 +258,7 @@ describe("the install script and the store", () => {
     const { connect, statements } = recording(world);
     const store = await createStore({
       url: "postgres://facetdb_worker@localhost/listings",
+      pgHost: undefined,
       connect,
       secret: TEST_SECRET,
       clock: new FakeClock(),
@@ -207,6 +280,7 @@ describe("the install script and the store", () => {
     worlds.push(world);
     const store = await createStore({
       url: "postgres://admin@localhost/store",
+      pgHost: undefined,
       connect: () => world.client,
       secret: TEST_SECRET,
       clock: new FakeClock(),
@@ -227,6 +301,7 @@ describe("the install script and the store", () => {
       await expect(
         createStore({
           url: "postgres://plain_login@localhost/listings",
+          pgHost: undefined,
           connect: () => world.client,
           secret: TEST_SECRET,
           clock: new FakeClock(),
@@ -235,6 +310,7 @@ describe("the install script and the store", () => {
       await expect(
         createStore({
           url: "postgres://plain_login@localhost/listings",
+          pgHost: undefined,
           connect: () => world.client,
           secret: TEST_SECRET,
           clock: new FakeClock(),
@@ -261,6 +337,7 @@ describe("the install script and the store", () => {
       await expect(
         createStore({
           url: "postgres://plain_login@localhost/listings",
+          pgHost: undefined,
           connect: () => world.client,
           secret: TEST_SECRET,
           clock: new FakeClock(),

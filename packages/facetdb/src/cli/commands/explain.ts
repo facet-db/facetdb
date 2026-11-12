@@ -402,8 +402,8 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     // Before any connection: the store's, then the source's own (a table source's current state is
     // read from its database with the worker login).
     const allowInsecure = options.allowInsecure === true;
-    requireSecureUrl(url, "DATABASE_URL", allowInsecure);
-    requireSecureSource(source, allowInsecure);
+    requireSecureUrl(url, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
+    requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
     const store = await deps.store({ allowInsecure });
     let history: readonly LogEntry[];
     try {

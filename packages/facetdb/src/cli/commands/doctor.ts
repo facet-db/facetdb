@@ -15,7 +15,6 @@ import {
   databaseLabel,
   projectRef,
   questionSetOf,
-  tlsFix,
   tlsProblem,
   workerLoginOf,
 } from "./database.ts";
@@ -219,10 +218,10 @@ const databaseReachable: Check = {
         fix = `set ${variable} to ${WORKER_URL_SHAPE}`;
         continue;
       }
-      const insecure = tlsProblem(url, variable, options.allowInsecure);
+      const insecure = tlsProblem(url, variable, options.allowInsecure, deps.env["PGHOST"]);
       if (insecure !== undefined) {
-        problems.push(`"${source.name}": ${insecure}`);
-        fix = tlsFix(variable);
+        problems.push(`"${source.name}": ${insecure.problem}`);
+        fix = insecure.fix;
         continue;
       }
       try {
@@ -345,7 +344,7 @@ const poolerSession: Check = {
       storeUrl !== undefined &&
       storeUrl !== "" &&
       !targets.has(storeUrl) &&
-      tlsProblem(storeUrl, "DATABASE_URL", options.allowInsecure) === undefined
+      tlsProblem(storeUrl, "DATABASE_URL", options.allowInsecure, deps.env["PGHOST"]) === undefined
     ) {
       targets.set(storeUrl, { name: "the store", variable: "DATABASE_URL" });
     }
@@ -506,9 +505,9 @@ const workerHeartbeat: Check = {
     if (url === undefined || url === "") {
       return fail("DATABASE_URL is not set, so there is no store to read", DATABASE_URL_FIX);
     }
-    const insecure = tlsProblem(url, "DATABASE_URL", options.allowInsecure);
+    const insecure = tlsProblem(url, "DATABASE_URL", options.allowInsecure, deps.env["PGHOST"]);
     if (insecure !== undefined) {
-      return fail(insecure, tlsFix("DATABASE_URL"));
+      return fail(insecure.problem, insecure.fix);
     }
     let last: number | undefined;
     try {

@@ -77,6 +77,8 @@ export type TableConnectorOptions = {
    * passes true: its database is in the process, not on a network.
    */
   readonly allowInsecure: boolean;
+  /** The environment's `PGHOST`: where the driver goes for a URL that names no host. */
+  readonly pgHost: string | undefined;
   /**
    * The most connections the connector's pool opens; the driver's default when unset. The worker
    * passes its in-flight limit plus two (`WORKER_CONNECTIONS`), so no lane waits for a connection.
@@ -89,7 +91,12 @@ export async function openTableConnector(
   options: TableConnectorOptions,
 ): Promise<PostgresConnector> {
   const { source, maxConnections } = options;
-  requireSecureUrl(options.url, source.databaseEnv ?? "DATABASE_URL", options.allowInsecure);
+  requireSecureUrl(
+    options.url,
+    source.databaseEnv ?? "DATABASE_URL",
+    options.allowInsecure,
+    options.pgHost,
+  );
   const connect: SqlConnect =
     maxConnections === undefined
       ? options.connect

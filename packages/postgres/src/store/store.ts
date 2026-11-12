@@ -48,7 +48,15 @@ export type StoreOptions = {
    */
   readonly allowInsecure?: boolean;
 } & (
-  | { readonly url: string; readonly pglite?: undefined }
+  | {
+      readonly url: string;
+      /**
+       * The environment's `PGHOST`, where the driver connects when the URL names no host
+       * (`postgres:///db`); the composition root reads it, `undefined` when it is unset.
+       */
+      readonly pgHost: string | undefined;
+      readonly pglite?: undefined;
+    }
   | { readonly pglite: PGlite; readonly url?: undefined }
 );
 
@@ -85,20 +93,70 @@ export type Store = {
   close(): Promise<void>;
 };
 
-// An empty host is not here: a driver reads it as its default host or a socket, not as this machine.
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const TLS_MODES = new Set(["require", "verify-ca", "verify-full"]);
 /** The modes that may send the password in the clear; they win over `ssl=true`. */
 const PLAINTEXT_MODES = new Set(["disable", "allow", "prefer"]);
 
+/** A connection string `requireTls` refuses: the host it would reach in the clear, and how it got there. */
+export class PlaintextUrlError extends Error {
+  /** The host the driver would connect to (from the URL, or `PGHOST` when the URL names none). */
+  readonly host: string;
+  /** The URL names no host, so the driver takes `PGHOST`: the fix is there, or in the URL. */
+  readonly viaPgHost: boolean;
+  constructor(host: string, viaPgHost: boolean) {
+    super(
+      viaPgHost
+        ? `the store URL names no host, so the driver connects to PGHOST (${host}) without TLS; add ?sslmode=require to the URL, point PGHOST at this machine or a socket directory, or set allowInsecure if that network is trusted`
+        : `the store URL reaches ${host} without TLS; add ?sslmode=require to it, or set allowInsecure if that network is trusted`,
+    );
+    this.name = "PlaintextUrlError";
+    this.host = host;
+    this.viaPgHost = viaPgHost;
+  }
+}
+
+/**
+ * A connection string whose host two readers would read differently: more than one `@` before the
+ * path. postgres.js takes the host list after the first `@`, the URL parser after the last, so
+ * `postgres://x@evil.com,y@localhost/app` would pass the check as localhost and connect elsewhere.
+ */
+export class AmbiguousHostError extends Error {
+  constructor() {
+    super(
+      "the store URL's host cannot be read unambiguously (more than one @ before the path); percent-encode @ in the user or password as %40",
+    );
+    this.name = "AmbiguousHostError";
+  }
+}
+
+/** A host is this machine when it is a loopback name or address, or a Unix socket's directory. */
+function onThisMachine(host: string): boolean {
+  // postgres.js connects to every host of a comma-separated list in turn, each with an optional port.
+  return (
+    host.startsWith("/") ||
+    host.split(",").every((one) => {
+      const name = one.toLowerCase();
+      return LOCAL_HOSTS.has(name) || LOCAL_HOSTS.has(name.replace(/:\d+$/, ""));
+    })
+  );
+}
+
 /**
  * Connections use TLS. A URL that reaches another machine must ask for it
  * (`sslmode=require` or stronger, or `ssl=true`); a local one need not. `allowInsecure` is the one
- * explicit way out, for a database on a private network the operator trusts.
+ * explicit way out, for a database on a private network the operator trusts. A URL with no host
+ * (`postgres:///db`) is resolved as the driver resolves it: `PGHOST` (`pgHost`, read from the
+ * environment by the composition root), else localhost; a `PGHOST` starting with `/` is a socket.
  */
-export function requireTls(url: string, allowInsecure: boolean): void {
+export function requireTls(url: string, allowInsecure: boolean, pgHost: string | undefined): void {
   if (allowInsecure) {
     return;
+  }
+  const scheme = url.indexOf("://");
+  const authority = scheme === -1 ? "" : (url.slice(scheme + 3).split(/[/?#]/)[0] ?? "");
+  if (authority.split("@").length > 2) {
+    throw new AmbiguousHostError();
   }
   let parsed: URL;
   try {
@@ -108,7 +166,11 @@ export function requireTls(url: string, allowInsecure: boolean): void {
       cause,
     });
   }
-  if (LOCAL_HOSTS.has(parsed.hostname.toLowerCase())) {
+  // An empty PGHOST is unset to the driver (`env.PGHOST || 'localhost'`).
+  const fromEnv = pgHost === undefined || pgHost === "" ? undefined : pgHost;
+  const viaPgHost = parsed.hostname === "" && fromEnv !== undefined;
+  const host = parsed.hostname === "" ? (fromEnv ?? "localhost") : parsed.hostname;
+  if (onThisMachine(host)) {
     return;
   }
   // The driver lets a later `sslmode` (or `ssl`) replace an earlier one, so the last one counts.
@@ -119,9 +181,7 @@ export function requireTls(url: string, allowInsecure: boolean): void {
       ? false
       : (mode !== undefined && TLS_MODES.has(mode)) || ssl === "true";
   if (!tls) {
-    throw new Error(
-      `the store URL reaches ${parsed.hostname} without TLS; add ?sslmode=require to it, or set allowInsecure if that network is trusted`,
-    );
+    throw new PlaintextUrlError(host, viaPgHost);
   }
 }
 
@@ -138,7 +198,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
   if (options.pglite !== undefined) {
     client = pgliteClient(options.pglite);
   } else {
-    requireTls(options.url, options.allowInsecure ?? false);
+    requireTls(options.url, options.allowInsecure ?? false, options.pgHost);
     client = (options.connect ?? connectPostgres)(
       options.url,
       options.maxConnections === undefined ? undefined : { max: options.maxConnections },

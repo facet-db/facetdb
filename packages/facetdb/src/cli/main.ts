@@ -142,12 +142,13 @@ export function processDeps(): CliDeps {
         );
       }
       try {
-        requireSecureUrl(url, "DATABASE_URL", options?.allowInsecure);
+        requireSecureUrl(url, "DATABASE_URL", options?.allowInsecure, env["PGHOST"]);
       } catch (error) {
         return Promise.reject(error);
       }
       return createStore({
         url,
+        pgHost: env["PGHOST"],
         secret: env[SECRET_VARIABLE],
         clock,
         connect: options?.connect ?? connectPostgres,
@@ -171,7 +172,12 @@ export function processDeps(): CliDeps {
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
-        const connector = await sourceConnector(config, source, mode.allowInsecure === true);
+        const connector = await sourceConnector(
+          config,
+          source,
+          mode.allowInsecure === true,
+          env["PGHOST"],
+        );
         return {
           deps: wireBackfillDryRun({ config, source, connector, clock }),
           close: () => connector.close(),
@@ -180,7 +186,12 @@ export function processDeps(): CliDeps {
       const store = await deps.store({ allowInsecure: mode.allowInsecure === true });
       let connector: PostgresConnector | undefined;
       try {
-        connector = await sourceConnector(config, source, mode.allowInsecure === true);
+        connector = await sourceConnector(
+          config,
+          source,
+          mode.allowInsecure === true,
+          env["PGHOST"],
+        );
         const wired = await wireBackfill({
           config,
           source,
@@ -225,6 +236,7 @@ function sourceConnector(
   config: ProjectConfig,
   source: SourceConfig,
   allowInsecure: boolean,
+  pgHost: string | undefined,
 ): Promise<PostgresConnector> {
   return openTableConnector({
     source,
@@ -234,6 +246,7 @@ function sourceConnector(
     clock,
     workerId: `backfill-${randomUUID()}`,
     allowInsecure,
+    pgHost,
   });
 }
 

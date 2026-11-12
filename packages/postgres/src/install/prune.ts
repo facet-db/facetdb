@@ -9,7 +9,13 @@ import {
   VIEW_NAME_SETTING,
   VIEW_SCHEMA_SETTING,
 } from "../scan/index.ts";
-import { connectPostgres, quoteIdent, quoteTable, type SqlConnect } from "../sql/index.ts";
+import {
+  connectPostgres,
+  quoteIdent,
+  quoteLiteral,
+  quoteTable,
+  type SqlConnect,
+} from "../sql/index.ts";
 import { plain, readInstalled, SCRIPT_HEADER, settingsStatement } from "./catalog.ts";
 import {
   type InstallStatement,
@@ -40,6 +46,76 @@ const WORKER_SELECT_QUERY = `select a.attname as name
    and x.privilege_type = 'SELECT'
    and x.grantee = (select oid from pg_catalog.pg_roles where rolname = $3)
  order by a.attnum`;
+
+/**
+ * The worker's column selects granted by a role other than the table's owner and the running role
+ * (a DBA's own grant): no revoke of this prune can take them back, so they are named in its notes.
+ */
+const FOREIGN_GRANTS_QUERY = `select a.attname as name, pg_catalog.pg_get_userbyid(x.grantor) as grantor
+  from pg_catalog.pg_attribute a
+  join pg_catalog.pg_class c on c.oid = a.attrelid
+  cross join lateral pg_catalog.aclexplode(a.attacl) x
+ where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass
+   and a.attnum > 0 and not a.attisdropped
+   and x.privilege_type = 'SELECT'
+   and x.grantee = (select oid from pg_catalog.pg_roles where rolname = $3)
+   and x.grantor not in (c.relowner, (select oid from pg_catalog.pg_roles where rolname = current_user))
+ order by a.attnum, 2`;
+
+/**
+ * Who must run a revoke (proven in install.db.test.ts): Postgres takes back only the grants made by
+ * the role that runs it, or by the owner when that role is the owner or a member of its role;
+ * install's grants on the table are recorded as the owner's. Run by another admin, the revoke
+ * changes nothing with a mere warning, so the script says so and checks the result itself. No name
+ * here: a newline in one would end the comment.
+ */
+const REVOKE_NOTE =
+  "-- A revoke takes back only grants made by the role running it, and install's grants on the table\n-- are its owner's: run this as the table's owner or a member of its role.\n";
+
+/** The revoked columns, as a JSON array, for the check after the revokes (a `do` block takes no value). */
+const REVOKED_SETTING = "facetdb.prune_revoked";
+
+/** The SQLSTATE the check raises with, so `prune` can tell its refusal from any other failure. */
+const NOT_REVOKED_STATE = "FD051";
+
+/**
+ * The check after the revokes, in the script so a hand-run script stops too: a revoke that took
+ * nothing back (REVOKE_NOTE) raises, and the whole transaction, drops included, rolls back.
+ */
+function revokedCheck(
+  source: TableSource,
+  revoked: readonly string[],
+): readonly InstallStatement[] {
+  return [
+    settingsStatement([
+      [SCHEMA_SETTING, source.schema ?? "public"],
+      [TABLE_SETTING, source.table],
+      [REVOKED_SETTING, JSON.stringify(revoked)],
+    ]),
+    // Only a grant this revoke should have taken back stops it: install's (the owner's) or the
+    // running role's own. Another grantor's (a DBA's) stays with a note (`FOREIGN_GRANTS_QUERY`).
+    plain(`do $$
+declare
+  still text;
+begin
+  select string_agg(a.attname, ', ' order by a.attnum) into still
+    from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c on c.oid = a.attrelid
+    cross join lateral pg_catalog.aclexplode(a.attacl) x
+   where a.attrelid = format('%I.%I', current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'))::regclass
+     and a.attnum > 0
+     and a.attname in (select jsonb_array_elements_text(current_setting('${REVOKED_SETTING}')::jsonb))
+     and x.privilege_type = 'SELECT'
+     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(WORKER_ROLE)})
+     and x.grantor in (c.relowner, (select oid from pg_catalog.pg_roles where rolname = current_user));
+  if still is not null then
+    raise exception using errcode = ${quoteLiteral(NOT_REVOKED_STATE)}, message = format(${quoteLiteral(
+      "FacetDB: %s.%s: the worker login still reads %s after the revoke; Postgres takes back only grants made by the role that runs it, and install's grants are the table owner's. Run migrate --prune as the table's owner or a member of its role; nothing was changed.",
+    )}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), still);
+  end if;
+end $$`),
+  ];
+}
 
 /** The FacetDB columns the catalog shows: marked ones on the table, or the side table's. */
 export type PruneCatalog = {
@@ -127,9 +203,14 @@ export function pruneSql(
     return [];
   }
   const table = quoteTable({ schema: source.schema, name: source.table });
-  const revokes = revoked.map((name) =>
-    plain(`revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(WORKER_ROLE)}`),
-  );
+  const revokes = [
+    ...revoked.map((name, index) =>
+      plain(
+        `${index === 0 ? REVOKE_NOTE : ""}revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(WORKER_ROLE)}`,
+      ),
+    ),
+    ...(revoked.length === 0 ? [] : revokedCheck(source, revoked)),
+  ];
   if (removed.length === 0) {
     return [...SCRIPT_HEADER, ...revokes];
   }
@@ -189,6 +270,11 @@ export type PruneResult =
       readonly dropped: readonly string[];
       /** Marked columns that stay, one line each with the reason: `<column>: kept (storeProbabilities is off)`. */
       readonly kept: readonly string[];
+      /**
+       * What the prune could not do, one line each: a worker grant on a removed state column made by
+       * another role (`<column>: a grant by <role> remains; only that role can revoke it`).
+       */
+      readonly notes: readonly string[];
       readonly statements: readonly InstallStatement[];
       /** The printed script; empty, and nothing printed or run, when there is nothing to prune. */
       readonly sql: string;
@@ -232,21 +318,38 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
     const kept = keptColumns(source, options.questionSet, catalog).map(
       (name) => `${name}: ${KEPT_NOTE}`,
     );
+    const revoked = new Set(revokedColumns(source, options.questionSet, catalog));
+    const notes = (
+      await client.query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, WORKER_ROLE])
+    )
+      .filter((row) => revoked.has(String(row["name"])))
+      .map(
+        (row) =>
+          `${String(row["name"])}: a grant by ${String(row["grantor"])} remains; only that role can revoke it`,
+      );
     const statements = pruneSql(source, options.questionSet, catalog);
     if (statements.length === 0) {
-      return { ok: true, dropped, kept, statements, sql: "", applied: false };
+      return { ok: true, dropped, kept, notes, statements, sql: "", applied: false };
     }
     const sql = renderSql(statements);
     options.print(sql);
     if (options.dryRun === true) {
-      return { ok: true, dropped, kept, statements, sql, applied: false };
+      return { ok: true, dropped, kept, notes, statements, sql, applied: false };
     }
-    await client.transaction(async (query) => {
-      for (const statement of statements) {
-        await query(statement.text, statement.params);
+    try {
+      await client.transaction(async (query) => {
+        for (const statement of statements) {
+          await query(statement.text, statement.params);
+        }
+      });
+    } catch (error) {
+      // The script's own check (`revokedCheck`) rolled everything back: a refusal, in its words.
+      if (error instanceof Error && "code" in error && error.code === NOT_REVOKED_STATE) {
+        return { ok: false, reason: error.message.replace(/^FacetDB: /, "") };
       }
-    });
-    return { ok: true, dropped, kept, statements, sql, applied: true };
+      throw error;
+    }
+    return { ok: true, dropped, kept, notes, statements, sql, applied: true };
   } finally {
     await client.close();
   }

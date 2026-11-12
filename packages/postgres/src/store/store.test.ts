@@ -22,7 +22,13 @@ import { CLAIM_LEASE_MS, jobsTableSql } from "../sql/index.ts";
 import { freshPglite } from "../testing/index.ts";
 import { createCrypto, newSalt } from "./crypto.ts";
 import { SCHEMA_VERSION } from "./schema.ts";
-import { createStore, requireTls, type Store } from "./store.ts";
+import {
+  AmbiguousHostError,
+  createStore,
+  PlaintextUrlError,
+  requireTls,
+  type Store,
+} from "./store.ts";
 
 const SECRET = "a-long-random-secret-for-tests-only";
 
@@ -466,52 +472,93 @@ describe("API keys", () => {
 });
 
 describe("TLS", () => {
+  /** The rule with `PGHOST` unset, as most of these cases need. */
+  const tls = (url: string, allowInsecure: boolean) => requireTls(url, allowInsecure, undefined);
+
   it("is required for a URL that leaves this machine unless allowInsecure is set", () => {
-    expect(() => requireTls("postgres://u:p@db.example.com/app", false)).toThrow(/TLS/);
-    expect(() => requireTls("postgres://u:p@db.example.com/app?sslmode=disable", false)).toThrow(
-      /TLS/,
-    );
-    expect(() => requireTls("postgres://u:p@db.example.com/app?sslmode=prefer", false)).toThrow(
-      /TLS/,
-    );
-    expect(() =>
-      requireTls("postgres://u:p@db.example.com/app?sslmode=require", false),
-    ).not.toThrow();
-    expect(() =>
-      requireTls("postgres://u:p@db.example.com/app?sslmode=verify-full", false),
-    ).not.toThrow();
-    expect(() => requireTls("postgres://u:p@db.example.com/app", true)).not.toThrow();
+    expect(() => tls("postgres://u:p@db.example.com/app", false)).toThrow(/TLS/);
+    expect(() => tls("postgres://u:p@db.example.com/app?sslmode=disable", false)).toThrow(/TLS/);
+    expect(() => tls("postgres://u:p@db.example.com/app?sslmode=prefer", false)).toThrow(/TLS/);
+    expect(() => tls("postgres://u:p@db.example.com/app?sslmode=require", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@db.example.com/app?sslmode=verify-full", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@db.example.com/app", true)).not.toThrow();
   });
 
   it("reads the last sslmode, as the driver does", () => {
     const host = "postgres://u:p@db.example.com/app";
-    expect(() => requireTls(`${host}?sslmode=require&sslmode=disable`, false)).toThrow(/TLS/);
-    expect(() => requireTls(`${host}?sslmode=disable&sslmode=require`, false)).not.toThrow();
+    expect(() => tls(`${host}?sslmode=require&sslmode=disable`, false)).toThrow(/TLS/);
+    expect(() => tls(`${host}?sslmode=disable&sslmode=require`, false)).not.toThrow();
   });
 
   it("does not take ssl=true for TLS when sslmode says disable, allow or prefer", () => {
     const host = "postgres://u:p@db.example.com/app";
     for (const mode of ["disable", "allow", "prefer"]) {
-      expect(() => requireTls(`${host}?ssl=true&sslmode=${mode}`, false)).toThrow(/TLS/);
-      expect(() => requireTls(`${host}?sslmode=${mode}&ssl=true`, false)).toThrow(/TLS/);
+      expect(() => tls(`${host}?ssl=true&sslmode=${mode}`, false)).toThrow(/TLS/);
+      expect(() => tls(`${host}?sslmode=${mode}&ssl=true`, false)).toThrow(/TLS/);
     }
-    expect(() => requireTls(`${host}?ssl=true`, false)).not.toThrow();
-    expect(() => requireTls(`${host}?ssl=true&sslmode=require`, false)).not.toThrow();
+    expect(() => tls(`${host}?ssl=true`, false)).not.toThrow();
+    expect(() => tls(`${host}?ssl=true&sslmode=require`, false)).not.toThrow();
     // `ssl` is read the way the driver reads it too: the last value wins.
-    expect(() => requireTls(`${host}?ssl=true&ssl=false`, false)).toThrow(/TLS/);
-    expect(() => requireTls(`${host}?ssl=false&ssl=true`, false)).not.toThrow();
+    expect(() => tls(`${host}?ssl=true&ssl=false`, false)).toThrow(/TLS/);
+    expect(() => tls(`${host}?ssl=false&ssl=true`, false)).not.toThrow();
   });
 
-  it("does not take an empty host for this machine", () => {
-    expect(() => requireTls("postgres:///app", false)).toThrow();
-    expect(() => requireTls("postgres://u:p@/app", false)).toThrow();
-    expect(() => requireTls("postgres:///app", true)).not.toThrow();
+  it("resolves an empty host as the driver does: PGHOST, then localhost; a PGHOST path is a socket", () => {
+    // PGHOST unset (or empty): the driver connects to localhost.
+    expect(() => requireTls("postgres:///app", false, undefined)).not.toThrow();
+    expect(() => requireTls("postgres:///app?user=u", false, "")).not.toThrow();
+    // Credentials with no host are not a URL at all, to the driver either.
+    expect(() => requireTls("postgres://u:p@/app", false, undefined)).toThrow(
+      /not a connection string/,
+    );
+    // PGHOST names a socket directory or this machine (with a port, or a list of such hosts).
+    expect(() => requireTls("postgres:///app", false, "/var/run/postgresql")).not.toThrow();
+    expect(() => requireTls("postgres:///app", false, "localhost:5433")).not.toThrow();
+    expect(() => requireTls("postgres:///app", false, "127.0.0.1,localhost")).not.toThrow();
+    // PGHOST names another machine: refused, and the fix names PGHOST, not only the URL.
+    let refused: unknown;
+    try {
+      requireTls("postgres:///app?user=u", false, "db.example.com");
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(PlaintextUrlError);
+    expect(refused).toMatchObject({ host: "db.example.com", viaPgHost: true });
+    expect(String(refused)).toContain("PGHOST (db.example.com)");
+    expect(String(refused)).toContain("point PGHOST at this machine or a socket directory");
+    expect(() => requireTls("postgres:///app", false, "localhost,db.example.com")).toThrow(
+      /PGHOST/,
+    );
+    expect(() =>
+      requireTls("postgres:///app?sslmode=require", false, "db.example.com"),
+    ).not.toThrow();
+    expect(() => requireTls("postgres:///app", true, "db.example.com")).not.toThrow();
+    // A URL that names its host is not about PGHOST, whatever it says.
+    expect(() => requireTls("postgres://u:p@db.example.com/app", false, "/tmp")).toThrow(
+      PlaintextUrlError,
+    );
+    expect(() => requireTls("postgres://u:p@localhost/app", false, "db.example.com")).not.toThrow();
+  });
+
+  it("refuses a URL whose host two readers would read differently (more than one @ before the path)", () => {
+    // postgres.js reads the hosts after the first @ (evil.com, then y@localhost), the URL parser
+    // after the last (localhost): the check must not pass what the driver would send elsewhere.
+    expect(() => tls("postgres://x@evil.com,y@localhost/app", false)).toThrow(AmbiguousHostError);
+    expect(() => tls("postgres://u:p@ss@localhost/app", false)).toThrow(/percent-encode @/);
+    // An encoded @ is one @, and a comma list of local hosts is still this machine.
+    expect(() => tls("postgres://u:p%40ss@localhost/app", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@localhost,127.0.0.1/app", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@localhost,db.example.com/app", false)).toThrow(
+      PlaintextUrlError,
+    );
+    // An @ after the path is not in the host.
+    expect(() => tls("postgres://u:p@localhost/app?options=a@b", false)).not.toThrow();
   });
 
   it("is not required on this machine", () => {
-    expect(() => requireTls("postgres://u:p@localhost/app", false)).not.toThrow();
-    expect(() => requireTls("postgres://u:p@127.0.0.1:5432/app", false)).not.toThrow();
-    expect(() => requireTls("postgres://u:p@[::1]/app", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@localhost/app", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@127.0.0.1:5432/app", false)).not.toThrow();
+    expect(() => tls("postgres://u:p@[::1]/app", false)).not.toThrow();
   });
 
   it("is checked before a connection is opened", async () => {
@@ -519,6 +566,7 @@ describe("TLS", () => {
     await expect(
       createStore({
         url: "postgres://u:p@db.example.com/app",
+        pgHost: undefined,
         secret: SECRET,
         clock: new FakeClock(),
         connect: () => {
@@ -583,6 +631,7 @@ describe("usage", () => {
     const sent: string[] = [];
     const store = await createStore({
       url: "postgres://localhost/facetdb",
+      pgHost: undefined,
       secret: SECRET,
       clock: new TurningClock(1_700_000_000_000),
       connect: () => ({
@@ -670,6 +719,7 @@ describe("usage", () => {
     const sent: string[] = [];
     const store = await createStore({
       url: "postgres://localhost/facetdb",
+      pgHost: undefined,
       secret: SECRET,
       clock: new TurningClock(1_700_000_000_000),
       connect: () => ({
@@ -862,6 +912,7 @@ describe("store statements per answered record", () => {
     const sent: string[] = [];
     const store = await createStore({
       url: "postgres://localhost/facetdb",
+      pgHost: undefined,
       secret: SECRET,
       clock: new TurningClock(1_700_000_000_000),
       connect: () => ({

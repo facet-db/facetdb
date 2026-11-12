@@ -69,6 +69,7 @@ async function newStore(): Promise<Store> {
   // The test database is on a private network of the CI, so a remote host without TLS is allowed here.
   const store = await createStore({
     url: databaseUrl(),
+    pgHost: undefined,
     secret: SECRET,
     clock: new FakeClock(1_700_000_000_000),
     allowInsecure: true,
@@ -319,6 +320,7 @@ describe("the store's pool on a real Postgres", () => {
     // pool lets through stays in flight on a backend of its own until the lock goes.
     const store = await createStore({
       url: databaseUrl(),
+      pgHost: undefined,
       secret: SECRET,
       clock: new FakeClock(1_700_000_000_000),
       allowInsecure: true,

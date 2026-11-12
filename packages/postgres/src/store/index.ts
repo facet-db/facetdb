@@ -4,6 +4,7 @@ export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.
 export {
   migrateStore,
   SCHEMA_VERSION,
+  STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
@@ -18,4 +19,4 @@ export type {
   CredentialStore,
 } from "./secrets.ts";
 export type { SourceKind, Store, StoreOptions } from "./store.ts";
-export { createStore, requireTls } from "./store.ts";
+export { AmbiguousHostError, createStore, PlaintextUrlError, requireTls } from "./store.ts";

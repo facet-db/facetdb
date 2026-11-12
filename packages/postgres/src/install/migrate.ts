@@ -8,11 +8,13 @@ import {
 } from "../scan/index.ts";
 import { connectPostgres, type SqlConnect, type SqlQuery, type SqlRow } from "../sql/index.ts";
 import {
+  anotherProject,
   ENQUEUE_ROLE,
   type InstallStatement,
   installOwnedColumns,
   installOwnedColumnTypes,
   installSql,
+  LOG_GRANTS_STATE,
   ownedColumnsQuery,
   type ProjectRef,
   renderSql,
@@ -292,10 +294,6 @@ async function inspect(
   };
 }
 
-function anotherProject(table: string, owner: string): string {
-  return `${table} already carries FacetDB columns from another project (${owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
-}
-
 /** Thrown inside the install transaction to roll it back with a refusal's words. */
 class Refused extends Error {}
 
@@ -445,7 +443,8 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
           if (statement.claimsOwner === true) {
             // The inspection ran before this transaction: another project may have claimed the table
             // since. The claim above did nothing then, so the owner now read is the truth, and
-            // nothing after it (columns, trigger, grants) has run yet.
+            // nothing after it (columns, trigger, grants) has run yet. The script's own `do` block
+            // checks the same right after, for the printed script run by hand.
             const rows = await query(OWNER_QUERY, [schema, plan.source.table]);
             const owner = String(rows[0]?.["project_id"]);
             if (owner !== plan.project.id) {
@@ -457,6 +456,10 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
     } catch (error) {
       if (error instanceof Refused) {
         return { ok: false, reason: error.message };
+      }
+      // The script's own check on the logs' grants rolled everything back: a refusal, in its words.
+      if (error instanceof Error && "code" in error && error.code === LOG_GRANTS_STATE) {
+        return { ok: false, reason: error.message.replace(/^FacetDB: /, "") };
       }
       throw error;
     }

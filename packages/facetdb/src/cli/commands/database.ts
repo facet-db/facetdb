@@ -1,6 +1,12 @@
 import { basename } from "node:path";
 import type { QuestionSet } from "@facetdb/core";
-import { type ProjectRef, requireTls, WORKER_ROLE } from "@facetdb/postgres";
+import {
+  AmbiguousHostError,
+  PlaintextUrlError,
+  type ProjectRef,
+  requireTls,
+  WORKER_ROLE,
+} from "@facetdb/postgres";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -123,47 +129,74 @@ export function questionSetOf(config: ProjectConfig, source: SourceConfig): Ques
 
 /**
  * What the store's TLS rule (`requireTls`) says about a connection string: `undefined` when it may
- * be used, `"invalid"` when it is not a URL, else the host it would reach without TLS.
+ * be used, `"invalid"` when it is not a URL, `"ambiguous"` when its host cannot be read for sure
+ * (more than one `@` before the path), else the host it would reach without TLS. `pgHost` is the
+ * environment's `PGHOST`, where the driver goes for a URL that names no host.
  */
 function tlsRefusal(
   url: string,
   allowInsecure: boolean | undefined,
-): "invalid" | { readonly host: string } | undefined {
+  pgHost: string | undefined,
+): "invalid" | "ambiguous" | { readonly host: string; readonly viaPgHost: boolean } | undefined {
   try {
-    requireTls(url, allowInsecure ?? false);
+    requireTls(url, allowInsecure ?? false, pgHost);
     return undefined;
-  } catch {
-    try {
-      return { host: new URL(url).hostname };
-    } catch {
-      return "invalid";
+  } catch (error) {
+    if (error instanceof AmbiguousHostError) {
+      return "ambiguous";
     }
+    return error instanceof PlaintextUrlError
+      ? { host: error.host, viaPgHost: error.viaPgHost }
+      : "invalid";
   }
 }
 
-const hostWords = (host: string): string => (host === "" ? "an empty host" : host);
+/** Why an ambiguous URL is refused, and what to do about it. */
+const AMBIGUOUS =
+  "has more than one @ before the path, so its host cannot be read for sure (the driver and the check would read different hosts)";
+const ambiguousFix = (target: string) =>
+  `percent-encode every @ in the user and password of ${target} as %40`;
 
-/** What to do about a refused URL: the variable to change, or the flag for a network that is trusted. */
-export function tlsFix(variable: string): string {
-  return `add ?sslmode=require to ${variable}, or pass --allow-insecure if that network is trusted`;
-}
+/** Where a refused URL would go: its host, or `PGHOST`'s when the URL names none. */
+const reaches = (
+  subject: string,
+  refusal: { readonly host: string; readonly viaPgHost: boolean },
+) =>
+  refusal.viaPgHost
+    ? `${subject} names no host, so the driver reaches PGHOST (${refusal.host}) without TLS`
+    : `${subject} reaches ${refusal.host} without TLS`;
+
+/** What to do about a refused URL: the URL (or `PGHOST`) to change, or the flag for a trusted network. */
+const fixFor = (target: string, viaPgHost: boolean) =>
+  `add ?sslmode=require to ${target},${viaPgHost ? " point PGHOST at this machine or a socket directory," : ""} or pass --allow-insecure if that network is trusted`;
 
 /**
  * The words for a worker-side connection string (`variable` names where it came from) that the
- * store's rule refuses, or `undefined` when the URL may be used. The password in it is the worker's.
+ * store's rule refuses, with the fix, or `undefined` when the URL may be used. The password in it
+ * is the worker's.
  */
 export function tlsProblem(
   url: string,
   variable: string,
   allowInsecure: boolean | undefined,
-): string | undefined {
-  const refusal = tlsRefusal(url, allowInsecure);
+  pgHost: string | undefined,
+): { readonly problem: string; readonly fix: string } | undefined {
+  const refusal = tlsRefusal(url, allowInsecure, pgHost);
   if (refusal === undefined) {
     return undefined;
   }
+  if (refusal === "ambiguous") {
+    return { problem: `${variable} ${AMBIGUOUS}`, fix: ambiguousFix(variable) };
+  }
   return refusal === "invalid"
-    ? `${variable} is not a connection string (postgres://user:password@host/database)`
-    : `${variable} reaches ${hostWords(refusal.host)} without TLS, so the password in it would travel in the clear`;
+    ? {
+        problem: `${variable} is not a connection string (postgres://user:password@host/database)`,
+        fix: fixFor(variable, false),
+      }
+    : {
+        problem: `${reaches(variable, refusal)}, so the password in it would travel in the clear`,
+        fix: fixFor(variable, refusal.viaPgHost),
+      };
 }
 
 /** Refuses, before any connection, a worker-side URL that would travel in the clear to another machine. */
@@ -171,10 +204,15 @@ export function requireSecureUrl(
   url: string,
   variable: string,
   allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
 ): void {
-  const problem = tlsProblem(url, variable, allowInsecure);
-  if (problem !== undefined) {
-    throw new CliError("database-url-tls", `${problem}; no connection was made`, tlsFix(variable));
+  const refused = tlsProblem(url, variable, allowInsecure, pgHost);
+  if (refused !== undefined) {
+    throw new CliError(
+      "database-url-tls",
+      `${refused.problem}; no connection was made`,
+      refused.fix,
+    );
   }
 }
 
@@ -182,15 +220,20 @@ export function requireSecureUrl(
 export function requireSecureSource(
   source: SourceConfig,
   allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
 ): void {
   if (source.database !== undefined && source.database !== "") {
-    requireSecureUrl(source.database, source.databaseEnv ?? "DATABASE_URL", allowInsecure);
+    requireSecureUrl(source.database, source.databaseEnv ?? "DATABASE_URL", allowInsecure, pgHost);
   }
 }
 
 /** The admin password must not travel in the clear: refuses before any connection is made. */
-function requireSecureAdminUrl(url: string, allowInsecure: boolean | undefined): void {
-  const refusal = tlsRefusal(url, allowInsecure);
+function requireSecureAdminUrl(
+  url: string,
+  allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
+): void {
+  const refusal = tlsRefusal(url, allowInsecure, pgHost);
   if (refusal === undefined) {
     return;
   }
@@ -201,10 +244,17 @@ function requireSecureAdminUrl(url: string, allowInsecure: boolean | undefined):
       "pass postgres://user:password@host/database?sslmode=require as --admin-url",
     );
   }
+  if (refusal === "ambiguous") {
+    throw new CliError(
+      "admin-url",
+      `the admin connection string ${AMBIGUOUS}; no connection was made`,
+      ambiguousFix("the admin connection string"),
+    );
+  }
   throw new CliError(
     "admin-url-tls",
-    `the admin connection string reaches ${hostWords(refusal.host)} without TLS, so the admin password would travel in the clear; no connection was made`,
-    "add ?sslmode=require to the admin connection string, or pass --allow-insecure if that network is trusted",
+    `${reaches("the admin connection string", refusal)}, so the admin password would travel in the clear; no connection was made`,
+    fixFor("the admin connection string", refusal.viaPgHost),
   );
 }
 
@@ -238,7 +288,7 @@ export async function adminUrl(
       "pass --admin-url, or type the connection string of a role that may alter the table when asked",
     );
   }
-  requireSecureAdminUrl(url.trim(), allowInsecure);
+  requireSecureAdminUrl(url.trim(), allowInsecure, deps.env["PGHOST"]);
   return url.trim();
 }
 

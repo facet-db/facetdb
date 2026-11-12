@@ -232,6 +232,14 @@ export const STORE_TABLES: readonly string[] = [
 ];
 
 /**
+ * The store's append-only logs: the decision log and the question-set versions are only ever read
+ * and inserted into (a correction is a new row), so the worker login holds select and insert on
+ * them and nothing more. Only the admin's `uninstall
+ * --purge` deletes from them.
+ */
+export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versions", "decisions"];
+
+/**
  * Every function the store's migrations create, by signature: `facetdb migrate` grants the worker
  * login EXECUTE on each (the migration revokes it from everyone else), and `facetdb uninstall`
  * drops them with the store's tables.

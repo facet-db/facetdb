@@ -1,10 +1,12 @@
 import type { QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createPostgresConnector } from "../capture/index.ts";
 import { connectPostgres, type SqlClient, type SqlConnect, type SqlQuery } from "../sql/index.ts";
 import { createStore } from "../store/index.ts";
 import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
+import { prune } from "./prune.ts";
 import { ENQUEUE_ROLE, WORKER_ROLE } from "./sql.ts";
 import { uninstall } from "./uninstall.ts";
 
@@ -35,6 +37,8 @@ let admin: SqlClient;
 let worker: SqlClient;
 /** Every connection opened so far, closed in afterAll even when beforeAll stopped halfway. */
 const open: SqlClient[] = [];
+/** Roles a test created besides FacetDB's, dropped once the scratch database is gone. */
+const roles: string[] = [];
 
 async function dropRole(): Promise<void> {
   await scratch.admin(`drop role if exists ${WORKER_ROLE}`).catch(() => undefined);
@@ -77,6 +81,9 @@ afterAll(async () => {
   }
   await scratch.drop();
   await dropRole();
+  for (const role of roles.splice(0).reverse()) {
+    await scratch.admin(`drop role if exists ${role}`);
+  }
 });
 
 async function denied(work: () => Promise<unknown>): Promise<string> {
@@ -175,7 +182,6 @@ describe("the worker login on a real Postgres", () => {
     );
     expect(rights[0]).toEqual({ database: false, schema: false, owned: 0 });
 
-    const base = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
     const statements: string[] = [];
     const record =
       (query: SqlQuery): SqlQuery =>
@@ -183,21 +189,53 @@ describe("the worker login on a real Postgres", () => {
         statements.push(text);
         return query(text, params);
       };
-    const recording: SqlClient = {
-      query: record(base.query),
-      transaction: (work) => base.transaction((query) => work(record(query))),
-      pipeline: (text, paramSets) => base.pipeline(text, paramSets),
-      close: () => base.close(),
+    /** A worker-login client that records every statement text it is given. */
+    const recorded = (): SqlClient => {
+      const base = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
+      return {
+        query: record(base.query),
+        transaction: (work) => base.transaction((query) => work(record(query))),
+        pipeline: (text, paramSets) => {
+          statements.push(text);
+          return base.pipeline(text, paramSets);
+        },
+        close: () => base.close(),
+      };
     };
+    const recording = recorded();
     const store = await createStore({
       url: scratch.as(WORKER_ROLE, PASSWORD),
+      pgHost: undefined,
       connect: () => recording,
       secret: TEST_SECRET,
       clock: new FakeClock(1_700_000_000_000),
       allowInsecure: true,
     });
+    // The table source's capture connector, as `facetdb worker` opens it (cli/table-connector.ts)
+    // under the same login: the start path of the worker command, short of the CLI itself.
+    const capture = createPostgresConnector({
+      workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+      connect: recorded,
+      source: { table: "listings", key: "id" },
+      questionSet: listings,
+      clock: new FakeClock(1_700_000_000_000),
+      workerId: "w1",
+    });
     try {
+      // What `runWorkers` does first: the project, each source and its question-set version (a
+      // second record of the same set is the restart case, which inserts nothing), the heartbeat.
       await store.ensureProject({ id: "proj_listings", name: "Listings" });
+      await store.ensureSource({
+        id: "listings",
+        projectId: "proj_listings",
+        name: "listings",
+        kind: "plugin",
+      });
+      expect((await store.questionSets.record("listings", listings)).version).toBe(1);
+      expect((await store.questionSets.record("listings", listings)).version).toBe(1);
+      await admin.query(`update public.listings set title = 'asked again' where id = 1`);
+      expect(await capture.claim(5)).toEqual(["1"]);
+      await capture.ack(["1"]);
       await store.alerts.saveHeartbeat("proj_listings", 1_700_000_000_000);
       expect(await store.alerts.lastHeartbeat("proj_listings")).toBe(1_700_000_000_000);
       await store.log("src_listings").appendAnswer({
@@ -239,12 +277,53 @@ describe("the worker login on a real Postgres", () => {
       );
       expect(claimedRows).toEqual([{ id: String(reserved[0]?.["id"]) }]);
     } finally {
+      await capture.close();
       await store.close();
     }
     expect(statements.length).toBeGreaterThan(0);
     expect(
       statements.filter((text) => /^\s*(create|alter|drop|grant|revoke)\b/i.test(text)),
     ).toEqual([]);
+  });
+
+  it("holds exactly select and insert on the decision log and the versions, after an upgrade too", async () => {
+    const privileges = () =>
+      admin.query(
+        `select table_name, string_agg(privilege_type, ', ' order by privilege_type) as privileges
+           from information_schema.table_privileges
+          where table_schema = 'facetdb' and grantee = $1
+            and table_name in ('decisions', 'question_set_versions')
+          group by 1 order by 1`,
+        [WORKER_ROLE],
+      );
+    const appendOnly = [
+      { table_name: "decisions", privileges: "INSERT, SELECT" },
+      { table_name: "question_set_versions", privileges: "INSERT, SELECT" },
+    ];
+    expect(await privileges()).toEqual(appendOnly);
+    for (const statement of [
+      "update facetdb.decisions set note = 'x'",
+      "delete from facetdb.decisions",
+      "update facetdb.question_set_versions set content_hash = 'x'",
+      "delete from facetdb.question_set_versions",
+    ]) {
+      expect(await denied(() => worker.query(statement))).toContain("permission denied");
+    }
+    // An earlier install granted update and delete too: migrate takes them back.
+    await admin.query(
+      `grant update, delete on facetdb.decisions, facetdb.question_set_versions to ${WORKER_ROLE}`,
+    );
+    const again = await migrate({
+      adminUrl: scratch.url,
+      print: () => undefined,
+      plan: {
+        source: { table: "listings" },
+        questionSet: listings,
+        project: { id: "proj_listings", name: "Listings" },
+      },
+    });
+    expect(again).toMatchObject({ ok: true, applied: true });
+    expect(await privileges()).toEqual(appendOnly);
   });
 
   it("a password given on a later run is the one that logs in", async () => {
@@ -392,5 +471,246 @@ describe("a log-only purge against a concurrent install, on two connections", ()
     expect(await admin.query(`select id from facetdb.sources where id = $1`, [SOURCE])).toEqual([
       { id: SOURCE },
     ]);
+  });
+});
+
+/** Resolves when the returned function is called; for holding a transaction open across connections. */
+function gate<T>(): { readonly promise: Promise<T>; readonly open: (value: T) => void } {
+  let open: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+/**
+ * The statements of this database's backends that wait for a lock, once there is one. It polls the
+ * server for a state, it times nothing: the bound only keeps a broken test from hanging.
+ */
+async function lockWaits(): Promise<string[]> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const rows = await admin.query(
+      `select query from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`,
+    );
+    if (rows.length > 0) {
+      return rows.map((row) => String(row["query"]));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("no backend ever waited for a lock: the claim did not wait for the other one");
+}
+
+describe("two installs and two admins on a real Postgres", () => {
+  /**
+   * Another project's install, held open on its own connection right after its claim (the owner
+   * check runs inside the transaction; this shows it across two real connections).
+   */
+  async function claimHeld(table: string, projectId: string) {
+    const claimed = gate<undefined>();
+    const finish = gate<"commit" | "rollback">();
+    const other = connectPostgres(scratch.url);
+    open.push(other);
+    const done = other
+      .transaction(async (query) => {
+        await query(
+          `insert into facetdb.projects (id, name) values ($1, $1) on conflict (id) do nothing`,
+          [projectId],
+        );
+        await query(
+          `insert into facetdb.table_owners (table_schema, table_name, project_id) values ('public', $1, $2)`,
+          [table, projectId],
+        );
+        claimed.open(undefined);
+        if ((await finish.promise) === "rollback") {
+          throw new Error("rolled back on purpose");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof Error && error.message === "rolled back on purpose")) {
+          throw error;
+        }
+      });
+    await claimed.promise;
+    return { finish: finish.open, done };
+  }
+
+  function install(table: string, projectId: string) {
+    return migrate({
+      adminUrl: scratch.url,
+      print: () => undefined,
+      plan: {
+        source: { table },
+        questionSet: listings,
+        project: { id: projectId, name: projectId },
+      },
+    });
+  }
+
+  async function hasStatus(table: string): Promise<boolean> {
+    const rows = await admin.query(
+      `select 1 from information_schema.columns
+        where table_schema = 'public' and table_name = $1 and column_name = 'facetdb_status'`,
+      [table],
+    );
+    return rows.length > 0;
+  }
+
+  it("the second claim waits for the first, reads the committed owner and rolls back", async () => {
+    await admin.query(
+      `create table public.raced_commit (id serial primary key, title text, description text)`,
+    );
+    const first = await claimHeld("raced_commit", "proj_first");
+    const second = install("raced_commit", "proj_second");
+    try {
+      // The second install's inspection saw no owner (the first is not committed): it waits at its claim.
+      expect((await lockWaits()).join("\n")).toContain("table_owners");
+    } finally {
+      // Released whatever happened, so a failed assertion never leaves the second waiting out its lock.
+      first.finish("commit");
+      await first.done;
+    }
+    const result = await second;
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) {
+      expect(result.reason).toContain("another project (proj_first)");
+    }
+    expect(await hasStatus("raced_commit")).toBe(false);
+    expect(
+      await admin.query(
+        `select project_id from facetdb.table_owners where table_name = 'raced_commit'`,
+      ),
+    ).toEqual([{ project_id: "proj_first" }]);
+  });
+
+  it("the second claim takes the table when the first rolls back", async () => {
+    await admin.query(
+      `create table public.raced_rollback (id serial primary key, title text, description text)`,
+    );
+    const first = await claimHeld("raced_rollback", "proj_first");
+    const second = install("raced_rollback", "proj_second");
+    try {
+      expect((await lockWaits()).join("\n")).toContain("table_owners");
+    } finally {
+      first.finish("rollback");
+      await first.done;
+    }
+    expect(await second).toMatchObject({ ok: true, applied: true });
+    expect(await hasStatus("raced_rollback")).toBe(true);
+    expect(
+      await admin.query(
+        `select project_id from facetdb.table_owners where table_name = 'raced_rollback'`,
+      ),
+    ).toEqual([{ project_id: "proj_second" }]);
+  });
+
+  it("prune's revoke of a state column, run by an admin who did not make the grant", async () => {
+    // The table belongs to the application's role; the installer was another admin (here the
+    // server's superuser, whose grants Postgres records as the owner's). Roles are cluster-wide, so
+    // their names are this scratch database's own.
+    const owner = `${scratch.name}_owner`;
+    const member = `${scratch.name}_member`;
+    const outsider = `${scratch.name}_outsider`;
+    const password = "a-long-random-password-for-admins";
+    roles.push(owner, member, outsider);
+    await admin.query(`create role ${owner} nologin`);
+    await admin.query(`create role ${member} login password '${password}' in role ${owner}`);
+    await admin.query(`create role ${outsider} login password '${password}'`);
+    await admin.query(
+      `create table public.pruned (id serial primary key, title text, description text, notes text)`,
+    );
+    await admin.query(`alter table public.pruned owner to ${owner}`);
+    for (const role of [member, outsider]) {
+      await admin.query(`grant usage on schema facetdb to ${role}`);
+      await admin.query(`grant select on facetdb.table_owners, facetdb.projects to ${role}`);
+    }
+    // The outsider may read the table (an analytics admin, say): some right on it, no grant option.
+    await admin.query(`grant select on public.pruned to ${outsider}`);
+    const wider = { ...listings, read: ["title", "description", "notes"] };
+    const installed = await migrate({
+      adminUrl: scratch.url,
+      print: () => undefined,
+      plan: {
+        source: { table: "pruned" },
+        questionSet: wider,
+        project: { id: "proj_listings", name: "Listings" },
+      },
+    });
+    expect(installed).toMatchObject({ ok: true, applied: true });
+    const grants = () =>
+      admin.query(
+        `select x.grantor::regrole::text as grantor
+           from pg_catalog.pg_attribute a cross join lateral pg_catalog.aclexplode(a.attacl) x
+          where a.attrelid = 'public.pruned'::regclass and a.attname = 'notes'
+            and x.privilege_type = 'SELECT' and x.grantee = $1::regrole`,
+        [WORKER_ROLE],
+      );
+    expect(await grants()).toEqual([{ grantor: owner }]);
+    const pruneAs = (role: string) =>
+      prune({
+        adminUrl: scratch.as(role, password),
+        source: { table: "pruned" },
+        questionSet: listings,
+        project: { id: "proj_listings", name: "Listings" },
+        print: () => undefined,
+      });
+
+    // An admin with some right on the table but neither its owner nor in the owner's role: Postgres
+    // runs the revoke, warns, and takes nothing back. Prune once reported it applied, and listed it
+    // again on every run; now the script's own check after the revokes raises, and the transaction
+    // rolls back having changed nothing.
+    const byOutsider = await pruneAs(outsider);
+    expect(byOutsider).toMatchObject({ ok: false });
+    if (!byOutsider.ok) {
+      expect(byOutsider.reason).toContain("still reads notes");
+      expect(byOutsider.reason).toContain("as the table's owner or a member of its role");
+    }
+    expect(await grants()).toEqual([{ grantor: owner }]);
+    // A member of the owner's role revokes as the owner, who made the grant: it is gone.
+    const byMember = await pruneAs(member);
+    expect(byMember).toMatchObject({ ok: true, applied: true });
+    if (byMember.ok) {
+      expect(byMember.sql).toContain(
+        "-- A revoke takes back only grants made by the role running it",
+      );
+    }
+    expect(await grants()).toEqual([]);
+    expect(await denied(() => worker.query(`select notes from public.pruned`))).toContain(
+      "permission denied",
+    );
+  });
+
+  it("an upgrade whose revoke on the logs took nothing back refuses, naming the grantor and who must run it", async () => {
+    // A DBA, not the owner of the store's tables, granted the worker update on the versions: the
+    // owner's revoke takes back only the owner's own grants, and the driver drops Postgres's warning.
+    const dba = `${scratch.name}_dba`;
+    roles.push(dba);
+    await admin.query(`create role ${dba} nologin`);
+    await admin.query(`grant usage on schema facetdb to ${dba}`);
+    await admin.query(`grant update on facetdb.question_set_versions to ${dba} with grant option`);
+    const asDba = (statement: string) =>
+      admin.transaction(async (query) => {
+        await query(`set local role ${dba}`);
+        await query(statement);
+      });
+    await asDba(`grant update on facetdb.question_set_versions to ${WORKER_ROLE}`);
+    const again = () =>
+      migrate({
+        adminUrl: scratch.url,
+        print: () => undefined,
+        plan: {
+          source: { table: "listings" },
+          questionSet: listings,
+          project: { id: "proj_listings", name: "Listings" },
+        },
+      });
+    const refused = await again();
+    expect(refused).toMatchObject({ ok: false });
+    if (!refused.ok) {
+      expect(refused.reason).toContain(`UPDATE on question_set_versions granted by ${dba}`);
+      expect(refused.reason).toContain("or a member of its role");
+    }
+    await asDba(`revoke update on facetdb.question_set_versions from ${WORKER_ROLE}`);
+    expect(await again()).toMatchObject({ ok: true, applied: true });
   });
 });

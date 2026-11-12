@@ -126,10 +126,10 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
     const name = `${target.schema}.${target.table}`;
     // Before anything connects, a dry run included (it reads the source): no password in the clear.
     const allowInsecure = options.allowInsecure === true;
-    requireSecureSource(source, allowInsecure);
+    requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
     const storeUrl = deps.env["DATABASE_URL"];
     if (!options.dryRun && storeUrl !== undefined && storeUrl !== "") {
-      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure);
+      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
     }
     const setup = await deps.backfill(config, source, {
       dryRun: options.dryRun,

@@ -116,6 +116,40 @@ async function run(
   return { result, printed };
 }
 
+/**
+ * The script with every quoted identifier, literal, `$$` body and comment blanked (newlines kept):
+ * what is left is the text Postgres reads as statements, outside any quotes.
+ */
+function runnableText(script: string): string {
+  let out = "";
+  let at = 0;
+  while (at < script.length) {
+    const rest = script.slice(at);
+    const close = rest.startsWith("--")
+      ? "\n"
+      : rest.startsWith("$$")
+        ? "$$"
+        : rest.startsWith("'") || rest.startsWith('"')
+          ? rest.charAt(0)
+          : undefined;
+    if (close === undefined) {
+      out += script.charAt(at);
+      at += 1;
+      continue;
+    }
+    const quote = close === "'" || close === '"';
+    let end = script.indexOf(close, at + (close === "\n" ? 2 : close.length));
+    // A doubled quote inside a literal or an identifier is part of it.
+    while (quote && end !== -1 && script.charAt(end + 1) === close) {
+      end = script.indexOf(close, end + 2);
+    }
+    const stop = end === -1 ? script.length : close === "\n" ? end : end + close.length;
+    out += script.slice(at, stop).replaceAll(/[^\n]/g, " ");
+    at = stop;
+  }
+  return out;
+}
+
 /** The catalog as a later install must leave it: columns, triggers, functions, policies, grants. */
 async function catalog(): Promise<unknown> {
   const q = world.client.query;
@@ -445,6 +479,29 @@ describe("migrate on PGlite", () => {
     expect(status).toHaveLength(0);
   });
 
+  it("run by hand after another project claimed the table, the printed script stops at its owner check and changes nothing", async () => {
+    await listingsTable();
+    // This project prints its script (a dry run) while the table is free; the worker login exists,
+    // as on any server where FacetDB was installed before, so only the owner check can stop it.
+    await world.client.query(`create role facetdb_worker login`);
+    const { printed } = await run({ workerPassword: undefined }, { dryRun: true });
+    const script = printed[0] ?? "";
+    expect(script).toContain("set_config('facetdb.install_project', 'proj_listings', true)");
+    // Then another project installs on the same table, with the CLI.
+    const other = await run({ project: { id: "proj_other", name: "Other" } });
+    expect(other.result).toMatchObject({ ok: true, applied: true });
+    const before = await catalog();
+    await expect(world.db.exec(script)).rejects.toThrow(
+      "FacetDB: public.listings already carries FacetDB columns from another project (proj_other)",
+    );
+    // PGlite is one session: the failed script leaves its transaction open and aborted, as psql would.
+    await world.db.exec("rollback");
+    expect(await catalog()).toEqual(before);
+    expect(await world.client.query(`select id from facetdb.projects order by id`)).toEqual([
+      { id: "proj_other" },
+    ]);
+  });
+
   it("tells readers granted after the install to migrate again, in side-table mode with readers only", async () => {
     const note = "granted after this install need `facetdb migrate` again";
     await listingsTable();
@@ -469,11 +526,18 @@ describe("migrate on PGlite", () => {
     const { result, printed } = await run({ source: { table: hostile, storage: "side-table" } });
     expect(result).toMatchObject({ ok: true, applied: true });
     expect(printed[0]).toContain("granted after this install need `facetdb migrate` again");
-    // The only places the name may appear are quoted identifiers and literals, never a comment.
-    const comments = (printed[0]?.split("\n") ?? []).filter((line) => line.startsWith("--"));
+    // The only places the name may appear are quoted identifiers and literals, never a comment:
+    // with those blanked, no line of what Postgres would run starts with the injected statement,
+    // whatever the note's words are (the name's own newline puts `alter role` at the start of a
+    // line inside its quotes, which is harmless).
+    const lines = printed[0]?.split("\n") ?? [];
     expect(
-      comments.filter((line) => line.includes("alter role") || line.includes(hostile)),
+      runnableText(printed[0] ?? "")
+        .split("\n")
+        .filter((line) => line.trimStart().startsWith("alter role")),
     ).toEqual([]);
+    const comments = lines.filter((line) => line.startsWith("--"));
+    expect(comments.filter((line) => line.includes(hostile))).toEqual([]);
     expect(comments.some((line) => line.startsWith("-- Readers of the source table"))).toBe(true);
     const roles = await world.client.query(
       `select rolsuper from pg_roles where rolname = 'facetdb_worker'`,

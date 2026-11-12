@@ -130,6 +130,67 @@ describe("migrate --prune revokes the worker's select on a removed state column"
     expect(await workerSelect()).toEqual(before);
   });
 
+  it("says who must run the revoke, and refuses, changing nothing, when it took nothing back", async () => {
+    await installed();
+    // An admin who may read the table but neither owns it nor is in its owner's role: Postgres runs
+    // its revoke with a warning and takes back nothing (install.db.test.ts shows it on a server).
+    await world.client.query(`create role other_admin`);
+    await world.client.query(`grant select on public.listings to other_admin`);
+    await world.client.query(`grant usage on schema facetdb to other_admin`);
+    await world.client.query(
+      `grant select on facetdb.table_owners, facetdb.projects to other_admin`,
+    );
+    const before = await workerSelect();
+    await world.client.query(`set role other_admin`);
+    let refused: Awaited<ReturnType<typeof runPrune>>;
+    try {
+      refused = await runPrune(titleOnly);
+    } finally {
+      await world.client.query(`reset role`);
+    }
+    expect(refused.printed[0]).toContain(
+      "-- A revoke takes back only grants made by the role running it, and install's grants on the table\n-- are its owner's: run this as the table's owner or a member of its role.\nrevoke select",
+    );
+    expect(refused.result).toMatchObject({ ok: false });
+    if (!refused.result.ok) {
+      expect(refused.result.reason).toContain("the worker login still reads description");
+    }
+    expect(await workerSelect()).toEqual(before);
+    // The owner's run takes it back.
+    expect((await runPrune(titleOnly)).result).toMatchObject({ ok: true, applied: true });
+    expect(await workerSelect()).not.toContain("description");
+  });
+
+  it("lets another grantor's grant stay with a note naming it, instead of refusing every prune", async () => {
+    await installed();
+    // A DBA granted the worker the same column on its own: the owner cannot revoke that grant.
+    await world.client.query(`create role table_dba`);
+    await world.client.query(
+      `grant select (description) on public.listings to table_dba with grant option`,
+    );
+    await world.client.query(`set role table_dba`);
+    try {
+      await world.client.query(`grant select (description) on public.listings to facetdb_worker`);
+    } finally {
+      await world.client.query(`reset role`);
+    }
+    const { result } = await runPrune(titleOnly);
+    expect(result).toMatchObject({
+      ok: true,
+      applied: true,
+      notes: ["description: a grant by table_dba remains; only that role can revoke it"],
+    });
+    // Install's grant is gone; the DBA's is the one left.
+    const grantors = await world.client.query(
+      `select x.grantor::regrole::text as grantor
+         from pg_attribute a cross join lateral aclexplode(a.attacl) x
+        where a.attrelid = 'public.listings'::regclass and a.attname = 'description'
+          and x.grantee = 'facetdb_worker'::regrole`,
+    );
+    expect(grantors).toEqual([{ grantor: "table_dba" }]);
+    expect((await runPrune(both)).result).toMatchObject({ ok: true, notes: [] });
+  });
+
   it("lists the revoke in the dry run and touches nothing", async () => {
     await installed();
     const before = await workerSelect();
