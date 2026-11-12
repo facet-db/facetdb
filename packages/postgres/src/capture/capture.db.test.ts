@@ -1,3 +1,4 @@
+import { connect as connectTcp, createServer, type Socket } from "node:net";
 import type { Clock, QuestionSet, RecordKey } from "@facetdb/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ENQUEUE_ROLE, migrate, WORKER_ROLE } from "../install/index.ts";
@@ -118,7 +119,39 @@ async function until(never: string, holds: () => Promise<boolean>): Promise<void
   throw new Error(never);
 }
 
+/**
+ * What `pending` settled to, or "still waiting" once `ms` passed: a hang fails the assertion that
+ * reads it, with a name, instead of the test's own timeout.
+ */
+async function within<T>(
+  ms: number,
+  pending: Promise<T>,
+): Promise<{ value: T } | { error: unknown } | "still waiting"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      ),
+      new Promise<"still waiting">((resolve) => {
+        timer = setTimeout(() => resolve("still waiting"), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** The queued keys among `queuedKeys` another session can see, that is, committed. */
+async function committed(queuedKeys: readonly string[]): Promise<number> {
+  const rows = await admin.query(
+    `select count(*)::int as n from facetdb.jobs where record_key = any($1::text[])`,
+    [queuedKeys],
+  );
+  return Number(rows[0]?.["n"]);
+}
+
 /** A promise the test resolves by hand, to step concurrent transactions in a fixed order. */
 function gate(): { opened: Promise<void>; open(): void } {
   let open: () => void = () => undefined;
@@ -128,20 +161,77 @@ function gate(): { opened: Promise<void>; open(): void } {
   return { opened, open: () => open() };
 }
 
-/** How many sessions on the scratch database wait for a lock right now, any role. */
-async function lockWaiters(): Promise<number> {
+/** How many sessions other than the worker login's wait for a lock right now. */
+async function applicationsWaiting(): Promise<number> {
   const rows = await admin.query(
-    `select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+    `select count(*)::int as n from pg_stat_activity
+      where datname = current_database() and wait_event_type = 'Lock' and usename <> $1`,
+    [WORKER_ROLE],
   );
   return Number(rows[0]?.["n"]);
 }
 
-async function committed(queuedKeys: readonly string[]): Promise<number> {
-  const rows = await admin.query(
-    `select count(*)::int as n from facetdb.jobs where record_key = any($1::text[])`,
-    [queuedKeys],
-  );
-  return Number(rows[0]?.["n"]);
+/** The listing an application inserts; its trigger inserts and holds that record's job row. */
+const INSERT_LISTING = `insert into public.listings (id, title, body) values ($1, 'app', 'body')`;
+
+/**
+ * A TCP relay between a client and the Postgres of `target`, counting round trips: each time a
+ * connection's client speaks again after the server answered is one. Statements the client sends
+ * without waiting for an answer (a pipeline) are one round trip however many they are. It connects
+ * to the host and port `target` names, wherever that is; it listens on loopback because it runs in
+ * this process. It relays bytes only, so TLS stays end to end.
+ */
+async function roundTripRelay(target: URL): Promise<{
+  url(through: URL): string;
+  roundTrips(): number;
+  reset(): void;
+  close(): Promise<void>;
+}> {
+  let roundTrips = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = connectTcp(Number(target.port || 5432), target.hostname);
+    sockets.add(client).add(upstream);
+    let serverAnswered = true;
+    client.on("data", (data) => {
+      if (serverAnswered) {
+        roundTrips++;
+        serverAnswered = false;
+      }
+      upstream.write(data);
+    });
+    upstream.on("data", (data) => {
+      serverAnswered = true;
+      client.write(data);
+    });
+    client.on("close", () => upstream.destroy());
+    upstream.on("close", () => client.destroy());
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("the relay has no TCP address");
+  }
+  return {
+    url(through) {
+      const relayed = new URL(through.toString());
+      relayed.hostname = "127.0.0.1";
+      relayed.port = String(address.port);
+      return relayed.toString();
+    },
+    roundTrips: () => roundTrips,
+    reset: () => {
+      roundTrips = 0;
+    },
+    close: async () => {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 describe("two workers on one queue", () => {
@@ -205,7 +295,7 @@ describe("two workers on one queue", () => {
     await drainQueue();
   });
 
-  it("a page enqueue meeting a job row an application transaction holds finishes after the commit, by the one-key fallback, and never aborts the application", async () => {
+  it("a page enqueue meeting a job row an application transaction holds finishes after the commit, and never aborts the application", async () => {
     await drainQueue();
     const keys = Array.from({ length: 100 }, (_, i) => `page-${String(i).padStart(3, "0")}`);
     const held = keys[50] ?? "";
@@ -222,10 +312,10 @@ describe("two workers on one queue", () => {
       enqueued = w.enqueue(keys).then(() => {
         finished = true;
       });
-      // The batch waits on the held row, holding the 50 rows before it, until its statement
-      // timeout; rolled back, it queues key by key, and each of those 50 commits on its own while the
-      // call still waits on the held key. A batch could never show them before it finished.
-      await until("the enqueue never fell back to one key per statement", async () => {
+      // One key per statement, each its own transaction: the 50 keys before the held one commit
+      // while the statement for the held key still waits, holding nothing else. A multi-row
+      // statement could never show them before it finished.
+      await until("the keys before the held one never committed on their own", async () => {
         return (await committed(before)) === before.length;
       });
       await waitForALockWait();
@@ -244,45 +334,46 @@ describe("two workers on one queue", () => {
     await drainQueue();
   });
 
-  it("a page enqueue caught between two application transactions ends itself, never the application", async () => {
-    // Three sessions. The page is [x, w, y]. Application C holds w's job row and
-    // application A holds y's. The batch inserts x and waits on w; A then edits record x, so its
-    // trigger waits on the batch's uncommitted x, and A is now the older waiter. C commits, the
-    // batch moves on to y, held by A: a cycle in which A has waited longer. Postgres aborts the
-    // session whose deadlock check fires first. A batch bounded per wait (`lock_timeout = '1s'`,
-    // equal to the default deadlock_timeout) lost that race in every run: A got 40P01. Bounded as
-    // a whole statement to half the deadlock_timeout, the batch rolls back first and A commits.
+  it("a page enqueue caught between two application transactions delays no application and aborts none", async () => {
+    // Three sessions. The page is [x, w, y]; application C holds w's job
+    // row, application A holds y's. A multi-row insert took x and waited on w; A's edit of record
+    // x then waited on that uncommitted x; C committed and the insert met y, held by A: a cycle in
+    // which A, the older waiter, was aborted (40P01 in every run under `lock_timeout = '1s'`).
+    // One key per statement, x is committed on its own at once, so A's edit of x waits on nothing,
+    // and only the worker's statements for w and y wait, each holding nothing else.
     await drainQueue();
     const [x, w, y] = ["cycle-x", "cycle-w", "cycle-y"];
-    const page = worker("cycle-w");
+    const page = worker("cycle-page");
     const appA = connectPostgres(scratch.url);
     const appC = connectPostgres(scratch.url);
     try {
       const aMayTouchX = gate();
+      const aTouchedX = gate();
       const cMayCommit = gate();
       const aHoldsY = gate();
       const cHoldsW = gate();
-      const insertListing = `insert into public.listings (id, title, body) values ($1, 'app', 'body')`;
       const cDone = appC.transaction(async (query) => {
-        await query(insertListing, [w]);
+        await query(INSERT_LISTING, [w]);
         cHoldsW.open();
         await cMayCommit.opened;
       });
       const aDone = appA.transaction(async (query) => {
-        await query(insertListing, [y]);
+        await query(INSERT_LISTING, [y]);
         aHoldsY.open();
         await aMayTouchX.opened;
-        await query(insertListing, [x]);
+        await query(INSERT_LISTING, [x]);
+        aTouchedX.open();
       });
       await Promise.all([aHoldsY.opened, cHoldsW.opened]);
       const enqueued = page.enqueue([x, w, y]);
-      await waitForALockWait(); // the batch inserted x and waits on C's w
-      aMayTouchX.open();
-      await until("the application never waited on the batch's x", async () => {
-        return (await lockWaiters()) >= 2;
+      await waitForALockWait(); // the worker's statement for w waits on C
+      await until("the worker's statement for x never committed", async () => {
+        return (await committed([`t:15:public.listings:${x}`])) === 1;
       });
-      // Let A's wait be clearly the older one before the batch begins its wait on y.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      aMayTouchX.open();
+      // A edits x and goes on while C is still open: the enqueue holds nothing A waits for.
+      await aTouchedX.opened;
+      expect(await applicationsWaiting()).toBe(0);
       cMayCommit.open();
       const [a, c] = await Promise.allSettled([aDone, cDone]);
       expect(a).toEqual({ status: "fulfilled", value: undefined });
@@ -300,6 +391,179 @@ describe("two workers on one queue", () => {
     }
     await drainQueue();
   });
+
+  it("a page enqueue joining a chain of application waits closes no cycle: both applications commit", async () => {
+    // A second cycle: application C holds w's job row and then waits on application A
+    // for an ordinary row lock of its own; the enqueue of [x, w] starts while C waits. A multi-row
+    // insert took x and waited on C's w; A's edit of record x waited on that uncommitted x: a cycle
+    // A -> enqueue -> C -> A, in which C had waited longest, so C's deadlock check fired first and
+    // C was aborted, whatever timeout bounded the insert. One key per statement, x commits on its
+    // own and the statement for w waits holding nothing: the waits form a chain, not a cycle.
+    await drainQueue();
+    const [x, w, lockRow] = ["chain-x", "chain-w", "chain-lock"];
+    await admin.query(`insert into public.listings (id, title, body) values ($1, 'free', 'body')`, [
+      lockRow,
+    ]);
+    const page = worker("chain-page");
+    const appA = connectPostgres(scratch.url);
+    const appC = connectPostgres(scratch.url);
+    try {
+      const aHoldsLockRow = gate();
+      const aMayTouchX = gate();
+      const cHoldsW = gate();
+      const aDone = appA.transaction(async (query) => {
+        await query(`update public.listings set title = 'A' where id = $1`, [lockRow]);
+        aHoldsLockRow.open();
+        await aMayTouchX.opened;
+        await query(INSERT_LISTING, [x]);
+      });
+      await aHoldsLockRow.opened;
+      const cDone = appC.transaction(async (query) => {
+        await query(INSERT_LISTING, [w]);
+        cHoldsW.open();
+        await query(`update public.listings set title = 'C' where id = $1`, [lockRow]);
+      });
+      await cHoldsW.opened;
+      await until("application C never waited on application A", async () => {
+        return (await applicationsWaiting()) === 1;
+      });
+      const enqueued = page.enqueue([x, w]);
+      await waitForALockWait(); // the worker's statement for w waits on C, which waits on A
+      aMayTouchX.open();
+      const [a, c] = await Promise.allSettled([aDone, cDone]);
+      expect(a).toEqual({ status: "fulfilled", value: undefined });
+      expect(c).toEqual({ status: "fulfilled", value: undefined });
+      await enqueued;
+      expect(await committed([x, w].map((key) => `t:15:public.listings:${key}`))).toBe(2);
+      // Both applications' writes stand, in the order their locks allowed: A, then C.
+      expect(
+        await admin.query(
+          `select id, title from public.listings where id = any($1::text[]) order by 1`,
+          [[x, w, lockRow]],
+        ),
+      ).toEqual([
+        { id: lockRow, title: "C" },
+        { id: w, title: "app" },
+        { id: x, title: "app" },
+      ]);
+    } finally {
+      await appA.close();
+      await appC.close();
+    }
+    await drainQueue();
+  });
+
+  it("a page enqueue is pipelined: 200 keys cost a few round trips, where one statement awaited per key costs one each", async () => {
+    await drainQueue();
+    const relay = await roundTripRelay(new URL(scratch.url));
+    try {
+      const page = createPostgresConnector({
+        workerUrl: relay.url(new URL(scratch.as(WORKER_ROLE, PASSWORD))),
+        source: { table: "listings", key: "id" },
+        questionSet,
+        clock: realClock,
+        pollMs: POLL_MS,
+        workerId: "pipeline",
+      });
+      open.push(page);
+      const keys = (prefix: string, count: number) =>
+        Array.from({ length: count }, (_, i) => `${prefix}-${String(i).padStart(3, "0")}`);
+      // Warm up: the connection opens, logs in and learns the statement (described once).
+      await page.enqueue(keys("warm", 300));
+      relay.reset();
+      await page.enqueue(keys("pipe", 200));
+      const pipelined = relay.roundTrips();
+      relay.reset();
+      for (const key of keys("one", 20)) {
+        await page.enqueue([key]);
+      }
+      const oneByOne = relay.roundTrips();
+      // The counter counts round trips: 20 statements awaited one by one are 20 of them.
+      expect(oneByOne).toBeGreaterThanOrEqual(20);
+      // 200 statements as one pipeline: the first alone, then bursts of 100 and 99 on one
+      // connection, three round trips at best (a burst's tail can reach the server after its first
+      // answers, and a loaded machine splits writes). Before the pipeline named its statement,
+      // postgres.js described every run first: 400, two per key; a burst wider than postgres.js's
+      // 100 in flight streamed one run per answer: 101.
+      expect(pipelined).toBeLessThanOrEqual(8);
+      expect(await committed(keys("pipe", 200).map((key) => `t:15:public.listings:${key}`))).toBe(
+        200,
+      );
+    } finally {
+      await relay.close();
+    }
+    await drainQueue();
+  });
+
+  it.each(["cold", "warm"] as const)(
+    "a pipeline whose connection is ended mid-way (%s) rejects at once, and the next statement gets a fresh connection",
+    async (state) => {
+      // The reserved connection's backend is found by its application_name and ended with
+      // pg_terminate_backend while a run of the pipeline waits on a job row an application holds:
+      // cold, the run sent alone first on a connection that never described the statement; warm,
+      // a run in the second burst of a connection that has. Nothing may be left unsettled (the call
+      // would hang), and the dead connection must not go back to the pool (the next statement
+      // would be written to a socket that is gone).
+      await drainQueue();
+      const name = `facetdb-pipe-${state}`;
+      const url = new URL(scratch.as(WORKER_ROLE, PASSWORD));
+      url.searchParams.set("application_name", name);
+      const page = createPostgresConnector({
+        workerUrl: url.toString(),
+        source: { table: "listings", key: "id" },
+        questionSet,
+        clock: realClock,
+        pollMs: POLL_MS,
+        workerId: name,
+      });
+      open.push(page);
+      if (state === "warm") {
+        await page.enqueue([`${state}-warm-up`, `${state}-warm-up-2`]);
+      }
+      const keys = Array.from({ length: 150 }, (_, i) => `${state}-${String(i).padStart(3, "0")}`);
+      const held = (state === "cold" ? keys[0] : keys[120]) ?? "";
+      const app = connectPostgres(scratch.url);
+      try {
+        const holds = gate();
+        const mayCommit = gate();
+        const appDone = app.transaction(async (query) => {
+          await query(INSERT_LISTING, [held]);
+          holds.open();
+          await mayCommit.opened;
+        });
+        await holds.opened;
+        const enqueued = page.enqueue(keys);
+        let pid: unknown;
+        await until("the pipeline never waited on the held key", async () => {
+          const rows = await admin.query(
+            `select pid from pg_stat_activity where application_name = $1 and wait_event_type = 'Lock'`,
+            [name],
+          );
+          pid = rows[0]?.["pid"];
+          return pid !== undefined;
+        });
+        await admin.query(`select pg_terminate_backend($1)`, [pid]);
+        const outcome = await within(5000, enqueued);
+        expect(outcome).not.toBe("still waiting");
+        expect(outcome).not.toHaveProperty("value");
+        // A FATAL ends the session without a ReadyForQuery: postgres.js reports the closed socket.
+        expect(String((outcome as { error: unknown }).error)).toMatch(
+          /terminating connection|CONNECTION_/,
+        );
+        mayCommit.open();
+        await appDone;
+        // The same client, a fresh connection: a pipeline and a plain statement both go through.
+        await page.enqueue([`${state}-after`]);
+        expect(await committed([`t:15:public.listings:${state}-after`])).toBe(1);
+        expect((await page.read([held])).rows.map((row) => row.key)).toEqual([held]);
+        // The dead connection is never reused; closing must not wait for it forever.
+        expect(await within(10_000, page.close())).toEqual({ value: undefined });
+      } finally {
+        await app.close();
+      }
+      await drainQueue();
+    },
+  );
 
   it("@timing LISTEN across connections wakes a watch long before its poll", async () => {
     await drainQueue();

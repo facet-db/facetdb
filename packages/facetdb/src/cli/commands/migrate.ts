@@ -65,7 +65,7 @@ async function workerRoleExists(deps: CliDeps, url: string): Promise<boolean> {
  */
 function workerPassword(target: TableTarget): string {
   const variable = target.source.databaseEnv ?? "DATABASE_URL";
-  const fix = `set ${variable} to postgres://${WORKER_ROLE}:<a long random password>@<host>/<database> (or postgres://${WORKER_ROLE}.<suffix>:… when a connection pooler such as the Supabase session pooler asks for a suffixed user); migrate creates that login with that password, and the worker connects with it`;
+  const fix = `set ${variable} to postgres://${WORKER_ROLE}:<a long random password>@<host>/<database> (or postgres://${WORKER_ROLE}.<suffix>:… when a connection pooler such as the Supabase session pooler asks for a suffixed user); migrate creates that login with that password, and the worker connects with it, directly or through a session pooler (Supabase: port 5432), not a transaction pooler (6543), because it queues records with named prepared statements`;
   if (target.source.database === undefined) {
     throw new CliError(
       "worker-login",

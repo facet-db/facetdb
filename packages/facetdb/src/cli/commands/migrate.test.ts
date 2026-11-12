@@ -92,6 +92,10 @@ function recordingConnect(onConnect?: (index: number) => Promise<void>): {
           }),
         );
       },
+      pipeline: async (text, paramSets) => {
+        await ready;
+        return world.client.pipeline(text, paramSets);
+      },
       close: () => Promise.resolve(),
     };
   };

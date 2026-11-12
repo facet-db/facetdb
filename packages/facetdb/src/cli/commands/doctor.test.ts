@@ -122,6 +122,10 @@ function asWorker(role: string | null = WORKER_ROLE): SqlConnect {
         await enter();
         return world.client.transaction(work);
       },
+      pipeline: async (text, paramSets) => {
+        await enter();
+        return world.client.pipeline(text, paramSets);
+      },
       close: async () => {
         await world.client.query("reset role");
       },

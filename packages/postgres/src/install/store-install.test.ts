@@ -98,6 +98,10 @@ function recording(world: PgliteWorld): { connect: SqlConnect; statements: strin
           return query(text, params);
         }),
       ),
+    pipeline: (text, paramSets) => {
+      statements.push(text);
+      return world.client.pipeline(text, paramSets);
+    },
     close: async () => undefined,
   };
   return { connect: () => client, statements };

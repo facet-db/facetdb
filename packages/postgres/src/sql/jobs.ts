@@ -51,12 +51,11 @@ export function jobsTableSql(): string[] {
  */
 export const jobsQueries = {
   /**
-   * `$1` keys (text[]). Keys already queued stay one entry. With several keys the insert can wait
-   * on a job row an open application transaction inserted, holding the rows it inserted already:
-   * `enqueueJobs` runs it under a statement timeout with a fallback to one key per statement.
+   * `$1` key. Queues one key; a key already queued stays one entry. One row by design: it may wait
+   * on the job row an open application transaction inserted, and holds nothing while it waits
+   * (`enqueueJobs` pipelines many of these rather than insert several rows in one statement).
    */
-  enqueue: `insert into ${JOBS_TABLE} (record_key)
-select key from unnest($1::text[]) as key
+  enqueue: `insert into ${JOBS_TABLE} (record_key) values ($1::text)
 on conflict (record_key) do nothing`,
 
   /**
@@ -197,17 +196,19 @@ export function createClaimLedger(query: SqlQuery, workerId: string): ClaimLedge
     one: string,
     queuedKeys: readonly string[],
   ): Promise<void> => {
-    // The oldest times of each key, read but kept until the batch statement returns: a statement
-    // that throws leaves the ledger whole, so a later settle still names those claims. Settles of
-    // one key never overlap (a worker awaits each batch's settle).
+    // Each key's oldest time leaves the ledger before the statement runs: nothing
+    // retries a settle that threw, and a time kept after one would stay at the head of the key's
+    // list and pair every later settle of that key with the claim before it. A claim whose settle
+    // threw is given back by its lease instead.
     const claims: (readonly [key: string, atMs: number])[] = [];
-    const taken = new Map<string, number>();
     for (const key of queuedKeys) {
-      const index = taken.get(key) ?? 0;
-      const atMs = times.get(key)?.[index];
+      const pending = times.get(key);
+      const atMs = pending?.shift();
+      if (pending?.length === 0) {
+        times.delete(key);
+      }
       if (atMs !== undefined) {
         claims.push([key, atMs]);
-        taken.set(key, index + 1);
       }
     }
     if (claims.length === 0) {
@@ -218,14 +219,6 @@ export function createClaimLedger(query: SqlQuery, workerId: string): ClaimLedge
       claims.map(([key]) => key),
       claims.map(([, atMs]) => atMs),
     ]);
-    for (const [key, count] of taken) {
-      const remaining = times.get(key)?.slice(count) ?? [];
-      if (remaining.length === 0) {
-        times.delete(key);
-      } else {
-        times.set(key, remaining);
-      }
-    }
     const settled = new Set(rows.map((row: SqlRow) => row["record_key"]));
     for (const [key, atMs] of claims) {
       if (!settled.has(key)) {
@@ -244,75 +237,33 @@ export function createClaimLedger(query: SqlQuery, workerId: string): ClaimLedge
   };
 }
 
-/** Keys per `enqueue` statement: a backfill page fits in one, and no statement grows unbounded. */
-export const ENQUEUE_KEYS_PER_STATEMENT = 500;
-
 /**
- * Bounds the next statement of the transaction (`set local`) to half the server's
- * `deadlock_timeout`, read at run time (`pg_settings` gives it in milliseconds), never less than
- * 1 ms. Why half, and why the whole statement rather than one lock wait: see `enqueueJobs`.
- */
-export const ENQUEUE_STATEMENT_TIMEOUT_SQL = `select set_config('statement_timeout', greatest(1, setting::int / 2)::text, true)
-  from pg_settings where name = 'deadlock_timeout'`;
-
-/**
- * Queues keys, `ENQUEUE_KEYS_PER_STATEMENT` per statement. A multi-row `insert … on conflict do
- * nothing` waits on a job row an open application transaction inserted (its trigger's insert),
- * holding the rows it inserted already, and `skip locked` cannot help an insert. An application
- * that then touches one of those rows waits on the batch: a cycle, and Postgres aborts the session
- * whose deadlock check fires first, which is the one that has waited `deadlock_timeout` first.
+ * Queues keys: one `enqueue` statement per key, each its own implicit transaction, sent as one
+ * pipeline (`SqlClient.pipeline`), so a page costs a few round trips, not one or two per key: on
+ * postgres.js the first key alone, then bursts of 100, about six round trips for a 500-key page on
+ * a warm connection, seven on a cold one, whose first run is described first.
  *
- * The invariant: the batch ends itself before any session that waits on it can run that check.
- * Every wait on the batch's rows begins after the batch statement began, since the transaction
- * holds no job row before it; the statement is cancelled `deadlock_timeout / 2` after it began
- * (`statement_timeout`, SQLSTATE 57014), so it rolls back and lets go of its rows at least half a
- * `deadlock_timeout` before the earliest check of another session can fire. A per-wait bound
- * (`lock_timeout`) cannot promise this: the application may have begun waiting on the batch
- * before the batch began the wait that closes the cycle (reproduced on a real Postgres). This
- * holds for sessions under the server's `deadlock_timeout`; a role given a shorter one of its own
- * by a superuser is outside it.
+ * Why not several rows in one statement: a multi-row insert waits on a job row an open application
+ * transaction inserted (its trigger's insert) while it holds the rows it inserted already, and
+ * `skip locked` cannot help an insert. An application that then touches one of those rows closes a
+ * cycle, possibly through other application transactions waiting on each other, and Postgres
+ * aborts whichever session's deadlock check fires first, which can be the application's. No
+ * timeout on the batch prevents that; it only narrows the window (real-Postgres cases reproduced
+ * both a `lock_timeout` and a `statement_timeout` of half the `deadlock_timeout` losing). A
+ * one-row statement holds nothing while it waits, so it can never be part of a cycle.
  *
- * On that cancel the chunk is queued one key per statement, each of which waits holding nothing
- * else. A single key needs no transaction. A chunk the server is too slow to insert within the
- * bound, with no wait at all, takes the same fallback: slower, never wrong.
+ * The pipeline answers whole before the call returns or reports a failure, so it never returns
+ * while a statement it sent is still running.
  */
-export async function enqueueJobs(client: SqlClient, queuedKeys: readonly string[]): Promise<void> {
+export async function enqueueJobs(
+  client: Pick<SqlClient, "pipeline">,
+  queuedKeys: readonly string[],
+): Promise<void> {
   const keys = [...new Set(queuedKeys)];
-  for (let start = 0; start < keys.length; start += ENQUEUE_KEYS_PER_STATEMENT) {
-    const chunk = keys.slice(start, start + ENQUEUE_KEYS_PER_STATEMENT);
-    if (chunk.length === 1) {
-      await client.query(jobsQueries.enqueue, [chunk]);
-      continue;
-    }
-    try {
-      await client.transaction(async (query) => {
-        await query(ENQUEUE_STATEMENT_TIMEOUT_SQL);
-        await query(jobsQueries.enqueue, [chunk]);
-      });
-    } catch (error) {
-      if (!gaveUpWaiting(error)) {
-        throw error;
-      }
-      for (const key of chunk) {
-        await client.query(jobsQueries.enqueue, [[key]]);
-      }
-    }
+  if (keys.length > 0) {
+    await client.pipeline(
+      jobsQueries.enqueue,
+      keys.map((key) => [key]),
+    );
   }
-}
-
-/**
- * The SQLSTATEs that mean the batch's own transaction ended because it waited on another:
- * `query_canceled` (the statement timeout above, the expected one), `lock_not_available` (a
- * `lock_timeout` the worker login may carry from its role) and `deadlock_detected` (the batch's own
- * deadlock check; it cannot fire first under the bound, but if it does, it is still the batch that
- * ended, not the application).
- */
-const GAVE_UP_WAITING = new Set(["57014", "55P03", "40P01"]);
-
-/** The driver's error (a boundary): did the batch end because it waited on another transaction? */
-function gaveUpWaiting(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return false;
-  }
-  return typeof error.code === "string" && GAVE_UP_WAITING.has(error.code);
 }

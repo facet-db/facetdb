@@ -10,12 +10,7 @@ import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
 import type { StorageMode } from "../scan/index.ts";
-import {
-  CLAIM_LEASE_MS,
-  ENQUEUE_STATEMENT_TIMEOUT_SQL,
-  jobsQueries,
-  type SqlClient,
-} from "../sql/index.ts";
+import { CLAIM_LEASE_MS, jobsQueries, type SqlClient } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { createPostgresConnector, type Installer, type PostgresConnector } from "./connector.ts";
 import { stateHashSql } from "./hash-sql.ts";
@@ -230,6 +225,11 @@ function recordingConnector(world: World): {
       statements.push(text);
       return inner.query(text, params);
     },
+    pipeline: (text, paramSets) => {
+      statements.push(`pipeline of ${paramSets.length} one-key runs: ${text}`);
+      expect(paramSets.every((params) => params.length === 1)).toBe(true);
+      return inner.pipeline(text, paramSets);
+    },
     transaction: (work) =>
       inner.transaction((query) =>
         work((text, params) => {
@@ -438,18 +438,16 @@ describe("postgres connector", () => {
     expect(await world.queued()).toEqual([]);
   });
 
-  it("an enqueue of 60 keys is one statement", async () => {
+  it("an enqueue of 60 keys is one pipeline of 60 one-key statements", async () => {
     const world = await newWorld();
     const { connector, statements } = recordingConnector(world);
     await connector.install();
     const keys = Array.from({ length: 60 }, (_, i) => `page-${String(i).padStart(2, "0")}`);
     statements.length = 0;
     await connector.enqueue(keys);
-    // The statement runs in its own transaction, after the statement timeout it runs under.
-    expect(statements).toEqual([
-      `in transaction: ${ENQUEUE_STATEMENT_TIMEOUT_SQL}`,
-      `in transaction: ${jobsQueries.enqueue}`,
-    ]);
+    // No transaction and no other statement: on postgres.js the pipeline is a few round trips for
+    // the lot (capture.db.test.ts counts them through a relay).
+    expect(statements).toEqual([`pipeline of 60 one-key runs: ${jobsQueries.enqueue}`]);
     expect(await world.queued()).toEqual(keys.map((key) => `t:15:public.listings:${key}`));
   });
 

@@ -335,8 +335,8 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     read,
     write,
     scan,
-    // A batch per statement, under a statement timeout with a fallback to one key per statement
-    // (`enqueueJobs`): an application transaction may hold one of these job rows.
+    // One key per statement, pipelined (`enqueueJobs`): an application transaction may hold one
+    // of these job rows, and a statement that waits on it must hold no other.
     enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
     async claim(limit) {
       if (limit < 1) {

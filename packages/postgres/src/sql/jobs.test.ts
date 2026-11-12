@@ -4,8 +4,6 @@ import type { SqlClient, SqlQuery } from "./client.ts";
 import {
   CLAIM_LEASE_MS,
   createClaimLedger,
-  ENQUEUE_KEYS_PER_STATEMENT,
-  ENQUEUE_STATEMENT_TIMEOUT_SQL,
   enqueueJobs,
   jobsQueries,
   jobsTableSql,
@@ -57,7 +55,7 @@ describe("ack and release", () => {
 
   it("a batch ack takes the claims that stand and leaves a key granted again since", async () => {
     const w = await queue();
-    await w.client.query(jobsQueries.enqueue, [["a", "k"]]);
+    await put(w, "a", "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     await w.client.query(
       `update facetdb.jobs set claimed_at = to_timestamp($1::double precision / 1000) where record_key = 'k'`,
@@ -75,7 +73,7 @@ describe("ack and release", () => {
 
   it("a batch release gives back the claims that stand and leaves a new claim alone", async () => {
     const w = await queue();
-    await w.client.query(jobsQueries.enqueue, [["a", "k"]]);
+    await put(w, "a", "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     await w.client.query(
       `update facetdb.jobs set claimed_at = to_timestamp($1::double precision / 1000) where record_key = 'k'`,
@@ -89,7 +87,7 @@ describe("ack and release", () => {
 
   it("an ack with the time of an earlier claim deletes nothing", async () => {
     const w = await queue();
-    await w.client.query(jobsQueries.enqueue, [["k"]]);
+    await put(w, "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T2, CLAIM_LEASE_MS]);
     await w.client.query(jobsQueries.ack, ["w1", "k", T1]);
@@ -102,7 +100,7 @@ describe("ack and release", () => {
 
   it("a release with the time of an earlier claim leaves the new claim alone", async () => {
     const w = await queue();
-    await w.client.query(jobsQueries.enqueue, [["k"]]);
+    await put(w, "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T2, CLAIM_LEASE_MS]);
     await w.client.query(jobsQueries.release, ["w1", "k", T1]);
@@ -117,7 +115,7 @@ describe("the claim ledger", () => {
     const w = await queue();
     const statements: unknown[][] = [];
     const ledger = createClaimLedger(recording(w.client.query, statements), "w1");
-    await w.client.query(jobsQueries.enqueue, [["a", "b"]]);
+    await put(w, "a", "b");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     ledger.held(["a", "b"], T1);
     await ledger.ack(["a", "b", "never-claimed"]);
@@ -134,7 +132,7 @@ describe("the claim ledger", () => {
     const w = await queue();
     const statements: unknown[][] = [];
     const ledger = createClaimLedger(recording(w.client.query, statements), "w1");
-    await w.client.query(jobsQueries.enqueue, [["a", "k"]]);
+    await put(w, "a", "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     ledger.held(["a", "k"], T1);
     // `k` is granted again before the first batch settles: the batch and the one-key release both
@@ -155,7 +153,7 @@ describe("the claim ledger", () => {
     expect(await claimedBy(w, "k")).toBe("gone");
   });
 
-  it("keeps the claims of a batch whose statement threw, so a later settle still names them", async () => {
+  it("forgets the claims of a settle that threw, so the next batch's settle names its own claim", async () => {
     const w = await queue();
     let failNext = true;
     const statements: unknown[][] = [];
@@ -167,24 +165,27 @@ describe("the claim ledger", () => {
       }
       return w.client.query(text, params);
     }, "w1");
-    await w.client.query(jobsQueries.enqueue, [["a", "b"]]);
+    await put(w, "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
-    ledger.held(["a", "b"], T1);
-    await expect(ledger.ack(["a", "b"])).rejects.toThrow(/connection lost/);
-    expect(await claimedBy(w, "a")).toBe("w1");
-    await ledger.ack(["a", "b"]);
+    ledger.held(["k"], T1);
+    await expect(ledger.ack(["k"])).rejects.toThrow(/connection lost/);
+    // Nothing retries that settle; the lease gives the job back and a second batch takes it. Its
+    // settle must name T2: a T1 kept at the head would pair it with the dead claim, and the job
+    // would stay claimed until another lease ran out.
+    await w.client.query(jobsQueries.claim, ["", "w1", 10, T2, CLAIM_LEASE_MS]);
+    ledger.held(["k"], T2);
+    await ledger.ack(["k"]);
     expect(statements).toEqual([
-      [jobsQueries.ackBatch, "w1", ["a", "b"], [T1, T1]],
-      [jobsQueries.ackBatch, "w1", ["a", "b"], [T1, T1]],
+      [jobsQueries.ackBatch, "w1", ["k"], [T1]],
+      [jobsQueries.ackBatch, "w1", ["k"], [T2]],
     ]);
-    expect(await claimedBy(w, "a")).toBe("gone");
-    expect(await claimedBy(w, "b")).toBe("gone");
+    expect(await claimedBy(w, "k")).toBe("gone");
   });
 
   it("settles the oldest claim of a key first, so a stale settle changes nothing", async () => {
     const w = await queue();
     const ledger = createClaimLedger(w.client.query, "w1");
-    await w.client.query(jobsQueries.enqueue, [["k"]]);
+    await put(w, "k");
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T1, CLAIM_LEASE_MS]);
     ledger.held(["k"], T1);
     await w.client.query(jobsQueries.claim, ["", "w1", 10, T2, CLAIM_LEASE_MS]);
@@ -196,6 +197,13 @@ describe("the claim ledger", () => {
   });
 });
 
+/** Queues `keys` as setup, one statement each. */
+async function put(w: PgliteWorld, ...keys: string[]): Promise<void> {
+  for (const key of keys) {
+    await w.client.query(jobsQueries.enqueue, [key]);
+  }
+}
+
 /** A query that records each statement with its parameters before running it. */
 function recording(query: SqlQuery, statements: unknown[][]): SqlQuery {
   return (text, params = []) => {
@@ -204,134 +212,76 @@ function recording(query: SqlQuery, statements: unknown[][]): SqlQuery {
   };
 }
 
-/**
- * A client over PGlite that records what runs outside a transaction and what runs inside each one.
- * `failInside` makes a statement inside a transaction fail as the driver would, so the transaction
- * rolls back on the real engine.
- */
-function recordingClient(
-  inner: SqlClient,
-  failInside?: (text: string) => Error | undefined,
-): { client: SqlClient; outside: unknown[][]; transactions: unknown[][][] } {
-  const outside: unknown[][] = [];
-  const transactions: unknown[][][] = [];
-  const client: SqlClient = {
-    ...inner,
-    query: recording(inner.query, outside),
-    transaction: (work) => {
-      const statements: unknown[][] = [];
-      transactions.push(statements);
-      return inner.transaction((query) =>
-        work(async (text, params = []) => {
-          statements.push([text, ...params]);
-          const failure = failInside?.(text);
-          if (failure !== undefined) {
-            throw failure;
-          }
-          return query(text, params);
-        }),
-      );
-    },
-  };
-  return { client, outside, transactions };
-}
-
-const sqlError = (code: string, message: string): Error =>
-  Object.assign(new Error(message), { code });
-
 async function queuedKeys(w: PgliteWorld): Promise<string[]> {
   const rows = await w.client.query(`select record_key from facetdb.jobs order by 1`);
   return rows.map((row) => String(row["record_key"]));
 }
 
-const TIMEOUT = ENQUEUE_STATEMENT_TIMEOUT_SQL;
+/** A client over PGlite that records each pipeline it is handed: the text and its parameter sets. */
+function recordingPipelines(
+  w: PgliteWorld,
+  fail?: Error,
+): { client: Pick<SqlClient, "pipeline">; pipelines: [string, unknown[][]][] } {
+  const pipelines: [string, unknown[][]][] = [];
+  return {
+    pipelines,
+    client: {
+      pipeline: (text, paramSets) => {
+        pipelines.push([text, paramSets.map((params) => [...params])]);
+        return fail === undefined ? w.client.pipeline(text, paramSets) : Promise.reject(fail);
+      },
+    },
+  };
+}
 
 describe("enqueueJobs", () => {
   const keys = (count: number): string[] =>
     Array.from({ length: count }, (_, i) => `k${String(i).padStart(4, "0")}`);
 
-  it("bounds the batch statement to half the server's deadlock_timeout, for that transaction only", async () => {
+  it("sends a page as one pipeline of one-key statements, each key once", async () => {
     const w = await queue();
-    const seen = await w.client.transaction(async (query) => {
-      await query(`set local deadlock_timeout = '300ms'`);
-      await query(ENQUEUE_STATEMENT_TIMEOUT_SQL);
-      return query(`select current_setting('statement_timeout') as t`);
-    });
-    expect(seen).toEqual([{ t: "150ms" }]);
-    expect(await w.client.query(`select current_setting('statement_timeout') as t`)).toEqual([
-      { t: "0" },
-    ]);
-  });
-
-  it(`queues ${ENQUEUE_KEYS_PER_STATEMENT} keys per statement, each chunk in a transaction under a statement timeout`, async () => {
-    const w = await queue();
-    const { client, outside, transactions } = recordingClient(w.client);
-    const wanted = keys(1200);
+    const { client, pipelines } = recordingPipelines(w);
+    // The client bursts it (100 at a time on postgres.js); a duplicate is sent once.
+    const wanted = keys(250);
     await enqueueJobs(client, [...wanted, ...wanted.slice(0, 10)]);
-    expect(outside).toEqual([]);
-    expect(transactions).toEqual([
-      [[TIMEOUT], [jobsQueries.enqueue, wanted.slice(0, 500)]],
-      [[TIMEOUT], [jobsQueries.enqueue, wanted.slice(500, 1000)]],
-      [[TIMEOUT], [jobsQueries.enqueue, wanted.slice(1000)]],
-    ]);
+    expect(pipelines).toEqual([[jobsQueries.enqueue, wanted.map((key) => [key])]]);
     expect(await queuedKeys(w)).toEqual(wanted);
   });
 
-  it("queues a single key in one statement, with no transaction", async () => {
+  it("sends nothing for no keys", async () => {
     const w = await queue();
-    const { client, outside, transactions } = recordingClient(w.client);
-    await enqueueJobs(client, ["only"]);
-    expect(outside).toEqual([[jobsQueries.enqueue, ["only"]]]);
-    expect(transactions).toEqual([]);
-    expect(await queuedKeys(w)).toEqual(["only"]);
+    const { client, pipelines } = recordingPipelines(w);
+    await enqueueJobs(client, []);
+    expect(pipelines).toEqual([]);
   });
 
-  // The fake failure is thrown before the insert reaches PGlite, so these cases prove the path
-  // taken after a cancel, not the rollback itself: a real lock wait, its cancel and the rollback are
-  // capture.db.test.ts ("a page enqueue meeting a job row…", "…caught between two application
-  // transactions…"), where the keys before the held one show up only once the fallback commits them.
-  it("queues the chunk one key per statement when its statement was cancelled by the timeout", async () => {
+  it("queues a key already queued as one entry", async () => {
     const w = await queue();
-    const { client, outside, transactions } = recordingClient(w.client, (text) =>
-      text === jobsQueries.enqueue
-        ? sqlError("57014", "canceling statement due to statement timeout")
-        : undefined,
-    );
-    await enqueueJobs(client, ["a", "b", "c"]);
-    expect(transactions).toEqual([[[TIMEOUT], [jobsQueries.enqueue, ["a", "b", "c"]]]]);
-    expect(outside).toEqual([
-      [jobsQueries.enqueue, ["a"]],
-      [jobsQueries.enqueue, ["b"]],
-      [jobsQueries.enqueue, ["c"]],
-    ]);
-    expect(await queuedKeys(w)).toEqual(["a", "b", "c"]);
+    await put(w, "a");
+    await enqueueJobs(w.client, ["a", "b"]);
+    expect(await queuedKeys(w)).toEqual(["a", "b"]);
   });
 
-  it.each([
-    ["55P03", "canceling statement due to lock timeout"],
-    ["40P01", "deadlock detected"],
-  ])(
-    "falls back the same way on %s, its own transaction ended by a wait",
-    async (code, message) => {
-      const w = await queue();
-      const { client, outside } = recordingClient(w.client, (text) =>
-        text === jobsQueries.enqueue ? sqlError(code, message) : undefined,
-      );
-      await enqueueJobs(client, ["a", "b"]);
-      expect(outside).toHaveLength(2);
-      expect(await queuedKeys(w)).toEqual(["a", "b"]);
-    },
-  );
-
-  it("passes any other failure on, queuing nothing", async () => {
+  it("passes a failed pipeline on", async () => {
     const w = await queue();
-    const { client, outside } = recordingClient(w.client, (text) =>
-      text === jobsQueries.enqueue
-        ? sqlError("42501", "permission denied for table jobs")
-        : undefined,
-    );
-    await expect(enqueueJobs(client, ["a", "b"])).rejects.toThrow(/permission denied/);
-    expect(outside).toEqual([]);
-    expect(await queuedKeys(w)).toEqual([]);
+    const { client } = recordingPipelines(w, new Error("permission denied"));
+    await expect(enqueueJobs(client, keys(3))).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe("a pipeline on PGlite", () => {
+  it("runs each parameter set as its own statement, in order, and stops at the first failure", async () => {
+    const w = await queue();
+    await put(w, "b");
+    // No `on conflict`: the set for b fails on the primary key; a committed on its own before it,
+    // and c, after the failure, is never run (each run is its own burst on one connection).
+    await expect(
+      w.client.pipeline(`insert into facetdb.jobs (record_key) values ($1::text)`, [
+        ["a"],
+        ["b"],
+        ["c"],
+      ]),
+    ).rejects.toThrow(/duplicate key/);
+    expect(await queuedKeys(w)).toEqual(["a", "b"]);
   });
 });

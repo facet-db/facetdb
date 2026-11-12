@@ -182,6 +182,7 @@ describe("the worker login on a real Postgres", () => {
     const recording: SqlClient = {
       query: record(base.query),
       transaction: (work) => base.transaction((query) => work(record(query))),
+      pipeline: (text, paramSets) => base.pipeline(text, paramSets),
       close: () => base.close(),
     };
     const store = await createStore({

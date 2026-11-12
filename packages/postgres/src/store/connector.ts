@@ -290,8 +290,8 @@ export function createStoreConnector(
     scan,
     upsertRecord,
     getRecord,
-    // The same batches as the customer's database: `upsertRecord` holds a job row in its
-    // transaction while it writes that record.
+    // One key per statement, pipelined, as on the customer's database: `upsertRecord` holds a job
+    // row in its transaction while it writes that record.
     enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
     async claim(limit) {
       if (limit < 1) {

@@ -419,6 +419,7 @@ describe("migrate on PGlite", () => {
         );
         return world.client.transaction(work);
       },
+      pipeline: world.client.pipeline,
       close: async () => undefined,
     });
     const { result } = await run({ workerPassword: undefined }, { connect: racing });
@@ -503,6 +504,7 @@ describe("migrate on PGlite", () => {
           transaction: fail
             ? () => Promise.reject(new Error("the server went away"))
             : (work) => inner.transaction(work),
+          pipeline: inner.pipeline,
           close: async () => {
             closes.push(label);
           },

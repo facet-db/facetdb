@@ -10,8 +10,6 @@ export {
   CLAIM_LEASE_MS,
   type ClaimLedger,
   createClaimLedger,
-  ENQUEUE_KEYS_PER_STATEMENT,
-  ENQUEUE_STATEMENT_TIMEOUT_SQL,
   enqueueJobs,
   JOBS_TABLE,
   jobsQueries,

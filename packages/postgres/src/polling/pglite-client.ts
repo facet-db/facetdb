@@ -20,6 +20,13 @@ export function pgliteClient(db: PGlite): SqlClient {
           return result.rows;
         }),
       ),
+    // One connection: the runs go one after another, each its own statement and each its own
+    // burst, so the first failure ends the call and no later run is sent.
+    async pipeline(text, paramSets) {
+      for (const params of paramSets) {
+        await db.query(text, [...params]);
+      }
+    },
     async listen(channel, onNotify) {
       // PGlite delivers a NOTIFY raised in this same instance to its listeners: enough to prove
       // the wake-up path; two real connections are a *.db.test.ts matter.

@@ -107,6 +107,7 @@ function recording(): { readonly connect: SqlConnect; readonly executed: Install
           return query(text, params);
         }),
       ),
+    pipeline: (text, paramSets) => world.client.pipeline(text, paramSets),
     close: () => world.client.close(),
   };
   return { connect: () => client, executed };
