@@ -22,7 +22,7 @@ export { onlyRecord } from "./check/target.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";
-export { createServer, DEFAULT_RETRY_AFTER_SECONDS } from "./main.ts";
+export { createServer } from "./main.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
 export type {

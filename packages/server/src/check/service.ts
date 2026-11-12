@@ -72,6 +72,12 @@ export type CheckResult =
       readonly reason: "unavailable";
       /** The seconds the caller is told to wait (`retry-after`). */
       readonly retryAfterSeconds: number;
+      /**
+       * Whether the record is still in the queue. False when the outage policy ruled on it (`hold`
+       * marks it `error`, `release` marks it `unchecked`): it leaves the queue with that status
+       * until the policy's next retry, and the next call with the same id answers 200 carrying the status.
+       */
+      readonly queued: boolean;
     };
 
 export type CheckService = {
@@ -119,14 +125,16 @@ export function createCheckService(deps: CheckDeps): CheckService {
           (failure) => failure.key === request.id && failure.stage === "ask",
         );
         if (failed || report.paused) {
-          // A failed model call is an error, never an answer. The record is stored and the failed
-          // job went back to the queue, so the worker loop answers it when the model returns and
-          // the source's webhook action (the outbox) delivers that answer.
+          // A failed model call is an error, never an answer. Unless the outage policy has ruled on
+          // the record, the failed job went back to the queue, so the worker loop answers it when
+          // the model returns and the source's webhook action (the outbox) delivers that answer.
+          const held = report.held.some((entry) => entry.key === request.id);
           return {
             kind: "unanswered",
             id: request.id,
             reason: "unavailable",
             retryAfterSeconds: deps.retryAfterSeconds,
+            queued: !held,
           };
         }
         if (report.claimed === 0) {

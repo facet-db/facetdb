@@ -13,13 +13,20 @@ export const WEBHOOK_SIGNATURE_HEADER = "facetdb-signature";
  * ```ts
  * import { verify } from "@facetdb/server";
  *
+ * const secret = process.env.FACETDB_WEBHOOK_SECRET; // string | undefined
+ * if (secret === undefined || secret === "") {
+ *   throw new Error("Set FACETDB_WEBHOOK_SECRET to the project's webhook secret.");
+ * }
+ *
  * app.post("/facetdb", express.raw({ type: "application/json" }), (req, res) => {
  *   const body = req.body.toString("utf8"); // the exact bytes FacetDB sent
- *   const result = verify(process.env.FACETDB_WEBHOOK_SECRET, req.get("facetdb-signature"), body, Date.now());
+ *   const result = verify(secret, req.get("facetdb-signature"), body, Date.now());
  *   if (!result.ok) return res.status(400).send(result.reason);
- *   const event = JSON.parse(body); // { event, source, id, status, answers }
+ *   // { event, delivery, source, id, status, decidedAt, answers }; every field is signed.
+ *   const event = JSON.parse(body);
  *   // Answer 2xx quickly. Anything else is retried with backoff for 24 hours, so be idempotent:
- *   // `facetdb-delivery` (a header) is the same on every retry of one webhook.
+ *   // `delivery` is the same on every retry of one webhook (the `facetdb-delivery` header repeats it),
+ *   // and a retried older webhook can land after a newer one: keep the one with the later `decidedAt`.
  *   res.sendStatus(204);
  * });
  * ```

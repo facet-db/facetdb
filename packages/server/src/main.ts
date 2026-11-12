@@ -13,12 +13,13 @@ export type ServerDeps = {
   /** The workers that answer each API source's queue. */
   readonly worker: CheckWorkers;
   readonly clock: Clock;
-  /** `retry-after` of a 503 when the model is unreachable; defaults to the model backoff's ceiling. */
-  readonly retryAfterSeconds?: number;
+  /**
+   * `retry-after` of a 503 when the model is unreachable, in whole seconds. The caller passes the
+   * model package's backoff ceiling (`DEFAULT_MAX_MS`, `@facetdb/model`): this package does not
+   * depend on the model package, so the number has one owner and no copy here.
+   */
+  readonly retryAfterSeconds: number;
 };
-
-/** The ceiling of the model's backoff (`DEFAULT_MAX_MS`, 30 s): by then the next attempt has been made. */
-export const DEFAULT_RETRY_AFTER_SECONDS = 30;
 
 /**
  * The HTTP surface's composition root: every dependency of the app is wired here and nowhere else.
@@ -31,7 +32,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       store: deps.store,
       worker: deps.worker,
       clock: deps.clock,
-      retryAfterSeconds: deps.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS,
+      retryAfterSeconds: deps.retryAfterSeconds,
     }),
     newRequestId: randomUUID,
   });

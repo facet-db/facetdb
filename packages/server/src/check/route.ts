@@ -64,8 +64,12 @@ export function checkRoute(service: CheckService): Hono<AppEnv> {
         throw new ApiError(
           503,
           "model_unavailable",
-          "The model could not be asked just now. The record is stored and stays queued.",
-          `Send the same call again after ${result.retryAfterSeconds} seconds (an unchanged record is not asked twice), or wait for the answer on your webhook.`,
+          result.queued
+            ? "The model could not be asked just now. The record is stored and stays queued."
+            : "The model could not be asked just now. The record is stored but not queued: the retry window is spent, so its status is now error or unchecked (the source's `onOutage`).",
+          result.queued
+            ? `Send the same call again after ${result.retryAfterSeconds} seconds (an unchanged record is not asked twice), or wait for the answer on your webhook.`
+            : `Send the same call again after ${result.retryAfterSeconds} seconds: the answer is a 200 that carries the record's status (error or unchecked). Do not wait for a webhook for this call.`,
           { "retry-after": String(result.retryAfterSeconds) },
         );
     }

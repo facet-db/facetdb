@@ -1,5 +1,7 @@
 import type {
   ModelProvider,
+  OutagePolicy,
+  OutageVerdict,
   ProviderRequest,
   ProviderResponse,
   QuestionSet,
@@ -110,7 +112,10 @@ function recordingKeyStore(inner: ApiKeyStore): ApiKeyStore & { readonly verifie
  * The whole path over the real FacetDB store (PGlite): API keys, the API source's records and jobs
  * through `createCheckStore`, the decision log and the worker's claim, with only the model scripted.
  */
-async function rig(questions: QuestionSet["questions"] = [urgency, wantsRefund]) {
+async function rig(
+  questions: QuestionSet["questions"] = [urgency, wantsRefund],
+  outage?: OutagePolicy,
+) {
   const clock = new FakeClock(1_700_000_000_000);
   const memory = await createMemoryStore(clock);
   closers.push(() => memory.close());
@@ -139,6 +144,7 @@ async function rig(questions: QuestionSet["questions"] = [urgency, wantsRefund])
       questionSet: questionSet(...questions),
       version: 1,
       spending: UNLIMITED,
+      ...(outage === undefined ? {} : { outage }),
     });
   const keyStore = recordingKeyStore(store.apiKeys);
   const keys = createApiKeys(keyStore);
@@ -361,6 +367,60 @@ describe("POST /v1/check when the answer does not come", () => {
     });
     // Queued again, not lost: the next worker can take it.
     expect(await t.holder.claimRecord("T-1042")).toBe(true);
+  });
+
+  it("says the record is not queued when the outage policy has ruled on it, and the next call's 200 carries the status", async () => {
+    for (const verdict of ["error", "unchecked"] as const satisfies readonly OutageVerdict[]) {
+      // A policy whose retry window is already spent: the failed call is final for now.
+      const spent: OutagePolicy = {
+        failed: () => verdict,
+        succeeded: () => [],
+        due: () => [],
+        hold: () => undefined,
+      };
+      const t = await rig([urgency, wantsRefund], spent);
+      t.provider.down = true;
+
+      const response = await t.post(ticket(CHARGED));
+
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("30");
+      expect(response.json).toMatchObject({
+        error: {
+          code: "model_unavailable",
+          message: expect.stringContaining("not queued"),
+          fix: expect.stringContaining("200"),
+        },
+      });
+      expect(response.json).not.toMatchObject({
+        error: { message: expect.stringContaining("stays queued") },
+      });
+      expect(await t.inspect.getRecord("T-1042")).toMatchObject({ status: verdict });
+      // Out of the queue: nobody can claim it.
+      expect(await t.holder.claimRecord("T-1042")).toBe(false);
+
+      // The same call again is a 200 that carries the status, without a model call.
+      const again = await t.post(ticket(CHARGED));
+      expect(again.status).toBe(200);
+      expect(again.json).toEqual({ id: "T-1042", status: verdict, answers: {} });
+      expect(t.provider.requests).toHaveLength(1);
+    }
+  });
+
+  it("says the record stays queued when the retry window is not spent yet", async () => {
+    const waiting: OutagePolicy = {
+      failed: () => "retry",
+      succeeded: () => [],
+      due: () => [],
+      hold: () => undefined,
+    };
+    const t = await rig([urgency, wantsRefund], waiting);
+    t.provider.down = true;
+    const response = await t.post(ticket(CHARGED));
+    expect(response.status).toBe(503);
+    expect(response.json).toMatchObject({
+      error: { message: expect.stringContaining("stays queued") },
+    });
   });
 
   it("waits for a worker that holds the job, then says the answer is pending", async () => {

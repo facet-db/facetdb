@@ -118,6 +118,7 @@ async function rig() {
       spending: UNLIMITED,
     });
   const app = createServer({
+    retryAfterSeconds: 30,
     store: {
       ...createCheckStore(
         store,

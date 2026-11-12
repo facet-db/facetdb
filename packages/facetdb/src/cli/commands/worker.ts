@@ -15,6 +15,7 @@ import {
   createInFlightLimiter,
   createOutagePolicy,
   createResilientProvider,
+  DEFAULT_MAX_MS,
 } from "@facetdb/model";
 import {
   type ProjectRef,
@@ -308,6 +309,8 @@ export async function runWorkers(
           },
         },
         clock,
+        // The model's backoff ceiling: by then the next attempt has been made.
+        retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
       });
       listener = await deps.serve((request) => app.fetch(request), port);
       print(`Serving the check API on port ${listener.port}.`);

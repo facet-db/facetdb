@@ -22,6 +22,7 @@ import { createWebhookAction, type WebhookPayload } from "./action.ts";
 import {
   CLAIM_LEASE_MS,
   createOutbox,
+  DEFAULT_FETCH_TIMEOUT_MS,
   GIVE_UP_AFTER_MS,
   RETRY_MAX_MS,
   retryDelayMs,
@@ -217,6 +218,7 @@ async function rig() {
     client,
     clock,
     fetch: receiver.fetch,
+    loopId: "loop-main",
     secretFor: (projectId, endpoint) => {
       secretLookups.push(`${projectId} ${endpoint}`);
       return Promise.resolve(SECRET);
@@ -235,7 +237,7 @@ async function rig() {
     store.connector({ sourceId: SOURCE_ID, fields: FIELDS, workerId });
   const webhook = configureAction(
     "webhook",
-    createWebhookAction({ outbox, projectId: PROJECT, source: SOURCE }),
+    createWebhookAction({ outbox, projectId: PROJECT, source: SOURCE, clock }),
     { url: ENDPOINT },
   );
   const workerOver = (connector: ReturnType<typeof connectorOf> | ReturnType<typeof onlyRecord>) =>
@@ -299,9 +301,25 @@ async function rig() {
     return found;
   }
 
+  /** Another loop over the same table: its own id, its own fetch, its own alerts. */
+  function otherLoop(loopId: string, send: WebhookFetch, alerts: WebhookGaveUp[] = []) {
+    return createOutbox({
+      client,
+      clock,
+      fetch: send,
+      loopId,
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: (event) => {
+        alerts.push(event);
+        return Promise.resolve();
+      },
+    });
+  }
+
   return {
     clock,
     receiver,
+    otherLoop,
     outbox,
     gaveUp,
     secretLookups,
@@ -541,6 +559,7 @@ describe("the check API with the model down", () => {
     const pass = await t.loopWorker.runOnce();
     expect(pass.written).toEqual(["T-1042"]);
     expect(pass.failures).toEqual([]);
+    const decidedAt = new Date(t.clock.now()).toISOString();
     expect(await t.outbox.deliverDue(t.clock.now())).toMatchObject({ retrying: [] });
 
     expect(t.receiver.calls).toHaveLength(1);
@@ -550,9 +569,11 @@ describe("the check API with the model down", () => {
     ).toEqual({ ok: true });
     expect(JSON.parse(call?.body ?? "null")).toEqual({
       event: "record.decided",
+      delivery: expect.any(String),
       source: SOURCE,
       id: "T-1042",
       status: "done",
+      decidedAt,
       answers: {
         urgency: { value: "high", confidence: 0.91, expected: 2.89 },
         wants_refund: { value: false, probability: 0.02 },
@@ -593,6 +614,7 @@ describe("a person's decision reaches the same endpoint", () => {
     if (stored?.decision == null) {
       throw new Error("the record has no decision");
     }
+    t.clock.advance(1_000); // the person decides a second after the automatic decision
     const outcome = await t.loopWorker.onHumanDecision({
       key: "T-1042",
       stateHash: stored.hash,
@@ -603,7 +625,6 @@ describe("a person's decision reaches the same endpoint", () => {
       },
     });
     expect(outcome).toEqual({ ran: true, failures: [] });
-    t.clock.advance(1_000);
     await t.outbox.deliverDue(t.clock.now());
 
     expect(t.receiver.calls).toHaveLength(2);
@@ -615,6 +636,13 @@ describe("a person's decision reaches the same endpoint", () => {
     expect(
       verify(SECRET, human?.headers[WEBHOOK_SIGNATURE_HEADER], human?.body ?? "", t.clock.now()),
     ).toEqual({ ok: true });
+    // The receiver can order the two: the person's webhook is the later decision, and the body
+    // (signed) says so, whichever arrives first.
+    const firstBody = JSON.parse(t.receiver.calls[0]?.body ?? "null") as WebhookPayload;
+    const humanBody = JSON.parse(human?.body ?? "null") as WebhookPayload;
+    expect(humanBody.decidedAt > firstBody.decidedAt).toBe(true);
+    expect(humanBody.delivery).toBe(human?.headers["facetdb-delivery"]);
+    expect(firstBody.delivery).toBe(t.receiver.calls[0]?.headers["facetdb-delivery"]);
     expect(JSON.parse(human?.body ?? "null")).toMatchObject({
       id: "T-1042",
       status: "done",
@@ -638,5 +666,265 @@ describe("a person's decision reaches the same endpoint", () => {
     expect(outcome.ran).toBe(false);
     expect(await t.outbox.deliverDue(t.clock.now())).toMatchObject({ delivered: [] });
     expect(t.receiver.calls).toHaveLength(1);
+  });
+});
+
+describe("the payload names its delivery and its decision time, under the signature", () => {
+  it("carries delivery and decidedAt in the signed body; the facetdb-delivery header matches the body", async () => {
+    const t = await rig();
+    await t.post(CHARGED);
+    await t.outbox.deliverDue(t.clock.now());
+
+    const [call] = t.receiver.calls;
+    const body = JSON.parse(call?.body ?? "null") as WebhookPayload;
+    expect(body.delivery).toBe(call?.headers["facetdb-delivery"]);
+    expect(body.decidedAt).toBe(new Date(START).toISOString());
+    const header = call?.headers[WEBHOOK_SIGNATURE_HEADER];
+    expect(verify(SECRET, header, call?.body ?? "", t.clock.now())).toEqual({ ok: true });
+
+    // Changing either field (what a replayed or reordered webhook would need) breaks the signature.
+    const later = JSON.stringify({ ...body, decidedAt: new Date(START + 1000).toISOString() });
+    expect(verify(SECRET, header, later, t.clock.now())).toEqual({ ok: false, reason: "mismatch" });
+    const renamed = JSON.stringify({ ...body, delivery: "999" });
+    expect(verify(SECRET, header, renamed, t.clock.now())).toEqual({
+      ok: false,
+      reason: "mismatch",
+    });
+  });
+
+  it("keeps one delivery id and one set of bytes across the retries", async () => {
+    const t = await rig();
+    t.receiver.respond = () => 500;
+    await t.post(CHARGED);
+    await t.outbox.deliverDue(START);
+    await t.outbox.deliverDue(START + 10_000);
+
+    const [first, second] = t.receiver.calls;
+    expect(second?.body).toBe(first?.body);
+    expect(second?.headers["facetdb-delivery"]).toBe(first?.headers["facetdb-delivery"]);
+    expect((JSON.parse(first?.body ?? "null") as WebhookPayload).delivery).toBe(
+      first?.headers["facetdb-delivery"],
+    );
+  });
+});
+
+type Gate = { readonly opened: Promise<void>; open(): void };
+
+function gate(): Gate {
+  let open: () => void = () => undefined;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+}
+
+describe("a delivery is claim-safe", () => {
+  /** A fetch that stays in flight until `answer` is called; `entered` resolves when it was called. */
+  function slowReceiver() {
+    const entered = gate();
+    let answer: (status: number) => void = () => undefined;
+    const fetch: WebhookFetch = () => {
+      entered.open();
+      return new Promise((resolve) => {
+        answer = (status) => resolve({ status });
+      });
+    };
+    return { fetch, entered: entered.opened, answer: (status: number) => answer(status) };
+  }
+
+  it("@timing leaves a late success of the first loop with zero rows affected once a second loop delivered the row", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const slow = slowReceiver();
+    const alertsA: WebhookGaveUp[] = [];
+    const loopA = t.otherLoop("loop-a", slow.fetch, alertsA);
+    const loopB = t.otherLoop("loop-b", t.receiver.fetch);
+
+    const pendingA = loopA.deliverDue(START);
+    await slow.entered;
+    // The lease runs out while A is still sending: B takes the row and delivers it.
+    const later = START + CLAIM_LEASE_MS;
+    expect(await loopB.deliverDue(later)).toMatchObject({ delivered: [id], lost: [] });
+    const afterB = await t.row(id);
+    expect(Number(afterB["attempts"])).toBe(2);
+
+    slow.answer(204);
+    const reportA = await pendingA;
+
+    expect(reportA).toMatchObject({ delivered: [], retrying: [], gaveUp: [], lost: [id] });
+    // Zero rows affected: the row is exactly as B left it.
+    expect(await t.row(id)).toEqual(afterB);
+    expect(Number(afterB["delivered_at"])).toBe(later);
+    expect(alertsA).toEqual([]);
+  });
+
+  it("@timing raises no alert and writes nothing when a loop that lost its lease fails at the deadline", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const slow = slowReceiver();
+    const alertsA: WebhookGaveUp[] = [];
+    const alertsB: WebhookGaveUp[] = [];
+    const loopA = t.otherLoop("loop-a", slow.fetch, alertsA);
+    t.receiver.respond = () => 200;
+    const loopB = t.otherLoop("loop-b", t.receiver.fetch, alertsB);
+
+    const deadline = START + GIVE_UP_AFTER_MS;
+    const pendingA = loopA.deliverDue(deadline);
+    await slow.entered;
+    expect(await loopB.deliverDue(deadline + CLAIM_LEASE_MS)).toMatchObject({ delivered: [id] });
+    const afterB = await t.row(id);
+
+    // A's send ends in failure at the deadline, but the row is no longer A's: no false alert.
+    slow.answer(500);
+    expect(await pendingA).toMatchObject({ gaveUp: [], lost: [id] });
+    expect(alertsA).toEqual([]);
+    expect(alertsB).toEqual([]);
+    expect(await t.row(id)).toEqual(afterB);
+    expect((await t.row(id))["gave_up_at"]).toBeNull();
+  });
+
+  it("@timing a loop that lost its lease cannot reschedule the row either", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const slow = slowReceiver();
+    const loopA = t.otherLoop("loop-a", slow.fetch);
+    t.receiver.respond = () => 500;
+    const loopB = t.otherLoop("loop-b", t.receiver.fetch);
+
+    const pendingA = loopA.deliverDue(START);
+    await slow.entered;
+    await loopB.deliverDue(START + CLAIM_LEASE_MS);
+    const afterB = await t.row(id);
+    expect(afterB["last_error"]).toBe("the receiver answered 500");
+
+    slow.answer(503);
+    expect(await pendingA).toMatchObject({ retrying: [], lost: [id] });
+    expect(await t.row(id)).toEqual(afterB);
+  });
+
+  it("@timing raises the alert before it closes the row, and a crash in between alerts again instead of never", async () => {
+    const t = await rig();
+    t.receiver.respond = () => 500;
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const deadline = START + GIVE_UP_AFTER_MS;
+
+    // The row is still open while the alert goes out.
+    const seenByAlert: unknown[] = [];
+    const alerts: WebhookGaveUp[] = [];
+    const crashing = createOutbox({
+      // The process dies when it tries to close the row: the statement never reaches the database.
+      client: {
+        query: (text, params) =>
+          text.includes("gave_up_at = ")
+            ? Promise.reject(new Error("the process died"))
+            : t.client.query(text, params),
+      },
+      clock: t.clock,
+      fetch: t.receiver.fetch,
+      loopId: "loop-crash",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: async (event) => {
+        seenByAlert.push((await t.row(id))["gave_up_at"]);
+        alerts.push(event);
+      },
+    });
+    await expect(crashing.deliverDue(deadline)).rejects.toThrow("the process died");
+    expect(alerts).toHaveLength(1);
+    expect(seenByAlert).toEqual([null]);
+    expect((await t.row(id))["gave_up_at"]).toBeNull();
+
+    // After the lease another loop finds the row open, and the alert is not lost.
+    expect(await t.outbox.deliverDue(deadline + CLAIM_LEASE_MS - 1)).toMatchObject({ gaveUp: [] });
+    const report = await t.outbox.deliverDue(deadline + CLAIM_LEASE_MS);
+    expect(report).toMatchObject({ gaveUp: [id], lost: [], alertFailures: [] });
+    expect(t.gaveUp).toHaveLength(1);
+    expect(Number((await t.row(id))["gave_up_at"])).toBe(deadline + CLAIM_LEASE_MS);
+  });
+
+  it("reports an alert that could not be raised and still closes the row", async () => {
+    const t = await rig();
+    t.receiver.respond = () => 500;
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const failing = createOutbox({
+      client: t.client,
+      clock: t.clock,
+      fetch: t.receiver.fetch,
+      loopId: "loop-alert",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: () => Promise.reject(new Error("the alert channel is down")),
+    });
+    const report = await failing.deliverDue(START + GIVE_UP_AFTER_MS);
+    expect(report.gaveUp).toEqual([id]);
+    expect(report.alertFailures).toHaveLength(1);
+    expect(Number((await t.row(id))["gave_up_at"])).toBe(START + GIVE_UP_AFTER_MS);
+  });
+
+  it("adds claimed_by to an outbox table made before it existed", async () => {
+    const t = await rig();
+    await t.client.query("alter table facetdb.webhook_outbox drop column claimed_by");
+    await t.outbox.install();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    expect(await t.outbox.deliverDue(START)).toMatchObject({ delivered: [id] });
+  });
+});
+
+describe("the send timeout", () => {
+  it("counts a receiver that never answers as a failed attempt after the timeout, and aborts the request", async () => {
+    const t = await rig();
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint: ENDPOINT, payload: {} });
+    const signals: AbortSignal[] = [];
+    // Never settles and ignores the signal: the outbox does not wait for it.
+    const hung: WebhookFetch = (_url, init) => {
+      signals.push(init.signal);
+      return new Promise(() => undefined);
+    };
+    const loop = createOutbox({
+      client: t.client,
+      clock: t.clock,
+      fetch: hung,
+      fetchTimeoutMs: 20,
+      loopId: "loop-hung",
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: () => Promise.resolve(),
+    });
+
+    const report = await loop.deliverDue(START);
+
+    expect(report).toMatchObject({ retrying: [id], delivered: [], lost: [] });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+    expect((await t.row(id))["last_error"]).toBe("the receiver did not answer within 20 ms");
+  });
+
+  it("is a constructor option that must stay below the claim lease", () => {
+    const base = {
+      client: { query: () => Promise.resolve([]) },
+      clock: new FakeClock(START),
+      fetch: () => Promise.resolve({ status: 204 }),
+      secretFor: () => Promise.resolve(SECRET),
+      onGiveUp: () => Promise.resolve(),
+    };
+    expect(DEFAULT_FETCH_TIMEOUT_MS).toBeLessThan(CLAIM_LEASE_MS);
+    expect(() => createOutbox(base)).not.toThrow();
+    expect(() => createOutbox({ ...base, fetchTimeoutMs: CLAIM_LEASE_MS - 1 })).not.toThrow();
+    for (const bad of [
+      CLAIM_LEASE_MS,
+      CLAIM_LEASE_MS + 1,
+      0,
+      -5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      expect(() => createOutbox({ ...base, fetchTimeoutMs: bad })).toThrow(/claim lease/);
+    }
+  });
+});
+
+describe("the receiver snippet", () => {
+  it("handles an unset FACETDB_WEBHOOK_SECRET in the types, with no runtime throw inside the handler", () => {
+    const source = readFileSync(new URL("./sign.ts", import.meta.url), "utf8");
+    expect(source).toContain("secret === undefined");
+    expect(source).not.toContain("verify(process.env.FACETDB_WEBHOOK_SECRET");
+    expect(source).toContain("decidedAt");
   });
 });
