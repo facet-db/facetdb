@@ -13,7 +13,7 @@ import type {
   SourceDefinition,
 } from "./kinds.ts";
 import { isValidRange, isValidVersion } from "./semver.ts";
-import { type Infer, secretPaths } from "./zod.ts";
+import { type Infer, SecretWalkError, secretPaths } from "./zod.ts";
 
 /** What an author passes to `definePlugin`. */
 export type PluginDefinition<Schema extends ZodObject> = {
@@ -135,23 +135,7 @@ export function definePlugin<Schema extends ZodObject>(
   const config = input["config"];
   checkManifestFields({ name, version, range, config }, issues);
 
-  const sources = entries(input, "sources", issues);
-  const actions = entries(input, "actions", issues);
-  const channels = entries(input, "channels", issues);
-  const providers = entries(input, "providers", issues);
-  const packs = entries(input, "packs", issues);
-
-  for (const [kind, list] of [
-    ["source", sources],
-    ["action", actions],
-    ["channel", channels],
-    ["provider", providers],
-    ["pack", packs],
-  ] as const) {
-    for (const [entry, value] of Object.entries(list)) {
-      checkEntry(kind, entry, value, issues);
-    }
-  }
+  const { sources, actions, channels, providers, packs } = checkEntries(input, issues, false);
 
   const kinds = PLUGIN_KINDS.filter(
     (kind): kind is PluginKind =>
@@ -169,14 +153,15 @@ export function definePlugin<Schema extends ZodObject>(
     });
   }
 
+  // Listed from the schema, never from the author: a secret the walker cannot reach is refused here.
+  const secrets = config instanceof ZodObject ? declaredSecrets(config, issues) : [];
+
   if (issues.length > 0 || !(config instanceof ZodObject)) {
     throw new PluginError(
       `The plugin ${typeof name === "string" ? `"${name}"` : "definition"}`,
       issues,
     );
   }
-
-  const secrets = secretPaths(config);
 
   return {
     [PLUGIN_BRAND]: true,
@@ -201,13 +186,73 @@ export function isPlugin(value: unknown): value is Plugin {
   return typeof value === "object" && value !== null && PLUGIN_BRAND in value;
 }
 
+/**
+ * The secrets of a config schema as `secretPaths` lists them, or nothing and one issue per place
+ * the walker could not look. Both `definePlugin` and the loader use it, so a secret is found or the
+ * plugin is refused, with the same words.
+ */
+export function declaredSecrets(config: ZodObject, issues: PluginIssue[]): readonly string[] {
+  try {
+    return secretPaths(config);
+  } catch (error) {
+    if (!(error instanceof SecretWalkError)) {
+      throw error;
+    }
+    for (const stop of error.stops) {
+      issues.push({
+        field: stop.path === "" ? "config" : `config.${stop.path}`,
+        message: stop.message,
+      });
+    }
+    return [];
+  }
+}
+
+/**
+ * Checks the five lists of entries of a plugin, whatever their source: `definePlugin` on the
+ * definition (a list may be left out) and the loader on an imported plugin (every list must be
+ * there, as `definePlugin` always makes them), so both refuse the same things with the same words.
+ */
+export function checkEntries(
+  input: Readonly<Record<string, unknown>>,
+  issues: PluginIssue[],
+  requireAll: boolean,
+) {
+  const lists = {
+    sources: entries(input, "sources", issues, requireAll),
+    actions: entries(input, "actions", issues, requireAll),
+    channels: entries(input, "channels", issues, requireAll),
+    providers: entries(input, "providers", issues, requireAll),
+    packs: entries(input, "packs", issues, requireAll),
+  };
+  for (const [kind, list] of [
+    ["source", lists.sources],
+    ["action", lists.actions],
+    ["channel", lists.channels],
+    ["provider", lists.providers],
+    ["pack", lists.packs],
+  ] as const) {
+    for (const [entry, value] of Object.entries(list)) {
+      checkEntry(kind, entry, value, issues);
+    }
+  }
+  return lists;
+}
+
 function entries(
   input: Readonly<Record<string, unknown>>,
   field: string,
   issues: PluginIssue[],
+  required: boolean,
 ): Readonly<Record<string, unknown>> {
   const value = input[field];
   if (value === undefined) {
+    if (required) {
+      issues.push({
+        field,
+        message: "is missing: build the plugin with `definePlugin`, which always lists it",
+      });
+    }
     return {};
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

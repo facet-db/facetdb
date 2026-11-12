@@ -1,6 +1,9 @@
 import { PLUGIN_KINDS } from "@facetdb/core";
+import { ZodObject } from "zod";
 import {
+  checkEntries,
   checkManifestFields,
+  declaredSecrets,
   isPlugin,
   type Plugin,
   PluginError,
@@ -71,9 +74,9 @@ export async function loadPlugin(spec: string, options: LoadPluginOptions): Prom
       },
     ]);
   }
-  // The brand is only a symbol any object can carry: the manifest is checked again, here, with the
-  // rules `definePlugin` applies, before anything reads it.
-  const issues = manifestIssues(exported.manifest as unknown);
+  // The brand is only a symbol any object can carry: the manifest and every entry are checked
+  // again, here, with the rules `definePlugin` applies, before anything reads them.
+  const issues = pluginIssues(exported);
   if (issues.length > 0) {
     throw new PluginError(`The package "${loaded.specifier}"`, issues);
   }
@@ -125,6 +128,36 @@ function manifestIssues(manifest: unknown): readonly PluginIssue[] {
   const secrets = fields["secrets"];
   if (!Array.isArray(secrets) || !secrets.every((secret) => typeof secret === "string")) {
     issues.push({ field: "secrets", message: "must list the names of the secrets as strings" });
+  } else if (fields["config"] instanceof ZodObject) {
+    // The list a plugin declares is only a claim: a plugin built by an older copy of
+    // `facetdb/plugin` lists top-level secrets alone. The schema is the truth, so it is read again.
+    const unreadable: PluginIssue[] = [];
+    const computed = declaredSecrets(fields["config"], unreadable);
+    issues.push(...unreadable);
+    if (unreadable.length === 0 && !sameList(secrets, computed)) {
+      issues.push({
+        field: "secrets",
+        message: `the plugin declares ${listed(secrets)} but its config schema marks ${listed(computed)} as z.secret(); a secret missing from the list would be saved in the config file in the clear, so rebuild the plugin with the current \`facetdb\` package (\`definePlugin\` writes the list itself) or ask its author to`,
+      });
+    }
   }
   return issues;
+}
+
+/** Everything wrong with an imported plugin: its manifest, then each list of entries the registry reads. */
+function pluginIssues(plugin: Plugin): readonly PluginIssue[] {
+  const issues = [...manifestIssues(plugin.manifest as unknown)];
+  checkEntries(plugin as unknown as Readonly<Record<string, unknown>>, issues, true);
+  return issues;
+}
+
+/** The same set of secrets, whatever the order or repeats: the host reads the names, not their position. */
+function sameList(declared: readonly string[], computed: readonly string[]): boolean {
+  const names = (list: readonly string[]) => [...new Set(list)].sort();
+  const [a, b] = [names(declared), names(computed)];
+  return a.length === b.length && a.every((name, i) => name === b[i]);
+}
+
+function listed(names: readonly string[]): string {
+  return names.length === 0 ? "no secrets" : `[${names.join(", ")}]`;
 }

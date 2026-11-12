@@ -12,6 +12,8 @@ import {
 } from "@facetdb/core";
 import { runConnectorContract } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
+import type { ZodObject, ZodType } from "zod";
+import * as mini from "zod/mini";
 import { noul, score } from "../config/index.ts";
 import { VERSION } from "../index.ts";
 import { PLUGIN_BRAND, shortName } from "./define.ts";
@@ -33,6 +35,7 @@ import {
   source,
   z,
 } from "./index.ts";
+import { type SecretStop, SecretWalkError, secretPaths } from "./zod.ts";
 
 /** The GitHub plugin skeleton, with the manifest fields it leaves out. */
 const githubConfig = z.object({ repo: z.string(), token: z.secret() });
@@ -150,6 +153,185 @@ describe("definePlugin", () => {
       "auth.deeper.key",
       "maybe.token",
     ]);
+  });
+
+  it.each([
+    ["an array of secrets", z.object({ tokens: z.array(z.secret()) }), ["tokens[]"]],
+    [
+      "an array of objects",
+      z.object({ hooks: z.array(z.object({ url: z.string(), secret: z.secret() })) }),
+      ["hooks[].secret"],
+    ],
+    ["an array of arrays", z.object({ grid: z.array(z.array(z.secret())) }), ["grid[][]"]],
+    [
+      "a tuple, its slots and its rest",
+      z.object({ pair: z.tuple([z.string(), z.secret()], z.secret()) }),
+      ["pair[1]", "pair[]"],
+    ],
+    ["a record of secrets", z.object({ headers: z.record(z.string(), z.secret()) }), ["headers.*"]],
+    [
+      "a record of objects",
+      z.object({ accounts: z.record(z.string(), z.object({ key: z.secret() })) }),
+      ["accounts.*.key"],
+    ],
+    ["an object with a catchall", z.object({ known: z.string() }).catchall(z.secret()), ["*"]],
+    [
+      "a union",
+      z.object({
+        auth: z.union([z.object({ token: z.secret() }), z.object({ user: z.string() })]),
+      }),
+      ["auth.token"],
+    ],
+    [
+      "a discriminated union, a secret in two variants once",
+      z.object({
+        auth: z.discriminatedUnion("kind", [
+          z.object({ kind: z.literal("token"), value: z.secret() }),
+          z.object({ kind: z.literal("basic"), value: z.secret(), user: z.string() }),
+          z.object({ kind: z.literal("none") }),
+        ]),
+      }),
+      ["auth.value"],
+    ],
+    [
+      "an intersection",
+      z.object({ both: z.intersection(z.object({ a: z.secret() }), z.object({ b: z.string() })) }),
+      ["both.a"],
+    ],
+    [
+      "a lazy schema that does not contain itself",
+      z.object({ later: z.lazy(() => z.object({ token: z.secret() })) }),
+      ["later.token"],
+    ],
+    [
+      "the other wrappers",
+      z.object({
+        a: z.array(z.secret()).optional(),
+        b: z.array(z.secret()).readonly(),
+        c: z.secret().catch("x"),
+        d: z.secret().prefault("x"),
+        e: z.secret().optional().nonoptional(),
+        f: z.success(z.secret()),
+      }),
+      ["a[]", "b[]", "c", "d", "e", "f"],
+    ],
+  ])("lists a secret nested in %s", (_shape, config, expected) => {
+    expect(secretPaths(config)).toEqual(expected);
+    const plugin = definePlugin({
+      name: "chat",
+      version: "0.1.0",
+      facetdb: "^0.0.0",
+      config,
+      channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+    });
+    expect(plugin.manifest.secrets).toEqual(expected);
+  });
+
+  it("walks a recursive schema once when it holds no secret", () => {
+    const tree: ZodType = z.object({ label: z.string(), kids: z.array(z.lazy(() => tree)) });
+    expect(secretPaths(z.object({ tree }))).toEqual([]);
+    // The same schema in two places is listed in both.
+    const leaf = z.object({ token: z.secret() });
+    expect(secretPaths(z.object({ one: leaf, two: z.array(leaf) }))).toEqual([
+      "one.token",
+      "two[].token",
+    ]);
+  });
+
+  it("refuses a recursive schema that holds a secret, naming the path it stopped at", () => {
+    const node: ZodType = z.object({
+      token: z.secret(),
+      children: z.array(z.lazy(() => node)),
+    });
+    expect(() => secretPaths(z.object({ root: node }))).toThrow(SecretWalkError);
+    const attempt = () =>
+      definePlugin({
+        name: "chat",
+        version: "0.1.0",
+        facetdb: "^0.0.0",
+        config: z.object({ root: node }),
+        channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+      });
+    expect(attempt).toThrow(PluginError);
+    expect(attempt).toThrow(/config\.root\.children\[\]: this schema contains itself/);
+  });
+
+  it("follows a zod/mini wrapper around a secret and refuses what is not a zod schema", () => {
+    expect(secretPaths(z.object({ tokens: z.array(mini.optional(z.secret())) }))).toEqual([
+      "tokens[]",
+    ]);
+    // A lazy getter that returns something else is a stop with its path, not a skipped field.
+    const config = z.object({ later: z.lazy(() => ({}) as never) });
+    const stops = (): readonly SecretStop[] => {
+      try {
+        secretPaths(config);
+      } catch (error) {
+        return (error as SecretWalkError).stops;
+      }
+      return [];
+    };
+    expect(stops().map((stop) => stop.path)).toEqual(["later"]);
+    expect(stops()[0]?.message).toMatch(/not a zod schema/);
+  });
+
+  it("reads a lazy getter once, and refuses one that throws or never settles, without a raw error", () => {
+    let calls = 0;
+    const shared = z.lazy(() => {
+      calls += 1;
+      return z.object({ token: z.secret() });
+    });
+    expect(secretPaths(z.object({ one: shared, two: shared }))).toEqual(["one.token", "two.token"]);
+    expect(calls).toBe(1);
+
+    // A getter that builds a new schema on each read has no cycle to find; the depth cap ends it.
+    const fresh = (): ZodType => z.object({ token: z.secret(), next: z.lazy(fresh) });
+    const endless = () => secretPaths(z.object({ root: z.lazy(fresh) }));
+    expect(endless).toThrow(SecretWalkError);
+    expect(endless).toThrow(/nests more than \d+ levels deep, or a z\.lazy builds a new schema/);
+
+    const broken = z.object({
+      bad: z.lazy(() => {
+        throw new Error("boom");
+      }),
+    });
+    const fresh1 = z.object({
+      bad: z.lazy(() => {
+        throw new Error("boom");
+      }),
+    });
+    expect(() => secretPaths(fresh1)).toThrow(/bad: .*the getter of this z\.lazy threw \(boom\)/);
+    const attempt = () =>
+      definePlugin({
+        name: "chat",
+        version: "0.1.0",
+        facetdb: "^0.0.0",
+        config: broken,
+        channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+      });
+    expect(attempt).toThrow(PluginError);
+    // zod answers `undefined` to every later read of a getter that failed: still a stop, not a skip.
+    expect(attempt).toThrow(/config\.bad: a secret could hide here: the getter of this z\.lazy/);
+  });
+
+  it.each([
+    ["a map", z.object({ tags: z.map(z.string(), z.secret()) }), "tags"],
+    ["a set", z.object({ deep: z.object({ keys: z.set(z.secret()) }) }), "deep.keys"],
+    ["a promise", z.object({ later: z.promise(z.secret()) }), "later"],
+  ])("refuses %s: a secret could hide where the walker cannot look", (_shape, config, path) => {
+    const attempt = () =>
+      definePlugin({
+        name: "chat",
+        version: "0.1.0",
+        facetdb: "^0.0.0",
+        config,
+        channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+      });
+    expect(attempt).toThrow(PluginError);
+    expect(attempt).toThrow(
+      new RegExp(
+        `config\\.${path}: a secret could hide here: this schema has a shape FacetDB cannot look inside; describe the setting with object, array`,
+      ),
+    );
   });
 
   it("refuses a missing config schema and names the field", () => {
@@ -417,6 +599,118 @@ describe("loadPlugin", () => {
       },
     };
     await expect(loadPlugin("github", options)).rejects.toThrow(SyntaxError);
+  });
+
+  /** A plugin as an older copy of `facetdb/plugin` wrote it, or a forger: the same object, one field changed. */
+  const nestedPlugin = () =>
+    definePlugin({
+      name: "chat",
+      version: "0.1.0",
+      facetdb: "^0.0.0",
+      config: z.object({
+        channel: z.string(),
+        token: z.secret(),
+        auth: z.object({ password: z.secret() }),
+        hooks: z.array(z.object({ secret: z.secret() })),
+      }),
+      channels: { post: channel({ config: z.object({}), deliver: async () => {} }) },
+    });
+  const load = (plugin: unknown) =>
+    loadPlugin("chat", modules({ "@facetdb/chat": { default: plugin } })).catch(
+      (caught: unknown) => caught,
+    );
+
+  it("recomputes the secrets from the config schema, so a loaded plugin's list always equals it", async () => {
+    const plugin = nestedPlugin();
+    const loaded = await loadPlugin("chat", modules({ "@facetdb/chat": { default: plugin } }));
+    expect(loaded.manifest.secrets).toEqual(secretPaths(loaded.manifest.config as ZodObject));
+    expect(loaded.manifest.secrets).toEqual(["token", "auth.password", "hooks[].secret"]);
+  });
+
+  it("refuses a short list from an older plugin, naming the declared and the computed list", async () => {
+    const plugin = nestedPlugin();
+    const older = { ...plugin, manifest: { ...plugin.manifest, secrets: ["token"] } };
+    const error = await load(older);
+    expect(error).toBeInstanceOf(PluginError);
+    expect((error as PluginError).issues.map((issue) => issue.field)).toEqual(["secrets"]);
+    expect((error as PluginError).message).toContain(
+      "the plugin declares [token] but its config schema marks [token, auth.password, hooks[].secret] as z.secret()",
+    );
+    expect((error as PluginError).message).toContain("rebuild the plugin");
+    // A list that claims more than the schema holds is as wrong as one that claims less.
+    const longer = {
+      ...plugin,
+      manifest: { ...plugin.manifest, secrets: [...plugin.manifest.secrets, "ghost"] },
+    };
+    expect(((await load(longer)) as PluginError).message).toMatch(/declares \[token, .*ghost\]/);
+    const none = { ...plugin, manifest: { ...plugin.manifest, secrets: [] } };
+    expect(((await load(none)) as PluginError).message).toMatch(/declares no secrets but/);
+  });
+
+  it("accepts a complete list in another order, or with a repeat, as the same set", async () => {
+    const plugin = nestedPlugin();
+    const reordered = {
+      ...plugin,
+      manifest: { ...plugin.manifest, secrets: ["hooks[].secret", "token", "auth.password"] },
+    };
+    expect(await load(reordered)).toBe(reordered);
+    const repeated = {
+      ...plugin,
+      manifest: {
+        ...plugin.manifest,
+        secrets: ["token", "token", "auth.password", "hooks[].secret"],
+      },
+    };
+    expect(await load(repeated)).toBe(repeated);
+  });
+
+  it("refuses a plugin whose config holds a shape the walker cannot read, with the path", async () => {
+    const plugin = nestedPlugin();
+    const config = z.object({ tags: z.map(z.string(), z.string()) });
+    const error = await load({ ...plugin, manifest: { ...plugin.manifest, config, secrets: [] } });
+    expect(error).toBeInstanceOf(PluginError);
+    expect((error as PluginError).issues.map((issue) => issue.field)).toEqual(["config.tags"]);
+    expect((error as PluginError).message).toMatch(/a secret could hide here/);
+  });
+
+  it("confirms every list of entries and every entry of a branded plugin", async () => {
+    const plugin = nestedPlugin();
+    const withEntries = (changes: Record<string, unknown>) => ({ ...plugin, ...changes });
+    const fields = async (forged: unknown) => {
+      const error = await load(forged);
+      expect(error).toBeInstanceOf(PluginError);
+      expect((error as PluginError).message).not.toMatch(/\n\s+at /);
+      return (error as PluginError).issues.map((issue) => issue.field);
+    };
+    // A list that is missing, not an object, or an array.
+    const { sources: _sources, ...withoutSources } = plugin;
+    expect(await fields(withoutSources)).toEqual(["sources"]);
+    expect(await fields(withEntries({ actions: "label" }))).toEqual(["actions"]);
+    expect(await fields(withEntries({ packs: [] }))).toEqual(["packs"]);
+    expect(await fields(withEntries({ providers: null }))).toEqual(["providers"]);
+    // An entry that is not an object, or was not made by its helper, or lacks what the registry calls.
+    expect(await fields(withEntries({ sources: { issues: "oops" } }))).toEqual(["sources.issues"]);
+    expect(await fields(withEntries({ sources: { issues: { kind: "action" } } }))).toEqual([
+      "sources.issues",
+    ]);
+    expect(
+      await fields(withEntries({ sources: { issues: { kind: "source", watch() {} } } })),
+    ).toEqual(["sources.issues.read", "sources.issues.scan"]);
+    expect(
+      await fields(withEntries({ channels: { post: { kind: "channel", deliver() {} } } })),
+    ).toEqual(["channels.post.config"]);
+    expect(
+      await fields(withEntries({ channels: { "Bad Name": plugin.channels["post"] } })),
+    ).toEqual(["channels.Bad Name"]);
+    expect(
+      await fields(withEntries({ packs: { triage: { kind: "pack", questions: {} } } })),
+    ).toEqual(["packs.triage"]);
+  });
+
+  it("accepts the entries definePlugin made", async () => {
+    const plugin = githubPlugin();
+    const loaded = await loadPlugin("github", modules({ "@facetdb/github": { default: plugin } }));
+    expect(loaded).toBe(plugin);
   });
 });
 
