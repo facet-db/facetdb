@@ -29,7 +29,12 @@ export {
   WORKER_ROLE,
 } from "./sql.ts";
 export {
+  type LogOnlyPurge,
+  type OtherSourceLog,
+  type ProjectKeptBy,
+  type SourceLog,
   type UninstallOptions,
+  type UninstallPlan,
   type UninstallResult,
   type UninstallSource,
   type UninstallTarget,

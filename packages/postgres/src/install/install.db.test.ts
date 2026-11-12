@@ -1,11 +1,12 @@
 import type { QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { connectPostgres, type SqlClient, type SqlQuery } from "../sql/index.ts";
+import { connectPostgres, type SqlClient, type SqlConnect, type SqlQuery } from "../sql/index.ts";
 import { createStore } from "../store/index.ts";
 import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { ENQUEUE_ROLE, WORKER_ROLE } from "./sql.ts";
+import { uninstall } from "./uninstall.ts";
 
 /**
  * The install against a real Postgres, for what PGlite cannot prove: the worker login exists with
@@ -267,5 +268,129 @@ describe("the worker login on a real Postgres", () => {
       await stale.close();
       await fresh.close();
     }
+  });
+});
+
+describe("a log-only purge against a concurrent install, on two connections", () => {
+  const archive = { id: "proj_archive", name: "Archive" };
+  const SOURCE = "t_archive";
+
+  /** Installs `public.archive` for its project; `connect` lets a test hold the transaction open. */
+  const installArchive = (connect?: SqlConnect) =>
+    migrate({
+      adminUrl: scratch.url,
+      print: () => undefined,
+      ...(connect === undefined ? {} : { connect }),
+      plan: { source: { table: "archive" }, questionSet: listings, project: archive },
+    });
+
+  /** Whether some session of this scratch database waits for a lock on `facetdb.table_owners`. */
+  async function ownersLockAwaited(): Promise<boolean> {
+    const rows = await admin.query(
+      `select exists (select 1 from pg_catalog.pg_locks
+                       where database = (select oid from pg_catalog.pg_database where datname = current_database())
+                         and relation = 'facetdb.table_owners'::regclass and not granted) as waiting`,
+    );
+    return rows[0]?.["waiting"] === true;
+  }
+
+  it("waits for the install's owner row inside its transaction, sees it, and deletes nothing", async () => {
+    // No other table may be installed for a purge to run (two projects' same-named sources share
+    // a log): the suite's `listings` goes first, with a plain uninstall.
+    expect(
+      await uninstall({
+        adminUrl: scratch.url,
+        source: { table: "listings", sourceId: "listings" },
+        print: () => undefined,
+        confirm: () => Promise.resolve("Listings"),
+      }),
+    ).toMatchObject({ ok: true, applied: true });
+    await admin.query(
+      `create table public.archive (id serial primary key, title text, description text)`,
+    );
+    expect(await installArchive()).toMatchObject({ ok: true, applied: true });
+    // The worker's registration of the source, and its log, as a first start leaves them.
+    await admin.query(
+      `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $1, 'plugin')`,
+      [SOURCE, archive.id],
+    );
+    await admin.query(
+      `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+       values ($1, '1', 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
+      [SOURCE],
+    );
+    const plain = await uninstall({
+      adminUrl: scratch.url,
+      source: { table: "archive", sourceId: SOURCE },
+      print: () => undefined,
+      confirm: () => Promise.resolve(archive.name),
+    });
+    expect(plain).toMatchObject({ ok: true, applied: true });
+
+    // A second connection installs the table again and holds its transaction open before the
+    // commit: its owner row is written, not yet visible.
+    let ranAll = (): void => undefined;
+    const installed = new Promise<void>((resolve) => {
+      ranAll = resolve;
+    });
+    let release = (): void => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const holding: SqlConnect = (url, options) => {
+      const base = connectPostgres(url, options);
+      return {
+        ...base,
+        transaction: <T>(work: (query: SqlQuery) => Promise<T>) =>
+          base.transaction(async (query) => {
+            const result = await work(query);
+            ranAll();
+            await held;
+            return result;
+          }),
+      };
+    };
+
+    let concurrent: Promise<unknown> = Promise.resolve();
+    let releaser: Promise<void> = Promise.resolve();
+    try {
+      const result = await uninstall({
+        adminUrl: scratch.url,
+        source: { table: "archive", sourceId: SOURCE },
+        purge: true,
+        print: () => undefined,
+        // Every check before the confirmation found the source unused; the install starts now,
+        // and is let commit only once the purge's transaction waits for the owner rows' lock.
+        confirm: async () => {
+          concurrent = installArchive(holding);
+          await installed;
+          releaser = (async () => {
+            for (let polls = 0; !(await ownersLockAwaited()); polls += 1) {
+              if (polls > 10_000) {
+                throw new Error("the purge never waited for the owner rows' lock");
+              }
+            }
+            release();
+          })();
+          return SOURCE;
+        },
+      });
+      await releaser;
+      expect(await concurrent).toMatchObject({ ok: true, applied: true });
+      expect(result).toMatchObject({ ok: false });
+      expect(result.ok === false && result.reason).toContain(
+        `the decision log of source "${SOURCE}" is live again: public.archive is now installed for its project; nothing was changed`,
+      );
+    } finally {
+      // Whatever failed above, the held install commits and its connection closes.
+      release();
+      await Promise.allSettled([concurrent, releaser]);
+    }
+    expect(
+      await admin.query(`select record_key from facetdb.decisions where source_id = $1`, [SOURCE]),
+    ).toEqual([{ record_key: "1" }]);
+    expect(await admin.query(`select id from facetdb.sources where id = $1`, [SOURCE])).toEqual([
+      { id: SOURCE },
+    ]);
   });
 });

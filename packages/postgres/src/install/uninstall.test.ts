@@ -1,5 +1,6 @@
 import type { QuestionSet } from "@facetdb/core";
 import { afterEach, describe, expect, it } from "vitest";
+import { pollingInstallSql } from "../polling/index.ts";
 import type { SqlClient, SqlConnect, SqlQuery } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
 import { type MigrateSource, migrate } from "./migrate.ts";
@@ -164,6 +165,17 @@ async function decisionLog(rows: readonly (readonly [source: string, key: string
       [source, key],
     );
   }
+}
+
+/**
+ * The source as the worker and backfill register it before writing its log (`ensureSource`): a
+ * plugin-kind row of the project, under the config's source name, whatever the table is called.
+ */
+async function registerSource(name: string = SOURCE_ID, projectId: string = project.id) {
+  await q(
+    `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $1, 'plugin')`,
+    [name, projectId],
+  );
 }
 
 async function runUninstall(
@@ -353,6 +365,7 @@ describe("uninstall", () => {
   it("with purge deletes the source's log and the schema once it is empty", async () => {
     await freshWorld();
     await install();
+    await registerSource();
     await decisionLog([[SOURCE_ID, "1"]]);
     const { result } = await runUninstall({ purge: true });
     expect(result).toMatchObject({ ok: true, applied: true });
@@ -364,6 +377,7 @@ describe("uninstall", () => {
   it("with purge keeps another source's log rows, and the schema that holds them", async () => {
     await freshWorld();
     await install();
+    await registerSource();
     await decisionLog([
       [SOURCE_ID, "1"],
       ["src_other", "7"],
@@ -374,6 +388,27 @@ describe("uninstall", () => {
       { source_id: "src_other", record_key: "7" },
     ]);
   });
+
+  it.each(["40P01", "55P03"])(
+    "a script that loses to a concurrent command (%s) changes nothing and says to run it again",
+    async (code) => {
+      await freshWorld();
+      await install();
+      const before = await snapshot();
+      // The database's own refusal, as the driver reports it: the transaction rolled back.
+      const losing: SqlClient = {
+        ...world.client,
+        transaction: () => Promise.reject(Object.assign(new Error("lost the race"), { code })),
+      };
+      const { result } = await runUninstall({ connect: () => losing });
+      expect(result).toEqual({
+        ok: false,
+        reason:
+          "another FacetDB command was running on this database at the same time; nothing was changed. Run it again.",
+      });
+      expect(await snapshot()).toEqual(before);
+    },
+  );
 
   it("a wrong confirmation runs nothing", async () => {
     await freshWorld();
@@ -450,7 +485,12 @@ describe("uninstall", () => {
 
     const { result } = await runUninstall();
     expect(result).toMatchObject({ ok: true, applied: true });
-    expect(await q(`select id from facetdb.projects`)).toEqual([{ id: "proj_polling" }]);
+    // An unfinished cursor names no project, so it keeps the uninstalled one's row too.
+    expect(result.ok && result.plan.projectKeptBy).toEqual(["cursors"]);
+    expect(await q(`select id from facetdb.projects order by id`)).toEqual([
+      { id: "proj_listings" },
+      { id: "proj_polling" },
+    ]);
     expect(await q(`select input_tokens::int as n from facetdb.usage`)).toEqual([{ n: 4200 }]);
     expect(await q(`select cursor from facetdb.cursors`)).toEqual([{ cursor: "c-17" }]);
     expect(await q(`select at::int as at from facetdb.heartbeats`)).toEqual([{ at: 1 }]);
@@ -571,8 +611,8 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     ]);
     const { result } = await purgeWith("src_made_up");
     expect(result).toMatchObject({ ok: true, applied: true });
-    expect(result.ok && result.notes.join("\n")).toContain(
-      `no source named "src_made_up" belongs to this table or its project, so no decision was deleted`,
+    expect(result.ok && result.notes).toContain(
+      `purge: no decisions were ever logged for source "src_made_up", nothing to purge.`,
     );
     expect(await logRows()).toEqual([
       { source_id: "listings", record_key: "1" },
@@ -609,8 +649,11 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
       ]);
       const { result } = await purgeWith(given);
       expect(result).toMatchObject({ ok: true, applied: true });
+      // The API source's id has log rows (they are not this table's); its name has none.
       expect(result.ok && result.notes.join("\n")).toContain(
-        `no source named "${given}" belongs to this table or its project, so no decision was deleted`,
+        given === "src_1"
+          ? `no source named "src_1" belongs to this table or its project, so no decision was deleted`
+          : `no decisions were ever logged for source "prod_listings", nothing to purge`,
       );
       expect(await logRows()).toEqual([
         { source_id: "listings", record_key: "3" },
@@ -650,6 +693,7 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
   it("a dry run says what the purge will delete and deletes nothing", async () => {
     await freshWorld();
     await install();
+    await registerSource();
     await decisionLog([[SOURCE_ID, "1"]]);
     const { result } = await purgeWith(SOURCE_ID, { dryRun: true });
     expect(result).toMatchObject({ ok: true, applied: false });
@@ -663,6 +707,7 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     it("a log-only purge deletes the matching source's log and says what it deleted", async () => {
       await freshWorld();
       await install();
+      await registerSource();
       await decisionLog([
         [SOURCE_ID, "1"],
         [SOURCE_ID, "2"],
@@ -679,6 +724,7 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     it("prints a script that only touches the log, asks for the source's name, and reports the count", async () => {
       await freshWorld();
       await install();
+      await registerSource();
       await decisionLog([
         [SOURCE_ID, "1"],
         ["src_other", "7"],
@@ -705,7 +751,10 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
         `purge: deleted 1 decision(s) and 0 question-set version(s) of source "listings".`,
       ]);
       expect(printed).toEqual([renderSql(executed)]);
-      expect(printed[0]).not.toMatch(/alter table|drop trigger|drop column|facetdb\.jobs/);
+      // Nothing of the table's: what it may drop besides the log is the store's, once unused.
+      expect(printed[0]).not.toMatch(
+        /alter table|drop trigger|drop column|delete from "facetdb"\."jobs"|listings_answers/,
+      );
       expect(await columns()).toEqual(APP_COLUMNS);
       expect(await logRows()).toEqual([{ source_id: "src_other", record_key: "7" }]);
     });
@@ -713,6 +762,7 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     it("a made-up name refuses and changes nothing; a wrong confirmation runs nothing", async () => {
       await freshWorld();
       await install();
+      await registerSource();
       await decisionLog([[SOURCE_ID, "1"]]);
       await runUninstall();
       const before = await snapshot();
@@ -731,10 +781,15 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     it("never reaches the log of a source that is still live (a typo'd table, a store source)", async () => {
       await freshWorld(["listings", "listing"]);
       await install();
+      await registerSource();
       await decisionLog([[SOURCE_ID, "1"]]);
-      // `listing` has no owner row; the live `listings` source carries the log.
+      // `listing` has no owner row; the live `listings` source carries the log. The store does not
+      // record which table a source reads, so any installed table makes it possibly live.
       const typo = await runUninstall({ purge: true, table: "listing", sourceId: "listings" });
       expect(typo.result).toMatchObject({ ok: false });
+      expect(typo.result.ok === false && typo.result.reason).toBe(
+        `the decision log of source "listings" may be shared with public.listings (project ${project.id}), which is still installed; uninstall that table first, or keep the log. Nothing was changed.`,
+      );
       expect(typo.events).toEqual([]);
       expect(await logRows()).toEqual([{ source_id: "listings", record_key: "1" }]);
 
@@ -760,6 +815,7 @@ describe("uninstall --purge is tied to the table it uninstalls", () => {
     it("the schema goes with the last log row", async () => {
       await freshWorld();
       await install();
+      await registerSource();
       await decisionLog([[SOURCE_ID, "1"]]);
       await runUninstall();
       const { result } = await runUninstall({ purge: true, typed: "listings" });
@@ -775,6 +831,7 @@ describe("uninstall keeps what is still in use", () => {
   it("drops facetdb.projects after the purge block", async () => {
     await freshWorld();
     await install();
+    await registerSource();
     const { printed } = await runUninstall({ purge: true });
     const text = printed[0] ?? "";
     expect(text.indexOf("delete from facetdb.decisions")).toBeGreaterThan(-1);
@@ -836,5 +893,426 @@ describe("uninstall keeps what is still in use", () => {
     const { result } = await runUninstall();
     expect(result).toMatchObject({ ok: true, applied: true, notes: [] });
     expect(await present("facetdb.listings_answers")).toBe(false);
+  });
+
+  it("names no orphan side table while a same-named table of another schema is installed", async () => {
+    await freshWorld();
+    await q(`create schema b`);
+    await q(`create table b.listings (id serial primary key, title text)`);
+    await install({ table: "listings", schema: "b", storage: "side-table" }, everyType, {
+      id: "proj_b",
+      name: "Bee",
+    });
+    await install();
+    // b's side table lost its foreign key by hand: it is FacetDB's, unmarked as anyone's.
+    const fk = await q(
+      `select conname from pg_constraint where conrelid = 'facetdb.listings_answers'::regclass and contype = 'f'`,
+    );
+    await q(`alter table facetdb.listings_answers drop constraint "${String(fk[0]?.["conname"])}"`);
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.notes.join("\n")).not.toContain("listings_answers");
+    expect(await present("facetdb.listings_answers")).toBe(true);
+  });
+});
+
+describe("uninstall --purge finds the log by the source's id", () => {
+  const logRows = async () =>
+    q(`select source_id, record_key from facetdb.decisions order by 1, 2`);
+
+  async function versions(sourceId: string): Promise<void> {
+    await q(
+      `insert into facetdb.question_set_versions (source_id, version, content_hash, question_set) values ($1, 1, 'h', '{}')`,
+      [sourceId],
+    );
+  }
+
+  it.each(["t_listings", "listings_renamed"])(
+    "a purge of source %s on table listings deletes exactly that source's log",
+    async (name) => {
+      const renamed = name === "listings_renamed";
+      await freshWorld();
+      await install();
+      await registerSource(name);
+      if (renamed) {
+        // The source was `listings` before the rename: the worker registered that row then, and
+        // registers the new name after; the old log stays under the old id.
+        await registerSource(SOURCE_ID);
+      }
+      await versions(name);
+      await versions("src_other");
+      await decisionLog([
+        [name, "1"],
+        [name, "2"],
+        [SOURCE_ID, "3"],
+        ["src_other", "4"],
+      ]);
+      const { connect, executed } = recording();
+      const { result, printed } = await runUninstall({ purge: true, sourceId: name, connect });
+      expect(result).toMatchObject({ ok: true, applied: true });
+      expect(result.ok && result.plan.log).toEqual({
+        status: "found",
+        given: name,
+        sourceId: name,
+        decisions: 2,
+        versions: 1,
+      });
+      expect(result.ok && result.notes).toContain(
+        `purge: deleted 2 decision(s) and 1 question-set version(s) of source "${name}".`,
+      );
+      expect(result.ok && result.plan.otherSourceLogs).toEqual(
+        renamed ? [{ source: SOURCE_ID, decisions: 1 }] : [],
+      );
+      const oldName = `left in place: the decision log of source "${SOURCE_ID}" (1 decision(s)), another source of this project in the FacetDB store; if it was this table's source under an earlier name, delete it with: facetdb uninstall --purge --source ${SOURCE_ID}`;
+      expect(result.ok && result.notes.includes(oldName)).toBe(renamed);
+      expect(await logRows()).toEqual([
+        { source_id: SOURCE_ID, record_key: "3" },
+        { source_id: "src_other", record_key: "4" },
+      ]);
+      expect(await q(`select source_id from facetdb.question_set_versions`)).toEqual([
+        { source_id: "src_other" },
+      ]);
+      expect(printed).toEqual([renderSql(executed)]);
+      expect(printed[0]).not.toContain("source_id = ''");
+      if (renamed) {
+        // The note's command: the old name's log, now that no table is installed.
+        const old = await runUninstall({ purge: true, sourceId: SOURCE_ID, typed: SOURCE_ID });
+        expect(old.result).toMatchObject({ ok: true, applied: true, plan: { mode: "log-only" } });
+        expect(await logRows()).toEqual([{ source_id: "src_other", record_key: "4" }]);
+      }
+    },
+  );
+
+  it("an unresolved purge prints no delete, says why and names the sources it found", async () => {
+    await freshWorld();
+    await install();
+    await registerSource("orders_src");
+    await registerSource("t_listings");
+    // Rows under the given name that no registration of the project claims: never purged here.
+    await decisionLog([
+      ["t_listings", "1"],
+      ["nope", "2"],
+    ]);
+    for (const dryRun of [true, false]) {
+      const { result, printed } = await runUninstall({ purge: true, sourceId: "nope", dryRun });
+      expect(result).toMatchObject({ ok: true, applied: !dryRun });
+      expect(result.ok && result.plan.log).toEqual({
+        status: "not-found",
+        given: "nope",
+        found: ["orders_src", "t_listings"],
+        logged: 1,
+      });
+      expect(result.ok && result.notes.join("\n")).toContain(
+        `no source named "nope" belongs to this table or its project, so no decision was deleted (the script has no delete of the log). The project's sources in the FacetDB store: orders_src, t_listings.`,
+      );
+      expect(printed[0]).not.toContain("delete from facetdb.decisions");
+      expect(printed[0]).not.toContain("source_id = ''");
+      expect(printed[0]).not.toContain("facetdb.uninstall_source");
+    }
+    expect(await logRows()).toEqual([
+      { source_id: "nope", record_key: "2" },
+      { source_id: "t_listings", record_key: "1" },
+    ]);
+  });
+
+  it("a plain uninstall names the log it leaves and the command that purges it later", async () => {
+    await freshWorld();
+    await install();
+    await registerSource("t_listings");
+    await decisionLog([["t_listings", "1"]]);
+    const { result } = await runUninstall({ sourceId: "t_listings" });
+    expect(result).toMatchObject({ ok: true, applied: true });
+    const command = "facetdb uninstall --purge --source t_listings";
+    expect(result.ok && result.plan).toMatchObject({
+      mode: "table",
+      purge: false,
+      log: { status: "found", sourceId: "t_listings", decisions: 1, versions: 0 },
+      logOnlyPurge: { source: "t_listings", command },
+      // The source's registration keeps the store in use until the log is purged.
+      projectKeptBy: ["store-in-use"],
+      sharedTablesDropped: false,
+    });
+    expect(result.ok && result.notes).toEqual([
+      `the decision log of source "t_listings" stays (1 decision(s), 0 question-set version(s)); to delete it later: ${command}`,
+    ]);
+
+    const later = await runUninstall({ purge: true, sourceId: "t_listings", typed: "t_listings" });
+    expect(later.result).toMatchObject({ ok: true, applied: true, plan: { mode: "log-only" } });
+    expect(later.result.ok && later.result.plan).toMatchObject({
+      log: { status: "found", sourceId: "t_listings", decisions: 1 },
+      projectKeptBy: [],
+      sharedTablesDropped: true,
+    });
+    // The log went with its last row, and nothing is left using the store: the project, the shared
+    // tables and the schema go too.
+    expect((await q(`select to_regnamespace('facetdb') is null as gone`))[0]?.["gone"]).toBe(true);
+  });
+
+  describe("two projects whose sources share a name write one log", () => {
+    const bee: ProjectRef = { id: "proj_b", name: "Bee" };
+    const shared = `the decision log of source "${SOURCE_ID}" may be shared with staging.listings (project proj_b), which is still installed; uninstall that table first, or keep the log. Nothing was changed.`;
+
+    /** A on public.listings, B on staging.listings, both sources named `listings`. */
+    async function twoProjects(options: { readonly installB: boolean }) {
+      await freshWorld();
+      await q(`create schema staging`);
+      await q(
+        `create table staging.listings (id serial primary key, title text, description text, secret text)`,
+      );
+      await install();
+      if (options.installB) {
+        await install({ table: "listings", schema: "staging" }, everyType, bee);
+      }
+      // The worker registers `id = name` with `on conflict (id) do nothing`: A's row wins, B's
+      // registration is skipped, and both write their log under `listings`.
+      await registerSource(SOURCE_ID, project.id);
+      await q(
+        `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $1, 'plugin') on conflict (id) do nothing`,
+        [SOURCE_ID, bee.id],
+      );
+      await versions(SOURCE_ID);
+      await decisionLog([
+        [SOURCE_ID, "a1"],
+        [SOURCE_ID, "b1"],
+        ["src_other", "7"],
+      ]);
+    }
+
+    const uninstallB = () =>
+      uninstall({
+        adminUrl: "postgres://admin@unused/app",
+        connect: world.connect,
+        source: { table: "listings", schema: "staging", sourceId: SOURCE_ID },
+        print: () => undefined,
+        confirm: async () => bee.name,
+      });
+
+    it("A's purge is refused while B is installed; once B is uninstalled it deletes exactly the log", async () => {
+      await twoProjects({ installB: true });
+      const before = await snapshot();
+      for (const dryRun of [true, false]) {
+        const { result, events } = await runUninstall({ purge: true, dryRun });
+        expect(result).toEqual({ ok: false, reason: shared });
+        expect(events).toEqual([]);
+      }
+      expect(await snapshot()).toEqual(before);
+      expect(await count(`select 1 from facetdb.question_set_versions`)).toBe(1);
+
+      // A plain uninstall of A still runs, and says the log waits for B.
+      const plain = await runUninstall({ dryRun: true });
+      expect(plain.result.ok && plain.result.plan.logOnlyPurge).toBeUndefined();
+      expect(plain.result.ok && plain.result.notes).toContain(
+        `the decision log of source "${SOURCE_ID}" stays (2 decision(s), 1 question-set version(s)); it can be purged once no other table is installed in this database (facetdb uninstall --purge --source ${SOURCE_ID}).`,
+      );
+
+      expect(await uninstallB()).toMatchObject({ ok: true, applied: true });
+      const { result } = await runUninstall({ purge: true });
+      expect(result).toMatchObject({ ok: true, applied: true });
+      expect(await logRows()).toEqual([{ source_id: "src_other", record_key: "7" }]);
+      // Its last version gone, the versions table went with it (nothing else uses the store).
+      expect(await present("facetdb.question_set_versions")).toBe(false);
+    });
+
+    it("a log-only purge after A's plain uninstall is refused while B is installed", async () => {
+      await twoProjects({ installB: true });
+      expect((await runUninstall()).result).toMatchObject({ ok: true, applied: true });
+      const { result, events } = await runUninstall({ purge: true, typed: SOURCE_ID });
+      expect(result).toEqual({ ok: false, reason: shared });
+      expect(events).toEqual([]);
+      expect(await count(`select 1 from facetdb.decisions where source_id = 'listings'`)).toBe(2);
+
+      expect(await uninstallB()).toMatchObject({ ok: true, applied: true });
+      const later = await runUninstall({ purge: true, typed: SOURCE_ID });
+      expect(later.result).toMatchObject({ ok: true, applied: true, plan: { mode: "log-only" } });
+      expect(await logRows()).toEqual([{ source_id: "src_other", record_key: "7" }]);
+    });
+
+    it("re-checks inside the transaction: B installed after A's checks stops A's purge", async () => {
+      await twoProjects({ installB: false });
+      const result = await uninstall({
+        adminUrl: "postgres://admin@unused/app",
+        connect: world.connect,
+        source: { table: "listings", sourceId: SOURCE_ID },
+        purge: true,
+        print: () => undefined,
+        confirm: async () => {
+          await install({ table: "listings", schema: "staging" }, everyType, bee);
+          return project.name;
+        },
+      });
+      expect(result).toEqual({ ok: false, reason: shared });
+      expect(await count(`select 1 from facetdb.decisions where source_id = 'listings'`)).toBe(2);
+      expect(await columns()).toContain("is_scam");
+    });
+  });
+
+  it("refuses --purge on a polling-mode table (no owner row) with the plain refusal", async () => {
+    await freshWorld(["listings", "orders"]);
+    await install({ table: "orders" }, everyType, { id: "proj_orders", name: "Orders" });
+    // A polling-mode source: FacetDB's marked columns on the table, no trigger, no owner row.
+    for (const statement of pollingInstallSql({ table: "listings", key: "id" }, everyType)) {
+      await q(statement);
+    }
+    await q(`insert into facetdb.projects (id, name) values ('proj_polling', 'Polling')`);
+    await registerSource(SOURCE_ID, "proj_polling");
+    await decisionLog([[SOURCE_ID, "1"]]);
+    const before = await snapshot();
+    const { result, events } = await runUninstall({ purge: true });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok === false && result.reason).toContain("facetdb.table_owners has no row");
+    expect(result.ok === false && result.reason).not.toContain("only the decision log");
+    expect(events).toEqual([]);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("re-checks inside the transaction: an install that lands after the checks is never purged", async () => {
+    await freshWorld();
+    await install();
+    await registerSource("t_listings");
+    await decisionLog([["t_listings", "1"]]);
+    await runUninstall({ sourceId: "t_listings" });
+
+    const result = await uninstall({
+      adminUrl: "postgres://admin@unused/app",
+      connect: world.connect,
+      source: { table: "listings", sourceId: "t_listings" },
+      purge: true,
+      print: () => undefined,
+      // Between the checks and the transaction, the table is installed again for its project.
+      confirm: async () => {
+        await install();
+        return "t_listings";
+      },
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok === false && result.reason).toContain(
+      `the decision log of source "t_listings" is live again: public.listings is now installed for its project; nothing was changed`,
+    );
+    expect(await logRows()).toEqual([{ source_id: "t_listings", record_key: "1" }]);
+    expect(await columns()).toContain("is_scam");
+  });
+});
+
+describe("uninstall keeps a project's pending state", () => {
+  async function outbox(rows: readonly (readonly [delivered: boolean, gaveUp: boolean])[]) {
+    for (const [delivered, gaveUp] of rows) {
+      await q(
+        `insert into facetdb.webhook_outbox (project_id, endpoint, payload, created_at, next_attempt_at, delivered_at, gave_up_at)
+         values ($1, 'https://hooks.example.com/f', '{}', 1, 1, $2, $3)`,
+        [project.id, delivered ? 2 : null, gaveUp ? 2 : null],
+      );
+    }
+  }
+
+  it("keeps the project and the outbox while a delivery is pending, and the note counts it", async () => {
+    await freshWorld();
+    await install();
+    await outbox([
+      [false, false],
+      [false, false],
+      [true, false],
+      [false, true],
+    ]);
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      pendingDeliveries: 2,
+      projectKeptBy: ["pending-deliveries"],
+      sharedTablesDropped: false,
+    });
+    expect(result.ok && result.notes).toContain(
+      `2 webhook deliveries of project ${project.id} still pending: the project and the webhook outbox stay until each is delivered or given up (retried for 24 hours).`,
+    );
+    expect(await q(`select id from facetdb.projects`)).toEqual([{ id: project.id }]);
+    expect(await count(`select 1 from facetdb.webhook_outbox`)).toBe(4);
+    expect(await present("facetdb.table_owners")).toBe(false);
+  });
+
+  it("drops the outbox with the project once every delivery is delivered or given up", async () => {
+    await freshWorld();
+    await install();
+    await outbox([
+      [true, false],
+      [false, true],
+    ]);
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true, notes: [] });
+    expect(result.ok && result.plan).toMatchObject({
+      pendingDeliveries: 0,
+      projectKeptBy: [],
+      sharedTablesDropped: true,
+    });
+    expect(await present("facetdb.projects")).toBe(false);
+    expect(await present("facetdb.webhook_outbox")).toBe(false);
+  });
+
+  it("never drops a pending delivery whose project row is gone", async () => {
+    await freshWorld();
+    await install();
+    await q(
+      `insert into facetdb.webhook_outbox (project_id, endpoint, payload, created_at, next_attempt_at)
+       values ('proj_gone', 'https://hooks.example.com/f', '{}', 1, 1)`,
+    );
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan.sharedTablesDropped).toBe(false);
+    expect(await count(`select 1 from facetdb.webhook_outbox`)).toBe(1);
+  });
+
+  it("keeps the project row while an unfinished backfill cursor exists, and says which run", async () => {
+    await freshWorld();
+    await install();
+    await q(`insert into facetdb.cursors (run, cursor, done) values ('v1', 'c-17', false)`);
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      projectKeptBy: ["cursors"],
+      unfinishedCursors: ["v1"],
+    });
+    expect(result.ok && result.notes).toContain(
+      `the project ${project.id} and the store's shared tables stay because of an unfinished backfill cursor (run v1); it keeps the shared tables until the backfill finishes or the cursor is deleted.`,
+    );
+    expect(await q(`select id from facetdb.projects`)).toEqual([{ id: project.id }]);
+    expect(await present("facetdb.cursors")).toBe(true);
+  });
+
+  it("counts records only through the project's own sources", async () => {
+    await freshWorld();
+    await install();
+    await q(`insert into facetdb.projects (id, name) values ('proj_x', 'X')`);
+    await q(
+      `insert into facetdb.sources (id, project_id, name, kind) values ('src_x', 'proj_x', 'xs', 'api')`,
+    );
+    const record = (source: string) =>
+      q(
+        `insert into facetdb.records (source_id, record_key, state, hash, status) values ($1, 'k', '{}', 'h', 'pending')`,
+        [source],
+      );
+    await record("src_x");
+    const theirs = await runUninstall({ dryRun: true });
+    // Another project's source keeps the store in use, but its records are not this project's.
+    expect(theirs.result.ok && theirs.result.plan.projectKeptBy).toEqual(["store-in-use"]);
+
+    await q(
+      `insert into facetdb.sources (id, project_id, name, kind) values ('src_api', '${project.id}', 'api', 'api')`,
+    );
+    await record("src_api");
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan.projectKeptBy).toEqual(["store-in-use", "records"]);
+    expect(await q(`select id from facetdb.projects order by id`)).toEqual([
+      { id: project.id },
+      { id: "proj_x" },
+    ]);
+  });
+
+  it("a finished cursor keeps nothing (a re-run starts from the top)", async () => {
+    await freshWorld();
+    await install();
+    await q(`insert into facetdb.cursors (run, cursor, done) values ('v1', null, true)`);
+    const { result } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan.projectKeptBy).toEqual([]);
+    expect(await present("facetdb.projects")).toBe(false);
   });
 });

@@ -65,6 +65,17 @@ async function facetdbSchemaExists(): Promise<boolean> {
   return rows.length > 0;
 }
 
+/**
+ * The `listings` source as the worker registers it on its first start (`ensureSource`), under the
+ * project migrate installed: what `--purge` finds the log by.
+ */
+async function registerSource(): Promise<void> {
+  await world.client.query(
+    `insert into facetdb.sources (id, project_id, name, kind)
+     select 'listings', project_id, 'listings', 'plugin' from facetdb.table_owners where table_name = 'listings'`,
+  );
+}
+
 /** The connections the commands open, with the ones that ran a transaction marked. */
 function recordingConnect(onConnect?: (index: number) => Promise<void>): {
   connect: SqlConnect;
@@ -195,6 +206,7 @@ describe("under --json, the SQL is shown before the confirmation", () => {
 
   it("uninstall --purge prints its SQL on stderr before asking for the name", async () => {
     expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    await registerSource();
     const result = await runSeeingPrompts(
       ["uninstall", "--json", "--purge", "--admin-url", ADMIN_URL],
       ["listings-app"],
@@ -532,6 +544,7 @@ describe("facetdb uninstall", () => {
   });
 
   it("passes --purge through to the script", async () => {
+    await registerSource();
     const kept = await run(["uninstall", "--dry-run", "--admin-url", ADMIN_URL]);
     const purged = await run(["uninstall", "--dry-run", "--purge", "--admin-url", ADMIN_URL]);
     expect(kept.stdout).not.toContain("delete from facetdb.decisions");
