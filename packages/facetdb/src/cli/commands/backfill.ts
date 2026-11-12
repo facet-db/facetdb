@@ -126,8 +126,11 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
         onEstimate: async (estimate) => {
           print(`Backfill of ${name} (source ${source.name}), newest records first:`);
           print(describeEstimate(estimate));
+          // The pace is a ceiling: each queue call is a round trip, so a far database (about 200 ms
+          // a statement) goes slower than it.
+          const seconds = Math.ceil(estimate.records / pace);
           print(
-            `Pace: ${pace} records per second, so roughly ${whole.format(Math.ceil(estimate.records / pace))} seconds.`,
+            `Pace: at most ${pace} records per second, so about ${whole.format(seconds)} ${seconds === 1 ? "second" : "seconds"} on a database close to the worker.`,
           );
           if (options.dryRun) {
             print(

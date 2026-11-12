@@ -177,6 +177,41 @@ describe("the decision log on a real Postgres", () => {
     );
     expect(stored[0]?.["kind"]).toBe("object");
   });
+
+  it("latestAnswers reads a backfill page of 500 keys, agreeing with latestAnswer on each", async () => {
+    // postgres.js binds the key list as a text[] here, which PGlite never proves.
+    const store = await newStore();
+    const log = store.log("page");
+    const keys = Array.from({ length: 500 }, (_, n) => `p${n}`);
+    const entry = (key: string, version: number, probability: number) =>
+      ({
+        kind: "answer",
+        key,
+        version,
+        model: "jev-1.14.0",
+        stateHash: `hash-${key}`,
+        answers: { is_scam: { type: "noul", probability } },
+        usage: { inputTokens: 100, outputTokens: 5 },
+        at: new Date("2026-11-02T08:00:00.000Z"),
+      }) as const;
+    // Every other key answered once, every fourth answered again later; the odd ones never.
+    for (let n = 0; n < 500; n += 2) {
+      await log.appendAnswer(entry(`p${n}`, 1, 0.5));
+      if (n % 4 === 0) {
+        await log.appendAnswer(entry(`p${n}`, 2, 0.9));
+      }
+    }
+
+    const latest = await log.latestAnswers(keys);
+
+    expect(latest.size).toBe(250);
+    for (const key of keys) {
+      expect(latest.get(key)).toEqual(await log.latestAnswer(key));
+    }
+    expect(latest.get("p0")?.version).toBe(2);
+    expect(latest.get("p2")?.version).toBe(1);
+    expect(latest.has("p1")).toBe(false);
+  });
 });
 
 describe("reserve on a real Postgres", () => {

@@ -180,10 +180,31 @@ describe("the decision log", () => {
     expect(fromTwo.map((entry) => entry.key)).toEqual(["b"]);
   });
 
+  it("latestAnswers gives each key's latest answer in one call, and leaves out keys never answered", async () => {
+    const { store } = await newStore();
+    const log = store.log("src");
+    await log.appendAnswer(answerEntry("a", 1, "2026-10-31T10:00:00Z"));
+    await log.appendAnswer(answerEntry("b", 1, "2026-10-31T10:00:00Z"));
+    await log.appendAnswer(answerEntry("b", 2, "2026-10-31T11:00:00Z"));
+    // A human row is newer than b's answer, and is not an answer: b's latest answer still wins.
+    await log.appendHuman(humanEntry("b", true, "2026-10-31T12:00:00Z"));
+    await log.appendHuman(humanEntry("h", true, "2026-10-31T12:00:00Z"));
+
+    const keys = ["a", "b", "h", "never"];
+    const latest = await log.latestAnswers(keys);
+    expect([...latest.keys()].sort()).toEqual(["a", "b"]);
+    for (const key of keys) {
+      expect(latest.get(key)).toEqual(await log.latestAnswer(key));
+    }
+    expect(latest.get("b")?.version).toBe(2);
+    expect((await log.latestAnswers([])).size).toBe(0);
+  });
+
   it("keeps sources apart", async () => {
     const { store } = await newStore();
     await store.log("one").appendAnswer(answerEntry("a", 1, "2026-10-31T10:00:00Z"));
     expect(await store.log("two").latestAnswer("a")).toBeUndefined();
+    expect((await store.log("two").latestAnswers(["a"])).size).toBe(0);
     expect(await store.log("two").latestAnswersSince()).toEqual([]);
   });
 });

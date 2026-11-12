@@ -159,11 +159,14 @@ class ScriptedWorker implements BackfillWorker {
 
 /**
  * A connector that notes the cursor of every scan, to prove where a resumed run starts, and when
- * each key was enqueued, to prove the pace. `failEnqueue` makes the queue refuse a key.
+ * each key was enqueued and in which call, to prove the pace and the chunks. `failEnqueue` makes the
+ * queue refuse a key, and with it the whole call, as one statement would.
  */
 class SpyConnector extends FakeConnector {
   readonly scans: (ScanCursor | null)[] = [];
   readonly enqueued: { key: RecordKey; at: number }[] = [];
+  /** The keys of every `enqueue` call, refused ones included, in call order. */
+  readonly enqueueCalls: (readonly RecordKey[])[] = [];
   writes = 0;
   failEnqueue: (key: RecordKey) => boolean = () => false;
   readonly #clock: FakeClock;
@@ -174,10 +177,12 @@ class SpyConnector extends FakeConnector {
   }
 
   override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+    this.enqueueCalls.push([...keys]);
+    const refused = keys.find((key) => this.failEnqueue(key));
+    if (refused !== undefined) {
+      throw new Error(`the queue refused ${refused}`);
+    }
     for (const key of keys) {
-      if (this.failEnqueue(key)) {
-        throw new Error(`the queue refused ${key}`);
-      }
       this.enqueued.push({ key, at: this.#clock.now() });
     }
     return super.enqueue(keys);
@@ -198,18 +203,43 @@ class SpyConnector extends FakeConnector {
   }
 }
 
+/**
+ * The in-memory log, counting the calls the backfill makes to it, to prove a page costs one lookup.
+ * `failLookups` makes every `latestAnswers` call reject.
+ */
+class RecordingLog extends FakeDecisionLog {
+  /** The keys of every `latestAnswers` call. */
+  readonly lookups: (readonly RecordKey[])[] = [];
+  /** The key of every `latestAnswer` call. */
+  readonly singleLookups: RecordKey[] = [];
+  failLookups = false;
+
+  override latestAnswer(key: RecordKey): Promise<AnswerEntry | undefined> {
+    this.singleLookups.push(key);
+    return super.latestAnswer(key);
+  }
+
+  override latestAnswers(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, AnswerEntry>> {
+    this.lookups.push([...keys]);
+    if (this.failLookups) {
+      return Promise.reject(new Error("the store is unreachable"));
+    }
+    return super.latestAnswers(keys);
+  }
+}
+
 type Rig = {
   db: FakeDatabase;
   connector: SpyConnector;
   clock: FakeClock;
-  log: FakeDecisionLog;
+  log: RecordingLog;
   cursors: FakeCursorStore;
   journal: string[];
   deps: (worker: BackfillWorker, questionSet?: QuestionSet, version?: number) => BackfillDeps;
 };
 
-async function rig(rows: number): Promise<Rig> {
-  const db = new FakeDatabase({ fields: ["body"], pageSize: 10 });
+async function rig(rows: number, pageSize = 10): Promise<Rig> {
+  const db = new FakeDatabase({ fields: ["body"], pageSize });
   for (let n = 1; n <= rows; n += 1) {
     db.edit(`k${n}`, { body: `row-${n}` });
   }
@@ -217,7 +247,7 @@ async function rig(rows: number): Promise<Rig> {
   const connector = new SpyConnector(db, clock);
   await connector.install();
   const journal: string[] = [];
-  const log = new FakeDecisionLog(journal);
+  const log = new RecordingLog(journal);
   const cursors = new FakeCursorStore();
   return {
     db,
@@ -240,6 +270,31 @@ async function rig(rows: number): Promise<Rig> {
 }
 
 const yes = (): boolean => true;
+
+/** The most records started in any one-second window [t, t + 1000); a fullest window starts at a start. */
+function mostInAnySecond(times: readonly number[]): number {
+  let most = 0;
+  for (const from of times) {
+    const inWindow = times.filter((at) => at >= from && at < from + 1_000).length;
+    most = Math.max(most, inWindow);
+  }
+  return most;
+}
+
+/** When each `enqueue` call went out: the time its first key was queued. */
+function startsOfCalls(r: Rig): number[] {
+  const starts: number[] = [];
+  let seen = 0;
+  for (const keys of r.connector.enqueueCalls) {
+    const first = r.connector.enqueued[seen];
+    if (first === undefined) {
+      throw new Error("every call in these tests is accepted");
+    }
+    starts.push(first.at);
+    seen += keys.length;
+  }
+  return starts;
+}
 
 /** What the worker does with the queue a whole-set run filled: claims, asks, records, acks. */
 async function drainQueue(
@@ -274,33 +329,103 @@ async function drainQueue(
 }
 
 describe("backfill pacing", () => {
-  it("@timing enqueues records at the pace, one interval apart, on the injected clock", async () => {
-    const r = await rig(30);
+  it("@timing queues a second of records per call, each call at its first record's slot", async () => {
+    const r = await rig(30, 100);
     const worker = new ScriptedWorker(r.clock, r.journal);
     const backfill = createBackfill(r.deps(worker));
 
-    const report = await backfill.run({ pace: 50, maxInFlight: 1, onEstimate: yes });
+    const report = await backfill.run({ pace: 10, onEstimate: yes });
 
     expect(report.status).toBe("completed");
     expect(report.enqueued).toHaveLength(30);
-    // One record every 20 ms: the first at once, the 30th after 29 intervals.
+    // Slots are 100 ms apart; the ten whose slots fall within one second go in one call, at the
+    // first one's slot, so no record is queued more than a second ahead of its own slot.
+    expect(r.connector.enqueueCalls.map((keys) => keys.length)).toEqual([10, 10, 10]);
     expect(r.connector.enqueued.map(({ at }) => at)).toEqual(
-      Array.from({ length: 30 }, (_, n) => n * 20),
+      Array.from({ length: 30 }, (_, n) => Math.floor(n / 10) * 1_000),
     );
-    expect(r.clock.sleeps.every((ms) => ms === 20)).toBe(true);
+    expect(r.clock.sleeps).toEqual([1_000, 1_000]);
   });
 
-  it("@timing holds the pace with several lanes", async () => {
+  it("@timing never queues more than the pace in any one-second window, across pages", async () => {
     const r = await rig(30);
     const worker = new ScriptedWorker(r.clock, r.journal);
     const backfill = createBackfill(r.deps(worker));
 
-    await backfill.run({ pace: 10, maxInFlight: 8, onEstimate: yes });
+    await backfill.run({ pace: 4, onEstimate: yes });
 
-    // 30 records at 10 a second take 29 intervals of 100 ms, however many lanes share them.
-    expect(r.clock.now()).toBe(2_900);
-    expect(r.clock.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(2_900);
     expect(r.connector.enqueued).toHaveLength(30);
+    expect(mostInAnySecond(r.connector.enqueued.map(({ at }) => at))).toBe(4);
+    // Pages of 10 at 4 a second: chunks of 4, 4 and 2 per page. The next page's first chunk waits
+    // until the second that took the short chunk is over, instead of landing inside it.
+    expect(r.connector.enqueueCalls.map((keys) => keys.length)).toEqual([
+      4, 4, 2, 4, 4, 2, 4, 4, 2,
+    ]);
+    expect(startsOfCalls(r)).toEqual([0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000]);
+  });
+
+  it("@timing holds the ceiling when a page's last chunk is short at the default pace", async () => {
+    const r = await rig(2_000, 500);
+    // k1501 is the oldest record of page one and already answered: page one has 499 to queue.
+    const [held] = (await r.connector.read(["k1501"])).rows;
+    if (held === undefined) {
+      throw new Error("the rig has k1501");
+    }
+    await r.log.appendAnswer({
+      kind: "answer",
+      key: "k1501",
+      version: 1,
+      model: SCAM_ONLY.model,
+      stateHash: held.hash,
+      answers: { scam: { type: "noul", probability: 0.05 } },
+      usage: { inputTokens: 100, outputTokens: 5 },
+      at: new Date(0),
+    });
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    const report = await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+
+    expect(report.alreadyAnswered).toEqual(["k1501"]);
+    expect(report.enqueued).toHaveLength(1_999);
+    expect(mostInAnySecond(r.connector.enqueued.map(({ at }) => at))).toBe(50);
+    // Page one ends with 49 at 9,000 ms; page two's first 50 wait for 10,000 ms instead of going at
+    // their slot, 9,980 ms, which would put 99 records in one second.
+    const calls = startsOfCalls(r);
+    expect(r.connector.enqueueCalls[9]).toHaveLength(49);
+    expect(calls.slice(9, 11)).toEqual([9_000, 10_000]);
+    expect(r.connector.enqueueCalls).toHaveLength(40);
+  });
+
+  it("@timing queues one record per call when the pace is below one a second", async () => {
+    const r = await rig(3);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    await createBackfill(r.deps(worker)).run({ pace: 0.5, onEstimate: yes });
+
+    expect(r.connector.enqueueCalls).toEqual([["k3"], ["k2"], ["k1"]]);
+    expect(r.connector.enqueued.map(({ at }) => at)).toEqual([0, 2_000, 4_000]);
+  });
+
+  it("looks up each page once and queues 2,000 rows in 40 calls at the default pace", async () => {
+    const r = await rig(2_000, 500);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    const report = await createBackfill(r.deps(worker)).run({ onEstimate: yes });
+
+    expect(report.status).toBe("completed");
+    expect(report.enqueued).toHaveLength(2_000);
+    // ceil(2,000 / 500) lookups, one per page and before any record of it is queued; no record
+    // costs a lookup of its own (a far database paid two round trips per record).
+    expect(r.log.lookups.map((keys) => keys.length)).toEqual([500, 500, 500, 500]);
+    expect(r.log.singleLookups).toEqual([]);
+    // ceil(2,000 / 50) calls of 50 records, one per second of the pace.
+    expect(r.connector.enqueueCalls).toHaveLength(40);
+    expect(r.connector.enqueueCalls.every((keys) => keys.length === 50)).toBe(true);
+    // The pace is unchanged: the 40th call starts at the 1,951st record's slot, 39 seconds in.
+    expect(r.clock.now()).toBe(39_000);
+    expect(r.connector.enqueuedKeys()).toEqual(
+      Array.from({ length: 2_000 }, (_, n) => `k${2_000 - n}`),
+    );
   });
 
   it("asks nothing itself: the whole set goes through the worker's queue, one entry per record", async () => {
@@ -384,11 +509,13 @@ describe("backfill resume", () => {
     r.connector.failEnqueue = (key) => key === "k14";
     const worker = new ScriptedWorker(r.clock, r.journal);
 
-    const first = await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
+    // Two a second, so a chunk is two records and the refused one takes only its neighbour with it.
+    const first = await createBackfill(r.deps(worker)).run({ pace: 2, onEstimate: yes });
 
     // Rows 25 to 16 are page one and saved; page two (15 to 6) has the failure and is not saved.
     expect(first.status).toBe("stopped");
-    expect(first.failures.map(({ key }) => key)).toEqual(["k14"]);
+    // The refused call held k15 and k14: neither reached the queue, the rest of the page did.
+    expect(first.failures.map(({ key }) => key)).toEqual(["k15", "k14"]);
     const savedAfterFirstPage = r.cursors.saves.at(-1)?.progress;
     expect(r.cursors.saves).toHaveLength(1);
     expect(savedAfterFirstPage?.done).toBe(false);
@@ -399,16 +526,16 @@ describe("backfill resume", () => {
     r.connector.failEnqueue = () => false;
     r.connector.enqueued.length = 0;
     r.connector.scans.length = 0;
-    const second = await createBackfill(r.deps(worker)).run({ maxInFlight: 1, onEstimate: yes });
+    const second = await createBackfill(r.deps(worker)).run({ pace: 2, onEstimate: yes });
 
     expect(second.status).toBe("completed");
     // The survey and the run both start at the saved cursor, never at the top.
     expect(r.connector.scans[0]).toBe(savedAfterFirstPage?.cursor);
     expect(r.connector.scans).not.toContain(null);
-    // Page two's answered rows are not queued again; the refused row and page three are.
-    expect(r.connector.enqueuedKeys()).toEqual(["k14", "k5", "k4", "k3", "k2", "k1"]);
+    // Page two's answered rows are not queued again; the refused chunk and page three are.
+    expect(r.connector.enqueuedKeys()).toEqual(["k15", "k14", "k5", "k4", "k3", "k2", "k1"]);
     expect([...second.alreadyAnswered].sort()).toEqual(
-      ["k15", "k13", "k12", "k11", "k10", "k9", "k8", "k7", "k6"].sort(),
+      ["k13", "k12", "k11", "k10", "k9", "k8", "k7", "k6"].sort(),
     );
     await drainQueue(r, worker);
     // Every record was asked exactly once overall.
@@ -491,6 +618,46 @@ describe("backfill of an added question", () => {
     }
     // Each record was held while asked and its job settled afterwards.
     expect(r.db.jobs.size).toBe(0);
+  });
+
+  it("@timing holds the pace with several lanes, one record per slot", async () => {
+    const r = await answeredBeforeTheNewQuestion(30);
+    const t0 = r.clock.now();
+    const sleptBefore = r.clock.sleeps.length;
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    await createBackfill(r.deps(worker, SCAM_AND_SPAM, 2)).run({
+      onlyQuestions: ["spam"],
+      pace: 10,
+      maxInFlight: 8,
+      onEstimate: yes,
+    });
+
+    // 30 records at 10 a second take 29 intervals of 100 ms, however many lanes share them. (The
+    // fake clock is one for all lanes, so a lane's sleep moves every lane's time: the total is what
+    // proves the pace, as each lane sleeps only until its own slot.)
+    expect(worker.requests).toHaveLength(30);
+    expect(r.clock.now() - t0).toBe(2_900);
+    expect(r.clock.sleeps.slice(sleptBefore).reduce((sum, ms) => sum + ms, 0)).toBe(2_900);
+  });
+
+  it("reads each page's answers in one lookup, and again only for a record it holds to ask", async () => {
+    const r = await answeredBeforeTheNewQuestion(12);
+    r.log.lookups.length = 0;
+    r.log.singleLookups.length = 0;
+    const worker = new ScriptedWorker(r.clock, r.journal);
+
+    const report = await createBackfill(r.deps(worker, SCAM_AND_SPAM, 2)).run({
+      onlyQuestions: ["spam"],
+      onEstimate: yes,
+    });
+
+    expect(report.answered).toHaveLength(12);
+    // Pages of 10: one lookup for each page, before any record of it is held.
+    expect(r.log.lookups.map((keys) => keys.length)).toEqual([10, 2]);
+    // Under the claim each asked record is read again, since the worker may have answered it since
+    // the page was read; that read rides on a model call, so it never sets the run's time.
+    expect([...r.log.singleLookups].sort()).toEqual([...report.answered].sort());
   });
 
   it("stops at the spending cap: no call is made past it, and every answer is counted", async () => {
@@ -747,12 +914,10 @@ describe("backfill alerts", () => {
     r.connector.failEnqueue = (key) => key === "k2";
     const worker = new ScriptedWorker(r.clock, r.journal);
 
-    await createBackfill({ ...r.deps(worker), alerts: signals }).run({
-      maxInFlight: 1,
-      onEstimate: yes,
-    });
+    await createBackfill({ ...r.deps(worker), alerts: signals }).run({ onEstimate: yes });
 
-    expect(told).toEqual(["failed 1 null"]);
+    // The three records went in one call, which the queue refused: none of them was queued.
+    expect(told).toEqual(["failed 3 null"]);
   });
 
   it("says nothing when the caller declines the estimate", async () => {
@@ -767,6 +932,28 @@ describe("backfill alerts", () => {
 });
 
 describe("backfill failures", () => {
+  it("stops with the cursor at the page's start when the page's lookup fails", async () => {
+    const r = await rig(25);
+    const worker = new ScriptedWorker(r.clock, r.journal);
+    const backfill = createBackfill(r.deps(worker));
+    // Page one goes through; the lookup of page two fails.
+    const pages: (ScanCursor | null)[] = [];
+    const report = await backfill.run({
+      onEstimate: yes,
+      onPage: ({ cursor }) => {
+        pages.push(cursor);
+        r.log.failLookups = true;
+      },
+    });
+
+    expect(report.status).toBe("stopped");
+    // Nothing of page two was queued: every one of its records failed with the lookup.
+    expect(report.failures).toHaveLength(10);
+    expect(r.connector.enqueued).toHaveLength(10);
+    expect(r.cursors.saves.map(({ progress }) => progress.cursor)).toEqual(pages);
+    expect(r.cursors.saves).toHaveLength(1);
+  });
+
   it("never turns a failed call into an answer, and lets an unchanged record go for the next run", async () => {
     const r = await rig(3);
     const worker = new ScriptedWorker(r.clock, r.journal);

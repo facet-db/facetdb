@@ -27,6 +27,9 @@ export const PRICE_PER_MILLION_INPUT_TOKENS = 0.042;
 /** The timing target: 50 records per second per source. */
 export const DEFAULT_BACKFILL_PACE = 50;
 
+/** The pace is per second; the clock counts milliseconds. */
+const MS_PER_SECOND = 1_000;
+
 /** The estimate is made from this many states, not from the whole table. */
 export const ESTIMATE_SAMPLE_SIZE = 100;
 
@@ -246,32 +249,70 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       return report;
     }
 
-    const interval = 1000 / pace;
+    const interval = MS_PER_SECOND / pace;
+    // The pace is records per second. The queue takes the records whose slots fall within one
+    // second of a chunk's first in one call (50 at the default pace), so a far database costs a
+    // round trip per second of records, not one per record.
+    const chunkSize = Math.ceil(pace);
     let nextStartAt = clock.now();
-    /** Each record gets its own start time, one interval after the last, however many lanes run. */
-    async function waitForTurn(): Promise<void> {
-      const slot = Math.max(nextStartAt, clock.now());
-      nextStartAt = slot + interval;
-      const wait = slot - clock.now();
+    /** When each of the last `chunkSize` records was started, oldest first. */
+    const recentStarts: number[] = [];
+    /**
+     * `count` records (at most `chunkSize`) take the next `count` slots, one interval apart, however
+     * many lanes run, and start together at the first of them. A start also waits until the record
+     * `chunkSize` places before the chunk's last started a second ago, so no one-second window ever
+     * holds more than `chunkSize` starts: the CLI promises "at most" the pace. Without it a page's
+     * short last chunk let the next page's full chunk land in the same second (99 at the default).
+     */
+    async function waitForTurn(count: number): Promise<void> {
+      let start = Math.max(nextStartAt, clock.now());
+      const bound = recentStarts.length + count - 1 - chunkSize;
+      const earlier = bound >= 0 ? recentStarts[bound] : undefined;
+      if (earlier !== undefined) {
+        start = Math.max(start, earlier + MS_PER_SECOND);
+      }
+      nextStartAt = start + count * interval;
+      for (let n = 0; n < count; n += 1) {
+        recentStarts.push(start);
+      }
+      recentStarts.splice(0, Math.max(0, recentStarts.length - chunkSize));
+      const wait = start - clock.now();
       if (wait > 0) {
         await clock.sleep(wait);
       }
     }
 
     /**
-     * The whole set: the record goes into the worker's queue at the pace, and the worker asks it,
-     * skips it or refuses it exactly as it does any change. The queue holds one entry per record,
-     * so a record the worker is already asking is never answered twice.
+     * The whole set: the page's records go into the worker's queue at the pace, a chunk per call,
+     * and the worker asks, skips or refuses each one exactly as it does any change. The queue holds
+     * one entry per record, so a record the worker is already asking is never answered twice. A
+     * chunk the queue refuses fails every record in it: the page is not saved, and the next run
+     * starts it again and queues what is still unanswered.
      */
-    async function enqueueWhole(row: ReadRow): Promise<void> {
-      const prior = await log.latestAnswer(row.key);
-      if (isCurrent(prior, row, asked, version)) {
-        report.alreadyAnswered.push(row.key);
-        return;
+    async function enqueuePage(
+      rows: readonly ReadRow[],
+      priors: ReadonlyMap<RecordKey, AnswerEntry>,
+    ): Promise<void> {
+      const due: RecordKey[] = [];
+      for (const row of rows) {
+        if (isCurrent(priors.get(row.key), row, asked, version)) {
+          report.alreadyAnswered.push(row.key);
+        } else {
+          due.push(row.key);
+        }
       }
-      await waitForTurn();
-      await connector.enqueue([row.key]);
-      report.enqueued.push(row.key);
+      for (let from = 0; from < due.length; from += chunkSize) {
+        const chunk = due.slice(from, from + chunkSize);
+        try {
+          await waitForTurn(chunk.length);
+          await connector.enqueue(chunk);
+          report.enqueued.push(...chunk);
+        } catch (error) {
+          for (const key of chunk) {
+            report.failures.push({ key, error });
+          }
+        }
+      }
     }
 
     /** Set when the spending cap refuses a request: no record after it is asked, in this run. */
@@ -279,19 +320,19 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     // `false` would be narrowed to the literal and every later read read as always false.
     let paused = false as boolean;
 
-    async function settle(row: ReadRow): Promise<void> {
+    /** One record of an added-question run; `prior` is its latest answer from the page's lookup. */
+    async function settle(
+      row: ReadRow,
+      prior: AnswerEntry | undefined,
+      only: ReadonlySet<string>,
+    ): Promise<void> {
       if (paused) {
         return;
       }
       try {
-        if (only === undefined) {
-          await enqueueWhole(row);
-          return;
-        }
         if (shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded }).skip) {
           return;
         }
-        const prior = await log.latestAnswer(row.key);
         if (hasAll(prior, row, asked)) {
           report.alreadyAnswered.push(row.key);
           return;
@@ -309,7 +350,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           report.refused.push(row.key);
           return;
         }
-        await waitForTurn();
+        await waitForTurn(1);
         // Held like a worker's claim while asking, so the worker never asks the record at once.
         if (!(await connector.claimKey(row.key))) {
           report.deferred.push({ key: row.key, reason: "queued" });
@@ -427,19 +468,55 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       await (unchanged ? connector.ack([row.key]) : connector.release([row.key]));
     }
 
-    let cursor = start;
-    do {
-      const page = await connector.scan(cursor);
+    /**
+     * Every record of the page is checked against its latest answer, read for the whole page in one
+     * call before any record of it is queued or asked. A failed read fails every record of the
+     * page, which then stops the run with its cursor unsaved.
+     */
+    async function lookUpPage(
+      rows: readonly ReadRow[],
+    ): Promise<ReadonlyMap<RecordKey, AnswerEntry> | undefined> {
+      if (rows.length === 0) {
+        return new Map();
+      }
+      try {
+        return await log.latestAnswers(rows.map((row) => row.key));
+      } catch (error) {
+        for (const row of rows) {
+          report.failures.push({ key: row.key, error });
+        }
+        return undefined;
+      }
+    }
+
+    async function settlePage(
+      rows: readonly ReadRow[],
+      priors: ReadonlyMap<RecordKey, AnswerEntry>,
+    ): Promise<void> {
+      if (only === undefined) {
+        await enqueuePage(rows, priors);
+        return;
+      }
       let next = 0;
       const lane = async (): Promise<void> => {
-        while (next < page.rows.length) {
-          const row = page.rows[next++];
+        while (next < rows.length) {
+          const row = rows[next++];
           if (row !== undefined) {
-            await settle(row);
+            await settle(row, priors.get(row.key), only);
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(maxInFlight, page.rows.length) }, lane));
+      await Promise.all(Array.from({ length: Math.min(maxInFlight, rows.length) }, lane));
+    }
+
+    let cursor = start;
+    do {
+      const page = await connector.scan(cursor);
+      const priors = await lookUpPage(page.rows);
+      // A failed lookup is reported as the page's failure: nothing of it is queued or asked.
+      if (priors !== undefined) {
+        await settlePage(page.rows, priors);
+      }
       if (report.failures.length > 0) {
         // Not saved: the next run starts this page again and skips what was answered.
         report.status = "stopped";

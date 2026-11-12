@@ -74,6 +74,26 @@ export function createDecisionLog(client: SqlClient, sourceId: string): Decision
       return found.find(isAnswer);
     },
 
+    async latestAnswers(keys) {
+      const latest = new Map<RecordKey, AnswerEntry>();
+      if (keys.length === 0) {
+        return latest;
+      }
+      // One statement for a whole page: on a far database every round trip costs about
+      // 200 ms, so a lookup per record set the backfill's time instead of its pace.
+      const rows = await client.query(
+        `select distinct on (record_key) ${COLUMNS}
+           from facetdb.decisions
+          where source_id = $1 and kind = 'answer' and record_key = any($2::text[])
+          order by record_key, id desc`,
+        [sourceId, [...keys]],
+      );
+      for (const entry of rows.map(toEntry).filter(isAnswer)) {
+        latest.set(entry.key, entry);
+      }
+      return latest;
+    },
+
     history(key: RecordKey) {
       return entries("and record_key = $2 order by id", [key]);
     },

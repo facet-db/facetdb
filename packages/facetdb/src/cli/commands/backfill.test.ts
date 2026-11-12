@@ -199,6 +199,21 @@ describe("facetdb backfill", () => {
     expect(world.closes).toBe(1);
   });
 
+  it("says the pace is a ceiling, with the seconds it takes on a database close to the worker", async () => {
+    const atDefault = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT));
+    // 6 records at 50 a second: under a second, rounded up. Each queue call is a round trip, so a
+    // far database goes slower than the pace (seen on Supabase).
+    expect(atDefault.stdout).toContain(
+      "Pace: at most 50 records per second, so about 1 second on a database close to the worker.",
+    );
+
+    const slower = await run(["backfill", "--dry-run", "--pace", "2"], createFakeProvider(SCRIPT));
+    expect(slower.stdout).toContain(
+      "Pace: at most 2 records per second, so about 3 seconds on a database close to the worker.",
+    );
+    expect(slower.stdout).not.toContain("roughly");
+  });
+
   it("--dry-run asks for a setup without the store; a real run asks for the full one", async () => {
     const dry = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT));
     expect(dry.code).toBe(0);

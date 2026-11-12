@@ -31,6 +31,17 @@ export class FakeDecisionLog implements DecisionLog {
     return Promise.resolve(latestOf(this.#entries.get(key) ?? []));
   }
 
+  latestAnswers(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, AnswerEntry>> {
+    const latest = new Map<RecordKey, AnswerEntry>();
+    for (const key of keys) {
+      const answer = latestOf(this.#entries.get(key) ?? []);
+      if (answer !== undefined) {
+        latest.set(key, answer);
+      }
+    }
+    return Promise.resolve(latest);
+  }
+
   history(key: RecordKey): Promise<readonly LogEntry[]> {
     return Promise.resolve([...(this.#entries.get(key) ?? [])]);
   }

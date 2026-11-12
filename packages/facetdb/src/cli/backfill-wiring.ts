@@ -64,6 +64,7 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
       appendAnswer: () => neverDoes("writes the decision log"),
       appendHuman: () => neverDoes("writes the decision log"),
       latestAnswer: () => Promise.resolve(undefined),
+      latestAnswers: () => Promise.resolve(new Map()),
       history: () => Promise.resolve([]),
       latestAnswersSince: () => Promise.resolve([]),
     },

@@ -13,6 +13,12 @@ export type DecisionLog = {
   appendHuman(entry: HumanEntry): Promise<void>;
   /** The most recent model call for the record, or undefined when it was never answered. */
   latestAnswer(key: RecordKey): Promise<AnswerEntry | undefined>;
+  /**
+   * `latestAnswer` for many records in one call: the most recent model call of each key, keyed by
+   * record key; a key never answered is absent. The backfill reads a whole page through this, so a
+   * far database costs one round trip per page instead of one per record.
+   */
+  latestAnswers(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, AnswerEntry>>;
   /** Every entry for the record, oldest first. */
   history(key: RecordKey): Promise<readonly LogEntry[]>;
   /**
