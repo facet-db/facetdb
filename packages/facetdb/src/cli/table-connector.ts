@@ -77,14 +77,23 @@ export type TableConnectorOptions = {
    * passes true: its database is in the process, not on a network.
    */
   readonly allowInsecure: boolean;
+  /**
+   * The most connections the connector's pool opens; the driver's default when unset. The worker
+   * passes its in-flight limit plus two (`WORKER_CONNECTIONS`), so no lane waits for a connection.
+   */
+  readonly maxConnections?: number;
 };
 
 /** Reads the key, then opens the capture connector; the caller closes it. */
 export async function openTableConnector(
   options: TableConnectorOptions,
 ): Promise<PostgresConnector> {
-  const { source } = options;
+  const { source, maxConnections } = options;
   requireSecureUrl(options.url, source.databaseEnv ?? "DATABASE_URL", options.allowInsecure);
+  const connect: SqlConnect =
+    maxConnections === undefined
+      ? options.connect
+      : (url) => options.connect(url, { max: maxConnections });
   const target = splitTable(source.table ?? "");
   const probe = options.connect(options.url);
   let key: { readonly name: string; readonly type: string };
@@ -106,6 +115,6 @@ export async function openTableConnector(
     questionSet: options.questionSet,
     clock: options.clock,
     workerId: options.workerId,
-    connect: options.connect,
+    connect,
   });
 }

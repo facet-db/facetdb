@@ -31,8 +31,20 @@ export type SqlClient = {
   close(): Promise<void>;
 };
 
-/** Opens a client for a connection string. The composition root passes this (or a fake) around. */
-export type SqlConnect = (url: string) => SqlClient;
+/** How a client is opened: `max` is the most connections its pool keeps open at once. */
+export type SqlConnectOptions = { readonly max?: number };
+
+/**
+ * Opens a client for a connection string. The composition root passes this (or a fake) around; a
+ * fake may ignore the options, as one in-process database has no pool.
+ */
+export type SqlConnect = (url: string, options?: SqlConnectOptions) => SqlClient;
+
+/**
+ * The pool of a client opened without a size: enough for a command's few statements at once. The
+ * worker asks for its own (`maxInFlight + 2`), so its lanes never queue for a connection.
+ */
+export const DEFAULT_MAX_CONNECTIONS = 10;
 
 /**
  * The postgres.js client. Statements are plain SQL text with parameters; the driver never
@@ -87,31 +99,50 @@ function connectionLost(error: unknown): boolean {
   );
 }
 
-export const connectPostgres: SqlConnect = (url) => {
-  const sql = postgres(url, { max: 2, onnotice: () => undefined, types: TEXT_AS_GIVEN_TYPES });
+/**
+ * Every statement with parameters is a named prepared statement (`prepare: true`). `unsafe`
+ * defaults to an unnamed one, which postgres.js describes before every run: two round trips each,
+ * measured through a counting relay (capture.db.test.ts), and about eleven of them per answered
+ * record on Supabase. A named statement is described once per connection and kept there under a
+ * name postgres.js derives from its text; every later run on that connection is one round trip. A
+ * statement without parameters goes as a simple query, one round trip, never named (postgres.js's
+ * rule, kept).
+ *
+ * A prepared statement lives in the server session that parsed it, so the connection must stay on
+ * one session: a direct connection or a session pooler (Supabase port 5432), never a
+ * transaction-mode pooler (Supabase port 6543, PgBouncer `pool_mode = transaction`), which hands
+ * each transaction to whichever server connection is free. `facetdb doctor` checks it (the
+ * `pooler` check). postgres.js never sends `DISCARD ALL` (3.4.9 has no such statement), so a
+ * connection given back to the pool keeps what it prepared; a statement the server no longer knows
+ * (SQLSTATE 26000, `FetchPreparedStatement`) or whose result type changed under it (0A000,
+ * `RevalidateCachedQuery`, as after a schema is dropped and made again) is described again under a
+ * new name and run once more, by postgres.js itself, once.
+ */
+const PREPARED = { prepare: true } as const;
+
+export const connectPostgres: SqlConnect = (url, options = {}) => {
+  const sql = postgres(url, {
+    max: options.max ?? DEFAULT_MAX_CONNECTIONS,
+    onnotice: () => undefined,
+    types: TEXT_AS_GIVEN_TYPES,
+  });
   return {
     query: async (text, params = []) => {
-      const rows = await sql.unsafe(text, [...params] as never[]);
+      const rows = await sql.unsafe(text, [...params] as never[], PREPARED);
       return rows as unknown as readonly SqlRow[];
     },
     transaction: (work) =>
       sql.begin(async (tx) => {
         const result = await work(async (text, params = []) => {
-          const rows = await tx.unsafe(text, [...params] as never[]);
+          const rows = await tx.unsafe(text, [...params] as never[], PREPARED);
           return rows as unknown as readonly SqlRow[];
         });
         return result as never;
       }) as Promise<never>,
-    // `unsafe` defaults to an unnamed statement, which postgres.js describes before every run (a
-    // round trip each, and nothing else sent on that connection meanwhile): measured 2 round trips
-    // per run through a counting relay (capture.db.test.ts). A named statement (`prepare: true`)
-    // is described once per connection; after that runs are sent back to back, each ending in its
-    // own Sync, so each is its own transaction. Only this method names statements: a
-    // transaction-mode pooler that keeps no prepared statements across server connections would
-    // fail it, and every other statement stays unnamed. The runs go on one reserved connection, so
-    // the server runs and commits them in the order sent: the queue is ordered by `enqueued_at`,
-    // and runs spread over the pool's two connections committed out of order (store.db.test.ts,
-    // "passes over a job another connection holds").
+    // Runs are sent back to back, each ending in its own Sync, so each is its own transaction. The
+    // runs go on one reserved connection, so the server runs and commits them in the order sent:
+    // the queue is ordered by `enqueued_at`, and runs spread over the pool's connections committed
+    // out of order (store.db.test.ts, "passes over a job another connection holds").
     //
     // Every run must be sent to the server, never left in postgres.js's own queue for a reserved
     // connection: that queue is drained one run per answer and is never settled when the
@@ -122,14 +153,15 @@ export const connectPostgres: SqlConnect = (url) => {
     pipeline: async (text, paramSets) => {
       const connection = await sql.reserve();
       const run = (params: readonly unknown[]) =>
-        connection.unsafe(text, [...params] as never[], { prepare: true });
+        connection.unsafe(text, [...params] as never[], PREPARED);
       let failure: { readonly reason: unknown } | undefined;
-      let lost = false;
+      // Set inside `settle`; a field, not a `let`, so the check below is not read as always false.
+      const state = { lost: false };
       const settle = async (runs: readonly (readonly unknown[])[]): Promise<void> => {
         for (const result of await Promise.allSettled(runs.map(run))) {
           if (result.status === "rejected") {
             failure ??= { reason: result.reason };
-            lost ||= connectionLost(result.reason);
+            state.lost ||= connectionLost(result.reason);
           }
         }
       };
@@ -145,7 +177,7 @@ export const connectPostgres: SqlConnect = (url) => {
         // `release` puts the connection back among the open ones whatever its state; a dropped one
         // the pool has already closed would take the next query to a socket that is gone. The pool
         // drops and replaces it on its own.
-        if (!lost) {
+        if (!state.lost) {
           connection.release();
         }
       }

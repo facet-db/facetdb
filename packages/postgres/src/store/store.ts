@@ -38,6 +38,11 @@ export type StoreOptions = {
   /** Opens the driver for a `url`; defaults to postgres.js. Tests pass PGlite through the same type. */
   readonly connect?: SqlConnect;
   /**
+   * The most connections the store's pool opens at once (the driver's default when unset). The
+   * worker passes its in-flight limit plus two, so each lane has a connection when it needs one.
+   */
+  readonly maxConnections?: number;
+  /**
    * Allows a connection without TLS to a host that is not on this machine. Off unless set, and the
    * composition root sets it only from an explicit flag of the operator's.
    */
@@ -134,7 +139,10 @@ export async function createStore(options: StoreOptions): Promise<Store> {
     client = pgliteClient(options.pglite);
   } else {
     requireTls(options.url, options.allowInsecure ?? false);
-    client = (options.connect ?? connectPostgres)(options.url);
+    client = (options.connect ?? connectPostgres)(
+      options.url,
+      options.maxConnections === undefined ? undefined : { max: options.maxConnections },
+    );
   }
 
   let closed = false;

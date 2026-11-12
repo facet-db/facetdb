@@ -28,22 +28,33 @@ export type ReservationId = string;
  */
 export const RESERVATION_LEASE_MS = 15 * 60_000;
 
+/** What `UsageStore.reserve` resolves: the reservation, and the count it was checked against. */
+export type Reserved = {
+  /** The new reservation's id, or undefined when the request was refused. */
+  readonly reservation: ReservationId | undefined;
+  /** The month's billable input tokens counted so far (open reservations not included). */
+  readonly monthTotal: number;
+};
+
 /**
  * Where billable input tokens are counted, per project and per UTC month (`YYYY-MM`). The store also
  * remembers which alerts went out this month, so each is raised once a month even across restarts.
  * It also holds the reservations of requests in flight, so every process on the same store shares
- * the headroom. `reserve` must check and insert in one atomic step (a single conditional update in a
- * database), or two processes can both pass the check.
+ * the headroom. `reserve` must check and insert in one atomic step (one statement in a database
+ * whose check sees what the lock holder committed), or two processes can both pass the check.
+ * Every write of a count resolves the month's count after it, so the caller needs no second read
+ * (each store call is a round trip).
  */
 export type UsageStore = {
-  add(projectId: string, month: string, inputTokens: number): Promise<void>;
+  add(projectId: string, month: string, inputTokens: number): Promise<number>;
   total(projectId: string, month: string): Promise<number>;
   /**
    * Reserves `requestTokens` for one request in flight, unless the month's count plus the project's
    * open reservations for that month already reach `limit`. `limit` is undefined for a project that
    * keeps answering, and then the reservation always goes through. A reservation is open until it is
    * released, or until `expiresAt` is no later than `now`, so a request whose process died in flight
-   * gives its headroom back. Resolves the new reservation's id, or undefined when refused.
+   * gives its headroom back. Resolves the new reservation's id (undefined when refused) with the
+   * month's count the check read, in one store call.
    */
   reserve(
     projectId: string,
@@ -52,7 +63,7 @@ export type UsageStore = {
     limit: number | undefined,
     now: number,
     expiresAt: number,
-  ): Promise<ReservationId | undefined>;
+  ): Promise<Reserved>;
   /**
    * Releases a reservation once its answer is counted, or has failed. A reservation already released
    * or expired is left as it is.
@@ -63,13 +74,14 @@ export type UsageStore = {
    * an answer's input tokens and releases its request's reservation, so the reservation gives way to
    * the count with no moment where both or neither hold the headroom, in one round trip. A
    * reservation already released or expired is left as it is; the tokens are counted either way.
+   * Resolves the month's count after it.
    */
   finish(
     projectId: string,
     month: string,
     reservation: ReservationId,
     inputTokens: number,
-  ): Promise<void>;
+  ): Promise<number>;
   /** True only for the first claim of this alert in this month; false for every later one. */
   claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean>;
   /** Gives a claim back when the alert reached no channel, so the next check raises it again. */
@@ -100,11 +112,20 @@ export type Spending = {
    */
   status(projectId: string, cap: SpendingCap): Promise<SpendingStatus>;
   /**
+   * `status` from the newest count this process saw this month (written by `finish` or `record`,
+   * or read by `admit` or `status`), reading the store only when it saw none. Its alerts are
+   * claimed only when the status differs from the one this process last reported cleanly this
+   * month; a claim holds for the month, so an unchanged status has nothing new to raise.
+   */
+  recheck(projectId: string, cap: SpendingCap): Promise<SpendingStatus>;
+  /**
    * Admits one request of the project against `cap`, for every process whose spending shares the usage
    * store. The store counts the open reservations of the requests admitted before it (not yet counted or
    * expired), so one request may cross the cap and no more follow. Resolves the admitted request's
    * reservation, which holds `requestTokens` until `finish` or `settle`, or until its lease ends; undefined when
-   * refused. `onAlertFailure` hears an alert that could not be raised; the decision stands either way.
+   * refused. One store call: the status comes from the count the reservation was checked against, and
+   * its alerts are claimed as `recheck` claims them. `onAlertFailure` hears an alert that could not be
+   * raised; the decision stands either way.
    */
   admit(
     projectId: string,
@@ -127,7 +148,9 @@ export type Spending = {
  * claim and `admit` before every request. An answered request ends with `finish`, which counts the
  * answer, releases the reservation and re-checks the cap so the warning goes out at once; a request
  * with no answer ends with `settle`. `record` counts tokens with no reservation to release. The
- * reservations live in the usage store, so every process on the same store shares them.
+ * reservations live in the usage store, so every process on the same store shares them. Per
+ * answered request that is two store calls (`admit`, `finish`) while the status holds; `allowsWork`
+ * reads the count and claims the alerts its level calls for once per pass.
  */
 export type SpendingGate = {
   /**
@@ -217,6 +240,20 @@ export function createSpending(deps: SpendingDeps): Spending {
   const uncounted: Uncounted[] = [];
   /** Each project's writes of held counts, one at a time, so a count already being written is waited for. */
   const writes = new Map<string, Promise<unknown>>();
+  /**
+   * The newest count this process saw per project, from a write's answer or a read. A month's count
+   * only grows, so a smaller one seen later (a read that began before a write) is older and ignored.
+   */
+  const seen = new Map<string, { readonly month: string; readonly total: number }>();
+  /** The status each project was last reported at with every alert it called for raised cleanly. */
+  const reported = new Map<string, { readonly month: string; readonly status: SpendingStatus }>();
+
+  function see(projectId: string, month: string, total: number): void {
+    const known = seen.get(projectId);
+    if (known === undefined || known.month !== month || known.total < total) {
+      seen.set(projectId, { month, total });
+    }
+  }
 
   /** Takes one held count of the project out of the list, so no other call writes it too. */
   function takeHeld(projectId: string): Uncounted | undefined {
@@ -234,11 +271,16 @@ export function createSpending(deps: SpendingDeps): Spending {
     const next = previous.then(async () => {
       for (let held = takeHeld(projectId); held !== undefined; held = takeHeld(projectId)) {
         try {
-          if (held.reservation === undefined) {
-            await usageStore.add(held.projectId, held.month, held.inputTokens);
-          } else {
-            await usageStore.finish(held.projectId, held.month, held.reservation, held.inputTokens);
-          }
+          const total =
+            held.reservation === undefined
+              ? await usageStore.add(held.projectId, held.month, held.inputTokens)
+              : await usageStore.finish(
+                  held.projectId,
+                  held.month,
+                  held.reservation,
+                  held.inputTokens,
+                );
+          see(held.projectId, held.month, total);
         } catch (error) {
           uncounted.push(held);
           throw error;
@@ -252,15 +294,19 @@ export function createSpending(deps: SpendingDeps): Spending {
     return next;
   }
 
-  /** Returns the error when the raise itself failed; a refused channel is not an error here. */
+  /**
+   * `held` when the month's claim stands (taken now and the alert went out, or taken before);
+   * `released` when it was given back for the next check; the error when the raise itself failed. A
+   * refused channel is not an error here.
+   */
   async function raiseOnce(
     projectId: string,
     month: string,
     kind: SpendingAlertKind,
     event: Omit<AlertEvent, "kind" | "project" | "source" | "question" | "link">,
-  ): Promise<{ readonly error: unknown } | undefined> {
+  ): Promise<"held" | "released" | { readonly error: unknown }> {
     if (!(await usageStore.claimAlert(projectId, month, kind))) {
-      return undefined;
+      return "held";
     }
     // The claim stands only once the alert is out cleanly. A channel that refused it, a raise that
     // threw, or a raise the alerts window held back gives the claim back, so the next check raises it
@@ -281,13 +327,17 @@ export function createSpending(deps: SpendingDeps): Spending {
     }
     if (outcome.status !== "sent" || outcome.failures.length > 0) {
       await usageStore.releaseAlert(projectId, month, kind);
+      return "released";
     }
-    return undefined;
+    return "held";
   }
 
   async function monthlyTotal(projectId: string): Promise<number> {
     await countOwed(projectId);
-    return usageStore.total(projectId, monthOf(clock.now()));
+    const month = monthOf(clock.now());
+    const total = await usageStore.total(projectId, month);
+    see(projectId, month, total);
+    return total;
   }
 
   async function record(projectId: string, inputTokens: number): Promise<void> {
@@ -299,6 +349,32 @@ export function createSpending(deps: SpendingDeps): Spending {
     await countOwed(projectId);
     const month = monthOf(clock.now());
     const total = await usageStore.total(projectId, month);
+    see(projectId, month, total);
+    return statusAt(projectId, cap, month, total, true);
+  }
+
+  async function recheck(projectId: string, cap: SpendingCap): Promise<SpendingStatus> {
+    await countOwed(projectId);
+    const month = monthOf(clock.now());
+    const known = seen.get(projectId);
+    if (known?.month !== month) {
+      return status(projectId, cap);
+    }
+    return statusAt(projectId, cap, month, known.total, false);
+  }
+
+  /**
+   * The status at a count already in hand, with the alerts it calls for. `always` claims them
+   * whatever was reported before; otherwise a status this process already reported cleanly this
+   * month claims nothing, so it touches no store (its claims were taken then and hold for the month).
+   */
+  async function statusAt(
+    projectId: string,
+    cap: SpendingCap,
+    month: string,
+    total: number,
+    always: boolean,
+  ): Promise<SpendingStatus> {
     // Integer comparisons only: 80% of the cap is `cap * 80 / 100`, never a rounded figure.
     const warningLevel = total * 100 >= cap.inputTokens * 80;
     const atCap = total >= cap.inputTokens;
@@ -313,6 +389,11 @@ export function createSpending(deps: SpendingDeps): Spending {
     } else {
       current = pauses ? "paused" : "continuing";
     }
+    const last = reported.get(projectId);
+    if (!always && last?.month === month && last.status === current) {
+      return current;
+    }
+    reported.delete(projectId);
 
     const warning = warningLevel
       ? await raiseOnce(projectId, month, "spending_80", {
@@ -321,18 +402,24 @@ export function createSpending(deps: SpendingDeps): Spending {
             ? "Nothing is paused yet; at 100% the project pauses and records stay pending."
             : "Nothing is paused yet; at 100% the project keeps answering.",
         })
-      : undefined;
+      : "held";
     const pause =
       atCap && pauses
         ? await raiseOnce(projectId, month, "spending_paused", {
             what: `This month's usage reached the spending cap: ${usage}.`,
             did: "Paused: records stay pending and are answered when the month resets or the cap changes.",
           })
-        : undefined;
+        : "held";
 
-    const failed = warning ?? pause;
-    if (failed !== undefined) {
-      throw new SpendingAlertError(current, failed.error);
+    if (typeof warning === "object") {
+      throw new SpendingAlertError(current, warning.error);
+    }
+    if (typeof pause === "object") {
+      throw new SpendingAlertError(current, pause.error);
+    }
+    // A claim given back is raised again at the next check, so that status is not reported yet.
+    if (warning === "held" && pause === "held") {
+      reported.set(projectId, { month, status: current });
     }
     return current;
   }
@@ -342,7 +429,8 @@ export function createSpending(deps: SpendingDeps): Spending {
    * one request crosses it and no more follow. The store makes that check and the reservation in one
    * step, so two processes on the same store cannot both pass it. A request is released only after its
    * answer is counted, so no answer is ever missed between them; a reservation whose process died is
-   * released by its lease instead.
+   * released by its lease instead. A paused project needs no status read first: its count alone
+   * reaches the limit, so the store refuses.
    */
   async function admit(
     projectId: string,
@@ -354,19 +442,33 @@ export function createSpending(deps: SpendingDeps): Spending {
     const next = previous.then(async () => {
       // A refused write of an earlier answer fails this admission too: the store must take it first.
       await countOwed(projectId);
-      // The status was settled before any alert went out, so it decides even when an alert failed.
-      if ((await statusReported({ status }, projectId, cap, onAlertFailure)) === "paused") {
-        return undefined;
-      }
       const now = clock.now();
-      return usageStore.reserve(
+      const month = monthOf(now);
+      const { reservation, monthTotal } = await usageStore.reserve(
         projectId,
-        monthOf(now),
+        month,
         requestTokens,
         cap.onCapReached === "pause" ? cap.inputTokens : undefined,
         now,
         now + RESERVATION_LEASE_MS,
       );
+      see(projectId, month, monthTotal);
+      try {
+        await statusAt(projectId, cap, month, monthTotal, false);
+      } catch (error) {
+        // The store decided before any alert went out, so a failed alert leaves the decision as it is.
+        if (error instanceof SpendingAlertError) {
+          onAlertFailure?.(error);
+          return reservation;
+        }
+        // The admission fails, so nothing is sent on this reservation: its headroom goes back now
+        // (and by its lease, should this release fail too).
+        if (reservation !== undefined) {
+          await usageStore.release(projectId, reservation).catch(() => undefined);
+        }
+        throw error;
+      }
+      return reservation;
     });
     admissions.set(
       projectId,
@@ -393,7 +495,7 @@ export function createSpending(deps: SpendingDeps): Spending {
     await countOwed(projectId);
   }
 
-  return { record, monthlyTotal, status, admit, settle, finish };
+  return { record, monthlyTotal, status, recheck, admit, settle, finish };
 }
 
 /**
@@ -422,8 +524,9 @@ export function spendingGate(
     },
     async finish(reservation, inputTokens) {
       // The count is stored before the status raises any alert, so an alert failure loses nothing.
+      // The status comes from the count the write answered with: no second read.
       await spending.finish(projectId, reservation, inputTokens);
-      await spending.status(projectId, await readCap());
+      await spending.recheck(projectId, await readCap());
     },
   };
 }

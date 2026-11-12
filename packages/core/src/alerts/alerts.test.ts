@@ -319,6 +319,61 @@ describe("the failure-rate window", () => {
     expect(outside.channel.delivered[0]?.message.text).toContain("1 of 1");
   });
 
+  it("reads the alert store once for a run of healthy calls, and again after a beat", async () => {
+    const { clock, alerts, store } = setup();
+    let reads = 0;
+    const getActive = store.getActive.bind(store);
+    store.getActive = (key) => {
+      reads += 1;
+      return getActive(key);
+    };
+    const signals = alerts.signals(scope);
+    await calls(alerts, clock, 20, 0);
+    expect(reads).toBe(1);
+
+    // A beat (once per pass) forgets what it knew: an alert another process raised under the
+    // same key is still resolved by the next healthy call. The beat reads its own key once.
+    await store.setActive(eventKey(eventOf("model_failing")), {
+      event: eventOf("model_failing"),
+      raisedAt: clock.now(),
+      lastSentAt: clock.now(),
+    });
+    await signals.beat();
+    reads = 0;
+    await calls(alerts, clock, 5, 0);
+    expect(reads).toBe(1);
+    expect(store.active.get(eventKey(eventOf("model_failing")))).toBeUndefined();
+  });
+
+  it("lets healthy calls made at once (the worker's lanes) share one read of the alert state", async () => {
+    const { alerts, store } = setup();
+    let reads = 0;
+    const getActive = store.getActive.bind(store);
+    store.getActive = (key) => {
+      reads += 1;
+      return getActive(key);
+    };
+    const signals = alerts.signals(scope);
+    await Promise.all(Array.from({ length: 8 }, () => signals.modelCall(true)));
+    expect(reads).toBe(1);
+  });
+
+  it("keeps resolving on healthy calls while no channel takes the resolved message", async () => {
+    const { clock, alerts, channel } = setup();
+    await calls(alerts, clock, 0, 3);
+    expect(channel.delivered).toHaveLength(1);
+    clock.advance(5 * MINUTE);
+    channel.failNextWith(new Error("slack 503"));
+    // The first healthy call's resolved message is refused, so the next one tries again.
+    await calls(alerts, clock, 2, 0);
+    expect(
+      channel.delivered.map((delivery) => delivery.message.text.startsWith("Resolved:")),
+    ).toEqual([false, true, true]);
+    // Taken the second time: the alert is resolved, and later healthy calls send nothing more.
+    await calls(alerts, clock, 3, 0);
+    expect(channel.delivered).toHaveLength(3);
+  });
+
   it("stays quiet while every call succeeds", async () => {
     const { clock, alerts, channel } = setup();
     await calls(alerts, clock, 50, 0);

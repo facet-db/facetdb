@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { connectPostgres, type SqlClient } from "../sql/index.ts";
@@ -10,7 +11,8 @@ import { createStore, type Store } from "./store.ts";
  * proves shape, never concurrency. The two things the store leans on the
  * database for are proven here, with separate connections:
  *  - `reserve` locks the month's `usage` row, so reservations that arrive together cannot all see the
- *    same count (operations.ts);
+ *    same count, and reads the count after the lock with a fresh snapshot, so it counts what the
+ *    holder committed (operations.ts, the function of store migration 3);
  *  - `claim` takes `for update skip locked`, so a worker passes over a job another connection holds
  *    instead of waiting for it or taking it twice (sql/jobs.ts).
  * DATABASE_URL names a server, never the database the tests run in: they create a scratch database of
@@ -128,6 +130,26 @@ async function untilSomeoneWaitsForALock(admin: SqlClient): Promise<void> {
 }
 
 /**
+ * Resolves with the number of backends of this database waiting for a lock, once it reaches
+ * `count`. It polls the server for a state, it does not time anything: the bound only keeps a
+ * broken test from hanging.
+ */
+async function lockWaiters(admin: SqlClient, count: number): Promise<number> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const rows = await admin.query(
+      `select count(*)::text as n from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`,
+    );
+    const waiting = Number(rows[0]?.["n"]);
+    if (waiting >= count) {
+      return waiting;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`fewer than ${count} backends ever waited for a lock at once`);
+}
+
+/**
  * Holds `statement` (a `select … for update`) in an open transaction on its own connection until
  * `release` is called, and resolves `holding` once the lock is taken.
  */
@@ -225,9 +247,9 @@ describe("reserve on a real Postgres", () => {
     await lock.holding;
 
     let settled = false;
-    const pending = store.usage.reserve("p", MONTH, 10, 100, 0, 60_000).then((id) => {
+    const pending = store.usage.reserve("p", MONTH, 10, 100, 0, 60_000).then((reserved) => {
       settled = true;
-      return id;
+      return reserved.reservation;
     });
     try {
       // If reserve never touched the usage row it would not wait, and this would time out.
@@ -240,12 +262,48 @@ describe("reserve on a real Postgres", () => {
     expect(await pending).toBeDefined();
   });
 
+  it("refuses when the reservation it waited behind fills the cap: it counts what the holder commits", async () => {
+    // The race the lock exists for, made certain: this reserve starts while another process holds
+    // the month's usage row, and that process adds a reservation reaching the cap before it commits.
+    // A statement whose snapshot was taken before it waited counts 10 and admits; the reserve must
+    // count 10 + 90 and refuse.
+    const store = await newStore();
+    await store.usage.add("p", MONTH, 10);
+    const holding = deferred();
+    const mayCommit = deferred();
+    const holder = open().transaction(async (query) => {
+      await query("select 1 from facetdb.usage where project_id = $1 and month = $2 for update", [
+        "p",
+        MONTH,
+      ]);
+      holding.resolve();
+      await mayCommit.promise;
+      await query(
+        `insert into facetdb.usage_reservations (project_id, month, tokens, expires_at)
+         values ($1, $2, 90, 60000)`,
+        ["p", MONTH],
+      );
+    });
+    await holding.promise;
+    const pending = store.usage.reserve("p", MONTH, 10, 100, 0, 60_000);
+    try {
+      await untilSomeoneWaitsForALock(open());
+    } finally {
+      mayCommit.resolve();
+      await holder;
+    }
+    // Refused, and the count it answers with is the one it checked: 10.
+    expect(await pending).toEqual({ reservation: undefined, monthTotal: 10 });
+  });
+
   it("admits only the requests that fit when many arrive from separate connections at once", async () => {
     const workers = await Promise.all([newStore(), newStore(), newStore(), newStore()]);
     const attempts = workers.flatMap((store) =>
       Array.from({ length: 8 }, () => store.usage.reserve("p", MONTH, 30, 100, 0, 60_000)),
     );
-    const admitted = (await Promise.all(attempts)).filter((id) => id !== undefined);
+    const admitted = (await Promise.all(attempts)).filter(
+      (reserved) => reserved.reservation !== undefined,
+    );
     // Counted before each one: 0, 30, 60 and 90 are under 100. Without the lock, reservations that
     // start together all see 0 and every one of the 32 would be admitted.
     expect(admitted).toHaveLength(4);
@@ -254,12 +312,56 @@ describe("reserve on a real Postgres", () => {
   });
 });
 
+describe("the store's pool on a real Postgres", () => {
+  it("opens a connection per lane under load: the worker's maxInFlight + 2, not two", async () => {
+    // With a pool of two, six of the worker's eight lanes queued in the driver for a connection.
+    // Each reserve below waits on the usage row another connection holds, so every statement the
+    // pool lets through stays in flight on a backend of its own until the lock goes.
+    const store = await createStore({
+      url: databaseUrl(),
+      secret: SECRET,
+      clock: new FakeClock(1_700_000_000_000),
+      allowInsecure: true,
+      maxConnections: DEFAULT_WORKER_LIMITS.maxInFlight + 2,
+    });
+    stores.push(store);
+    const admin = open();
+    await store.usage.add("p", MONTH, 0);
+    const lock = holdLock(
+      "select 1 from facetdb.usage where project_id = $1 and month = $2 for update",
+      ["p", MONTH],
+    );
+    await lock.holding;
+    const lanes = Array.from({ length: DEFAULT_WORKER_LIMITS.maxInFlight }, () =>
+      store.usage.reserve("p", MONTH, 1, 1_000, 0, 60_000),
+    );
+    try {
+      // With the old pool of two this never reaches eight, and the bound below fails the test.
+      expect(await lockWaiters(admin, DEFAULT_WORKER_LIMITS.maxInFlight)).toBe(
+        DEFAULT_WORKER_LIMITS.maxInFlight,
+      );
+      const backends = await admin.query(
+        `select count(*)::text as n from pg_stat_activity
+          where datname = current_database() and backend_type = 'client backend'`,
+      );
+      // The eight lanes, the lock holder and this connection, at least.
+      expect(Number(backends[0]?.["n"])).toBeGreaterThan(DEFAULT_WORKER_LIMITS.maxInFlight);
+    } finally {
+      lock.release();
+      await lock.done;
+    }
+    expect((await Promise.all(lanes)).every((reserved) => reserved.reservation !== undefined)).toBe(
+      true,
+    );
+  });
+});
+
 describe("finish on a real Postgres", () => {
   it("counts and releases in one step, locking the usage row before the reservation, as reserve does", async () => {
     const store = await newStore();
     const admin = open();
     await store.usage.add("p", MONTH, 10);
-    const id = await store.usage.reserve("p", MONTH, 50, 100, 0, 60_000);
+    const id = (await store.usage.reserve("p", MONTH, 50, 100, 0, 60_000)).reservation;
     expect(id).toBeDefined();
     const lock = holdLock(
       "select 1 from facetdb.usage where project_id = $1 and month = $2 for update",
@@ -299,13 +401,10 @@ describe("finish on a real Postgres", () => {
   it("finishes alongside reserves that clear the same expired reservations, from separate connections", async () => {
     const workers = await Promise.all([newStore(), newStore(), newStore(), newStore()]);
     const [first] = workers;
-    if (first === undefined) {
-      throw new Error("four stores were opened");
-    }
     // Sixteen reservations whose lease ends at 1,000; the reserves below run at 2,000 and clear them.
     const ids: string[] = [];
     for (let n = 0; n < 16; n++) {
-      const id = await first.usage.reserve("p", MONTH, 5, 1_000_000, 0, 1_000);
+      const id = (await first.usage.reserve("p", MONTH, 5, 1_000_000, 0, 1_000)).reservation;
       if (id === undefined) {
         throw new Error("a reservation under the cap was refused");
       }

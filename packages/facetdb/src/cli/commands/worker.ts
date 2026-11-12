@@ -59,6 +59,19 @@ export const DEFAULT_PORT = 7411;
 /** How often the outbox looks for webhooks that are due. */
 export const OUTBOX_EVERY_MS = 2_000;
 
+/**
+ * The pool of the worker's store client and of each table source's client: a connection per lane in
+ * flight, plus the claim and the heartbeat. With the old pool of two, six of eight lanes waited for
+ * a connection on every statement (seen on Supabase). postgres.js keeps idle connections open, so
+ * the worker shares pools to stay inside a pooler's per-user limit (Supabase's session pooler
+ * serves about 15 per user and database on its small instances). Worst case per worker process:
+ *  - table sources on the store's database (one DATABASE_URL): the store, the outbox and every
+ *    such source share one pool, 10, plus one LISTEN connection: 11;
+ *  - each table source on another database adds its own pool, 10, plus one LISTEN connection on
+ *    that database, and one short-lived connection at start that reads its primary key.
+ */
+export const WORKER_CONNECTIONS = DEFAULT_WORKER_LIMITS.maxInFlight + 2;
+
 export type WorkerOptions = {
   readonly config: string;
   readonly port: string;
@@ -259,6 +272,7 @@ export async function runWorkers(
         clock,
         workerId,
         allowInsecure: parts.allowInsecure,
+        maxConnections: WORKER_CONNECTIONS,
       });
       // Its log and versions are kept in the store under the source's name, registered as a
       // plugin-kind source, as backfill does (the store has no third kind).
@@ -487,22 +501,29 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     for (const source of config.sources) {
       requireSecureSource(source, allowInsecure);
     }
-    const store = await deps.store({ allowInsecure });
-    const storeClient = deps.connect(storeUrl);
+    // One pool for the store, the outbox, and every table source on the store's own database (the
+    // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. Its borrowers close nothing.
+    const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
+    const borrowed = (): SqlClient => ({ ...storeClient, close: () => Promise.resolve() });
     try {
-      return await runWorkers(context, {
-        config,
-        project: projectRef(deps.projectDir),
-        store,
-        storeClient,
-        connect: deps.connect,
-        databaseOf: workerUrlOf,
-        allowInsecure,
-        provider: deps.provider(config),
-      });
+      const store = await deps.store({ allowInsecure, connect: borrowed });
+      try {
+        return await runWorkers(context, {
+          config,
+          project: projectRef(deps.projectDir),
+          store,
+          storeClient,
+          connect: (url, connectOptions) =>
+            url === storeUrl ? borrowed() : deps.connect(url, connectOptions),
+          databaseOf: workerUrlOf,
+          allowInsecure,
+          provider: deps.provider(config),
+        });
+      } finally {
+        await store.close();
+      }
     } finally {
       await storeClient.close();
-      await store.close();
     }
   },
 });

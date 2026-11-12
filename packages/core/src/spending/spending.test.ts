@@ -22,6 +22,7 @@ import {
   createSpending,
   monthOf,
   RESERVATION_LEASE_MS,
+  type Reserved,
   type Spending,
   SpendingAlertError,
   type SpendingAlertKind,
@@ -57,12 +58,15 @@ class MemoryUsageStore implements UsageStore {
   /** How many `finish` calls reached the store. */
   finishes = 0;
 
-  add(projectId: string, month: string, inputTokens: number): Promise<void> {
-    this.#count(projectId, month, inputTokens);
-    return Promise.resolve();
+  /** How many calls of each kind reached the store, as a database would see its statements. */
+  readonly calls = { total: 0, reserve: 0, claimAlert: 0 };
+
+  add(projectId: string, month: string, inputTokens: number): Promise<number> {
+    return Promise.resolve(this.#count(projectId, month, inputTokens));
   }
 
   total(projectId: string, month: string): Promise<number> {
+    this.calls.total += 1;
     return Promise.resolve(this.#totals.get([projectId, month].join("|")) ?? 0);
   }
 
@@ -73,22 +77,23 @@ class MemoryUsageStore implements UsageStore {
     limit: number | undefined,
     now: number,
     expiresAt: number,
-  ): Promise<string | undefined> {
-    // The check and the reservation are one synchronous step, as the store's conditional update is.
-    const counted = this.#totals.get([projectId, month].join("|")) ?? 0;
+  ): Promise<Reserved> {
+    this.calls.reserve += 1;
+    // The check and the reservation are one synchronous step, as the store's one statement is.
+    const monthTotal = this.#totals.get([projectId, month].join("|")) ?? 0;
     let open = 0;
     for (const held of this.#reservations.values()) {
       if (held.projectId === projectId && held.month === month && held.expiresAt > now) {
         open += held.tokens;
       }
     }
-    if (limit !== undefined && counted + open >= limit) {
-      return Promise.resolve(undefined);
+    if (limit !== undefined && monthTotal + open >= limit) {
+      return Promise.resolve({ reservation: undefined, monthTotal });
     }
     this.#issued += 1;
     const id = `reservation-${this.#issued}`;
     this.#reservations.set(id, { projectId, month, tokens: requestTokens, expiresAt });
-    return Promise.resolve(id);
+    return Promise.resolve({ reservation: id, monthTotal });
   }
 
   release(projectId: string, reservation: string): Promise<void> {
@@ -101,17 +106,19 @@ class MemoryUsageStore implements UsageStore {
     month: string,
     reservation: string,
     inputTokens: number,
-  ): Promise<void> {
+  ): Promise<number> {
     // One synchronous step, as the store's single statement: nothing runs between the two.
     this.finishes += 1;
-    this.#count(projectId, month, inputTokens);
+    const total = this.#count(projectId, month, inputTokens);
     this.#release(projectId, reservation);
-    return Promise.resolve();
+    return Promise.resolve(total);
   }
 
-  #count(projectId: string, month: string, inputTokens: number): void {
+  #count(projectId: string, month: string, inputTokens: number): number {
     const key = [projectId, month].join("|");
-    this.#totals.set(key, (this.#totals.get(key) ?? 0) + inputTokens);
+    const total = (this.#totals.get(key) ?? 0) + inputTokens;
+    this.#totals.set(key, total);
+    return total;
   }
 
   #release(projectId: string, reservation: string): void {
@@ -128,6 +135,7 @@ class MemoryUsageStore implements UsageStore {
   }
 
   claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean> {
+    this.calls.claimAlert += 1;
     const key = [projectId, month, kind].join("|");
     if (this.#claimed.has(key)) {
       return Promise.resolve(false);
@@ -149,7 +157,7 @@ class MemoryUsageStore implements UsageStore {
 class FlakyUsageStore extends MemoryUsageStore {
   failWrites = 0;
 
-  override add(projectId: string, month: string, inputTokens: number): Promise<void> {
+  override add(projectId: string, month: string, inputTokens: number): Promise<number> {
     if (this.failWrites > 0) {
       this.failWrites -= 1;
       return Promise.reject(new Error("usage store down"));
@@ -162,7 +170,7 @@ class FlakyUsageStore extends MemoryUsageStore {
     month: string,
     reservation: string,
     inputTokens: number,
-  ): Promise<void> {
+  ): Promise<number> {
     if (this.failWrites > 0) {
       this.failWrites -= 1;
       return Promise.reject(new Error("usage store down"));
@@ -176,11 +184,11 @@ class HeldUsageStore extends FlakyUsageStore {
   holdWrites = false;
   readonly #held: Array<() => void> = [];
 
-  override async add(projectId: string, month: string, inputTokens: number): Promise<void> {
+  override async add(projectId: string, month: string, inputTokens: number): Promise<number> {
     if (this.holdWrites) {
       await new Promise<void>((resolve) => this.#held.push(resolve));
     }
-    await super.add(projectId, month, inputTokens);
+    return super.add(projectId, month, inputTokens);
   }
 
   /** Lets the oldest held write reach the store. */
@@ -473,6 +481,77 @@ describe("spending: finish is settle then record in one store call", () => {
     expect(next).toBeDefined();
     expect(await spending.monthlyTotal(PROJECT)).toBe(500);
     expect(Object.keys(usage.reservations())).toEqual([next]);
+  });
+});
+
+/** Refuses every alert claim, as a store that went down between the count and the claim. */
+class ClaimFailingUsageStore extends MemoryUsageStore {
+  override claimAlert(): Promise<boolean> {
+    return Promise.reject(new Error("usage store down"));
+  }
+}
+
+describe("spending: store calls per admitted request", () => {
+  it("one reserve per admission and no read for the status while it holds; the alerts are claimed when it changes", async () => {
+    const { spending, usage, alerts } = setup();
+    const gate = spendingGate(spending, PROJECT, () => Promise.resolve(PAUSE_AT_1000));
+    // The pass's own check reads the count once.
+    expect(await gate.allowsWork()).toBe(true);
+    expect(usage.calls).toEqual({ total: 1, reserve: 0, claimAlert: 0 });
+
+    const answer = async (inputTokens: number) => {
+      const reservation = await gate.admit(150);
+      if (reservation === undefined) {
+        throw new Error("a request under the cap was refused");
+      }
+      await gate.finish(reservation, inputTokens);
+    };
+    for (let n = 0; n < 7; n++) {
+      await answer(100);
+    }
+    // 700 counted, under 80%: the status came from the counts the store answered with.
+    expect(usage.calls).toEqual({ total: 1, reserve: 7, claimAlert: 0 });
+
+    // The eighth answer reaches 800: the warning is claimed once, when the status changes.
+    await answer(100);
+    expect(alerts.kinds()).toEqual(["spending_80"]);
+    expect(usage.calls).toEqual({ total: 1, reserve: 8, claimAlert: 1 });
+    await answer(50);
+    expect(usage.calls).toEqual({ total: 1, reserve: 9, claimAlert: 1 });
+
+    // The next pass reads the count and claims what its level calls for, once.
+    expect(await gate.allowsWork()).toBe(true);
+    expect(usage.calls).toEqual({ total: 2, reserve: 9, claimAlert: 2 });
+    expect(alerts.kinds()).toEqual(["spending_80"]);
+  });
+
+  it("an alert every channel refused is claimed again at the next admission, then holds", async () => {
+    const { spending, alerts } = setup();
+    await spending.record(PROJECT, 800);
+    alerts.outage = "refuse";
+    await admitted(spending, 10);
+    expect(alerts.kinds()).toEqual(["spending_80"]);
+
+    alerts.outage = "none";
+    await admitted(spending, 10);
+    expect(alerts.kinds()).toEqual(["spending_80", "spending_80"]);
+    await admitted(spending, 10);
+    expect(alerts.kinds()).toEqual(["spending_80", "spending_80"]);
+  });
+
+  it("an admission whose alert claim cannot reach the store fails, and gives its reservation back", async () => {
+    const clock = new FakeClock(OCT_15);
+    const usage = new ClaimFailingUsageStore();
+    const spending = createSpending({
+      usageStore: usage,
+      clock,
+      alerts: new FakeAlerts(),
+      capLink: (project) => `https://app.facetdb.test/projects/${project}/settings#spending`,
+    });
+    await spending.record(PROJECT, 800);
+
+    await expect(spending.admit(PROJECT, PAUSE_AT_1000, 50)).rejects.toThrow("usage store down");
+    expect(usage.reservations()).toEqual({});
   });
 });
 

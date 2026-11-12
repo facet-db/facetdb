@@ -190,7 +190,7 @@ async function roundTripRelay(target: URL): Promise<{
   let roundTrips = 0;
   const sockets = new Set<Socket>();
   const server = createServer((client) => {
-    const upstream = connectTcp(Number(target.port || 5432), target.hostname);
+    const upstream = connectTcp(target.port === "" ? 5432 : Number(target.port), target.hostname);
     sockets.add(client).add(upstream);
     let serverAnswered = true;
     client.on("data", (data) => {
@@ -493,6 +493,39 @@ describe("two workers on one queue", () => {
       await relay.close();
     }
     await drainQueue();
+  });
+
+  it("a statement with parameters is prepared once per connection: on a warm one each run is one round trip", async () => {
+    // `query` and `transaction` name every statement (`prepare: true`), so postgres.js describes it
+    // once per connection and then only binds and runs it. Unnamed, it was described before every
+    // run: two round trips each (measured 40 for these 20 runs, and 40 for the 10 transactions
+    // below, before the change).
+    const relay = await roundTripRelay(new URL(scratch.url));
+    const client = connectPostgres(relay.url(new URL(scratch.as(WORKER_ROLE, PASSWORD))), {
+      max: 1,
+    });
+    const READ = "select count(*)::text as n from public.listings where id = $1";
+    const COUNT_JOB = "select count(*)::text as n from facetdb.jobs where record_key = $1";
+    try {
+      // Cold: the connection opens, logs in and describes each statement once.
+      await client.query(READ, ["warm-up"]);
+      await client.transaction((query) => query(COUNT_JOB, ["warm-up"]));
+      relay.reset();
+      for (let run = 0; run < 20; run++) {
+        await client.query(READ, [`key-${run}`]);
+      }
+      expect(relay.roundTrips()).toBe(20);
+
+      relay.reset();
+      for (let run = 0; run < 10; run++) {
+        await client.transaction((query) => query(COUNT_JOB, [`key-${run}`]));
+      }
+      // `begin`, the statement and `commit`: one round trip each.
+      expect(relay.roundTrips()).toBe(30);
+    } finally {
+      await client.close();
+      await relay.close();
+    }
   });
 
   it.each(["cold", "warm"] as const)(

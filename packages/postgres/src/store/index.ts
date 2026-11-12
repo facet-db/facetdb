@@ -4,6 +4,7 @@ export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.
 export {
   migrateStore,
   SCHEMA_VERSION,
+  STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,

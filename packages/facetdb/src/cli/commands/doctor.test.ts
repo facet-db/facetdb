@@ -218,13 +218,14 @@ describe("facetdb doctor, when everything is in place", () => {
     ).toEqual([
       "ok    config",
       "ok    database",
+      "ok    pooler",
       "ok    install",
       "ok    worker heartbeat",
       "ok    model key",
       "ok    model reachable",
       "ok    FACETDB_SECRET",
     ]);
-    expect(printed.at(-1)).toBe("All 7 checks passed.");
+    expect(printed.at(-1)).toBe("All 8 checks passed.");
     expect(lineFor(result.stdout, "worker heartbeat")).toContain("30 seconds ago");
     expect(lineFor(result.stdout, "database")).toContain(`logged in as ${WORKER_ROLE}`);
     expect(provider.callCount).toBe(1);
@@ -253,6 +254,7 @@ describe("facetdb doctor, when everything is in place", () => {
     expect(parsed.checks.map((check) => `${check.id}:${check.status}`)).toEqual([
       "config:ok",
       "database:ok",
+      "pooler:ok",
       "install:ok",
       "worker:ok",
       "model-key:ok",
@@ -752,7 +754,7 @@ describe("facetdb doctor, how far the database is", () => {
       "listings on localhost:5432/app (round trip 12 ms)",
     );
     expect(lines(result.stdout).some((text) => text.startsWith("warn"))).toBe(false);
-    expect(lines(result.stdout).at(-1)).toBe("All 7 checks passed.");
+    expect(lines(result.stdout).at(-1)).toBe("All 8 checks passed.");
   });
 
   it("takes the median, so one slow trip does not decide", async () => {
@@ -773,7 +775,7 @@ describe("facetdb doctor, how far the database is", () => {
       "warn  distance: the database is 190 ms away; run the worker next to it, the 1 second target assumes a same-region link",
     );
     expect(printed[warn - 1]).toMatch(/^ok\s+database:/);
-    expect(printed.at(-1)).toBe("All 7 checks passed.");
+    expect(printed.at(-1)).toBe("All 8 checks passed.");
     expect(result.stderr).toBe("");
   });
 
@@ -792,7 +794,7 @@ describe("facetdb doctor, how far the database is", () => {
       env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "tsk-s3cret-model-key" },
     });
     expect(failing.code).toBe(1);
-    expect(lines(failing.stdout).at(-1)).toBe("1 of 7 checks failed.");
+    expect(lines(failing.stdout).at(-1)).toBe("1 of 8 checks failed.");
     expect(lines(failing.stdout).some((text) => text.startsWith("warn  distance"))).toBe(true);
     const json = await doctor(["--json"], { connect: farAway([190]) });
     expect(json.code, json.stderr).toBe(0);
@@ -800,10 +802,11 @@ describe("facetdb doctor, how far the database is", () => {
       checks: { id: string; status: string }[];
       warnings: { id: string; status: string; detail: string }[];
     };
-    // A warning is not a check: it has a field of its own, and `checks` holds only the 7 checks.
+    // A warning is not a check: it has a field of its own, and `checks` holds only the 8 checks.
     expect(parsed.checks.map((check) => check.id)).toEqual([
       "config",
       "database",
+      "pooler",
       "install",
       "worker",
       "model-key",
@@ -832,7 +835,7 @@ describe("facetdb doctor, how far the database is", () => {
     const parsed = JSON.parse(result.stdout) as {
       details: { checks: { id: string }[]; warnings: { id: string }[] };
     };
-    expect(parsed.details.checks).toHaveLength(7);
+    expect(parsed.details.checks).toHaveLength(8);
     expect(parsed.details.warnings.map((warning) => warning.id)).toEqual(["distance"]);
   });
 
@@ -862,6 +865,128 @@ describe("facetdb doctor, how far the database is", () => {
   });
 });
 
+describe("facetdb doctor, a transaction-mode pooler", () => {
+  /**
+   * The connection of `asWorker`, behind a pretend pooler: the doctor's prepared statement is
+   * `dropped` on its second run (a server connection that never parsed it: SQLSTATE 26000), or
+   * `moved` to another server session (the driver prepared it again there). It records the pool
+   * size each probe asked for.
+   */
+  function pooled(behaviour: "dropped" | "moved" | "session"): {
+    readonly connect: SqlConnect;
+    readonly pools: (number | undefined)[];
+  } {
+    const inner = asWorker();
+    const pools: (number | undefined)[] = [];
+    return {
+      pools,
+      connect: (url, connectOptions) => {
+        const connection = inner(url);
+        let runs = 0;
+        return {
+          ...connection,
+          query: async (text, params) => {
+            if (!text.includes("pg_backend_pid()")) {
+              return connection.query(text, params);
+            }
+            runs += 1;
+            if (runs === 1) {
+              pools.push(connectOptions?.max);
+            }
+            if (runs === 2 && behaviour === "dropped") {
+              throw Object.assign(new Error('prepared statement "k1x2" does not exist'), {
+                code: "26000",
+              });
+            }
+            const rows = await connection.query(text, params);
+            return behaviour === "moved" && runs === 2
+              ? rows.map((row) => ({ ...row, pid: Number(row["pid"]) + 1 }))
+              : rows;
+          },
+        };
+      },
+    };
+  }
+
+  const POOLER_DETAIL =
+    "the database is behind a transaction-mode pooler (Supabase port 6543, PgBouncer transaction mode)";
+  const POOLER_FIX = "use the session pooler (port 5432) or a direct connection in DATABASE_URL";
+
+  it("passes on one server session, checking each connection the worker opens once, on one client connection", async () => {
+    await beat(0);
+    const probe = pooled("session");
+    const result = await doctor([], { connect: probe.connect });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    // The source and the store share DATABASE_URL here: one connection, checked once.
+    expect(lineFor(result.stdout, "pooler")).toBe(
+      'ok    pooler: prepared statements stay on one server session on "listings" (a direct connection or a session pooler)',
+    );
+    expect(probe.pools).toEqual([1]);
+  });
+
+  it("fails when the statement is gone on its second run (SQLSTATE 26000), and says what to use", async () => {
+    await beat(0);
+    const result = await doctor([], { connect: pooled("dropped").connect });
+    expect(result.code).toBe(1);
+    const line = lineFor(result.stdout, "pooler");
+    expect(line).toMatch(/^FAIL/);
+    expect(line).toContain(`"listings" on localhost:5432/app: ${POOLER_DETAIL}`);
+    expect(line).toContain("SQLSTATE 26000");
+    expect(line).toContain(`Fix: ${POOLER_FIX}`);
+    expect(result.stderr).toContain("error: the pooler check failed:");
+    // The checks that follow still run: the pooler is the worker's problem, not the install's.
+    expect(lineFor(result.stdout, "install")).toMatch(/^ok/);
+  });
+
+  it("fails when the statement ran in another server session, as after the driver prepared it again", async () => {
+    await beat(0);
+    const result = await doctor([], { connect: pooled("moved").connect });
+    expect(result.code).toBe(1);
+    expect(lineFor(result.stdout, "pooler")).toContain(
+      `${POOLER_DETAIL}: one prepared statement ran in two server sessions on one connection`,
+    );
+  });
+
+  it.each([
+    ["Supavisor's pooler host", "facetdb_worker.abcd", "aws-0-eu-west-1.pooler.supabase.com"],
+    ["the dedicated PgBouncer", "facetdb_worker", "db.abcdefghijkl.supabase.co"],
+  ])(
+    "fails on port 6543 of %s without trying it, and checks the store's URL too",
+    async (_name, user, host) => {
+      await beat(0);
+      const supabase = `postgres://${user}:s3cret-worker-password@${host}:6543/postgres?sslmode=require`;
+      const probe = pooled("session");
+      const result = await doctor(["--offline"], {
+        config: configWith({ database: supabase }),
+        connect: probe.connect,
+      });
+      expect(result.code).toBe(1);
+      const line = lineFor(result.stdout, "pooler");
+      expect(line).toContain(
+        `"listings" on ${host}:6543/postgres: ${POOLER_DETAIL}: port 6543 of a Supabase host is its transaction-mode pooler`,
+      );
+      expect(line).not.toContain("s3cret-worker-password");
+      // DATABASE_URL (the store) is another connection: it was probed, and passed.
+      expect(probe.pools).toEqual([1]);
+      expect(line).not.toContain("the store on");
+    },
+  );
+
+  it("probes the Supabase database itself on 5432 like any direct connection", async () => {
+    await beat(0);
+    const direct =
+      "postgres://facetdb_worker:s3cret-worker-password@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require";
+    const probe = pooled("session");
+    const result = await doctor(["--offline"], {
+      config: configWith({ database: direct }),
+      connect: probe.connect,
+    });
+    expect(lineFor(result.stdout, "pooler")).toMatch(/^ok/);
+    // The source's database and the store's are two connections, each probed once.
+    expect(probe.pools).toEqual([1, 1]);
+  });
+});
+
 describe("facetdb doctor reports the first failure, whatever else fails", () => {
   it("names the earliest failing check in the error, counts them all, and lists them under --json", async () => {
     // Nothing installed and nothing set: the database is the first failure, then the rest.
@@ -874,7 +999,7 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
     expect(lineFor(result.stdout, "worker heartbeat")).toMatch(/^FAIL.*DATABASE_URL is not set/);
     expect(lineFor(result.stdout, "model key")).toMatch(/^FAIL/);
     expect(lineFor(result.stdout, "FACETDB_SECRET")).toMatch(/^FAIL/);
-    expect(lines(result.stdout).at(-1)).toBe("4 of 7 checks failed.");
+    expect(lines(result.stdout).at(-1)).toBe("4 of 8 checks failed.");
 
     const json = await doctor(["--json"], { env: {} });
     expect(json.code).toBe(1);
@@ -903,9 +1028,10 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
       loadConfig: () => Promise.reject(new Error("a dry run loads no config")),
     });
     expect(result.code, result.stderr).toBe(0);
-    expect(lines(result.stdout)).toHaveLength(8);
+    expect(lines(result.stdout)).toHaveLength(9);
     expect(result.stdout).toContain("1. config:");
-    expect(result.stdout).toContain("7. FACETDB_SECRET:");
+    expect(result.stdout).toContain("3. pooler:");
+    expect(result.stdout).toContain("8. FACETDB_SECRET:");
     expect(result.stdout).toContain("Dry run: nothing was checked.");
     expect(provider.callCount).toBe(0);
   });

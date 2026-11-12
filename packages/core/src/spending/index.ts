@@ -1,5 +1,6 @@
 export type {
   ReservationId,
+  Reserved,
   Spending,
   SpendingAlertKind,
   SpendingCap,

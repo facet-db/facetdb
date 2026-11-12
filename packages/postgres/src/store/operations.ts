@@ -4,11 +4,11 @@ import type {
   AlertStore,
   BackfillProgress,
   CursorStore,
-  ReservationId,
   UsageStore,
 } from "@facetdb/core";
 import type { SqlClient } from "../sql/index.ts";
-import { flag, integer, json, text, textOrNull } from "./rows.ts";
+import { flag, integer, json, textOrNull } from "./rows.ts";
+import { RESERVE_USAGE_FUNCTION } from "./schema.ts";
 
 /**
  * `facetdb.usage`, `usage_reservations` and `usage_alerts` as core's `UsageStore`: billable input
@@ -18,11 +18,13 @@ import { flag, integer, json, text, textOrNull } from "./rows.ts";
 export function createUsageStore(client: SqlClient): UsageStore {
   return {
     async add(projectId, month, inputTokens) {
-      await client.query(
+      const rows = await client.query(
         `insert into facetdb.usage (project_id, month, input_tokens) values ($1, $2, $3)
-         on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens + excluded.input_tokens`,
+         on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens + excluded.input_tokens
+         returning input_tokens::text as total`,
         [projectId, month, inputTokens],
       );
+      return integer(rows[0] ?? {}, "total");
     },
 
     async total(projectId, month) {
@@ -35,39 +37,25 @@ export function createUsageStore(client: SqlClient): UsageStore {
     },
 
     /**
-     * The check and the insert are atomic across processes: the month's `usage` row is locked first
-     * (an upsert that changes nothing), so a second `reserve` for the same project and month waits
-     * for the first to commit and then counts its reservation. Each statement of a read-committed
-     * transaction takes a fresh snapshot, which is why the lock is its own statement and the check a
-     * second one. A project with no limit keeps answering, so it needs no lock.
+     * One statement, so one round trip and no transaction holding a connection: the store's
+     * `reserve_usage` function (store migration 3) locks the month's `usage` row, clears the
+     * project's expired reservations, reads the count and inserts the reservation when the count
+     * plus the open reservations stays under the limit. The check and the insert are atomic across
+     * processes: a second `reserve` waits on the lock, and its check, a statement of its own in the
+     * function, takes a fresh snapshot and counts what the first committed. A project with no limit
+     * keeps answering, so it takes no lock.
      */
     async reserve(projectId, month, requestTokens, limit, now, expiresAt) {
-      return client.transaction(async (query) => {
-        if (limit !== undefined) {
-          await query(
-            `insert into facetdb.usage (project_id, month, input_tokens) values ($1, $2, 0)
-             on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens`,
-            [projectId, month],
-          );
-        }
-        // Reservations whose lease ended give their headroom back; clearing them keeps the table small.
-        await query(
-          "delete from facetdb.usage_reservations where project_id = $1 and expires_at <= $2",
-          [projectId, now],
-        );
-        const rows = await query(
-          `insert into facetdb.usage_reservations (project_id, month, tokens, expires_at)
-           select $1::text, $2::text, $3::bigint, $4::bigint
-            where $5::bigint is null
-               or coalesce((select input_tokens from facetdb.usage where project_id = $1 and month = $2), 0)
-                + coalesce((select sum(tokens) from facetdb.usage_reservations
-                             where project_id = $1 and month = $2 and expires_at > $6), 0) < $5::bigint
-           returning id::text as id`,
-          [projectId, month, requestTokens, expiresAt, limit ?? null, now],
-        );
-        const row = rows[0];
-        return row === undefined ? undefined : (text(row, "id") as ReservationId);
-      });
+      const rows = await client.query(
+        `select reservation_id, month_total::text as month_total
+           from ${RESERVE_USAGE_FUNCTION}($1::text, $2::text, $3::bigint, $4::bigint, $5::bigint, $6::bigint)`,
+        [projectId, month, requestTokens, limit ?? null, now, expiresAt],
+      );
+      const row = rows[0] ?? {};
+      return {
+        reservation: textOrNull(row, "reservation_id") ?? undefined,
+        monthTotal: integer(row, "month_total"),
+      };
     },
 
     async release(projectId, reservation) {
@@ -82,19 +70,23 @@ export function createUsageStore(client: SqlClient): UsageStore {
      * The delete reads the count's output, so the month's `usage` row is locked before the reservation
      * row, the order `reserve` takes them in; the other order could deadlock with a `reserve` clearing
      * this reservation after its lease. A data-modifying `with` runs to completion either way, so the
-     * tokens are counted even when the reservation is already gone.
+     * tokens are counted even when the reservation is already gone. It answers with the month's count
+     * after the write, so the gate needs no second read for the status.
      */
     async finish(projectId, month, reservation, inputTokens) {
-      await client.query(
+      const rows = await client.query(
         `with counted as (
            insert into facetdb.usage (project_id, month, input_tokens) values ($1, $2, $4)
            on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens + excluded.input_tokens
-           returning 1
+           returning input_tokens
+         ), released as (
+           delete from facetdb.usage_reservations
+            where project_id = $1 and id = $3::uuid and exists (select 1 from counted)
          )
-         delete from facetdb.usage_reservations
-          where project_id = $1 and id = $3::uuid and exists (select 1 from counted)`,
+         select input_tokens::text as total from counted`,
         [projectId, month, reservation, inputTokens],
       );
+      return integer(rows[0] ?? {}, "total");
     },
 
     async claimAlert(projectId, month, kind) {

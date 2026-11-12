@@ -264,6 +264,123 @@ const databaseReachable: Check = {
   },
 };
 
+/** A statement with a parameter, so the driver prepares it under a name, as it does the worker's. */
+const POOLER_PROBE = "select pg_backend_pid() as pid, $1::int as run";
+
+/** The server's error code, read off the driver's error (a boundary). */
+function sqlState(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+/**
+ * Supabase serves transaction mode on port 6543: Supavisor on its pooler hosts
+ * (`*.pooler.supabase.com`, session mode on 5432) and the dedicated PgBouncer beside the database
+ * (`db.<project ref>.supabase.co`, the database itself on 5432).
+ */
+function supabaseTransactionPort(url: string): boolean {
+  try {
+    const { port, hostname } = new URL(url);
+    return (
+      port === "6543" &&
+      (hostname.endsWith(".pooler.supabase.com") || /^db\.[^.]+\.supabase\.co$/.test(hostname))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why a connection cannot keep the worker's prepared statements, or undefined when it can. The
+ * worker prepares every statement once per connection, so its connection must stay on one server
+ * session. A transaction-mode pooler hands each transaction to any server connection: the second
+ * run of a statement finds it gone (SQLSTATE 26000), or, when the driver prepared it again there
+ * (postgres.js retries once), runs in another server process. Both runs go on one client connection
+ * (`max: 1`), so two backend ids can only be the pooler's doing.
+ */
+async function transactionPooler(deps: CliDeps, url: string): Promise<string | undefined> {
+  if (supabaseTransactionPort(url)) {
+    return "port 6543 of a Supabase host is its transaction-mode pooler";
+  }
+  const client = deps.connect(url, { max: 1 });
+  try {
+    const first = await client.query(POOLER_PROBE, [1]);
+    const second = await client.query(POOLER_PROBE, [2]);
+    return first[0]?.["pid"] === second[0]?.["pid"]
+      ? undefined
+      : "one prepared statement ran in two server sessions on one connection";
+  } catch (error) {
+    if (sqlState(error) === "26000") {
+      return "a prepared statement was gone on its second run (SQLSTATE 26000, prepared statement does not exist)";
+    }
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * 3. Every connection the worker opens (each table source's and the store's) keeps a prepared
+ * statement from one run to the next: a direct connection or a session pooler, never a
+ * transaction-mode pooler.
+ */
+const poolerSession: Check = {
+  id: "pooler",
+  label: "pooler",
+  looksAt:
+    "runs one prepared statement twice on each connection the worker opens, to find a transaction-mode pooler",
+  run: async ({ deps, options }, config) => {
+    const targets = new Map<string, { readonly name: string; readonly variable: string }>();
+    for (const source of tableSources(config)) {
+      const { url, variable } = connectionOf(source, deps.env);
+      if (url !== undefined) {
+        targets.set(url, { name: `"${source.name}"`, variable });
+      }
+    }
+    const storeUrl = deps.env["DATABASE_URL"];
+    // A plaintext store URL to another machine is the heartbeat check's failure: never sent here.
+    if (
+      storeUrl !== undefined &&
+      storeUrl !== "" &&
+      !targets.has(storeUrl) &&
+      tlsProblem(storeUrl, "DATABASE_URL", options.allowInsecure) === undefined
+    ) {
+      targets.set(storeUrl, { name: "the store", variable: "DATABASE_URL" });
+    }
+    if (targets.size === 0) {
+      return ok("no connection to check");
+    }
+    const problems: string[] = [];
+    const variables = new Set<string>();
+    for (const [url, { name, variable }] of targets) {
+      try {
+        const why = await transactionPooler(deps, url);
+        if (why !== undefined) {
+          problems.push(
+            `${name} on ${databaseLabel(url)}: the database is behind a transaction-mode pooler (Supabase port 6543, PgBouncer transaction mode): ${why}`,
+          );
+          variables.add(variable);
+        }
+      } catch (error) {
+        problems.push(
+          `${name} on ${databaseLabel(url)}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
+        );
+        variables.add(variable);
+      }
+    }
+    return problems.length === 0
+      ? ok(
+          `prepared statements stay on one server session on ${[...targets.values()].map((target) => target.name).join(", ")} (a direct connection or a session pooler)`,
+        )
+      : fail(
+          problems.join("; "),
+          `use the session pooler (port 5432) or a direct connection in ${[...variables].join(" and ")}; the worker prepares each statement once per connection`,
+        );
+  },
+};
+
 const TABLE_FACTS = `select
   to_regnamespace('facetdb') is not null as schema_present,
   to_regclass('facetdb.jobs') is not null as jobs_present,
@@ -337,7 +454,7 @@ async function installProblems(
   });
 }
 
-/** 3. The facetdb schema, the jobs table and the trigger exist, on the columns the questions read. */
+/** 4. The facetdb schema, the jobs table and the trigger exist, on the columns the questions read. */
 const installPresent: Check = {
   id: "install",
   label: "install",
@@ -377,7 +494,7 @@ function ageOf(milliseconds: number): string {
   return minutes < 120 ? `${minutes} minutes` : `${Math.round(minutes / 60)} hours`;
 }
 
-/** 4. The worker has reported within the last two minutes. */
+/** 5. The worker has reported within the last two minutes. */
 const workerHeartbeat: Check = {
   id: "worker",
   label: "worker heartbeat",
@@ -434,7 +551,7 @@ const workerHeartbeat: Check = {
   },
 };
 
-/** 5a. A model key is set, or the config names a compatible server that needs none. */
+/** 6a. A model key is set, or the config names a compatible server that needs none. */
 const modelKey: Check = {
   id: "model-key",
   label: "model key",
@@ -461,7 +578,7 @@ const PING_QUESTION: Question = {
   stakes: "low",
 };
 
-/** 5b. The provider answers one tiny question; `--offline` skips the network. */
+/** 6b. The provider answers one tiny question; `--offline` skips the network. */
 const modelReachable: Check = {
   id: "model-reachable",
   label: "model reachable",
@@ -488,7 +605,7 @@ const modelReachable: Check = {
   },
 };
 
-/** 6. The store's secret is in the environment: it encrypts what the store keeps. */
+/** 7. The store's secret is in the environment: it encrypts what the store keeps. */
 const storeSecret: Omit<Check, "run"> & {
   readonly run: (environment: DoctorEnvironment) => Promise<CheckResult>;
 } = {
@@ -511,6 +628,7 @@ const storeSecret: Omit<Check, "run"> & {
 /** The checks after the config, in the order they run; each names what must have passed before it. */
 export const CHECKS: readonly { readonly check: Check; readonly after?: string }[] = [
   { check: databaseReachable },
+  { check: poolerSession, after: "database" },
   { check: installPresent, after: "database" },
   { check: workerHeartbeat },
   { check: modelKey },

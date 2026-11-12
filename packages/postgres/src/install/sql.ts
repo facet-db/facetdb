@@ -25,6 +25,7 @@ import {
 } from "../scan/index.ts";
 import { JOBS_TABLE, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
 import {
+  STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
@@ -468,6 +469,10 @@ end $$`),
       plain(
         `grant usage, select on sequence ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
       ),
+    ),
+    // Security invoker, so the rights above still decide what the function may touch.
+    ...STORE_FUNCTIONS.map((signature) =>
+      plain(`grant execute on function ${signature} to ${worker}`),
     ),
   ];
 }

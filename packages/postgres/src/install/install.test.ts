@@ -282,11 +282,14 @@ describe("migrate on PGlite", () => {
     await listingsTable();
     await run();
     const functions = await world.client.query(
-      `select proname, proowner::regrole::text as owner from pg_proc where pronamespace = 'facetdb'::regnamespace order by proname`,
+      `select proname, proowner::regrole::text as owner, prosecdef from pg_proc
+        where pronamespace = 'facetdb'::regnamespace order by proname`,
     );
     expect(functions).toEqual([
-      { proname: "enqueue", owner: ENQUEUE_ROLE },
-      { proname: "enqueue_keep", owner: ENQUEUE_ROLE },
+      { proname: "enqueue", owner: ENQUEUE_ROLE, prosecdef: true },
+      { proname: "enqueue_keep", owner: ENQUEUE_ROLE, prosecdef: true },
+      // The store's function runs with its caller's rights, so its owner lends it none.
+      { proname: "reserve_usage", owner: expect.any(String), prosecdef: false },
     ]);
     const role = await world.client.query(
       `select rolcanlogin, rolsuper from pg_roles where rolname = $1`,
@@ -539,7 +542,8 @@ describe("migrate on PGlite", () => {
       await world.client.query(`reset role`);
     }
     const owners = await world.client.query(
-      `select proowner::regrole::text as owner from pg_proc where pronamespace = 'facetdb'::regnamespace`,
+      `select proowner::regrole::text as owner from pg_proc
+        where pronamespace = 'facetdb'::regnamespace and prosecdef order by proname`,
     );
     expect(owners).toEqual([{ owner: ENQUEUE_ROLE }, { owner: ENQUEUE_ROLE }]);
     const create = await world.client.query(

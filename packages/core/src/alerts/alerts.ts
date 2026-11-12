@@ -111,6 +111,18 @@ export function createAlerts(deps: AlertsDeps): Alerts {
   const { store, clock, channels } = deps;
   /** The sliding window of model calls this process made, oldest first. */
   let calls: Call[] = [];
+  /**
+   * Event keys this process knows hold no active alert: it resolved them, or found none to resolve.
+   * A healthy model call resolves `model_failing` only while its key is not known clear, so a run
+   * of healthy calls reads the alert store once instead of once per call (a round trip per answered
+   * record). A raise forgets its key, and so does each heartbeat (once per pass), so an alert
+   * another process raised under the same key is still resolved within a pass.
+   */
+  const knownClear = new Set<string>();
+  /** The check in flight per key, which concurrent healthy calls (the worker's lanes) all wait on. */
+  const clearing = new Map<string, Promise<void>>();
+  /** Raises per key, so a check that a raise overtook does not mark the key clear. */
+  const raises = new Map<string, number>();
 
   async function deliver(message: ChannelMessage): Promise<Delivery> {
     const results = await Promise.allSettled(channels.map((channel) => channel.deliver(message)));
@@ -127,6 +139,8 @@ export function createAlerts(deps: AlertsDeps): Alerts {
 
   async function raise(event: AlertEvent): Promise<AlertOutcome> {
     const key = eventKey(event);
+    knownClear.delete(key);
+    raises.set(key, (raises.get(key) ?? 0) + 1);
     const now = clock.now();
     const active = await store.getActive(key);
     if (active?.lastSentAt != null && now - active.lastSentAt < ALERT_WINDOW_MS) {
@@ -208,8 +222,32 @@ export function createAlerts(deps: AlertsDeps): Alerts {
         did: "Retrying with backoff; a record that cannot be answered is marked error and asked again.",
       });
     } else {
-      await resolve(eventKey({ kind: "model_failing", ...scope, question: null }));
+      const key = modelKey(scope);
+      if (knownClear.has(key)) {
+        return;
+      }
+      let pending = clearing.get(key);
+      if (pending === undefined) {
+        pending = clear(key).finally(() => clearing.delete(key));
+        clearing.set(key, pending);
+      }
+      await pending;
     }
+  }
+
+  /** Resolves `key`, and remembers it is clear unless the alert stayed active or was raised meanwhile. */
+  async function clear(key: string): Promise<void> {
+    const raisedBefore = raises.get(key) ?? 0;
+    const outcome = await resolve(key);
+    // Idle with a failure is a resolved message no channel took: the alert is still active.
+    const cleared = outcome.status === "resolved" || outcome.failures.length === 0;
+    if (cleared && (raises.get(key) ?? 0) === raisedBefore) {
+      knownClear.add(key);
+    }
+  }
+
+  function modelKey(scope: AlertScope): string {
+    return eventKey({ kind: "model_failing", ...scope, question: null });
   }
 
   function signals(scope: AlertScope): AlertSignals {
@@ -219,6 +257,7 @@ export function createAlerts(deps: AlertsDeps): Alerts {
         await checkModel(scope);
       },
       async beat() {
+        knownClear.delete(modelKey(scope));
         await store.saveHeartbeat(scope.project, clock.now());
         await resolve(workerKey(scope));
       },

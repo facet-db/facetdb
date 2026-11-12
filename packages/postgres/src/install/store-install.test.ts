@@ -5,6 +5,7 @@ import type { SqlClient, SqlConnect } from "../sql/index.ts";
 import {
   createStore,
   SCHEMA_VERSION,
+  STORE_FUNCTIONS,
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
@@ -141,6 +142,35 @@ describe("the install script and the store", () => {
     }
     expect(byTable.get(STORE_VERSION_TABLE)).toEqual(["SELECT"]);
     expect(byTable.has("table_owners")).toBe(false);
+    // The store's function: the worker may call it, and no one else but its owner.
+    await world.client.query(`create role someone_else`);
+    for (const signature of STORE_FUNCTIONS) {
+      expect(
+        await world.client.query(
+          `select has_function_privilege('facetdb_worker', $1, 'execute') as worker,
+                  has_function_privilege('someone_else', $1, 'execute') as other`,
+          [signature],
+        ),
+      ).toEqual([{ worker: true, other: false }]);
+    }
+  });
+
+  it("a store at version 2 (before reserve was one statement) is brought up by migrate, with the worker's EXECUTE", async () => {
+    const world = await installed();
+    await world.client.query(`delete from facetdb.store_migrations where version = 3`);
+    await world.client.query(`drop function ${STORE_FUNCTIONS.join(", ")}`);
+    await install(world);
+    for (const signature of STORE_FUNCTIONS) {
+      expect(
+        await world.client.query(
+          `select has_function_privilege('facetdb_worker', $1, 'execute') as may`,
+          [signature],
+        ),
+      ).toEqual([{ may: true }]);
+    }
+    expect(
+      await world.client.query(`select count(*)::int as n from facetdb.store_migrations`),
+    ).toEqual([{ n: SCHEMA_VERSION }]);
   });
 
   it("a second run changes nothing", async () => {
@@ -215,13 +245,14 @@ describe("the install script and the store", () => {
     }
   });
 
-  it("a store at version 1 (installed before the outbox moved in) names its version, and migrate brings it to 2", async () => {
+  it("a store at version 1 (installed before the outbox moved in) names its version, and migrate brings it up to date", async () => {
     // The state every install made before this migration is in (the Supabase project of the
     // example among them): the worker login says how far behind it is and what to run; the
     // admin's second `facetdb migrate` adds the outbox and the worker's rights on it.
     const world = await installed();
-    await world.client.query(`delete from facetdb.store_migrations where version = 2`);
+    await world.client.query(`delete from facetdb.store_migrations where version >= 2`);
     await world.client.query(`drop table facetdb.webhook_outbox`);
+    await world.client.query(`drop function ${STORE_FUNCTIONS.join(", ")}`);
     await world.client.query(`create role plain_login login`);
     await world.client.query(`grant usage on schema facetdb to plain_login`);
     await world.client.query(`grant select on facetdb.store_migrations to plain_login`);
@@ -234,7 +265,11 @@ describe("the install script and the store", () => {
           secret: TEST_SECRET,
           clock: new FakeClock(),
         }),
-      ).rejects.toThrow(/at schema version 1, behind this FacetDB \(2\).*facetdb migrate/);
+      ).rejects.toThrow(
+        new RegExp(
+          `at schema version 1, behind this FacetDB \\(${SCHEMA_VERSION}\\).*facetdb migrate`,
+        ),
+      );
     } finally {
       await world.client.query(`reset role`);
     }
@@ -243,7 +278,7 @@ describe("the install script and the store", () => {
       await world.client.query(
         `select version::int as version from facetdb.store_migrations order by 1`,
       ),
-    ).toEqual([{ version: 1 }, { version: 2 }]);
+    ).toEqual(Array.from({ length: SCHEMA_VERSION }, (_, n) => ({ version: n + 1 })));
     expect(await names(world, "r")).toContain("webhook_outbox");
     expect(
       await world.client.query(

@@ -150,7 +150,7 @@ export function processDeps(): CliDeps {
         url,
         secret: env[SECRET_VARIABLE],
         clock,
-        connect: connectPostgres,
+        connect: options?.connect ?? connectPostgres,
         ...(options?.allowInsecure === true ? { allowInsecure: true } : {}),
       });
     },

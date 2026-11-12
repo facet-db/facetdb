@@ -102,7 +102,14 @@ export type CliDeps = {
    * needs no store never opens one (nor needs the secret). The caller closes it. A store refuses a
    * plaintext URL to another machine unless `allowInsecure` (`--allow-insecure`) says it is trusted.
    */
-  readonly store: (options?: { readonly allowInsecure?: boolean }) => Promise<Store>;
+  readonly store: (options?: {
+    readonly allowInsecure?: boolean;
+    /**
+     * Opens the store's client: the worker hands in its shared pool, so the store and the table
+     * sources on its database use one; one-off commands leave it out and get the driver's own.
+     */
+    readonly connect?: SqlConnect;
+  }) => Promise<Store>;
   /** The model provider for a config: `modelUrl`'s server, else TypeSafe with `TYPESAFE_API_KEY`. */
   readonly provider: (config: ProjectConfig) => ModelProvider;
   /**

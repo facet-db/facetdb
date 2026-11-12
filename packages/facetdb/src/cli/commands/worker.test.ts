@@ -1,4 +1,4 @@
-import type { Clock } from "@facetdb/core";
+import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { createStore, migrate, type SqlConnect, type Store } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
@@ -9,7 +9,7 @@ import { runInProcess } from "../program.ts";
 import { openTableConnector } from "../table-connector.ts";
 import { projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
-import { DEFAULT_PORT } from "./worker.ts";
+import { DEFAULT_PORT, WORKER_CONNECTIONS } from "./worker.ts";
 
 /**
  * `facetdb worker` through the in-process runner on PGlite: the table is installed as `facetdb
@@ -69,6 +69,14 @@ let served: { readonly handler: HttpHandler; readonly port: number }[];
 let closedListeners: number;
 /** Whether each store the commands asked for was allowed to be plaintext. */
 let storeAsked: boolean[];
+/**
+ * Whether each store was handed a client to borrow, and every client the commands opened, with the
+ * pool it asked for (undefined: the driver's default).
+ */
+let poolsAsked: {
+  readonly store: boolean[];
+  readonly clients: { readonly url: string; readonly max: number | undefined }[];
+};
 
 beforeEach(async () => {
   world = await createPgliteWorld();
@@ -78,6 +86,7 @@ beforeEach(async () => {
   served = [];
   closedListeners = 0;
   storeAsked = [];
+  poolsAsked = { store: [], clients: [] };
   await world.client.query("create table public.listings (id text primary key, title text)");
   const [source] = config.sources;
   if (source === undefined) {
@@ -121,10 +130,14 @@ function run(
         TYPESAFE_API_KEY: "ts-test-key",
       },
       loadConfig: () => Promise.resolve(options.config ?? config),
-      connect: world.connect,
+      connect: (url, connectOptions) => {
+        poolsAsked.clients.push({ url, max: connectOptions?.max });
+        return world.connect(url, connectOptions);
+      },
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: (storeOptions) => {
         storeAsked.push(storeOptions?.allowInsecure === true);
+        poolsAsked.store.push(storeOptions?.connect !== undefined);
         return Promise.resolve({ ...store, close: () => Promise.resolve() });
       },
       provider: () => provider,
@@ -175,6 +188,33 @@ describe("facetdb worker", () => {
     expect(jobs[0]?.["n"]).toBe(0);
     // The heartbeat doctor reads is saved under the project directory's name.
     expect(await heartbeat()).toBe(START);
+  });
+
+  describe("opens a connection per lane plus two, and one pool per database", () => {
+    it("a table source on the store's database shares the store's pool: one client in all", async () => {
+      const result = await run(["worker", "--once", "--no-http"], {
+        env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(WORKER_CONNECTIONS).toBe(DEFAULT_WORKER_LIMITS.maxInFlight + 2);
+      // The store, the outbox, the primary-key probe and the source's connector all borrow it.
+      expect(poolsAsked.clients).toEqual([{ url: WORKER_URL, max: WORKER_CONNECTIONS }]);
+      expect(poolsAsked.store).toEqual([true]);
+    });
+
+    it("a table source on another database gets a pool of its own, and the probe the default", async () => {
+      const storeUrl = "postgres://localhost:5432/facetdb";
+      const result = await run(["worker", "--once", "--no-http"], {
+        env: { DATABASE_URL: storeUrl, TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(poolsAsked.clients).toEqual([
+        { url: storeUrl, max: WORKER_CONNECTIONS },
+        { url: WORKER_URL, max: undefined },
+        { url: WORKER_URL, max: WORKER_CONNECTIONS },
+      ]);
+      expect(poolsAsked.store).toEqual([true]);
+    });
   });
 
   it("--allow-insecure is passed to the store, and is off without it", async () => {

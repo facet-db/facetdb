@@ -169,6 +169,38 @@ create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_at
 
 insert into facetdb.store_migrations (version) values (2) on conflict (version) do nothing;
 
+create or replace function facetdb.reserve_usage(
+  for_project text, for_month text, request_tokens bigint, token_limit bigint, at_ms bigint,
+  lease_ends bigint, out reservation_id text, out month_total bigint)
+language plpgsql
+set search_path = ''
+as $$
+begin
+  -- The month's usage row is the lock: a second reserve of the project waits here for the first
+  -- to commit, and a finish takes the same row before the reservation, so neither order deadlocks.
+  -- A project with no limit keeps answering whatever the count, so it needs no lock.
+  if token_limit is not null then
+    insert into facetdb.usage (project_id, month, input_tokens) values (for_project, for_month, 0)
+    on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens;
+  end if;
+  -- Reservations whose lease ended give their headroom back; clearing them keeps the table small.
+  delete from facetdb.usage_reservations r where r.project_id = for_project and r.expires_at <= at_ms;
+  month_total := coalesce((select u.input_tokens from facetdb.usage u
+                            where u.project_id = for_project and u.month = for_month), 0);
+  insert into facetdb.usage_reservations (project_id, month, tokens, expires_at)
+  select for_project, for_month, request_tokens, lease_ends
+   where token_limit is null
+      or month_total + coalesce((select sum(r.tokens) from facetdb.usage_reservations r
+                                  where r.project_id = for_project and r.month = for_month
+                                    and r.expires_at > at_ms), 0) < token_limit
+  returning id::text into reservation_id;
+end
+$$;
+
+revoke all on function facetdb.reserve_usage(text, text, bigint, bigint, bigint, bigint) from public;
+
+insert into facetdb.store_migrations (version) values (3) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -350,5 +382,7 @@ grant usage, select on sequence "facetdb"."decisions_id_seq" to "facetdb_worker"
 grant usage, select on sequence "facetdb"."alert_history_id_seq" to "facetdb_worker";
 
 grant usage, select on sequence "facetdb"."webhook_outbox_id_seq" to "facetdb_worker";
+
+grant execute on function facetdb.reserve_usage(text, text, bigint, bigint, bigint, bigint) to "facetdb_worker";
 
 commit;

@@ -8,6 +8,12 @@ import { jobsTableSql, quoteIdent, type SqlClient, type SqlQuery } from "../sql/
  */
 type Migration = { readonly version: number; readonly statements: readonly string[] };
 
+/** Admits one request against the spending cap in one statement (migration 3, `UsageStore.reserve`). */
+export const RESERVE_USAGE_FUNCTION = "facetdb.reserve_usage";
+
+/** The function with its argument types, as `grant`, `revoke` and `drop function` name it. */
+export const RESERVE_USAGE_FUNCTION_SIGNATURE = `${RESERVE_USAGE_FUNCTION}(text, text, bigint, bigint, bigint, bigint)`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -153,6 +159,47 @@ const MIGRATIONS: readonly Migration[] = [
   where delivered_at is null and gave_up_at is null`,
     ],
   },
+  {
+    version: 3,
+    statements: [
+      // A request is admitted against the month's count plus the open reservations, one step for
+      // every process on the store. It is one statement (one round trip, no transaction to hold a
+      // connection), and one statement alone cannot do it: its snapshot is taken before it waits
+      // for the usage row's lock, so it never counts the reservation the lock holder commits
+      // meanwhile (store.db.test.ts, "refuses when the reservation it waited behind fills the
+      // cap"). Each statement of a volatile function takes a fresh snapshot under read committed,
+      // so the count below, after the lock, sees it. Security invoker: it runs with the caller's
+      // rights on the tables, and only the worker may call it.
+      `create or replace function ${RESERVE_USAGE_FUNCTION}(
+  for_project text, for_month text, request_tokens bigint, token_limit bigint, at_ms bigint,
+  lease_ends bigint, out reservation_id text, out month_total bigint)
+language plpgsql
+set search_path = ''
+as $$
+begin
+  -- The month's usage row is the lock: a second reserve of the project waits here for the first
+  -- to commit, and a finish takes the same row before the reservation, so neither order deadlocks.
+  -- A project with no limit keeps answering whatever the count, so it needs no lock.
+  if token_limit is not null then
+    insert into facetdb.usage (project_id, month, input_tokens) values (for_project, for_month, 0)
+    on conflict (project_id, month) do update set input_tokens = facetdb.usage.input_tokens;
+  end if;
+  -- Reservations whose lease ended give their headroom back; clearing them keeps the table small.
+  delete from facetdb.usage_reservations r where r.project_id = for_project and r.expires_at <= at_ms;
+  month_total := coalesce((select u.input_tokens from facetdb.usage u
+                            where u.project_id = for_project and u.month = for_month), 0);
+  insert into facetdb.usage_reservations (project_id, month, tokens, expires_at)
+  select for_project, for_month, request_tokens, lease_ends
+   where token_limit is null
+      or month_total + coalesce((select sum(r.tokens) from facetdb.usage_reservations r
+                                  where r.project_id = for_project and r.month = for_month
+                                    and r.expires_at > at_ms), 0) < token_limit
+  returning id::text into reservation_id;
+end
+$$`,
+      `revoke all on function ${RESERVE_USAGE_FUNCTION_SIGNATURE} from public`,
+    ],
+  },
 ];
 
 /** The newest migration number this version of FacetDB knows. */
@@ -183,6 +230,13 @@ export const STORE_TABLES: readonly string[] = [
   "install",
   "webhook_outbox",
 ];
+
+/**
+ * Every function the store's migrations create, by signature: `facetdb migrate` grants the worker
+ * login EXECUTE on each (the migration revokes it from everyone else), and `facetdb uninstall`
+ * drops them with the store's tables.
+ */
+export const STORE_FUNCTIONS: readonly string[] = [RESERVE_USAGE_FUNCTION_SIGNATURE];
 
 /** The version table: the worker reads it to see that nothing is left to migrate, and writes nothing. */
 export const STORE_VERSION_TABLE = "store_migrations";

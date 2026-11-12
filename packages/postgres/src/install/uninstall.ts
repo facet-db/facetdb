@@ -10,7 +10,7 @@ import {
   type SqlQuery,
   type SqlRow,
 } from "../sql/index.ts";
-import { STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
+import { STORE_FUNCTIONS, STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
 import {
   type InstalledTable,
   plain,
@@ -217,6 +217,7 @@ ${IN_USE_DECLARE}
     if not exists (select 1 from facetdb.projects) then
       drop table if exists ${["sources", "credentials", "api_keys"].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
       drop table if exists ${[...BOOKKEEPING_TABLES, STORE_VERSION_TABLE].map((name) => `facetdb.${quoteIdent(name)}`).join(", ")};
+      drop function if exists ${STORE_FUNCTIONS.join(", ")};
     end if;
   end if;
 end $$`),

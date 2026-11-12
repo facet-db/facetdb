@@ -47,7 +47,10 @@ The model key, the store key and the API key are never in the config file. They 
 environment: `TYPESAFE_API_KEY`, `FACETDB_SECRET`, `FACETDB_API_KEY`. A connection string is read
 from the environment too (`process.env.DATABASE_URL`). The worker logs in as `facetdb_worker`; a
 connection pooler's suffixed user is fine (the Supabase session pooler wants
-`facetdb_worker.<project ref>`), and `migrate` and `doctor` accept it.
+`facetdb_worker.<project ref>`), and `migrate` and `doctor` accept it. A pooler must be in session
+mode (Supabase port 5432), never transaction mode (Supabase port 6543, PgBouncer
+`pool_mode = transaction`): the worker prepares each statement once per connection, and `doctor`
+fails its `pooler` check when the connection cannot keep one.
 
 ## The config file
 

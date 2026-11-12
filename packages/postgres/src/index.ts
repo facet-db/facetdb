@@ -13,8 +13,10 @@ export * from "./scan/index.ts";
 // The driver, for the composition roots that wire it (the facetdb CLI) and the tests that fake it.
 export {
   connectPostgres,
+  DEFAULT_MAX_CONNECTIONS,
   type SqlClient,
   type SqlConnect,
+  type SqlConnectOptions,
   type SqlQuery,
   type SqlRow,
 } from "./sql/index.ts";

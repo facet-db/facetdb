@@ -143,11 +143,14 @@ describe("the worker login on a real Postgres", () => {
 
   it("runs the trigger as the enqueue role, which cannot log in", async () => {
     const owners = await admin.query(
-      `select proname, proowner::regrole::text as owner from pg_proc where pronamespace = 'facetdb'::regnamespace order by proname`,
+      `select proname, proowner::regrole::text as owner, prosecdef from pg_proc
+        where pronamespace = 'facetdb'::regnamespace order by proname`,
     );
     expect(owners).toEqual([
-      { proname: "enqueue", owner: ENQUEUE_ROLE },
-      { proname: "enqueue_keep", owner: ENQUEUE_ROLE },
+      { proname: "enqueue", owner: ENQUEUE_ROLE, prosecdef: true },
+      { proname: "enqueue_keep", owner: ENQUEUE_ROLE, prosecdef: true },
+      // The store's function runs with its caller's rights, so its owner lends it none.
+      { proname: "reserve_usage", owner: expect.any(String), prosecdef: false },
     ]);
     const login = connectPostgres(scratch.as(ENQUEUE_ROLE, "anything"));
     try {
@@ -213,6 +216,12 @@ describe("the worker login on a real Postgres", () => {
       });
       await queue.enqueue(["k1"]);
       expect(await queue.claim(1)).toEqual(["k1"]);
+      // Spending as the worker login: the store's function runs on its EXECUTE grant.
+      const admitted = await store.usage.reserve("proj_listings", "2026-11", 10, 100, 0, 60_000);
+      expect(admitted).toEqual({ reservation: expect.any(String), monthTotal: 0 });
+      expect(
+        await store.usage.finish("proj_listings", "2026-11", admitted.reservation ?? "", 7),
+      ).toBe(7);
       // The webhook outbox (@facetdb/server) is a store table too; the worker queues and claims
       // in it with the same login (a run on Supabase failed here: the worker had created it).
       const reserved = await recording.query(

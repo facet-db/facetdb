@@ -7,6 +7,14 @@ import type {
   RecordKey,
   StateValue,
 } from "@facetdb/core";
+import {
+  createAlerts,
+  createSpending,
+  createWorker,
+  DEFAULT_WORKER_LIMITS,
+  type ModelProvider,
+  spendingGate,
+} from "@facetdb/core";
 import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { pgliteClient } from "../polling/index.ts";
@@ -523,6 +531,14 @@ describe("TLS", () => {
   });
 });
 
+/** The reservation's id, or undefined when refused: what most usage tests look at. */
+async function reserved(
+  store: Store,
+  ...args: Parameters<Store["usage"]["reserve"]>
+): Promise<string | undefined> {
+  return (await store.usage.reserve(...args)).reservation;
+}
+
 describe("usage", () => {
   const MONTH = "2026-11";
   const OTHER = "2026-12";
@@ -543,69 +559,85 @@ describe("usage", () => {
     const now = 1_000;
     const expires = now + 60_000;
     await store.usage.add("p", MONTH, 40);
-    const first = await store.usage.reserve("p", MONTH, 50, 100, now, expires);
-    const second = await store.usage.reserve("p", MONTH, 50, 100, now, expires);
+    const first = await reserved(store, "p", MONTH, 50, 100, now, expires);
+    const second = await reserved(store, "p", MONTH, 50, 100, now, expires);
     expect(first).toBeDefined();
     expect(second).toBeDefined();
     // 40 counted + 100 reserved is past the cap of 100: nothing more goes out.
-    expect(await store.usage.reserve("p", MONTH, 1, 100, now, expires)).toBeUndefined();
+    expect(await reserved(store, "p", MONTH, 1, 100, now, expires)).toBeUndefined();
 
     await store.usage.release("p", first ?? "");
     // Releasing leaves 40 + 50 = 90, under the cap again.
-    expect(await store.usage.reserve("p", MONTH, 1, 100, now, expires)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 1, 100, now, expires)).toBeDefined();
   });
 
-  it("takes the lock on the month's usage row before it checks the count", async () => {
+  it("admits in one statement, whose function takes the lock on the month's usage row before it reads the count", async () => {
     // PGlite runs one transaction at a time, so no test on it can tell a locked reserve from an
     // unlocked one by its outcome (store.db.test.ts proves the outcome on a real Postgres, with
-    // separate connections). What this proves without one is the statement the guarantee rests on:
-    // inside the reserve transaction, a write to the project's `usage` row comes before the insert
-    // that counts. Remove the lock statement and this fails.
+    // separate connections). What this proves without one is what the guarantee rests on: one
+    // statement reaches the store (one round trip, no transaction), and inside the function it calls,
+    // a write to the project's `usage` row comes before the count is read and before the insert
+    // that checks it, each its own statement. Move the lock after the count and this fails.
     const db = await newDb();
     const inner = pgliteClient(db);
-    const transactions: string[][] = [];
+    const sent: string[] = [];
     const store = await createStore({
       url: "postgres://localhost/facetdb",
       secret: SECRET,
       clock: new TurningClock(1_700_000_000_000),
       connect: () => ({
         ...inner,
+        query: (text, params) => {
+          sent.push(text);
+          return inner.query(text, params);
+        },
         transaction: (work) => {
-          const statements: string[] = [];
-          transactions.push(statements);
-          return inner.transaction((query) =>
-            work((text, params) => {
-              statements.push(text);
-              return query(text, params);
-            }),
-          );
+          sent.push("transaction");
+          return inner.transaction(work);
         },
       }),
     });
     stores.push(store);
-    transactions.length = 0;
+    await store.usage.add("p", MONTH, 25);
+    sent.length = 0;
 
-    await store.usage.reserve("p", MONTH, 10, 100, 0, 60_000);
+    expect(await store.usage.reserve("p", MONTH, 10, 100, 0, 60_000)).toEqual({
+      reservation: expect.any(String),
+      monthTotal: 25,
+    });
 
-    expect(transactions).toHaveLength(1);
-    const statements = transactions[0] ?? [];
-    const countAt = statements.findIndex((text) =>
-      text.includes("insert into facetdb.usage_reservations"),
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("from facetdb.reserve_usage(");
+    const body = String(
+      await scalar(db, "select prosrc from pg_catalog.pg_proc where proname = 'reserve_usage'"),
     );
-    const lockAt = statements.findIndex(
-      (text) =>
-        text.includes("insert into facetdb.usage ") && text.includes("do update set input_tokens"),
-    );
-    expect(countAt).toBeGreaterThan(-1);
+    const lockAt = body.indexOf("insert into facetdb.usage (");
+    const countAt = body.indexOf("month_total :=");
+    const insertAt = body.indexOf("insert into facetdb.usage_reservations");
     expect(lockAt).toBeGreaterThan(-1);
     expect(lockAt).toBeLessThan(countAt);
+    expect(countAt).toBeLessThan(insertAt);
+  });
+
+  it("answers a refusal with the count it read, and counts no reservation in it", async () => {
+    const { store } = await newStore();
+    await store.usage.add("p", MONTH, 60);
+    expect((await store.usage.reserve("p", MONTH, 40, 100, 0, 60_000)).monthTotal).toBe(60);
+    // 60 counted + 40 reserved reaches the cap of 100: refused, and the count is still 60.
+    expect(await store.usage.reserve("p", MONTH, 1, 100, 0, 60_000)).toEqual({
+      reservation: undefined,
+      monthTotal: 60,
+    });
+    // A month with no usage row yet reads 0, with or without a limit.
+    expect((await store.usage.reserve("p", OTHER, 1, undefined, 0, 60_000)).monthTotal).toBe(0);
+    expect((await store.usage.reserve("q", MONTH, 1, 100, 0, 60_000)).monthTotal).toBe(0);
   });
 
   it("lets only the requests that fit pass when several arrive together", async () => {
     // The arithmetic under concurrent calls; the lock itself is the test above and store.db.test.ts.
     const { store } = await newStore();
     const results = await Promise.all(
-      Array.from({ length: 6 }, () => store.usage.reserve("p", MONTH, 30, 100, 0, 60_000)),
+      Array.from({ length: 6 }, () => reserved(store, "p", MONTH, 30, 100, 0, 60_000)),
     );
     // 0, 30, 60, 90 are under 100; the fifth and sixth find 120 reserved.
     expect(results.filter((id) => id !== undefined)).toHaveLength(4);
@@ -613,21 +645,21 @@ describe("usage", () => {
 
   it("returns a reservation's headroom when its lease ends", async () => {
     const { store } = await newStore();
-    expect(await store.usage.reserve("p", MONTH, 100, 100, 0, 1_000)).toBeDefined();
-    expect(await store.usage.reserve("p", MONTH, 1, 100, 999, 2_000)).toBeUndefined();
-    expect(await store.usage.reserve("p", MONTH, 1, 100, 1_000, 2_000)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 100, 100, 0, 1_000)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 1, 100, 999, 2_000)).toBeUndefined();
+    expect(await reserved(store, "p", MONTH, 1, 100, 1_000, 2_000)).toBeDefined();
   });
 
   it("counts a reservation against its own month only, and always admits a project with no limit", async () => {
     const { store } = await newStore();
-    expect(await store.usage.reserve("p", MONTH, 100, 100, 0, 60_000)).toBeDefined();
-    expect(await store.usage.reserve("p", OTHER, 1, 100, 0, 60_000)).toBeDefined();
-    expect(await store.usage.reserve("p", MONTH, 1_000_000, undefined, 0, 60_000)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 100, 100, 0, 60_000)).toBeDefined();
+    expect(await reserved(store, "p", OTHER, 1, 100, 0, 60_000)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 1_000_000, undefined, 0, 60_000)).toBeDefined();
   });
 
   it("releases a reservation twice without harm", async () => {
     const { store } = await newStore();
-    const id = await store.usage.reserve("p", MONTH, 10, 100, 0, 60_000);
+    const id = await reserved(store, "p", MONTH, 10, 100, 0, 60_000);
     await store.usage.release("p", id ?? "");
     await store.usage.release("p", id ?? "");
   });
@@ -654,27 +686,29 @@ describe("usage", () => {
     });
     stores.push(store);
     await store.usage.add("p", MONTH, 10);
-    const id = await store.usage.reserve("p", MONTH, 90, 100, 0, 60_000);
+    const id = await reserved(store, "p", MONTH, 90, 100, 0, 60_000);
     expect(id).toBeDefined();
     // 10 counted + 90 reserved is the cap: nothing more goes out until the request is finished.
-    expect(await store.usage.reserve("p", MONTH, 1, 100, 0, 60_000)).toBeUndefined();
+    expect(await reserved(store, "p", MONTH, 1, 100, 0, 60_000)).toBeUndefined();
     sent.length = 0;
 
-    await store.usage.finish("p", MONTH, id ?? "", 40);
+    // It answers with the month's count after it, so the gate needs no second read.
+    expect(await store.usage.finish("p", MONTH, id ?? "", 40)).toBe(50);
 
     expect(sent).toHaveLength(1);
     expect(await store.usage.total("p", MONTH)).toBe(50);
     // 50 counted and nothing reserved: the 90 gave way to the 40 it cost.
-    expect(await store.usage.reserve("p", MONTH, 49, 100, 0, 60_000)).toBeDefined();
+    expect(await reserved(store, "p", MONTH, 49, 100, 0, 60_000)).toBeDefined();
   });
 
   it("counts a finish whose reservation is already released, and agrees with add then release", async () => {
     const { store } = await newStore();
-    const id = await store.usage.reserve("p", MONTH, 30, 100, 0, 60_000);
+    const id = await reserved(store, "p", MONTH, 30, 100, 0, 60_000);
     await store.usage.release("p", id ?? "");
-    await store.usage.finish("p", MONTH, id ?? "", 25);
-    await store.usage.finish("p", OTHER, id ?? "", 5);
-    await store.usage.add("q", MONTH, 25);
+    expect(await store.usage.finish("p", MONTH, id ?? "", 25)).toBe(25);
+    expect(await store.usage.finish("p", OTHER, id ?? "", 5)).toBe(5);
+    expect(await store.usage.add("q", MONTH, 25)).toBe(25);
+    expect(await store.usage.add("q", MONTH, 0)).toBe(25);
 
     expect(await store.usage.total("p", MONTH)).toBe(25);
     expect(await store.usage.total("p", OTHER)).toBe(5);
@@ -765,5 +799,176 @@ describe("alerts, cursors and question-set versions", () => {
     expect(await store.questionSets.latest("src")).toEqual(two);
     expect(one.createdAt.getTime()).toBe(1_700_000_000_000);
     expect(await scalar(db, "select count(*)::int from facetdb.question_set_versions")).toBe(2);
+  });
+});
+
+/**
+ * What one answered record costs the store, counted by a recording client over PGlite with the
+ * worker, the spending gate and the alerts wired as `facetdb worker` wires them. Each statement is
+ * a round trip, and on Supabase one cost 139 ms. Every statement is named by what it does, so a new
+ * one fails the test with its text instead of passing unseen.
+ */
+describe("store statements per answered record", () => {
+  const STATEMENTS: readonly (readonly [string, RegExp])[] = [
+    [
+      "usage total",
+      /^select coalesce\(sum\(input_tokens\), 0\)::text as total from facetdb\.usage/,
+    ],
+    ["claim", /^update "facetdb"\."jobs"\s+set claimed_at/],
+    ["heartbeat", /^insert into facetdb\.heartbeats/],
+    ["alert state", /^select state::text as state from facetdb\.alerts/],
+    ["read", /^select record_key, state::text as state, hash from facetdb\.records/],
+    ["latest answers", /^select distinct on \(record_key\)/],
+    [
+      "reserve",
+      /^select reservation_id, month_total::text as month_total\s+from facetdb\.reserve_usage\(/,
+    ],
+    ["finish", /^with counted as \(\s+insert into facetdb\.usage/],
+    ["log answer", /^insert into facetdb\.decisions/],
+    ["write", /^update facetdb\.records/],
+    ["ack", /^delete from "facetdb"\."jobs"\s+where record_key in \(/],
+  ];
+
+  function nameOf(text: string): string {
+    const trimmed = text.trim();
+    return STATEMENTS.find(([, pattern]) => pattern.test(trimmed))?.[0] ?? trimmed;
+  }
+
+  const questionSet: QuestionSet = {
+    questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
+    read: [...FIELDS],
+    model: "jev-1.14.0",
+    thresholds: {},
+  };
+
+  /** Answers every question, as the scripted fake provider does; the model is not what is counted. */
+  const provider: ModelProvider = {
+    ask: (request) =>
+      Promise.resolve({
+        model: request.model,
+        answers: Object.fromEntries(
+          request.questions.map((question) => [
+            question.name,
+            { type: "noul", probability: 0.1 } as const,
+          ]),
+        ),
+        usage: { inputTokens: 100, outputTokens: 4 },
+      }),
+  };
+
+  async function worldOf() {
+    const db = await newDb();
+    const inner = pgliteClient(db);
+    const sent: string[] = [];
+    const store = await createStore({
+      url: "postgres://localhost/facetdb",
+      secret: SECRET,
+      clock: new TurningClock(1_700_000_000_000),
+      connect: () => ({
+        ...inner,
+        query: (text, params) => {
+          sent.push(text);
+          return inner.query(text, params);
+        },
+        transaction: (work) =>
+          inner.transaction((query) =>
+            work((text, params) => {
+              sent.push(text);
+              return query(text, params);
+            }),
+          ),
+        pipeline: (text, paramSets) => {
+          sent.push(...paramSets.map(() => text));
+          return inner.pipeline(text, paramSets);
+        },
+      }),
+    });
+    stores.push(store);
+    const clock = new FakeClock(1_700_000_000_000);
+    const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
+    const spending = createSpending({
+      usageStore: store.usage,
+      clock,
+      alerts,
+      capLink: () => "https://app.facetdb.test/settings#spending",
+    });
+    const connector = store.connector({ sourceId: "src", fields: FIELDS, workerId: "w" });
+    const worker = createWorker({
+      connector,
+      provider,
+      log: store.log("src"),
+      reviews: { withdraw: () => Promise.resolve() },
+      actions: [],
+      clock,
+      limits: DEFAULT_WORKER_LIMITS,
+      questionSet,
+      version: 1,
+      alerts: alerts.signals({ project: "p", source: "src", link: "https://docs.facetdb.dev" }),
+      // A cap far away, so the status stays "ok" and the count of a normal pass is what is measured.
+      spending: spendingGate(spending, "p", () =>
+        Promise.resolve({ inputTokens: 1_000_000_000, onCapReached: "pause" }),
+      ),
+    });
+    const queue = async (keys: readonly string[]) => {
+      for (const key of keys) {
+        await connector.upsertRecord(key, { title: `listing ${key}`, body: "body" });
+      }
+      sent.length = 0;
+    };
+    return { worker, queue, sent };
+  }
+
+  it("20 answered records cost 4 statements each, plus 8 for the pass: 88 in all", async () => {
+    const { worker, queue, sent } = await worldOf();
+    await queue(Array.from({ length: 20 }, (_, n) => `r${String(n).padStart(2, "0")}`));
+
+    const report = await worker.runOnce();
+
+    expect(report.written).toHaveLength(20);
+    expect(report.failures).toEqual([]);
+    const counts = new Map<string, number>();
+    for (const name of sent.map(nameOf)) {
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    expect(Object.fromEntries(counts)).toEqual({
+      // The pass: the spending check, the claim, the heartbeat and its alert, the batch's read and
+      // its prior answers, the first healthy model call's alert, and the batch's ack.
+      "usage total": 1,
+      claim: 1,
+      heartbeat: 1,
+      "alert state": 2,
+      read: 1,
+      "latest answers": 1,
+      ack: 1,
+      // Each record: admitted, counted, logged and written, one statement each.
+      reserve: 20,
+      finish: 20,
+      "log answer": 20,
+      write: 20,
+    });
+    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 8.
+    expect(sent).toHaveLength(88);
+  });
+
+  it("one answered record, in the order the store sees them", async () => {
+    const { worker, queue, sent } = await worldOf();
+    await queue(["only"]);
+
+    expect((await worker.runOnce()).written).toEqual(["only"]);
+
+    expect(sent.map(nameOf)).toEqual([
+      "usage total",
+      "claim",
+      "heartbeat",
+      "alert state",
+      "read",
+      "latest answers",
+      "reserve",
+      "finish",
+      "alert state",
+      "log answer",
+      "write",
+      "ack",
+    ]);
   });
 });

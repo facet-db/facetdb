@@ -1,7 +1,9 @@
 export {
   connectPostgres,
+  DEFAULT_MAX_CONNECTIONS,
   type SqlClient,
   type SqlConnect,
+  type SqlConnectOptions,
   type SqlQuery,
   type SqlRow,
 } from "./client.ts";
