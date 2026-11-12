@@ -475,6 +475,31 @@ describe("TLS", () => {
     expect(() => requireTls("postgres://u:p@db.example.com/app", true)).not.toThrow();
   });
 
+  it("reads the last sslmode, as the driver does", () => {
+    const host = "postgres://u:p@db.example.com/app";
+    expect(() => requireTls(`${host}?sslmode=require&sslmode=disable`, false)).toThrow(/TLS/);
+    expect(() => requireTls(`${host}?sslmode=disable&sslmode=require`, false)).not.toThrow();
+  });
+
+  it("does not take ssl=true for TLS when sslmode says disable, allow or prefer", () => {
+    const host = "postgres://u:p@db.example.com/app";
+    for (const mode of ["disable", "allow", "prefer"]) {
+      expect(() => requireTls(`${host}?ssl=true&sslmode=${mode}`, false)).toThrow(/TLS/);
+      expect(() => requireTls(`${host}?sslmode=${mode}&ssl=true`, false)).toThrow(/TLS/);
+    }
+    expect(() => requireTls(`${host}?ssl=true`, false)).not.toThrow();
+    expect(() => requireTls(`${host}?ssl=true&sslmode=require`, false)).not.toThrow();
+    // `ssl` is read the way the driver reads it too: the last value wins.
+    expect(() => requireTls(`${host}?ssl=true&ssl=false`, false)).toThrow(/TLS/);
+    expect(() => requireTls(`${host}?ssl=false&ssl=true`, false)).not.toThrow();
+  });
+
+  it("does not take an empty host for this machine", () => {
+    expect(() => requireTls("postgres:///app", false)).toThrow();
+    expect(() => requireTls("postgres://u:p@/app", false)).toThrow();
+    expect(() => requireTls("postgres:///app", true)).not.toThrow();
+  });
+
   it("is not required on this machine", () => {
     expect(() => requireTls("postgres://u:p@localhost/app", false)).not.toThrow();
     expect(() => requireTls("postgres://u:p@127.0.0.1:5432/app", false)).not.toThrow();

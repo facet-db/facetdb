@@ -5,7 +5,13 @@ import {
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
 import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
-import { loadProjectConfig, singleTarget } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  loadProjectConfig,
+  requireSecureSource,
+  requireSecureUrl,
+  singleTarget,
+} from "./database.ts";
 
 /**
  * `facetdb backfill`: answers every existing row of a source, newest first, at a pace, resumable.
@@ -20,6 +26,7 @@ type BackfillOptions = {
   readonly pace: string;
   readonly question?: string;
   readonly yes: boolean;
+  readonly allowInsecure?: boolean;
 };
 
 function parsePace(text: string): number {
@@ -105,6 +112,7 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       description: "ask only these questions (comma-separated), for questions you just added",
     },
     { flags: "--yes", description: "start without asking, after showing the estimate" },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
     const pace = parsePace(options.pace);
@@ -116,7 +124,17 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       source.questions.map((question) => question.name),
     );
     const name = `${target.schema}.${target.table}`;
-    const setup = await deps.backfill(config, source, { dryRun: options.dryRun });
+    // Before anything connects, a dry run included (it reads the source): no password in the clear.
+    const allowInsecure = options.allowInsecure === true;
+    requireSecureSource(source, allowInsecure);
+    const storeUrl = deps.env["DATABASE_URL"];
+    if (!options.dryRun && storeUrl !== undefined && storeUrl !== "") {
+      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure);
+    }
+    const setup = await deps.backfill(config, source, {
+      dryRun: options.dryRun,
+      ...(options.allowInsecure === true ? { allowInsecure: true } : {}),
+    });
     try {
       const backfill = createBackfill(setup.deps);
       let answeredRecords = 0;

@@ -1,5 +1,5 @@
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, type Store } from "@facetdb/postgres";
+import { createStore, type SqlConnect, type Store } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
@@ -70,16 +70,27 @@ afterEach(async () => {
   await world.close();
 });
 
-function run(argv: readonly string[], config: ProjectConfig) {
+/** Whether each store the command asked for was allowed to be plaintext. */
+const storeAsked: boolean[] = [];
+
+function run(
+  argv: readonly string[],
+  config: ProjectConfig,
+  env: Record<string, string> = { DATABASE_URL: "postgres://localhost:5432/app" },
+  connect: SqlConnect = world.connect,
+) {
   return runInProcess(
     argv,
     {
       projectDir: "/work/listings-app",
-      env: { DATABASE_URL: "postgres://localhost:5432/app" },
+      env,
       loadConfig: () => Promise.resolve(config),
-      connect: world.connect,
+      connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
-      store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
+      store: (options) => {
+        storeAsked.push(options?.allowInsecure === true);
+        return Promise.resolve({ ...store, close: () => Promise.resolve() });
+      },
     },
     COMMANDS,
   );
@@ -281,5 +292,72 @@ describe("facetdb explain", () => {
     const result = await run(["explain", "listings"], configWith(CURRENT_WORDING));
 
     expect(result.code).toBe(2);
+  });
+});
+
+describe("facetdb explain keeps the worker's password out of the clear", () => {
+  const REMOTE_PLAIN = "postgres://facetdb_worker:s3cret-worker-password@db.example.com/x";
+  const REMOTE_TLS = `${REMOTE_PLAIN}?sslmode=require`;
+
+  /** A driver that fails the test when anything connects. */
+  const noConnection: SqlConnect = (url) => {
+    throw new Error(`a connection was opened to ${url}`);
+  };
+
+  /** What the loader makes of `database: process.env.LISTINGS_URL`: the value read, and the variable. */
+  function ownUrl(url: string): ProjectConfig {
+    const base = configWith(CURRENT_WORDING);
+    return {
+      ...base,
+      sources: base.sources.map(({ database: _database, ...source }) => ({
+        ...source,
+        database: url,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+  }
+
+  it("refuses a plaintext remote DATABASE_URL before the store opens, and the flag it names is accepted", async () => {
+    storeAsked.length = 0;
+    const result = await run(
+      ["explain", "listings", "r1"],
+      configWith(CURRENT_WORDING),
+      { DATABASE_URL: REMOTE_PLAIN },
+      noConnection,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "error: DATABASE_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+    );
+    expect(result.stderr).toContain(
+      "fix: add ?sslmode=require to DATABASE_URL, or pass --allow-insecure if that network is trusted",
+    );
+    expect(result.stderr).not.toContain("s3cret-worker-password");
+    expect(storeAsked).toEqual([]);
+  });
+
+  it("refuses a source's own plaintext remote URL when DATABASE_URL has TLS, naming its variable", async () => {
+    storeAsked.length = 0;
+    const result = await run(
+      ["explain", "listings", "r1"],
+      ownUrl(REMOTE_PLAIN),
+      { DATABASE_URL: REMOTE_TLS },
+      noConnection,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("error: LISTINGS_URL reaches db.example.com without TLS");
+    expect(result.stderr).toContain("fix: add ?sslmode=require to LISTINGS_URL");
+    expect(storeAsked).toEqual([]);
+  });
+
+  it("--allow-insecure reaches the store and lets both through", async () => {
+    storeAsked.length = 0;
+    const result = await run(
+      ["explain", "listings", "r1", "--allow-insecure"],
+      ownUrl(REMOTE_PLAIN),
+      { DATABASE_URL: REMOTE_PLAIN },
+    );
+    expect(result.stderr).not.toContain("without TLS");
+    expect(storeAsked).toEqual([true]);
   });
 });

@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import type { QuestionSet } from "@facetdb/core";
-import { type ProjectRef, WORKER_ROLE } from "@facetdb/postgres";
+import { type ProjectRef, requireTls, WORKER_ROLE } from "@facetdb/postgres";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -122,10 +122,110 @@ export function questionSetOf(config: ProjectConfig, source: SourceConfig): Ques
 }
 
 /**
+ * What the store's TLS rule (`requireTls`) says about a connection string: `undefined` when it may
+ * be used, `"invalid"` when it is not a URL, else the host it would reach without TLS.
+ */
+function tlsRefusal(
+  url: string,
+  allowInsecure: boolean | undefined,
+): "invalid" | { readonly host: string } | undefined {
+  try {
+    requireTls(url, allowInsecure ?? false);
+    return undefined;
+  } catch {
+    try {
+      return { host: new URL(url).hostname };
+    } catch {
+      return "invalid";
+    }
+  }
+}
+
+const hostWords = (host: string): string => (host === "" ? "an empty host" : host);
+
+/** What to do about a refused URL: the variable to change, or the flag for a network that is trusted. */
+export function tlsFix(variable: string): string {
+  return `add ?sslmode=require to ${variable}, or pass --allow-insecure if that network is trusted`;
+}
+
+/**
+ * The words for a worker-side connection string (`variable` names where it came from) that the
+ * store's rule refuses, or `undefined` when the URL may be used. The password in it is the worker's.
+ */
+export function tlsProblem(
+  url: string,
+  variable: string,
+  allowInsecure: boolean | undefined,
+): string | undefined {
+  const refusal = tlsRefusal(url, allowInsecure);
+  if (refusal === undefined) {
+    return undefined;
+  }
+  return refusal === "invalid"
+    ? `${variable} is not a connection string (postgres://user:password@host/database)`
+    : `${variable} reaches ${hostWords(refusal.host)} without TLS, so the password in it would travel in the clear`;
+}
+
+/** Refuses, before any connection, a worker-side URL that would travel in the clear to another machine. */
+export function requireSecureUrl(
+  url: string,
+  variable: string,
+  allowInsecure: boolean | undefined,
+): void {
+  const problem = tlsProblem(url, variable, allowInsecure);
+  if (problem !== undefined) {
+    throw new CliError("database-url-tls", `${problem}; no connection was made`, tlsFix(variable));
+  }
+}
+
+/** `requireSecureUrl` for the connection string a table source reads, when it has one. */
+export function requireSecureSource(
+  source: SourceConfig,
+  allowInsecure: boolean | undefined,
+): void {
+  if (source.database !== undefined && source.database !== "") {
+    requireSecureUrl(source.database, source.databaseEnv ?? "DATABASE_URL", allowInsecure);
+  }
+}
+
+/** The admin password must not travel in the clear: refuses before any connection is made. */
+function requireSecureAdminUrl(url: string, allowInsecure: boolean | undefined): void {
+  const refusal = tlsRefusal(url, allowInsecure);
+  if (refusal === undefined) {
+    return;
+  }
+  if (refusal === "invalid") {
+    throw new CliError(
+      "admin-url",
+      "the admin connection string is not a connection string",
+      "pass postgres://user:password@host/database?sslmode=require as --admin-url",
+    );
+  }
+  throw new CliError(
+    "admin-url-tls",
+    `the admin connection string reaches ${hostWords(refusal.host)} without TLS, so the admin password would travel in the clear; no connection was made`,
+    "add ?sslmode=require to the admin connection string, or pass --allow-insecure if that network is trusted",
+  );
+}
+
+/** The `--allow-insecure` option, in the same words on every command that connects. */
+export const ALLOW_INSECURE_OPTION = {
+  flags: "--allow-insecure",
+  description:
+    "connect without TLS to a database on a network you trust (a remote host needs ?sslmode=require otherwise)",
+} as const;
+
+/**
  * The admin connection string: `--admin-url`, or asked for with the input hidden. It is handed to
  * the connector for this run and kept nowhere: not in a file, not in the output, not in an error.
+ * A plaintext URL to a host other than this machine is refused here, before anything connects,
+ * unless `--allow-insecure` says the network is trusted.
  */
-export async function adminUrl(deps: CliDeps, given: string | undefined): Promise<string> {
+export async function adminUrl(
+  deps: CliDeps,
+  given: string | undefined,
+  allowInsecure: boolean | undefined,
+): Promise<string> {
   const url =
     given ??
     (await deps.io.prompt("Admin connection string (used for this run only, never stored): ", {
@@ -138,6 +238,7 @@ export async function adminUrl(deps: CliDeps, given: string | undefined): Promis
       "pass --admin-url, or type the connection string of a role that may alter the table when asked",
     );
   }
+  requireSecureAdminUrl(url.trim(), allowInsecure);
   return url.trim();
 }
 

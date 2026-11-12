@@ -9,6 +9,7 @@ import {
 import type { ProjectConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, defineCommand } from "../program.ts";
 import {
+  ALLOW_INSECURE_OPTION,
   adminUrl,
   databaseLabel,
   loadProjectConfig,
@@ -34,6 +35,7 @@ type MigrateOptions = {
   readonly source?: string;
   readonly yes: boolean;
   readonly prune: boolean;
+  readonly allowInsecure?: boolean;
 };
 
 /** One table's scripts, as shown: the prune (when `--prune` has something to drop) and the install. */
@@ -189,11 +191,12 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     { flags: "--source <name>", description: "install only this source" },
     { flags: "--yes", description: "run the printed SQL without asking" },
     { flags: "--prune", description: "also drop the answer columns of questions you removed" },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
     const config = await loadProjectConfig(deps, options.config);
     const targets = tableTargets(config, options.source);
-    const url = await adminUrl(deps, options.adminUrl);
+    const url = await adminUrl(deps, options.adminUrl, options.allowInsecure);
     const project = projectRef(deps.projectDir);
     const roleExists = await workerRoleExists(deps, url);
     const shown: Shown[] = [];

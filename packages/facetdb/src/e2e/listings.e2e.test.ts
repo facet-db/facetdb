@@ -263,6 +263,7 @@ async function withConnector<Result>(
     questionSet: questionSetOf(config, source),
     clock: wallClock,
     workerId: "e2e-review",
+    allowInsecure: false,
   });
   try {
     return await work(connector);

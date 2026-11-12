@@ -22,7 +22,14 @@ import {
   likelyYes,
   percent,
 } from "../program.ts";
-import { loadProjectConfig, questionSetOf, singleTarget } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  loadProjectConfig,
+  questionSetOf,
+  requireSecureSource,
+  requireSecureUrl,
+  singleTarget,
+} from "./database.ts";
 
 /**
  * `facetdb explain <source> <key>`: one record's full history, oldest first, in words. Each model
@@ -34,6 +41,7 @@ import { loadProjectConfig, questionSetOf, singleTarget } from "./database.ts";
 
 type ExplainOptions = {
   readonly config: string;
+  readonly allowInsecure?: boolean;
 };
 
 /** One question as it was worded in the version in force, with the answer in words. */
@@ -354,6 +362,7 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
       description: "the config file",
       defaultValue: "facetdb.config.ts",
     },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, args, deps, print }) => {
     const [sourceName, key] = args;
@@ -390,7 +399,12 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
         "set DATABASE_URL to the connection string of the database FacetDB keeps its store in",
       );
     }
-    const store = await deps.store();
+    // Before any connection: the store's, then the source's own (a table source's current state is
+    // read from its database with the worker login).
+    const allowInsecure = options.allowInsecure === true;
+    requireSecureUrl(url, "DATABASE_URL", allowInsecure);
+    requireSecureSource(source, allowInsecure);
+    const store = await deps.store({ allowInsecure });
     let history: readonly LogEntry[];
     try {
       history = await store.log(source.name).history(key);

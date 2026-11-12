@@ -339,7 +339,7 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
   it("database: a pooler-suffixed worker login passes and the line names the suffix", async () => {
     await beat(0);
     const pooled = configWith({
-      database: `postgres://${WORKER_ROLE}.jkqrabcd:s3cret-worker-password@aws-0.pooler.supabase.com:5432/postgres`,
+      database: `postgres://${WORKER_ROLE}.jkqrabcd:s3cret-worker-password@aws-0.pooler.supabase.com:5432/postgres?sslmode=require`,
     });
     const result = await doctor([], { config: pooled });
     expect(result.code, result.stdout + result.stderr).toBe(0);
@@ -623,6 +623,238 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
     const line = lineFor(result.stdout, "FACETDB_SECRET");
     expect(line).toMatch(/^FAIL/);
     expect(line).toContain("openssl rand -hex 32");
+  });
+});
+
+describe("facetdb doctor, TLS to a remote database", () => {
+  const REMOTE_PLAIN = `postgres://${WORKER_ROLE}:s3cret-worker-password@db.example.com/x`;
+
+  /** Every URL a connection was opened to, wrapped around the real fake database. */
+  function watching(): { readonly connect: SqlConnect; readonly urls: string[] } {
+    const urls: string[] = [];
+    const inner = asWorker();
+    return {
+      urls,
+      connect: (url) => {
+        urls.push(url);
+        return inner(url);
+      },
+    };
+  }
+
+  it("fails the database check on a plaintext remote URL, naming the variable, before connecting", async () => {
+    const seen = watching();
+    const result = await doctor(["--offline"], {
+      config: configWith({ database: REMOTE_PLAIN }),
+      connect: seen.connect,
+    });
+    expect(result.code).toBe(1);
+    const database = lineFor(result.stdout, "database");
+    expect(database).toMatch(/^FAIL/);
+    expect(database).toContain(
+      '"listings": DATABASE_URL reaches db.example.com without TLS, so the password in it would travel in the clear',
+    );
+    expect(database).toContain(
+      "Fix: add ?sslmode=require to DATABASE_URL, or pass --allow-insecure if that network is trusted.",
+    );
+    // The store's own words ("set allowInsecure") are not a CLI instruction.
+    expect(database).not.toContain("set allowInsecure");
+    expect(lineFor(result.stdout, "install")).toMatch(/^skip/);
+    expect(seen.urls.filter((url) => url.includes("db.example.com"))).toEqual([]);
+    expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
+  });
+
+  it("names the variable the source reads, not DATABASE_URL, when the config says another", async () => {
+    // What the loader makes of `database: process.env.LISTINGS_URL`: the variable's name, and the value read.
+    const base = configWith();
+    const config: ProjectConfig = {
+      ...base,
+      sources: base.sources.map(({ database: _database, ...source }) => ({
+        ...source,
+        database: REMOTE_PLAIN,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+    const result = await doctor(["--offline"], { config });
+    const database = lineFor(result.stdout, "database");
+    expect(database).toContain('"listings": LISTINGS_URL reaches db.example.com without TLS');
+    expect(database).toContain(
+      "Fix: add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted.",
+    );
+  });
+
+  it("fails the worker heartbeat check when DATABASE_URL is a plaintext remote URL", async () => {
+    const seen = watching();
+    const result = await doctor(["--offline"], {
+      env: { ...goodEnv, DATABASE_URL: REMOTE_PLAIN },
+      connect: seen.connect,
+    });
+    expect(result.code).toBe(1);
+    const heartbeat = lineFor(result.stdout, "worker heartbeat");
+    expect(heartbeat).toMatch(/^FAIL/);
+    expect(heartbeat).toContain("DATABASE_URL reaches db.example.com without TLS");
+    expect(heartbeat).toContain("Fix: add ?sslmode=require to DATABASE_URL");
+    expect(seen.urls).not.toContain(REMOTE_PLAIN);
+  });
+
+  it("passes with ?sslmode=require, and on a loopback host without it", async () => {
+    await beat(0);
+    const remote = await doctor([], {
+      config: configWith({ database: `${REMOTE_PLAIN}?sslmode=require` }),
+      env: { ...goodEnv, DATABASE_URL: `${REMOTE_PLAIN}?sslmode=require` },
+    });
+    expect(remote.code, remote.stdout + remote.stderr).toBe(0);
+    expect(lineFor(remote.stdout, "database")).toContain("listings on db.example.com/x");
+    const local = await doctor([]);
+    expect(local.code, local.stdout + local.stderr).toBe(0);
+  });
+
+  it("--allow-insecure passes a plaintext remote URL on a trusted network", async () => {
+    await beat(0);
+    const result = await doctor(["--allow-insecure"], {
+      config: configWith({ database: REMOTE_PLAIN }),
+      env: { ...goodEnv, DATABASE_URL: REMOTE_PLAIN },
+    });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    expect(lineFor(result.stdout, "database")).toMatch(/^ok/);
+  });
+});
+
+/** The connection of `asWorker`, whose `select 1` round trips take the given milliseconds on the fake clock. */
+function farAway(trips: readonly number[]): SqlConnect {
+  const inner = asWorker();
+  return (url) => {
+    const connection = inner(url);
+    let taken = 0;
+    return {
+      ...connection,
+      query: (text, params) => {
+        if (text === "select 1") {
+          clock.advance(trips[taken % trips.length] ?? 0);
+          taken += 1;
+        }
+        return connection.query(text, params);
+      },
+    };
+  };
+}
+
+describe("facetdb doctor, how far the database is", () => {
+  it("prints the median of three round trips on the database line, with no warning when near", async () => {
+    await beat(0);
+    const result = await doctor([], { connect: farAway([12]) });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    expect(lineFor(result.stdout, "database")).toContain(
+      "listings on localhost:5432/app (round trip 12 ms)",
+    );
+    expect(lines(result.stdout).some((text) => text.startsWith("warn"))).toBe(false);
+    expect(lines(result.stdout).at(-1)).toBe("All 7 checks passed.");
+  });
+
+  it("takes the median, so one slow trip does not decide", async () => {
+    await beat(0);
+    const result = await doctor([], { connect: farAway([300, 12, 14]) });
+    expect(lineFor(result.stdout, "database")).toContain("round trip 14 ms");
+    expect(lines(result.stdout).some((text) => text.startsWith("warn"))).toBe(false);
+  });
+
+  it("at 190 ms adds a warn line after the database line, and the exit code stays 0", async () => {
+    await beat(0);
+    const result = await doctor([], { connect: farAway([190]) });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    expect(lineFor(result.stdout, "database")).toMatch(/^ok.*round trip 190 ms/);
+    const printed = lines(result.stdout);
+    const warn = printed.findIndex((text) => text.startsWith("warn"));
+    expect(printed[warn]).toBe(
+      "warn  distance: the database is 190 ms away; run the worker next to it, the 1 second target assumes a same-region link",
+    );
+    expect(printed[warn - 1]).toMatch(/^ok\s+database:/);
+    expect(printed.at(-1)).toBe("All 7 checks passed.");
+    expect(result.stderr).toBe("");
+  });
+
+  it("100 ms is not far; 101 ms is", async () => {
+    await beat(0);
+    const edge = await doctor([], { connect: farAway([100]) });
+    expect(lines(edge.stdout).some((text) => text.startsWith("warn"))).toBe(false);
+    const over = await doctor([], { connect: farAway([101]) });
+    expect(lines(over.stdout).some((text) => text.startsWith("warn"))).toBe(true);
+  });
+
+  it("does not count the warning as a check, a failure or a reason to exit 1", async () => {
+    await beat(0);
+    const failing = await doctor([], {
+      connect: farAway([190]),
+      env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "tsk-s3cret-model-key" },
+    });
+    expect(failing.code).toBe(1);
+    expect(lines(failing.stdout).at(-1)).toBe("1 of 7 checks failed.");
+    expect(lines(failing.stdout).some((text) => text.startsWith("warn  distance"))).toBe(true);
+    const json = await doctor(["--json"], { connect: farAway([190]) });
+    expect(json.code, json.stderr).toBe(0);
+    const parsed = JSON.parse(json.stdout) as {
+      checks: { id: string; status: string }[];
+      warnings: { id: string; status: string; detail: string }[];
+    };
+    // A warning is not a check: it has a field of its own, and `checks` holds only the 7 checks.
+    expect(parsed.checks.map((check) => check.id)).toEqual([
+      "config",
+      "database",
+      "install",
+      "worker",
+      "model-key",
+      "model-reachable",
+      "secret",
+    ]);
+    expect(parsed.checks.every((check) => check.status === "ok")).toBe(true);
+    expect(parsed.warnings).toEqual([
+      {
+        id: "distance",
+        label: "distance",
+        status: "warn",
+        detail:
+          "the database is 190 ms away; run the worker next to it, the 1 second target assumes a same-region link",
+      },
+    ]);
+  });
+
+  it("a failing run lists the warning beside the checks in --json too", async () => {
+    await beat(0);
+    const result = await doctor(["--json"], {
+      connect: farAway([190]),
+      env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "tsk-s3cret-model-key" },
+    });
+    expect(result.code).toBe(1);
+    const parsed = JSON.parse(result.stdout) as {
+      details: { checks: { id: string }[]; warnings: { id: string }[] };
+    };
+    expect(parsed.details.checks).toHaveLength(7);
+    expect(parsed.details.warnings.map((warning) => warning.id)).toEqual(["distance"]);
+  });
+
+  it("a select 1 that fails while timing is a database failure, not swallowed", async () => {
+    const inner = asWorker();
+    const connect: SqlConnect = (url) => {
+      const connection = inner(url);
+      let trips = 0;
+      return {
+        ...connection,
+        query: (text, params) => {
+          if (text === "select 1" && ++trips === 2) {
+            return Promise.reject(new Error("connection terminated mid round trip"));
+          }
+          return connection.query(text, params);
+        },
+      };
+    };
+    const result = await doctor([], { connect });
+    expect(result.code).toBe(1);
+    const database = lineFor(result.stdout, "database");
+    expect(database).toMatch(/^FAIL/);
+    expect(database).toContain('"listings" cannot connect to localhost:5432/app');
+    expect(database).toContain("connection terminated mid round trip");
+    expect(lineFor(result.stdout, "install")).toMatch(/^skip/);
+    expect(lines(result.stdout).some((text) => text.startsWith("warn"))).toBe(false);
   });
 });
 

@@ -35,7 +35,14 @@ import {
   type HttpListener,
 } from "../program.ts";
 import { openTableConnector, workerUrlOf } from "../table-connector.ts";
-import { loadProjectConfig, projectRef, questionSetOf } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  loadProjectConfig,
+  projectRef,
+  questionSetOf,
+  requireSecureSource,
+  requireSecureUrl,
+} from "./database.ts";
 
 /**
  * `facetdb worker`: one process that answers every source of the config. Per table source it runs
@@ -58,6 +65,8 @@ export type WorkerOptions = {
   /** False under `--no-http`. */
   readonly http: boolean;
   readonly once: boolean;
+  /** `--allow-insecure`: the store may be reached without TLS, on a network the operator trusts. */
+  readonly allowInsecure?: boolean;
 };
 
 /** Everything the loops run on, opened by `worker` from the environment or by `dev` on PGlite. */
@@ -70,6 +79,8 @@ export type WorkerParts = {
   /** Opens a table source's database; `databaseOf` names the URL it is given. */
   readonly connect: SqlConnect;
   readonly databaseOf: (source: SourceConfig) => string;
+  /** The worker's password may cross a network without TLS (`--allow-insecure`); `dev` is in-process. */
+  readonly allowInsecure: boolean;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
 };
@@ -243,6 +254,7 @@ export async function runWorkers(
         questionSet: questionSetOf(config, source),
         clock,
         workerId,
+        allowInsecure: parts.allowInsecure,
       });
       // Its log and versions are kept in the store under the source's name, registered as a
       // plugin-kind source, as backfill does (the store has no third kind).
@@ -431,8 +443,8 @@ function requireModel(
 
 export const workerCommand = defineCommand<WorkerOptions>("worker", {
   description:
-    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API",
-  options: OPTIONS,
+    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API; run it next to the database, in the same region, because every record costs a few round trips to it",
+  options: [...OPTIONS, ALLOW_INSECURE_OPTION],
   run: async (context) => {
     const { options, deps, print } = context;
     const config = await loadProjectConfig(deps, options.config);
@@ -445,7 +457,15 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       return { ok: true, dryRun: true };
     }
     const storeUrl = deps.env["DATABASE_URL"] ?? "";
-    const store = await deps.store();
+    const allowInsecure = options.allowInsecure === true;
+    // Before the store opens or anything connects: no worker password in the clear to another machine.
+    if (storeUrl !== "") {
+      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure);
+    }
+    for (const source of config.sources) {
+      requireSecureSource(source, allowInsecure);
+    }
+    const store = await deps.store({ allowInsecure });
     const storeClient = deps.connect(storeUrl);
     try {
       return await runWorkers(context, {
@@ -455,6 +475,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
         storeClient,
         connect: deps.connect,
         databaseOf: workerUrlOf,
+        allowInsecure,
         provider: deps.provider(config),
       });
     } finally {

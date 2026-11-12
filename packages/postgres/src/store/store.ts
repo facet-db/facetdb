@@ -80,8 +80,11 @@ export type Store = {
   close(): Promise<void>;
 };
 
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1", ""]);
+// An empty host is not here: a driver reads it as its default host or a socket, not as this machine.
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const TLS_MODES = new Set(["require", "verify-ca", "verify-full"]);
+/** The modes that may send the password in the clear; they win over `ssl=true`. */
+const PLAINTEXT_MODES = new Set(["disable", "allow", "prefer"]);
 
 /**
  * Connections use TLS. A URL that reaches another machine must ask for it
@@ -103,8 +106,13 @@ export function requireTls(url: string, allowInsecure: boolean): void {
   if (LOCAL_HOSTS.has(parsed.hostname.toLowerCase())) {
     return;
   }
-  const mode = parsed.searchParams.get("sslmode");
-  const tls = (mode !== null && TLS_MODES.has(mode)) || parsed.searchParams.get("ssl") === "true";
+  // The driver lets a later `sslmode` (or `ssl`) replace an earlier one, so the last one counts.
+  const mode = parsed.searchParams.getAll("sslmode").at(-1);
+  const ssl = parsed.searchParams.getAll("ssl").at(-1);
+  const tls =
+    mode !== undefined && PLAINTEXT_MODES.has(mode)
+      ? false
+      : (mode !== undefined && TLS_MODES.has(mode)) || ssl === "true";
   if (!tls) {
     throw new Error(
       `the store URL reaches ${parsed.hostname} without TLS; add ?sslmode=require to it, or set allowInsecure if that network is trusted`,

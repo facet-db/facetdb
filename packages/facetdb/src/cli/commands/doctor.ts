@@ -10,7 +10,15 @@ import {
 } from "@facetdb/postgres";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, defineCommand } from "../program.ts";
-import { databaseLabel, projectRef, questionSetOf, workerLoginOf } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  databaseLabel,
+  projectRef,
+  questionSetOf,
+  tlsFix,
+  tlsProblem,
+  workerLoginOf,
+} from "./database.ts";
 
 /**
  * `facetdb doctor`: runs the checks in order, prints one line each with the fix, and exits 1 naming
@@ -23,9 +31,11 @@ import { databaseLabel, projectRef, questionSetOf, workerLoginOf } from "./datab
 type DoctorOptions = {
   readonly config: string;
   readonly offline: boolean;
+  readonly allowInsecure?: boolean;
 };
 
-export type CheckStatus = "ok" | "fail" | "skip";
+/** `warn` is something to know that is not a failure: it is not counted and the exit code stays 0. */
+export type CheckStatus = "ok" | "fail" | "skip" | "warn";
 
 export type CheckResult = {
   readonly status: CheckStatus;
@@ -33,6 +43,8 @@ export type CheckResult = {
   readonly detail: string;
   /** What to do, for a failure. */
   readonly fix?: string;
+  /** A line of its own after this one, for what the check saw besides its verdict (the distance). */
+  readonly warning?: string;
 };
 
 export type CheckLine = CheckResult & {
@@ -54,7 +66,11 @@ type Check = {
   readonly run: (environment: DoctorEnvironment, config: ProjectConfig) => Promise<CheckResult>;
 };
 
-const ok = (detail: string): CheckResult => ({ status: "ok", detail });
+const ok = (detail: string, warning?: string): CheckResult => ({
+  status: "ok",
+  detail,
+  ...(warning === undefined ? {} : { warning }),
+});
 const fail = (detail: string, fix: string): CheckResult => ({ status: "fail", detail, fix });
 const skip = (detail: string): CheckResult => ({ status: "skip", detail });
 
@@ -151,12 +167,42 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
   }
 }
 
-/** 2. Every table source answers a query when logged in as the worker. */
+/** How many `select 1` round trips measure the link; the median of them is what doctor reports. */
+const ROUND_TRIPS = 3;
+
+/** Above this many milliseconds a round trip is a warning: the 1 second target assumes a near database. */
+const FAR_MS = 100;
+
+/** The middle of three numbers, so a single slow or fast trip does not decide. */
+function median(a: number, b: number, c: number): number {
+  return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+}
+
+/** Times three `select 1` round trips with the command's clock and returns the median, in ms. */
+async function roundTripMs(
+  clock: CliDeps["clock"],
+  query: ReturnType<CliDeps["connect"]>["query"],
+): Promise<number> {
+  const taken: number[] = [];
+  for (let trip = 0; trip < ROUND_TRIPS; trip += 1) {
+    const started = clock.now();
+    await query("select 1");
+    taken.push(clock.now() - started);
+  }
+  const [first = 0, second = 0, third = 0] = taken;
+  return Math.round(median(first, second, third));
+}
+
+/**
+ * 2. Every table source answers a query when logged in as the worker, over a connection that is
+ * encrypted when it leaves this machine, and the report says how far away it is.
+ */
 const databaseReachable: Check = {
   id: "database",
   label: "database",
-  looksAt: "connects to each table source with its own connection string and checks the login",
-  run: async ({ deps }, config) => {
+  looksAt:
+    "connects to each table source with its own connection string, checks the login, and times three round trips",
+  run: async ({ deps, options }, config) => {
     const sources = tableSources(config);
     if (sources.length === 0) {
       return ok("no source reads a table, so there is no database to reach");
@@ -165,6 +211,7 @@ const databaseReachable: Check = {
     let fix = "";
     const reached: string[] = [];
     const pooled = new Set<string>();
+    let farthest = 0;
     for (const source of sources) {
       const { url, variable } = connectionOf(source, deps.env);
       if (url === undefined) {
@@ -172,11 +219,20 @@ const databaseReachable: Check = {
         fix = `set ${variable} to ${WORKER_URL_SHAPE}`;
         continue;
       }
+      const insecure = tlsProblem(url, variable, options.allowInsecure);
+      if (insecure !== undefined) {
+        problems.push(`"${source.name}": ${insecure}`);
+        fix = tlsFix(variable);
+        continue;
+      }
       try {
-        const rows = await withConnection(deps, url, (query) =>
-          query("select current_user::text as name"),
-        );
-        const login = String(rows[0]?.["name"]);
+        const { login, milliseconds } = await withConnection(deps, url, async (query) => {
+          const rows = await query("select current_user::text as name");
+          return {
+            login: String(rows[0]?.["name"]),
+            milliseconds: await roundTripMs(deps.clock, query),
+          };
+        });
         if (login !== WORKER_ROLE) {
           problems.push(
             `"${source.name}" logs in as ${login} on ${databaseLabel(url)}, not as the worker login ${WORKER_ROLE}`,
@@ -187,7 +243,8 @@ const databaseReachable: Check = {
           if (suffix !== undefined) {
             pooled.add(`${WORKER_ROLE}.${suffix}`);
           }
-          reached.push(`${source.name} on ${databaseLabel(url)}`);
+          farthest = Math.max(farthest, milliseconds);
+          reached.push(`${source.name} on ${databaseLabel(url)} (round trip ${milliseconds} ms)`);
         }
       } catch (error) {
         problems.push(
@@ -199,6 +256,9 @@ const databaseReachable: Check = {
     return problems.length === 0
       ? ok(
           `logged in as ${WORKER_ROLE}${pooled.size === 0 ? "" : ` (through a pooler as ${[...pooled].join(", ")})`}: ${reached.join(", ")}`,
+          farthest > FAR_MS
+            ? `the database is ${farthest} ms away; run the worker next to it, the 1 second target assumes a same-region link`
+            : undefined,
         )
       : fail(problems.join("; "), fix);
   },
@@ -322,12 +382,16 @@ const workerHeartbeat: Check = {
   id: "worker",
   label: "worker heartbeat",
   looksAt: "reads the worker's last heartbeat from the FacetDB store",
-  run: async ({ deps }) => {
+  run: async ({ deps, options }) => {
     // One plain select over its own connection: opening the store (`createStore`) would create its
     // schema and salt in the database, which a check must never do and the worker login cannot.
     const url = deps.env["DATABASE_URL"];
     if (url === undefined || url === "") {
       return fail("DATABASE_URL is not set, so there is no store to read", DATABASE_URL_FIX);
+    }
+    const insecure = tlsProblem(url, "DATABASE_URL", options.allowInsecure);
+    if (insecure !== undefined) {
+      return fail(insecure, tlsFix("DATABASE_URL"));
     }
     let last: number | undefined;
     try {
@@ -460,11 +524,17 @@ const CONFIG_CHECK = {
 } as const;
 
 function line(entry: { id: string; label: string }, result: CheckResult): CheckLine {
-  return { id: entry.id, label: entry.label, ...result };
+  const { warning: _warning, ...verdict } = result;
+  return { id: entry.id, label: entry.label, ...verdict };
 }
 
+/** The line that follows a check which saw something worth knowing: it never counts as a failure. */
+const WARNING_ENTRY = { id: "distance", label: "distance" } as const;
+
+const MARKS: Record<CheckStatus, string> = { ok: "ok  ", fail: "FAIL", skip: "skip", warn: "warn" };
+
 function render(entry: CheckLine): string {
-  const mark = entry.status === "ok" ? "ok  " : entry.status === "fail" ? "FAIL" : "skip";
+  const mark = MARKS[entry.status];
   return `${mark}  ${entry.label}: ${entry.detail}${entry.fix === undefined ? "" : ` Fix: ${entry.fix}.`}`;
 }
 
@@ -481,7 +551,11 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
     } else if (earlier !== undefined && earlier.status !== "ok") {
       lines.push(line(check, skip(`not checked: the ${earlier.label} check did not pass`)));
     } else {
-      lines.push(line(check, await check.run(environment, config)));
+      const result = await check.run(environment, config);
+      lines.push(line(check, result));
+      if (result.warning !== undefined) {
+        lines.push(line(WARNING_ENTRY, { status: "warn", detail: result.warning }));
+      }
     }
   }
   // The one check that needs no config: it reads the environment alone, so it always runs.
@@ -499,6 +573,7 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
       defaultValue: "facetdb.config.ts",
     },
     { flags: "--offline", description: "skip the check that needs the network (the model)" },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
     const environment: DoctorEnvironment = { deps, options };
@@ -524,17 +599,20 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
     }
     const failing = lines.filter((entry) => entry.status === "fail");
     const first = failing[0];
+    // A warning is a note under a check, not a check: it is in neither total, nor in `checks`.
+    const checks = lines.filter((entry) => entry.status !== "warn");
+    const warnings = lines.filter((entry) => entry.status === "warn");
     if (first === undefined) {
-      print(`All ${lines.length} checks passed.`);
-      return { ok: true, checks: lines };
+      print(`All ${checks.length} checks passed.`);
+      return { ok: true, checks, warnings };
     }
-    print(`${failing.length} of ${lines.length} checks failed.`);
+    print(`${failing.length} of ${checks.length} checks failed.`);
     throw new CliError(
       `doctor-${first.id}`,
       `the ${first.label} check failed: ${first.detail}`,
       first.fix ?? "",
       undefined,
-      { checks: lines },
+      { checks, warnings },
     );
   },
 });

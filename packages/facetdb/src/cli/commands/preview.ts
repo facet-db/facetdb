@@ -23,7 +23,14 @@ import {
   likelyYes,
   percent,
 } from "../program.ts";
-import { loadProjectConfig, questionSetOf, singleTarget, type TableTarget } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  loadProjectConfig,
+  questionSetOf,
+  requireSecureSource,
+  singleTarget,
+  type TableTarget,
+} from "./database.ts";
 
 /**
  * `facetdb preview`: reads the most recent rows of a source through `scan`, asks the model every
@@ -36,6 +43,7 @@ type PreviewOptions = {
   readonly config: string;
   readonly source?: string;
   readonly limit: string;
+  readonly allowInsecure?: boolean;
 };
 
 export const PREVIEW_DEFAULT_LIMIT = 20;
@@ -191,6 +199,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       description: "how many of the most recent rows to answer",
       defaultValue: String(PREVIEW_DEFAULT_LIMIT),
     },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
     const limit = parseLimit(options.limit);
@@ -206,6 +215,8 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       return { ok: true, dryRun: true, source: source.name, table: name, rows: limit };
     }
 
+    // Before the first connection: the worker's password does not cross a network in the clear.
+    requireSecureSource(source, options.allowInsecure);
     const rows = await recentRows(deps, target, source, config, limit);
     if (rows.length === 0) {
       print(`${name} has no rows yet, so there is nothing to preview.`);

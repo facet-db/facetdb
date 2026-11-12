@@ -84,7 +84,7 @@ type World = {
   readonly clock: FakeClock;
   closes: number;
   /** The mode the command asked the composition root for, per call. */
-  readonly modes: { readonly dryRun: boolean }[];
+  readonly modes: { readonly dryRun: boolean; readonly allowInsecure?: boolean }[];
 };
 
 let world: World;
@@ -145,13 +145,18 @@ function depsFor(provider: FakeProvider, connector: Connector = world.connector)
   };
 }
 
-function run(argv: readonly string[], provider: FakeProvider, answers: readonly string[] = []) {
+function run(
+  argv: readonly string[],
+  provider: FakeProvider,
+  answers: readonly string[] = [],
+  setup: { readonly config?: ProjectConfig; readonly env?: Record<string, string> } = {},
+) {
   return runInProcess(
     argv,
     {
       projectDir: "/work/listings-app",
-      env: {},
-      loadConfig: () => Promise.resolve(config),
+      env: setup.env ?? {},
+      loadConfig: () => Promise.resolve(setup.config ?? config),
       connect: () => {
         throw new Error("backfill reaches the database only through its connector");
       },
@@ -224,6 +229,72 @@ describe("facetdb backfill", () => {
 
     await run(["backfill", "--yes"], createFakeProvider(SCRIPT));
     expect(world.modes).toEqual([{ dryRun: true }, { dryRun: false }]);
+  });
+
+  it("--allow-insecure reaches the composition root, and is absent without it", async () => {
+    await run(["backfill", "--yes", "--allow-insecure"], createFakeProvider(SCRIPT));
+    expect(world.modes).toEqual([{ dryRun: false, allowInsecure: true }]);
+  });
+
+  describe("refuses the worker's password in the clear to another machine", () => {
+    const REMOTE_PLAIN = "postgres://facetdb_worker:s3cret-worker-password@db.example.com/x";
+
+    /** What the loader makes of `database: process.env.LISTINGS_URL`: the value read, and the variable. */
+    function ownUrl(url: string): ProjectConfig {
+      return {
+        ...config,
+        sources: config.sources.map(({ database: _database, ...own }) => ({
+          ...own,
+          database: url,
+          databaseEnv: "LISTINGS_URL",
+        })),
+      };
+    }
+
+    it.each([
+      ["a dry run", ["backfill", "--dry-run"]],
+      ["a real run", ["backfill", "--yes"]],
+    ])(
+      "%s with a plaintext remote source URL is refused before anything is set up",
+      async (_name, argv) => {
+        const result = await run(argv, createFakeProvider(SCRIPT), [], {
+          config: ownUrl(REMOTE_PLAIN),
+          env: { DATABASE_URL: `${REMOTE_PLAIN}?sslmode=require` },
+        });
+        expect(result.code).toBe(1);
+        expect(result.stderr).toContain(
+          "error: LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+        );
+        expect(result.stderr).toContain(
+          "fix: add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
+        );
+        expect(result.stderr).not.toContain("s3cret-worker-password");
+        expect(world.modes).toEqual([]);
+      },
+    );
+
+    it("a real run is refused for a plaintext remote DATABASE_URL, a dry run (no store) is not", async () => {
+      const env = { DATABASE_URL: REMOTE_PLAIN };
+      const real = await run(["backfill", "--yes"], createFakeProvider(SCRIPT), [], { env });
+      expect(real.code).toBe(1);
+      expect(real.stderr).toContain("error: DATABASE_URL reaches db.example.com without TLS");
+      expect(world.modes).toEqual([]);
+      const dry = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT), [], { env });
+      expect(dry.code, dry.stderr).toBe(0);
+    });
+
+    it("--allow-insecure lets a trusted network through", async () => {
+      const result = await run(
+        ["backfill", "--dry-run", "--allow-insecure"],
+        createFakeProvider(SCRIPT),
+        [],
+        {
+          config: ownUrl(REMOTE_PLAIN),
+        },
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(world.modes).toEqual([{ dryRun: true, allowInsecure: true }]);
+    });
   });
 
   it("the dry-run wiring reads the source and refuses every write and every model call", async () => {

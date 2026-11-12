@@ -7,6 +7,7 @@ import {
   WORKER_ROLE,
 } from "@facetdb/postgres";
 import type { SourceConfig } from "../config/index.ts";
+import { requireSecureUrl } from "./commands/database.ts";
 import { CliError } from "./program.ts";
 
 /**
@@ -70,6 +71,12 @@ export type TableConnectorOptions = {
   readonly questionSet: QuestionSet;
   readonly clock: Clock;
   readonly workerId: string;
+  /**
+   * `--allow-insecure`: the worker's password may cross a network without TLS. Otherwise a URL to
+   * another machine needs `?sslmode=require`, and this refuses before it connects. `facetdb dev`
+   * passes true: its database is in the process, not on a network.
+   */
+  readonly allowInsecure: boolean;
 };
 
 /** Reads the key, then opens the capture connector; the caller closes it. */
@@ -77,6 +84,7 @@ export async function openTableConnector(
   options: TableConnectorOptions,
 ): Promise<PostgresConnector> {
   const { source } = options;
+  requireSecureUrl(options.url, source.databaseEnv ?? "DATABASE_URL", options.allowInsecure);
   const target = splitTable(source.table ?? "");
   const probe = options.connect(options.url);
   let key: { readonly name: string; readonly type: string };

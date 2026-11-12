@@ -128,6 +128,8 @@ export const devCommand = defineCommand<DevOptions>("dev", {
           storeClient: client,
           connect,
           databaseOf: () => DEV_URL,
+          // The dev database lives in this process: there is no network to protect.
+          allowInsecure: true,
           provider,
         });
       } finally {

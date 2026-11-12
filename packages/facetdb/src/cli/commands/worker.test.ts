@@ -1,11 +1,12 @@
 import type { Clock } from "@facetdb/core";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { createStore, migrate, type Store } from "@facetdb/postgres";
+import { createStore, migrate, type SqlConnect, type Store } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
+import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import type { HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
+import { openTableConnector } from "../table-connector.ts";
 import { projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 import { DEFAULT_PORT } from "./worker.ts";
@@ -66,6 +67,8 @@ let clock: SteppedClock;
 let provider: FakeProvider;
 let served: { readonly handler: HttpHandler; readonly port: number }[];
 let closedListeners: number;
+/** Whether each store the commands asked for was allowed to be plaintext. */
+let storeAsked: boolean[];
 
 beforeEach(async () => {
   world = await createPgliteWorld();
@@ -74,6 +77,7 @@ beforeEach(async () => {
   provider = createFakeProvider({ defaults: { noul: 0.01 } });
   served = [];
   closedListeners = 0;
+  storeAsked = [];
   await world.client.query("create table public.listings (id text primary key, title text)");
   const [source] = config.sources;
   if (source === undefined) {
@@ -105,6 +109,7 @@ function run(
   options: {
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly stop?: AbortSignal;
+    readonly config?: ProjectConfig;
   } = {},
 ) {
   return runInProcess(
@@ -115,10 +120,13 @@ function run(
         DATABASE_URL: "postgres://localhost:5432/facetdb",
         TYPESAFE_API_KEY: "ts-test-key",
       },
-      loadConfig: () => Promise.resolve(config),
+      loadConfig: () => Promise.resolve(options.config ?? config),
       connect: world.connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
-      store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
+      store: (storeOptions) => {
+        storeAsked.push(storeOptions?.allowInsecure === true);
+        return Promise.resolve({ ...store, close: () => Promise.resolve() });
+      },
       provider: () => provider,
       clock,
       random: () => 0.5,
@@ -167,6 +175,115 @@ describe("facetdb worker", () => {
     expect(jobs[0]?.["n"]).toBe(0);
     // The heartbeat doctor reads is saved under the project directory's name.
     expect(await heartbeat()).toBe(START);
+  });
+
+  it("--allow-insecure is passed to the store, and is off without it", async () => {
+    await run(["worker", "--once", "--no-http"]);
+    await run(["worker", "--once", "--no-http", "--allow-insecure"]);
+    expect(storeAsked).toEqual([false, true]);
+  });
+
+  describe("refuses the worker's password in the clear to another machine", () => {
+    const REMOTE_PLAIN = "postgres://facetdb_worker:s3cret-worker-password@db.example.com/x";
+    const REMOTE_TLS = `${REMOTE_PLAIN}?sslmode=require`;
+    const goodEnv = { DATABASE_URL: REMOTE_TLS, TYPESAFE_API_KEY: "ts-test-key" };
+
+    /** What the loader makes of `database: process.env.LISTINGS_URL`: the value read, and the variable. */
+    function ownUrl(url: string): ProjectConfig {
+      return {
+        ...config,
+        sources: config.sources.map(({ database: _database, ...source }) => ({
+          ...source,
+          database: url,
+          databaseEnv: "LISTINGS_URL",
+        })),
+      };
+    }
+
+    /** A driver that fails the test when anything connects. */
+    const noConnection: SqlConnect = (url) => {
+      throw new Error(`a connection was opened to ${url}`);
+    };
+
+    async function refused(argv: readonly string[], options: Parameters<typeof run>[1]) {
+      const result = await runInProcess(
+        argv,
+        {
+          projectDir: PROJECT_DIR,
+          env: options?.env ?? {},
+          loadConfig: () => Promise.resolve(options?.config ?? config),
+          connect: noConnection,
+          store: (storeOptions) => {
+            storeAsked.push(storeOptions?.allowInsecure === true);
+            return Promise.reject(new Error("the store must not be opened"));
+          },
+          provider: () => provider,
+          clock,
+          random: () => 0.5,
+        },
+        COMMANDS,
+      );
+      return result;
+    }
+
+    it("a plaintext remote DATABASE_URL is refused before the store opens", async () => {
+      const result = await refused(["worker", "--once", "--no-http"], {
+        env: { DATABASE_URL: REMOTE_PLAIN, TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(
+        "error: DATABASE_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+      );
+      expect(result.stderr).toContain(
+        "fix: add ?sslmode=require to DATABASE_URL, or pass --allow-insecure if that network is trusted",
+      );
+      expect(result.stderr).not.toContain("s3cret-worker-password");
+      expect(storeAsked).toEqual([]);
+    });
+
+    it("a source's own plaintext remote URL is refused even when DATABASE_URL has TLS, naming its variable", async () => {
+      const result = await refused(["worker", "--once", "--no-http"], {
+        env: goodEnv,
+        config: ownUrl(REMOTE_PLAIN),
+      });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(
+        "error: LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear",
+      );
+      expect(result.stderr).toContain("fix: add ?sslmode=require to LISTINGS_URL");
+      expect(storeAsked).toEqual([]);
+    });
+
+    it("the connector refuses it too, before it connects, whoever opens it", async () => {
+      await expect(
+        openTableConnector({
+          source: ownUrl(REMOTE_PLAIN).sources[0] as SourceConfig,
+          url: REMOTE_PLAIN,
+          connect: noConnection,
+          questionSet: questionSetOf(config, config.sources[0] as SourceConfig),
+          clock,
+          workerId: "w",
+          allowInsecure: false,
+        }),
+      ).rejects.toThrow(/LISTINGS_URL reaches db.example.com without TLS/);
+    });
+
+    it("--allow-insecure lets both through to the store", async () => {
+      const result = await run(["worker", "--once", "--no-http", "--allow-insecure"], {
+        env: { DATABASE_URL: REMOTE_PLAIN, TYPESAFE_API_KEY: "ts-test-key" },
+        config: ownUrl(WORKER_URL),
+      });
+      expect(result.stderr).not.toContain("without TLS");
+      expect(storeAsked).toEqual([true]);
+    });
+  });
+
+  it("its description says it runs next to the database", async () => {
+    const help = await run(["worker", "--help"]);
+    // Commander wraps the description to the terminal's width.
+    const text = help.stdout.replace(/\s+/g, " ");
+    expect(text).toContain("run it next to the database, in the same region");
+    expect(text).toContain("--allow-insecure");
   });
 
   it("--once with nothing queued asks nothing and exits 0", async () => {

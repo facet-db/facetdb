@@ -1,6 +1,6 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
-import { createStore } from "@facetdb/postgres";
+import { createStore, type SqlConnect } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
@@ -224,5 +224,77 @@ describe("facetdb preview", () => {
     expect(result.code).toBe(0);
     expect(provider.callCount).toBe(0);
     expect(result.stdout).toContain("no rows yet");
+  });
+});
+
+describe("facetdb preview keeps the worker's password out of the clear", () => {
+  const REMOTE_PLAIN = "postgres://facetdb_worker:s3cret-worker-password@db.example.com/x";
+
+  /** A driver that fails the test when anything connects. */
+  const noConnection: SqlConnect = (url) => {
+    throw new Error(`a connection was opened to ${url}`);
+  };
+
+  /** What the loader makes of `database: process.env.LISTINGS_URL`: the value read, and the variable. */
+  function ownUrl(url: string): ProjectConfig {
+    const base = configWith();
+    return {
+      ...base,
+      sources: base.sources.map(({ database: _database, ...source }) => ({
+        ...source,
+        database: url,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+  }
+
+  it("refuses a plaintext remote source URL before any connection, naming its variable", async () => {
+    const result = await run(
+      ["preview"],
+      createFakeProvider(SCRIPT),
+      ownUrl(REMOTE_PLAIN),
+      noConnection,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "error: LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+    );
+    expect(result.stderr).toContain(
+      "fix: add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
+    );
+    expect(result.stderr).not.toContain("s3cret-worker-password");
+  });
+
+  it("names DATABASE_URL when the source reads that one", async () => {
+    const base = configWith();
+    const config: ProjectConfig = {
+      ...base,
+      sources: base.sources.map((source) => ({ ...source, database: REMOTE_PLAIN })),
+    };
+    const result = await run(["preview"], createFakeProvider(SCRIPT), config, noConnection);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("error: DATABASE_URL reaches db.example.com without TLS");
+  });
+
+  it("passes with ?sslmode=require, with --allow-insecure, and in a dry run that connects nowhere", async () => {
+    const tls = await run(
+      ["preview", "--limit", "1"],
+      createFakeProvider(SCRIPT),
+      ownUrl(`${REMOTE_PLAIN}?sslmode=require`),
+    );
+    expect(tls.code, tls.stderr).toBe(0);
+    const trusted = await run(
+      ["preview", "--limit", "1", "--allow-insecure"],
+      createFakeProvider(SCRIPT),
+      ownUrl(REMOTE_PLAIN),
+    );
+    expect(trusted.code, trusted.stderr).toBe(0);
+    const dry = await run(
+      ["preview", "--dry-run"],
+      createFakeProvider(SCRIPT),
+      ownUrl(REMOTE_PLAIN),
+      noConnection,
+    );
+    expect(dry.code, dry.stderr).toBe(0);
   });
 });

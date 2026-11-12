@@ -406,6 +406,85 @@ describe("facetdb migrate", () => {
   });
 });
 
+describe("the admin password never travels in the clear to another machine", () => {
+  const REMOTE_PLAIN = "postgres://admin:s3cret-admin-password@db.example.com/x";
+
+  /** A driver that fails the test when anything connects: the refusal comes before any connection. */
+  const noConnection: SqlConnect = (url) => {
+    throw new Error(`a connection was opened to ${url}`);
+  };
+
+  it.each([
+    ["migrate", ["migrate", "--yes"]],
+    ["migrate --dry-run", ["migrate", "--dry-run"]],
+    ["uninstall", ["uninstall"]],
+  ])("%s refuses a plaintext remote admin URL before any connection", async (_name, argv) => {
+    const result = await run([...argv, "--admin-url", REMOTE_PLAIN], { connect: noConnection });
+    expect(result.code, result.stdout).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(
+      "error: the admin connection string reaches db.example.com without TLS, so the admin password would travel in the clear; no connection was made",
+    );
+    expect(result.stderr).toContain("?sslmode=require");
+    expect(result.stderr).toContain("--allow-insecure");
+    expect(result.stderr).toContain("https://docs.facetdb.dev/fix/admin-url-tls");
+    expect(result.stderr).not.toContain("s3cret-admin-password");
+    expect(await facetdbSchemaExists()).toBe(false);
+  });
+
+  it("refuses a URL typed at the prompt too", async () => {
+    const result = await run(["migrate", "--yes"], {
+      connect: noConnection,
+      answers: [REMOTE_PLAIN],
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("would travel in the clear");
+  });
+
+  it("asks for TLS with sslmode=require, and with ssl=true", async () => {
+    for (const query of ["?sslmode=require", "?sslmode=verify-full", "?ssl=true"]) {
+      const result = await run(["migrate", "--dry-run", "--admin-url", `${REMOTE_PLAIN}${query}`]);
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).toBe("");
+    }
+  });
+
+  it("is not asked of a loopback host", async () => {
+    for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+      const result = await run([
+        "migrate",
+        "--dry-run",
+        "--admin-url",
+        `postgres://admin:s3cret-admin-password@${host}:5432/app`,
+      ]);
+      expect(result.code, result.stderr).toBe(0);
+    }
+  });
+
+  it("--allow-insecure turns the rule off, dry run and real run alike", async () => {
+    const dry = await run([
+      "migrate",
+      "--dry-run",
+      "--allow-insecure",
+      "--admin-url",
+      REMOTE_PLAIN,
+    ]);
+    expect(dry.code, dry.stderr).toBe(0);
+    const real = await run(["migrate", "--yes", "--allow-insecure", "--admin-url", REMOTE_PLAIN]);
+    expect(real.code, real.stderr).toBe(0);
+    expect(await columns()).toEqual(expect.arrayContaining(["is_scam", "category"]));
+  });
+
+  it("--allow-insecure on uninstall lets a trusted network through", async () => {
+    expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    const result = await run(
+      ["uninstall", "--dry-run", "--allow-insecure", "--admin-url", REMOTE_PLAIN],
+      {},
+    );
+    expect(result.code, result.stderr).toBe(0);
+  });
+});
+
 describe("facetdb uninstall", () => {
   beforeEach(async () => {
     expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);

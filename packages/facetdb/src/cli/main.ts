@@ -14,7 +14,7 @@ import {
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
-import { projectRef, questionSetOf } from "./commands/database.ts";
+import { projectRef, questionSetOf, requireSecureUrl } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
 import { diskEmbedded } from "./embedded.ts";
 import {
@@ -130,7 +130,7 @@ export function processDeps(): CliDeps {
     loadConfig: async (path) =>
       (await loadConfig(path, { projectDir, env, stderr: process.stderr })).config,
     connect: connectPostgres,
-    store: () => {
+    store: (options) => {
       const url = env["DATABASE_URL"];
       if (url === undefined || url === "") {
         return Promise.reject(
@@ -141,7 +141,18 @@ export function processDeps(): CliDeps {
           ),
         );
       }
-      return createStore({ url, secret: env[SECRET_VARIABLE], clock, connect: connectPostgres });
+      try {
+        requireSecureUrl(url, "DATABASE_URL", options?.allowInsecure);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return createStore({
+        url,
+        secret: env[SECRET_VARIABLE],
+        clock,
+        connect: connectPostgres,
+        ...(options?.allowInsecure === true ? { allowInsecure: true } : {}),
+      });
     },
     provider: (config) => provider(config, env),
     serve: serveHttp,
@@ -158,16 +169,16 @@ export function processDeps(): CliDeps {
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
-        const connector = await sourceConnector(config, source);
+        const connector = await sourceConnector(config, source, mode.allowInsecure === true);
         return {
           deps: wireBackfillDryRun({ config, source, connector, clock }),
           close: () => connector.close(),
         };
       }
-      const store = await deps.store();
+      const store = await deps.store({ allowInsecure: mode.allowInsecure === true });
       let connector: PostgresConnector | undefined;
       try {
-        connector = await sourceConnector(config, source);
+        connector = await sourceConnector(config, source, mode.allowInsecure === true);
         const wired = await wireBackfill({
           config,
           source,
@@ -208,7 +219,11 @@ function provider(config: ProjectConfig, env: Readonly<Record<string, string | u
  * The connector of a table source: the Postgres capture runtime under the worker login, so what a
  * backfill queues lands in the source's own jobs table, where `facetdb worker` claims it.
  */
-function sourceConnector(config: ProjectConfig, source: SourceConfig): Promise<PostgresConnector> {
+function sourceConnector(
+  config: ProjectConfig,
+  source: SourceConfig,
+  allowInsecure: boolean,
+): Promise<PostgresConnector> {
   return openTableConnector({
     source,
     url: workerUrlOf(source),
@@ -216,6 +231,7 @@ function sourceConnector(config: ProjectConfig, source: SourceConfig): Promise<P
     questionSet: questionSetOf(config, source),
     clock,
     workerId: `backfill-${randomUUID()}`,
+    allowInsecure,
   });
 }
 

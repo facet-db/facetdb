@@ -99,9 +99,10 @@ export type CliDeps = {
   readonly connect: SqlConnect;
   /**
    * The FacetDB store, opened on first use from `DATABASE_URL` and `FACETDB_SECRET`; a command that
-   * needs no store never opens one (nor needs the secret). The caller closes it.
+   * needs no store never opens one (nor needs the secret). The caller closes it. A store refuses a
+   * plaintext URL to another machine unless `allowInsecure` (`--allow-insecure`) says it is trusted.
    */
-  readonly store: () => Promise<Store>;
+  readonly store: (options?: { readonly allowInsecure?: boolean }) => Promise<Store>;
   /** The model provider for a config: `modelUrl`'s server, else TypeSafe with `TYPESAFE_API_KEY`. */
   readonly provider: (config: ProjectConfig) => ModelProvider;
   /**
@@ -113,7 +114,7 @@ export type CliDeps = {
   readonly backfill: (
     config: ProjectConfig,
     source: SourceConfig,
-    mode: { readonly dryRun: boolean },
+    mode: { readonly dryRun: boolean; readonly allowInsecure?: boolean },
   ) => Promise<BackfillSetup>;
   /** Binds the HTTP surface on a port (`facetdb worker`); the composition root uses `node:http`. */
   readonly serve: (handler: HttpHandler, port: number) => Promise<HttpListener>;

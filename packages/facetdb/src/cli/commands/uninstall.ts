@@ -1,6 +1,7 @@
 import { uninstall } from "@facetdb/postgres";
 import { type CliDeps, CliError, defineCommand } from "../program.ts";
 import {
+  ALLOW_INSECURE_OPTION,
   adminUrl,
   loadProjectConfig,
   refused,
@@ -20,6 +21,7 @@ type UninstallOptions = {
   readonly adminUrl?: string;
   readonly source?: string;
   readonly purge: boolean;
+  readonly allowInsecure?: boolean;
 };
 
 type Shown = { readonly target: TableTarget; readonly sql: string; readonly project: string };
@@ -80,11 +82,12 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
     },
     { flags: "--source <name>", description: "uninstall only this source" },
     { flags: "--purge", description: "also delete the decision log of these sources" },
+    ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
     const config = await loadProjectConfig(deps, options.config);
     const targets = tableTargets(config, options.source);
-    const url = await adminUrl(deps, options.adminUrl);
+    const url = await adminUrl(deps, options.adminUrl, options.allowInsecure);
     const shown: Shown[] = [];
     for (const target of targets) {
       shown.push(await show(deps, url, target, options.purge));
