@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   type Connector,
+  type CurrentDecision,
   type ReadResult,
   type ReadRow,
   type RecordDecision,
@@ -10,7 +11,7 @@ import {
   stateHash,
   type WriteResult,
 } from "@facetdb/core";
-import { runConnectorContract } from "@facetdb/core/testing";
+import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type { ZodObject, ZodType } from "zod";
 import * as mini from "zod/mini";
@@ -781,6 +782,7 @@ describe("a defined source plugin", () => {
         service.edit(key, state);
       },
       decisionOf: async (key) => store.decisions.get(key) ?? null,
+      clock: store.clock,
     };
   });
 });
@@ -875,6 +877,9 @@ function trackerSource(service: IssueTracker): SourceDefinition<{ pageSize: numb
 /** FacetDB's side of a source plugin: the queue and the decisions, shared by every worker. */
 class MemoryStore {
   readonly decisions = new Map<RecordKey, RecordDecision>();
+  /** When each decision was written, by the store's clock. */
+  readonly writtenAt = new Map<RecordKey, number>();
+  readonly clock = new FakeClock(1_700_000_000_000);
   readonly jobs = new Map<RecordKey, string | null>();
   /** While the change capture runs: the tracker's change count when it started, and how many it queued. */
   capture: { readonly base: number; queued: number } | undefined;
@@ -949,6 +954,7 @@ class SourceAdapter implements Connector {
     this.#parts.store.capture = undefined;
     this.#parts.store.jobs.clear();
     this.#parts.store.decisions.clear();
+    this.#parts.store.writtenAt.clear();
   }
 
   watch(): AsyncIterable<readonly RecordKey[]> {
@@ -977,7 +983,34 @@ class SourceAdapter implements Connector {
     // `facetdb_reviewed` is never cleared once a person has decided.
     const reviewed = decision.reviewed ?? store.decisions.get(key)?.reviewed;
     store.decisions.set(key, reviewed === true ? { ...decision, reviewed } : decision);
+    store.writtenAt.set(key, store.clock.now());
     return { written: true };
+  }
+
+  /** The decisions live apart from the tool's records, so a record never written is absent. */
+  async current(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, CurrentDecision>> {
+    const { store } = this.#parts;
+    const found = new Map<RecordKey, CurrentDecision>();
+    for (const key of keys) {
+      const stored = store.decisions.get(key);
+      const at = store.writtenAt.get(key);
+      if (stored === undefined || at === undefined) {
+        continue;
+      }
+      const decisions: Record<string, CurrentDecision["decisions"][string]> = {};
+      for (const [name, decision] of Object.entries(stored.decisions)) {
+        if (decision.kind === "decided") {
+          decisions[name] = decision;
+        }
+      }
+      found.set(key, {
+        decisions,
+        status: stored.status,
+        reviewed: stored.reviewed === true,
+        updatedAt: new Date(at),
+      });
+    }
+    return found;
   }
 
   async scan(cursor: string | null): Promise<ScanPage> {

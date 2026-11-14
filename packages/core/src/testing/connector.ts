@@ -1,6 +1,8 @@
 import type {
   Capabilities,
+  Clock,
   Connector,
+  CurrentDecision,
   ReadResult,
   ReadRow,
   RecordDecision,
@@ -10,6 +12,7 @@ import type {
   WriteResult,
 } from "../contracts/index.ts";
 import { type StateValue, stateHash } from "../records/index.ts";
+import { FakeClock } from "./clock.ts";
 import { FakeStore } from "./store.ts";
 
 export type FakeDatabaseOptions = {
@@ -19,13 +22,19 @@ export type FakeDatabaseOptions = {
   readonly pageSize?: number;
   /** The source's `where` filter as the connector's SQL would evaluate it: true excludes the row. */
   readonly excludes?: (state: Readonly<Record<string, StateValue>>) => boolean;
+  /** What `write` stamps `facetdb_updated_at` with. Defaults to a fake clock standing at 0. */
+  readonly clock?: Clock;
 };
 
-/** A row as the fake table keeps it: its insertion order, its state and the decision written to it. */
+/**
+ * A row as the fake table keeps it: its insertion order, its state, the decision written to it and
+ * when (`facetdb_updated_at`, in ms; null before the first write).
+ */
 type FakeRow = {
   readonly seq: number;
   readonly state: Readonly<Record<string, StateValue>>;
   readonly decision: RecordDecision | null;
+  readonly updatedAt: number | null;
 };
 
 /** A queued job: who claimed it, or null while it waits. */
@@ -43,6 +52,7 @@ export class FakeDatabase {
   readonly fields: readonly string[];
   readonly pageSize: number;
   readonly excludes: (state: Readonly<Record<string, StateValue>>) => boolean;
+  readonly clock: Clock;
   readonly rows = new FakeStore<FakeRow>();
   readonly jobs = new FakeStore<FakeJob>();
   readonly #changes: RecordKey[] = [];
@@ -55,6 +65,7 @@ export class FakeDatabase {
     this.fields = options.fields;
     this.pageSize = options.pageSize ?? 10;
     this.excludes = options.excludes ?? (() => false);
+    this.clock = options.clock ?? new FakeClock();
     if (!Number.isInteger(this.pageSize) || this.pageSize < 1) {
       throw new Error(`a page holds at least one row, not ${this.pageSize}`);
     }
@@ -75,6 +86,7 @@ export class FakeDatabase {
       seq: existing?.seq ?? this.#nextSeq++,
       state: stored,
       decision: existing?.decision ?? null,
+      updatedAt: existing?.updatedAt ?? null,
     });
     if (this.#installed) {
       this.#fire(key);
@@ -103,7 +115,7 @@ export class FakeDatabase {
     this.#installed = false;
     this.jobs.clear();
     for (const [key, row] of this.rows.entries()) {
-      this.rows.set(key, { ...row, decision: null });
+      this.rows.set(key, { ...row, decision: null, updatedAt: null });
     }
   }
 
@@ -221,8 +233,34 @@ export class FakeConnector implements Connector {
     this.#db.rows.set(key, {
       ...row,
       decision: reviewed === true ? { ...decision, reviewed } : decision,
+      updatedAt: this.#db.clock.now(),
     });
     return { written: true };
+  }
+
+  /** Decisions live on the fake's rows, so a row never written reads as pending, nothing decided. */
+  current(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, CurrentDecision>> {
+    const found = new Map<RecordKey, CurrentDecision>();
+    for (const key of keys) {
+      const row = this.#db.rows.get(key);
+      if (row === undefined) {
+        continue;
+      }
+      const decisions: Record<string, CurrentDecision["decisions"][string]> = {};
+      for (const [name, decision] of Object.entries(row.decision?.decisions ?? {})) {
+        // A question left for review holds no decision: its value stays NULL.
+        if (decision.kind === "decided") {
+          decisions[name] = decision;
+        }
+      }
+      found.set(key, {
+        decisions,
+        status: row.decision?.status ?? "pending",
+        reviewed: row.decision?.reviewed === true,
+        updatedAt: row.updatedAt === null ? null : new Date(row.updatedAt),
+      });
+    }
+    return Promise.resolve(found);
   }
 
   async enqueue(keys: readonly RecordKey[]): Promise<void> {

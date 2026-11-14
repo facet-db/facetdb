@@ -4,6 +4,7 @@ import {
   type Capabilities,
   type Clock,
   type Connector,
+  type CurrentDecision,
   type QuestionSet,
   REVIEWED_COLUMN,
   type ReadResult,
@@ -22,8 +23,10 @@ import {
   CLAIM_LEASE_MS,
   connectPostgres,
   createClaimLedger,
+  currentColumns,
   enqueueJobs,
   jobsQueries,
+  parseCurrent,
   quoteIdent,
   quoteTable,
   type SqlClient,
@@ -301,6 +304,37 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     return { written: rows.length > 0 };
   }
 
+  /**
+   * Where `write` stored it: the record's own row inline, its side row in side-table mode, which
+   * exists only once a decision was written. The worker login reads
+   * the key and FacetDB's columns there in both modes. Keys compare as text, as `explain` does, so
+   * a key the column's type cannot hold (`abc` on an integer key) is absent, not an error; the
+   * callers ask a few keys at a time (`explain`, a review card), so the index it skips on a
+   * non-text key costs one pass over the table.
+   */
+  async function current(
+    keys: readonly RecordKey[],
+  ): Promise<ReadonlyMap<RecordKey, CurrentDecision>> {
+    const wanted = [...new Set(keys)];
+    const found = new Map<RecordKey, CurrentDecision>();
+    if (wanted.length === 0) {
+      return found;
+    }
+    const key = quoteIdent(target.keyColumn);
+    const rows = await client.query(
+      `select ${key}::text as k, ${currentColumns(questionSet.questions)}
+         from ${targetRelation} where ${key}::text = any($1::text[])`,
+      [wanted],
+    );
+    for (const row of rows) {
+      const decision = parseCurrent(row, questionSet.questions);
+      if (decision !== undefined) {
+        found.set(requireText(row["k"], target.keyColumn), decision);
+      }
+    }
+    return found;
+  }
+
   const scan = createScan({
     query: client.query,
     source,
@@ -334,6 +368,7 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     watch,
     read,
     write,
+    current,
     scan,
     // One key per statement, pipelined (`enqueueJobs`): an application transaction may hold one
     // of these job rows, and a statement that waits on it must hold no other.

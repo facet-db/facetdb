@@ -3,6 +3,7 @@ import {
   type Capabilities,
   type Clock,
   type Connector,
+  type CurrentDecision,
   type QuestionSet,
   REVIEWED_COLUMN,
   type ReadResult,
@@ -19,6 +20,8 @@ import {
 } from "@facetdb/core";
 import {
   connectPostgres,
+  currentColumns,
+  parseCurrent,
   quoteIdent,
   quoteTable,
   type SqlClient,
@@ -338,6 +341,33 @@ export function createPollingConnector(options: PollingConnectorOptions): Pollin
     });
   }
 
+  /**
+   * The record's own columns; a row whose status FacetDB never set (it never saw it) is absent.
+   * Keys compare as text, as `explain` does, so a key the column's type cannot hold is absent, not
+   * an error.
+   */
+  async function current(
+    keys: readonly RecordKey[],
+  ): Promise<ReadonlyMap<RecordKey, CurrentDecision>> {
+    const wanted = [...new Set(keys)];
+    const found = new Map<RecordKey, CurrentDecision>();
+    if (wanted.length === 0) {
+      return found;
+    }
+    const rows = await client.query(
+      `select ${keyColumn}::text as k, ${currentColumns(questionSet.questions)}
+         from ${table} where ${keyColumn}::text = any($1::text[])`,
+      [wanted],
+    );
+    for (const row of rows) {
+      const decision = parseCurrent(row, questionSet.questions);
+      if (decision !== undefined) {
+        found.set(requireText(row["k"], source.key), decision);
+      }
+    }
+    return found;
+  }
+
   async function scan(cursor: ScanCursor | null): Promise<ScanPage> {
     // Keyset paging by key, newest (highest) first: rows added meanwhile never shift a page.
     const rows =
@@ -391,6 +421,7 @@ export function createPollingConnector(options: PollingConnectorOptions): Pollin
     watch,
     read,
     write,
+    current,
     scan,
     enqueue(keys) {
       for (const key of keys) {

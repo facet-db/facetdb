@@ -7,6 +7,7 @@ export {
   type SqlQuery,
   type SqlRow,
 } from "./client.ts";
+export { currentColumns, parseCurrent, recordStatus } from "./current.ts";
 export { quoteIdent, quoteLiteral, quoteTable } from "./identifier.ts";
 export {
   CLAIM_LEASE_MS,

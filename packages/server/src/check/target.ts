@@ -16,6 +16,7 @@ export function onlyRecord(
     watch: () => connector.watch(),
     read: (keys) => connector.read(keys),
     write: (target, decision, expectedHash) => connector.write(target, decision, expectedHash),
+    current: (keys) => connector.current(keys),
     scan: (cursor) => connector.scan(cursor),
     enqueue: (keys) => connector.enqueue(keys),
     claim: async (limit) => (limit >= 1 && (await connector.claimRecord(key)) ? [key] : []),

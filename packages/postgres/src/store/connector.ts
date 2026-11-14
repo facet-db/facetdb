@@ -2,6 +2,7 @@ import {
   type Capabilities,
   type Clock,
   type Connector,
+  type CurrentDecision,
   type ReadResult,
   type ReadRow,
   type RecordDecision,
@@ -18,11 +19,58 @@ import {
   createClaimLedger,
   enqueueJobs,
   jobsQueries,
+  recordStatus,
   type SqlClient,
   type SqlRow,
 } from "../sql/index.ts";
-import { flag, fromMs, jsonObject, jsonOrNull, text } from "./rows.ts";
+import { flag, fromMs, integer, jsonObject, jsonOrNull, text, toMs } from "./rows.ts";
 import { migrateStore } from "./schema.ts";
+
+type Decided = CurrentDecision["decisions"][string];
+
+/**
+ * The decided questions of a decision as `write` stored it (`{ decisions, status }` as JSON). A
+ * question left for review holds no decision; anything else that is not a decision is an error
+ * that names the question (the row is a boundary).
+ */
+function decidedOf(written: unknown): Readonly<Record<string, Decided>> {
+  const decisions =
+    typeof written === "object" && written !== null && "decisions" in written
+      ? written.decisions
+      : undefined;
+  if (typeof decisions !== "object" || decisions === null || Array.isArray(decisions)) {
+    throw new Error(`the stored decision ${JSON.stringify(written)} holds no decisions object`);
+  }
+  const decided: Record<string, Decided> = {};
+  for (const [name, entry] of Object.entries(decisions)) {
+    if (typeof entry === "object" && entry !== null && "kind" in entry) {
+      if (entry.kind === "needs_review") {
+        continue;
+      }
+      const value = "value" in entry ? entry.value : undefined;
+      const certainty = "probabilityOrConfidence" in entry ? entry.probabilityOrConfidence : null;
+      const expected = "expected" in entry ? entry.expected : undefined;
+      if (
+        entry.kind === "decided" &&
+        (typeof value === "boolean" || typeof value === "string") &&
+        typeof certainty === "number" &&
+        certainty >= 0 &&
+        certainty <= 1 &&
+        (expected === undefined || typeof expected === "number")
+      ) {
+        decided[name] = {
+          kind: "decided",
+          value,
+          probabilityOrConfidence: certainty,
+          ...(expected === undefined ? {} : { expected }),
+        };
+        continue;
+      }
+    }
+    throw new Error(`the stored decision of "${name}" is ${JSON.stringify(entry)}, not a decision`);
+  }
+  return decided;
+}
 
 /**
  * What the source's job keys start with in `facetdb.jobs`. That table has no source column (the
@@ -205,6 +253,36 @@ export function createStoreConnector(
     return { written: rows.length > 0 };
   }
 
+  async function current(
+    keys: readonly RecordKey[],
+  ): Promise<ReadonlyMap<RecordKey, CurrentDecision>> {
+    const wanted = [...new Set(keys)];
+    const found = new Map<RecordKey, CurrentDecision>();
+    if (wanted.length === 0) {
+      return found;
+    }
+    const rows = await client.query(
+      `select record_key, status, decision::text as decision, reviewed,
+              ${toMs("updated_at", "updated_ms")}
+         from facetdb.records where source_id = $1 and record_key = any($2::text[])`,
+      [sourceId, wanted],
+    );
+    for (const row of rows) {
+      const written = jsonOrNull(row, "decision");
+      found.set(text(row, "record_key"), {
+        decisions: written === null ? {} : decidedOf(written),
+        // The record's own status, which a state change sends back to pending; the stored
+        // decision stays until a new one is written over it.
+        status: recordStatus(row["status"], "status"),
+        reviewed: flag(row, "reviewed"),
+        // The store keeps one time per record, and a state change moves it too; before the first
+        // decision there is none to report.
+        updatedAt: written === null ? null : new Date(integer(row, "updated_ms")),
+      });
+    }
+    return found;
+  }
+
   async function scan(cursor: ScanCursor | null): Promise<ScanPage> {
     // Keyset paging by key, highest first: rows added meanwhile never shift a page.
     const rows =
@@ -289,6 +367,7 @@ export function createStoreConnector(
     watch,
     read,
     write,
+    current,
     scan,
     upsertRecord,
     getRecord,

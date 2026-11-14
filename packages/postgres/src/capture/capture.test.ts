@@ -248,4 +248,23 @@ describe("postgres connector", () => {
     });
     await bare.close();
   });
+
+  it("current answers a key an integer column cannot hold with nothing, in both storage modes", async () => {
+    for (const storage of ["inline", "side-table"] as const) {
+      const world = await newWorld(storage, "reset", { keyType: "integer" });
+      const connector = world.connector();
+      await connector.install();
+      await world.edit("7", { title: "a", body: "b" });
+      const hash = (await connector.read(["7"])).rows[0]?.hash ?? "";
+      expect(await connector.write("7", decided(), hash)).toEqual({ written: true });
+
+      // `explain abc` on an integer-keyed table: no record, and no "invalid input syntax" error.
+      const current = await connector.current(["7", "8", "no-such-key"]);
+
+      expect([...current.keys()]).toEqual(["7"]);
+      expect(current.get("7")?.decisions).toEqual(decided().decisions);
+      // The next storage mode starts from an empty cluster, as on a fresh engine.
+      await world.close();
+    }
+  });
 });

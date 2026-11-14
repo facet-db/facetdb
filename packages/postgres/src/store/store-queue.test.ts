@@ -46,9 +46,7 @@ describe("the store connector passes the contract suite", () => {
         await connector.upsertRecord(key, state);
       },
       decisionOf: async (key: RecordKey) => (await connector.getRecord(key))?.decision ?? null,
-      close: async () => {
-        void clock;
-      },
+      clock,
     };
   });
 });

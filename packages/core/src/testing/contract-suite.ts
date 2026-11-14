@@ -1,7 +1,35 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { Connector, RecordDecision, RecordKey } from "../contracts/index.ts";
+import type { Clock, Connector, RecordDecision, RecordKey } from "../contracts/index.ts";
+import type { Question } from "../questions/index.ts";
 import type { StateValue } from "../records/index.ts";
 import type { Decision } from "../thresholds/index.ts";
+
+/**
+ * The questions the suite's decisions name, one of each type: a fixture whose connector keeps
+ * answers in columns asks these, so every question has its columns (a choice stores no
+ * probability list here: a decision carries none).
+ */
+export const CONTRACT_QUESTIONS: readonly Question[] = [
+  { type: "noul", name: "not_priority", instructions: "Is this not a priority?", stakes: "low" },
+  {
+    type: "choice",
+    name: "category",
+    instructions: "Which team should handle this?",
+    options: [
+      { name: "billing", description: "Payments, invoices and refunds" },
+      { name: "bug", description: "Something in the product does not work" },
+    ],
+    stakes: "low",
+    storeProbabilities: false,
+  },
+  {
+    type: "score",
+    name: "urgency",
+    instructions: "How urgent is this?",
+    levels: [{ name: "low" }, { name: "medium" }, { name: "high" }],
+    stakes: "low",
+  },
+];
 
 /**
  * What a connector under test is given. The suite never sees a database handle: the factory that
@@ -21,6 +49,8 @@ export type ContractFixture = {
   readonly fields: readonly string[];
   /** The decision stored for a key, or null. */
   readonly decisionOf: (key: RecordKey) => Promise<RecordDecision | null>;
+  /** The clock the connector stamps a decision's `updatedAt` with. */
+  readonly clock: Clock;
   /** Releases what the factory opened. */
   readonly close?: () => Promise<void>;
 };
@@ -156,6 +186,53 @@ export function runConnectorContract(
       expect((await fx.decisionOf(k))?.status).toBe("needs_review");
     });
 
+    it("current reports what write stored and nothing for a missing key", async () => {
+      const fx = await open();
+      await fx.connector.install();
+      await seed(fx, 3);
+      const [decidedKey = "", reviewKey = "", untouched = ""] = seedKeys(3);
+      const { rows } = await fx.connector.read([decidedKey, reviewKey]);
+      const hashOf = (key: RecordKey) => rows.find((row) => row.key === key)?.hash ?? "";
+      // A minute between the records' change and the write: `updatedAt` is the write's time, so a
+      // connector that stamped it at the change would fail here.
+      await fx.clock.sleep(60_000);
+      const writtenAt = new Date(fx.clock.now());
+      await fx.connector.write(decidedKey, everyTypeDecided(), hashOf(decidedKey));
+      await fx.connector.write(reviewKey, partlyDecided(), hashOf(reviewKey));
+
+      const current = await fx.connector.current([decidedKey, reviewKey, untouched, "no-such-key"]);
+
+      expect(current.get(decidedKey)).toEqual({
+        decisions: everyTypeDecided().decisions,
+        status: "done",
+        reviewed: true,
+        updatedAt: writtenAt,
+      });
+      // A question left for review holds no decision, its value NULL; on a record in
+      // needs_review the questions that reached a decision hold theirs.
+      expect(current.get(reviewKey)).toEqual({
+        decisions: { category: partlyDecided().decisions["category"] },
+        status: "needs_review",
+        reviewed: false,
+        updatedAt: writtenAt,
+      });
+      // Never decided: absent where FacetDB has no row or status for it yet (a side table, a
+      // polling install), or pending with nothing decided where it has one (inline, the store).
+      const never = current.get(untouched);
+      if (never !== undefined) {
+        expect(never).toEqual({
+          decisions: {},
+          status: "pending",
+          reviewed: false,
+          updatedAt: null,
+        });
+      }
+      expect(current.has("no-such-key")).toBe(false);
+      expect([...current.keys()].filter((key) => key !== untouched).sort()).toEqual(
+        [decidedKey, reviewKey].sort(),
+      );
+    });
+
     it("enqueue keeps one entry per record, and claimKey holds only a key nobody queued", async () => {
       const fx = await open();
       await fx.connector.install();
@@ -268,6 +345,31 @@ function aDecision(): RecordDecision {
     probabilityOrConfidence: 0.93,
   };
   return { decisions: { not_priority: decision }, status: "done" };
+}
+
+/** Every question of `CONTRACT_QUESTIONS` decided, and a person among the deciders. */
+function everyTypeDecided(): RecordDecision {
+  return {
+    decisions: {
+      not_priority: { kind: "decided", value: true, probabilityOrConfidence: 0.93 },
+      category: { kind: "decided", value: "billing", probabilityOrConfidence: 0.8 },
+      urgency: { kind: "decided", value: "high", probabilityOrConfidence: 0.7, expected: 1.8 },
+    },
+    status: "done",
+    reviewed: true,
+  };
+}
+
+/** The model answered; two questions fell between the thresholds and one reached a decision. */
+function partlyDecided(): RecordDecision {
+  return {
+    decisions: {
+      not_priority: { kind: "needs_review" },
+      category: { kind: "decided", value: "bug", probabilityOrConfidence: 0.9 },
+      urgency: { kind: "needs_review" },
+    },
+    status: "needs_review",
+  };
 }
 
 async function withTimeout<T>(pending: Promise<T>, ms: number, message: string): Promise<T> {

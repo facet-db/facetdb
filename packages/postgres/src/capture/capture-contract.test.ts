@@ -1,6 +1,6 @@
-import { runConnectorContract } from "@facetdb/core/testing";
+import { CONTRACT_QUESTIONS, runConnectorContract } from "@facetdb/core/testing";
 import { describe } from "vitest";
-import { questionSet, useCaptureWorld, World } from "./capture-world.ts";
+import { useCaptureWorld, World } from "./capture-world.ts";
 
 /**
  * The trigger-and-jobs connector against the connector contract suite, in both storage modes, on
@@ -15,13 +15,15 @@ useCaptureWorld();
 for (const storage of ["inline", "side-table"] as const) {
   describe(`postgres connector contract (${storage})`, () => {
     runConnectorContract(async () => {
-      const world = await new World(storage, "keep").create();
+      // The suite's questions, one of each type, so `current` reads every kind of answer column.
+      const world = await new World(storage, "keep", { questions: CONTRACT_QUESTIONS }).create();
       return {
         connector: world.connector({ workerId: "w1" }),
         peer: world.connector({ workerId: "w2" }),
-        fields: questionSet.read,
+        fields: world.questionSet.read,
         edit: (key, state) => world.edit(key, state),
         decisionOf: (key) => world.decisionOf(key),
+        clock: world.clock,
         close: () => world.close(),
       };
     });

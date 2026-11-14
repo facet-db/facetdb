@@ -1,0 +1,394 @@
+import type { QuestionSet } from "../questions/index.ts";
+import type { OnChange } from "../records/index.ts";
+import type { Clock } from "./clock.ts";
+import type { Capabilities, Connector } from "./connector.ts";
+
+/**
+ * The database engine contract (anyone can add a database by implementing it): what one database
+ * offers the CLI. An engine plans install, uninstall and prune for a source, renders a plan as the
+ * script the operator reads first, runs it, opens the runtime connector and answers doctor. It owns
+ * the answer columns, the queue and the change capture in the source's database; the log and
+ * everything else stay in the one Postgres store
+ *. The CLI picks an engine by the URL's scheme.
+ *
+ * Design notes:
+ * - A statement names the database it serves, `source` or `store`, because the store is one
+ *   Postgres for every engine. `store` statements, and the store's own objects among removes and
+ *   keeps (`log`, `store-table`), appear only when `EngineDeps.storeShared` says the store is the
+ *   source's own database: the plan is then one script, today's, byte for byte. With a separate
+ *   store the plan is `source` only, like a MySQL plan, and the CLI's store door (`migrateStore`,
+ *   the purge) owns the store. The tag follows a table's role, not the function that made it:
+ *   whatever the store, everything the source's database needs is `source`, among it the `facetdb`
+ *   schema, `facetdb.jobs`, `facetdb.projects`, `facetdb.table_owners` and the worker's grants on
+ *   them.
+ * - A plan is an ordered list, not a tree of steps: the order is what runs and what the operator
+ *   reads, and on a database without transactional DDL (MySQL) a stopped run is described by one
+ *   index. Every statement is idempotent, so running the same plan again completes it. An
+ *   uninstall of several tables is one plan per table, and each object's `scope` says whether it
+ *   goes with its table or once for the whole run.
+ * - What runs is what was printed, string for string. The one exception is a `secret` statement:
+ *   no plan holds the worker login's password, so `run` binds the one it is given.
+ * - `current` is on the connector, not here: it reads a record's decision with the worker login,
+ *   the key column and the question set the connector already holds, for `explain` and the review
+ *   screens, which run where connectors are open (the worker, the server). An engine plans with
+ *   the admin credential, which nothing keeps, and an API or plugin source has a connector (the
+ *   store's) and no engine.
+ * - `text` is free-form per engine: SQL for a SQL database; for MongoDB the mongosh line of one
+ *   command, `db.runCommand({ createIndexes: "facetdb_jobs", ... })`. mongosh evaluates that line
+ *   as JavaScript, where Extended JSON's `{ "$date": ... }` is a plain object, so the command is
+ *   written in a form JavaScript and the driver read alike: plain JSON values only, and a time set
+ *   by the server with `$currentDate`. The engine runs exactly the document the operator read.
+ */
+
+/**
+ * One source as an engine sees it, built by the CLI from the config. The connection string
+ * travels beside it, never inside: the admin URL to plan and run, the worker login's URL to open
+ * and to doctor.
+ */
+export type EngineTarget = {
+  /** The project that owns the install: its id marks the table, uninstall asks its name back. */
+  readonly project: { readonly id: string; readonly name: string };
+  /** The source's name in the config; its decision log in the store is keyed by it. */
+  readonly source: string;
+  /** The table the source reads, or the collection on MongoDB. */
+  readonly table: string;
+  /**
+   * The table's schema as the config names it (`schema.table`). Absent: the engine's default
+   * (`public` on Postgres, `dbo` on SQL Server, the connection's database on MySQL and MongoDB).
+   */
+  readonly schema?: string;
+  /**
+   * The single-column primary key, when the caller knows it. Otherwise the engine reads it from
+   * the catalog, and every engine refuses a composite one.
+   */
+  readonly key?: string;
+  /** Where the answers live. */
+  readonly storage: "inline" | "side-table";
+  /** What a change to a decided record does to its status. */
+  readonly onChange: OnChange;
+  /**
+   * The questions (each choice carries its own `storeProbabilities`), the state fields (`read`) and
+   * the filter (`where`). The model and the thresholds ride along unread: an engine owns columns,
+   * not decisions.
+   */
+  readonly questionSet: QuestionSet;
+};
+
+/**
+ * What part of the install a statement serves. The CLI shows it in `--json` and when a run stops
+ * part way ("stopped at statement 14 (grants)").
+ */
+export type StatementPurpose =
+  // A setting the statements after it rely on (Postgres's `set local`, a transaction-local value).
+  | "settings"
+  // FacetDB's schema, and the store's tables when the store shares the source's database.
+  | "schema"
+  // The answer and status columns or fields, or the side table and its view.
+  | "columns"
+  // The change capture: triggers, the functions they call, the role that owns them.
+  | "capture"
+  // The jobs table and its indexes.
+  | "queue"
+  // The worker login: created, or its password set.
+  | "login"
+  // The rights and row-level policies of the worker login and the trigger's owner.
+  | "grants"
+  // The project marker: which project installed on which table.
+  | "marker"
+  // Rows FacetDB writes or deletes in its own tables: queued jobs, a purged log.
+  | "data"
+  // What FacetDB no longer uses: functions no trigger calls, an emptied table or schema.
+  | "cleanup";
+
+/** One statement of a plan, as printed and as run. */
+export type PlanStatement = {
+  /**
+   * The database it serves: the source's own, or the FacetDB store (Postgres). `store` appears
+   * only in a plan made with `storeShared`, whose one script runs in that one database.
+   */
+  readonly database: "source" | "store";
+  readonly purpose: StatementPurpose;
+  /**
+   * The statement in the engine's own language, exactly as printed and as run: SQL with every value
+   * written as a literal, or MongoDB's mongosh line. It never holds a secret.
+   */
+  readonly text: string;
+  /**
+   * The statement that gives the worker login its password, the one credential FacetDB keeps
+   *. Its text shows where the password goes, never the password, and `run`
+   * binds the one it is given. On Postgres it prints as a comment with no placeholder, and `run`
+   * executes its own `set_config` with a fresh SCRAM verifier: neither the password nor a verifier
+   * is ever in a plan or a result (the Postgres engine's test asserts it).
+   */
+  readonly secret?: true;
+};
+
+/** The kinds of thing an install adds, and an uninstall or a prune removes or keeps. */
+export type ObjectKind =
+  // An answer or status column on the source's table.
+  | "column"
+  // An answer or status field on a document (MongoDB's `facetdb` subdocument).
+  | "field"
+  // The table that holds a source's answers in side-table mode.
+  | "side-table"
+  // The view that joins a table with its side table.
+  | "view"
+  // A trigger that queues a changed record.
+  | "trigger"
+  // A function the triggers call.
+  | "function"
+  // The queue; with `of`, one table's queued jobs in it.
+  | "jobs-table"
+  // The record of which project installed on which table; with `of`, one project's part of it.
+  | "marker"
+  // FacetDB's schema.
+  | "schema"
+  // A login or role FacetDB created: the worker login, the role that owns the triggers.
+  | "login"
+  // A right FacetDB gave a login: `name` is the login, `of` the table, column or schema it is on.
+  | "grant"
+  // A row-level security policy.
+  | "policy"
+  // An index FacetDB made.
+  | "index"
+  // A collection FacetDB made on MongoDB.
+  | "collection"
+  // The store's decision log: its tables, or with `of` one source's entries in one of them.
+  | "log"
+  // Another table of the FacetDB store (usage, alerts, heartbeats, the webhook outbox).
+  | "store-table";
+
+/**
+ * A thing FacetDB put in a database, as a typed reference the CLI words and groups: what a
+ * plan removes, and with a reason (`KeptObject`) what it keeps.
+ */
+export type EngineObject = {
+  readonly kind: ObjectKind;
+  /** Its name as the database spells it: `is_scam`, `facetdb.jobs`, `facetdb_worker`. */
+  readonly name: string;
+  /**
+   * What it belongs to, when it is part of something: the table or collection of a column, field,
+   * trigger, policy, index, view or side table; the part of a shared object that is meant (a
+   * table's queued jobs, a source's log, a project's marker); what a grant is on. Absent for an
+   * object of the database as a whole.
+   */
+  readonly of?: string;
+  /**
+   * `source`: it belongs to this table's install and goes with it. `run`: it serves every source
+   * of the database (the jobs table, the marks, the enqueue functions, the store's tables, the
+   * schema, the worker's use of a schema, the project's entry) and goes only when every source of
+   * the run is gone; the CLI prints it once for the run.
+   */
+  readonly scope: "source" | "run";
+  /**
+   * How many rows it stands for, when the CLI says so: a source's decisions in the log, a table's
+   * queued jobs. A number, so the CLI formats every count one way.
+   */
+  readonly count?: number;
+  /** Why it goes, in words the CLI prints as they are: `no question asks it any more`. */
+  readonly reason?: string;
+};
+
+/** Something a plan leaves in place on purpose, never without why. */
+export type KeptObject = EngineObject & {
+  /** `every project on the server may share it`, `only --purge deletes a log`. */
+  readonly reason: string;
+};
+
+/**
+ * What an engine would do for one source, shown before anything runs: the statements in order, what
+ * they remove, what stays and why, and what to tell and ask the operator. Plain data, so it prints
+ * as `--json` and two plans compare as values.
+ */
+export type EnginePlan = {
+  /** In the order they run; empty when there is nothing to do (a prune of a fresh source). */
+  readonly statements: readonly PlanStatement[];
+  /**
+   * Whether `run` applies the statements as one transaction, all or nothing. False where the
+   * database cannot (MySQL commits each DDL statement, MongoDB has none): a run that stops keeps
+   * what ran before it, and the same plan run again completes it.
+   */
+  readonly transactional: boolean;
+  /** What goes: this table's own objects (`source`), and what the whole run removes (`run`). */
+  readonly removes: readonly EngineObject[];
+  readonly keeps: readonly KeptObject[];
+  /** What the operator must be told besides the script, one sentence each. */
+  readonly notes: readonly string[];
+  /**
+   * The name typed back before the plan runs: the
+   * project's for an uninstall, the source's for a purge of a log its earlier uninstall left.
+   * Absent when a yes is enough (install, prune).
+   */
+  readonly confirm?: { readonly kind: "project" | "source"; readonly name: string };
+};
+
+/**
+ * Why an engine will not go on, and what to do instead. The CLI prints it as an error with its fix
+ * and the docs page of its code.
+ */
+export type Refusal = {
+  /** A short kebab-case id: `no-primary-key`, `another-project`, `no-replica-set`. */
+  readonly code: string;
+  readonly message: string;
+  readonly fix: string;
+};
+
+/** A plan, or a refusal instead of one: a refusal carries no statements, so nothing can run. */
+export type PlanResult =
+  | { readonly ok: true; readonly plan: EnginePlan }
+  | { readonly ok: false; readonly refusal: Refusal };
+
+/** What a run did. */
+export type RunResult = {
+  /**
+   * The statements whose effect stays, in order: every one when the run finished; none when a
+   * transactional run stopped (it rolled back); the ones before the stop otherwise.
+   */
+  readonly ran: readonly PlanStatement[];
+  /**
+   * Where the run stopped before its end, by index into the plan's statements, and why: one of the
+   * engine's own checks refusing (another project claimed the table since the plan was read), or
+   * the database's error, with no secret in its words. Absent when every statement ran.
+   */
+  readonly stopped?:
+    | { readonly at: number; readonly refusal: Refusal }
+    | { readonly at: number; readonly error: string };
+  /**
+   * What the run removed. A finished run reports its plan's `source`-scoped removes, and the
+   * `run`-scoped ones only when it was the run's last: they belong to the last table's run of a
+   * multi-table uninstall, whose statements find nothing still needing them. A stopped run reports
+   * none: nothing links an object to a statement, so the CLI prints `ran` instead.
+   */
+  readonly removed: readonly EngineObject[];
+  /** What the operator must be told now (`deleted`, where the plan said `deletes`). */
+  readonly notes: readonly string[];
+};
+
+/**
+ * One line `facetdb doctor` prints for a source.
+ */
+export type DoctorCheck = {
+  /** What was checked: `database`, `pooler`, `install`; doctor's error code is `doctor-<name>`. */
+  readonly name: string;
+  /**
+   * `fail` counts, and doctor exits 1 naming the first; `skip` is a check an earlier failure left
+   * nothing to look at; `warn` is worth knowing and never a failure (the database is 190 ms away),
+   * printed on its own line and not counted as a check.
+   */
+  readonly status: "ok" | "fail" | "skip" | "warn";
+  /** What was found, in plain words, with no secret in them. */
+  readonly detail: string;
+  /** What to do, for a failure. */
+  readonly fix?: string;
+};
+
+/** What every call that reaches a database is given, besides the target and the URL. */
+export type EngineDeps = {
+  readonly clock: Clock;
+  /**
+   * The operator's `--allow-insecure`. Without it an engine refuses, before it connects, a URL that
+   * would carry a password to another machine without TLS.
+   */
+  readonly allowInsecure: boolean;
+  /**
+   * Whether the FacetDB store is this source's own database: the same host, port and database as
+   * the source's URL (the CLI compares them). Only then does a plan hold `store` statements and the
+   * store's own objects, in one script with the source's; otherwise the plan is `source` only and
+   * the CLI's store door owns the store.
+   */
+  readonly storeShared: boolean;
+};
+
+export type InstallOptions = EngineDeps & {
+  /**
+   * The worker login's password, from the source's connection string. An engine sets it only on a
+   * login it creates: an existing one keeps its own, since other projects may share it.
+   */
+  readonly workerPassword?: string;
+};
+
+export type UninstallOptions = EngineDeps & {
+  /**
+   * Also delete the source's decision log (`--purge`): in the plan with `storeShared`, by the CLI's
+   * store door otherwise. Without it the log always stays.
+   */
+  readonly purge: boolean;
+  /**
+   * The other sources this run uninstalls, before or after this one. They change the plan's words
+   * only (its removes, keeps and notes say what the whole run leaves), never its statements: a
+   * `run`-scoped object is dropped by a statement that checks at run time whether anything still
+   * needs it (a `do` block on Postgres, an existence check on MySQL), so the first table's run
+   * never drops the jobs table under the second table's trigger.
+   */
+  readonly alsoUninstalling: readonly EngineTarget[];
+};
+
+export type RunOptions = EngineDeps & {
+  /** The password a `secret` statement binds; a run that reaches one without it stops there. */
+  readonly workerPassword?: string;
+};
+
+export type OpenOptions = EngineDeps & {
+  /** Names this worker's claims; two workers never share one. A fresh id when absent. */
+  readonly workerId?: string;
+  /**
+   * The most connections the connector opens at once; the worker asks for its in-flight limit plus
+   * two, so no lane waits for a connection.
+   */
+  readonly maxConnections?: number;
+};
+
+/** A source's runtime connector as `open` hands it out; whoever opened it closes it. */
+export type OpenConnector = Connector & {
+  /** Ends a running `watch` and lets go of the connection. */
+  close(): Promise<void>;
+};
+
+/**
+ * One database FacetDB installs on and reads from. The composition root makes each engine with its
+ * own driver; the CLI calls engines and nothing else of a database.
+ */
+export type DatabaseEngine = {
+  /** How the CLI names it: `postgres`, `mysql`, `mongodb`. */
+  readonly name: string;
+  /** The URL schemes it serves, without the colon: `postgres` and `postgresql`. */
+  readonly schemes: readonly string[];
+  /** What its databases can do; the connector `open` hands out declares the same. */
+  readonly capabilities: Capabilities;
+  /** The checks `doctor` runs, in order, and what each looks at: `doctor --dry-run` lists them. */
+  readonly checks: readonly { readonly name: string; readonly looksAt: string }[];
+  /**
+   * The install for a source, from the database as the admin `url` shows it now: the answer
+   * columns, the queue, the change capture, the worker login and its grants. Idempotent: on an
+   * installed source it changes nothing.
+   */
+  planInstall(target: EngineTarget, url: string, options: InstallOptions): Promise<PlanResult>;
+  /**
+   * The uninstall: what install added goes, the decision log only with `purge`. `alsoUninstalling`
+   * changes the plan's words, never its statements. With a separate store the engine still makes
+   * the purge's checks on the source's side through `table_owners` (another installed table of the
+   * project, the table live again) and refuses as today; the CLI's store door deletes the log only
+   * after the engine's run has finished.
+   */
+  planUninstall(target: EngineTarget, url: string, options: UninstallOptions): Promise<PlanResult>;
+  /**
+   * `migrate --prune`: the columns of questions the set no longer has, and the reads `read` no
+   * longer lists. A source not installed yet has nothing to prune: an empty plan, not a refusal.
+   */
+  planPrune(target: EngineTarget, url: string, deps: EngineDeps): Promise<PlanResult>;
+  /**
+   * The plan as one script in the engine's language, exactly as the CLI prints it before running
+   * it: framed as one transaction when the plan runs as one; empty for a plan with no statements.
+   */
+  render(plan: EnginePlan): string;
+  /**
+   * Runs every statement of the plan against `url`, the source's database (the store's too with
+   * `storeShared`), in order. With the target the engine checks again, inside the run, what the
+   * plan read before it: on Postgres, the table's owner right after the claim.
+   */
+  run(target: EngineTarget, plan: EnginePlan, url: string, options: RunOptions): Promise<RunResult>;
+  /** The runtime connector for a source, under the worker login's `url`. */
+  open(target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector>;
+  /** doctor's checks of a source under the worker login's `url`, in order. Nothing is changed. */
+  doctor(target: EngineTarget, url: string, deps: EngineDeps): Promise<readonly DoctorCheck[]>;
+};

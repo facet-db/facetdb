@@ -1,4 +1,11 @@
-import type { Clock, QuestionSet, RecordDecision, RecordKey, StateValue } from "@facetdb/core";
+import type {
+  Clock,
+  Question,
+  QuestionSet,
+  RecordDecision,
+  RecordKey,
+  StateValue,
+} from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, expect } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
@@ -44,6 +51,14 @@ export class FrozenClock implements Clock {
   }
 }
 
+/** What a world may differ in besides its storage mode and `onChange`. */
+export type WorldOptions = {
+  /** The application's primary key type. Defaults to `text`. */
+  readonly keyType?: "text" | "integer";
+  /** The questions asked of the table. Defaults to `questionSet`'s one noul. */
+  readonly questions?: readonly Question[];
+};
+
 /** One PGlite with the application's table; the admin and the workers share its single connection. */
 export class World {
   readonly clock = new TurningClock(1_700_000_000_000);
@@ -52,15 +67,26 @@ export class World {
   installed = false;
   readonly storage: StorageMode;
   readonly onChange: "reset" | "keep";
-  constructor(storage: StorageMode = "inline", onChange: "reset" | "keep" = "reset") {
+  readonly keyType: "text" | "integer";
+  readonly questionSet: QuestionSet;
+  constructor(
+    storage: StorageMode = "inline",
+    onChange: "reset" | "keep" = "reset",
+    options: WorldOptions = {},
+  ) {
     this.storage = storage;
     this.onChange = onChange;
+    this.keyType = options.keyType ?? "text";
+    this.questionSet =
+      options.questions === undefined
+        ? questionSet
+        : { ...questionSet, questions: options.questions };
   }
 
   async create(): Promise<this> {
     this.pg = engine;
     await this.pg.client.query(
-      `create table public.listings (id text primary key, title text, body text)`,
+      `create table public.listings (id ${this.keyType} primary key, title text, body text)`,
     );
     return this;
   }
@@ -77,7 +103,12 @@ export class World {
           adminUrl: "pglite://admin",
           connect: this.pg.connect,
           print: () => undefined,
-          plan: { source: this.source, questionSet, project, workerPassword: PASSWORD },
+          plan: {
+            source: this.source,
+            questionSet: this.questionSet,
+            project,
+            workerPassword: PASSWORD,
+          },
         });
         if (!result.ok) {
           throw new Error(result.reason);
@@ -109,7 +140,7 @@ export class World {
     const connector = createPostgresConnector({
       workerUrl: "pglite://worker",
       source: this.source,
-      questionSet,
+      questionSet: this.questionSet,
       clock: options.clock ?? this.clock,
       pollMs: options.pollMs ?? 50,
       scanPageSize: 10,
@@ -217,8 +248,9 @@ export function useCaptureWorld(): void {
 export async function newWorld(
   storage: StorageMode = "inline",
   onChange: "reset" | "keep" = "reset",
+  options: WorldOptions = {},
 ): Promise<World> {
-  const world = await new World(storage, onChange).create();
+  const world = await new World(storage, onChange, options).create();
   worlds.push(world);
   return world;
 }
@@ -260,7 +292,7 @@ export function recordingConnector(world: World): {
   const connector = createPostgresConnector({
     workerUrl: "pglite://worker",
     source: world.source,
-    questionSet,
+    questionSet: world.questionSet,
     clock: world.clock,
     workerId: "w1",
     installer: world.installer(),

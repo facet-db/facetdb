@@ -65,9 +65,31 @@ export type WriteResult = {
 };
 
 /**
- * A database a worker reads from and writes decisions to. Methods take keys, cursors and
- * decisions, never a database handle or a URL: those belong to the adapter's factory. Every
- * connector implements all of them; a capability says which paths it can take.
+ * A record's decision as the connector holds it now: what the last `write` stored, read back from
+ * where the engine keeps it (the record's own columns, the side table, the store), for `explain`
+ * and the review screens. After a change under `onChange: "reset"` a record reads pending with its
+ * previous decisions still there, until the new answer is written.
+ */
+export type CurrentDecision = {
+  /**
+   * The decision of each question that holds one. A question without one (not answered yet, or
+   * waiting for review: its value is NULL) is absent; the status says which.
+   */
+  readonly decisions: Readonly<Record<string, Extract<Decision, { readonly kind: "decided" }>>>;
+  readonly status: RecordStatus;
+  /** `facetdb_reviewed`: true once a person decided any question of the record. */
+  readonly reviewed: boolean;
+  /**
+   * When the record was last decided (`facetdb_updated_at`). The store keeps one time per record,
+   * so there it is when the record last changed or was decided. Null before the first decision.
+   */
+  readonly updatedAt: Date | null;
+};
+
+/**
+ * A database a worker reads from and writes decisions to. Methods take keys, cursors and decisions,
+ * never a database handle or a URL: those belong to the adapter's factory. Every connector
+ * implements all of them; a capability says which paths it can take.
  */
 export type Connector = {
   readonly capabilities: Capabilities;
@@ -81,6 +103,13 @@ export type Connector = {
   read(keys: readonly RecordKey[]): Promise<ReadResult>;
   /** Writes the decision only if the stored state hash equals `expectedHash`. */
   write(key: RecordKey, decision: RecordDecision, expectedHash: string): Promise<WriteResult>;
+  /**
+   * The decision each key holds now, keyed by record key; a key that names no record is absent,
+   * whatever its form. A record never decided is absent where FacetDB has no row or status for it
+   * yet (a side table, a polling install that has not seen it), and reads as pending with nothing
+   * decided and no `updatedAt` where it has one (inline columns, the store).
+   */
+  current(keys: readonly RecordKey[]): Promise<ReadonlyMap<RecordKey, CurrentDecision>>;
   /** Pages through every record, newest first, from a cursor that survives a restart. */
   scan(cursor: ScanCursor | null): Promise<ScanPage>;
   /**

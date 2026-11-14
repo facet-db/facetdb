@@ -1,6 +1,13 @@
 import type { PGlite } from "@electric-sql/pglite";
-import type { Connector, QuestionSet, RecordDecision, RecordKey, StateValue } from "@facetdb/core";
-import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
+import type {
+  Connector,
+  Question,
+  QuestionSet,
+  RecordDecision,
+  RecordKey,
+  StateValue,
+} from "@facetdb/core";
+import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlClient } from "../sql/index.ts";
 import { freshPglite, resetPglite } from "../testing/index.ts";
@@ -22,6 +29,8 @@ const HOUR_MS = 3_600_000;
 type WorldOptions = {
   readonly keyType?: "text" | "integer";
   readonly where?: string;
+  /** The questions asked of the table. Defaults to `questionSet`'s one noul. */
+  readonly questions?: readonly Question[];
 };
 
 /**
@@ -47,8 +56,11 @@ class World {
 
   constructor(options: WorldOptions = {}) {
     this.keyType = options.keyType ?? "text";
-    this.questionSet =
-      options.where === undefined ? questionSet : { ...questionSet, where: options.where };
+    this.questionSet = {
+      ...questionSet,
+      ...(options.questions === undefined ? {} : { questions: options.questions }),
+      ...(options.where === undefined ? {} : { where: options.where }),
+    };
   }
 
   async create(): Promise<this> {
@@ -217,15 +229,41 @@ async function yieldedWithin(pending: Next, clock: FakeClock, polls: number) {
 
 describe("polling connector contract", () => {
   runConnectorContract(async () => {
-    const world = await new World().create();
+    // The suite's questions, one of each type, so `current` reads every kind of answer column.
+    const world = await new World({ questions: CONTRACT_QUESTIONS }).create();
     const connector = world.connector({ pageSize: 10 });
     return {
       connector,
-      fields: questionSet.read,
+      fields: world.questionSet.read,
       edit: (key, state) => world.edit(key, state),
       decisionOf: (key) => world.decisionOf(key),
+      clock: world.clock,
       close: () => world.close(),
     };
+  });
+});
+
+describe("polling connector current", () => {
+  it("answers a key an integer column cannot hold with nothing, and a row never seen with nothing", async () => {
+    const world = await newWorld({ keyType: "integer" });
+    const connector = world.connector();
+    await connector.install();
+    await world.edit("7", states("a"));
+    await world.edit("8", states("b"));
+    const hash = (await connector.read(["7"])).rows[0]?.hash ?? "";
+    expect(await connector.write("7", decided(), hash)).toEqual({ written: true });
+
+    // `explain abc` on an integer-keyed table: no record, and no "invalid input syntax" error.
+    const current = await connector.current(["7", "8", "9", "no-such-key"]);
+
+    // 8 exists, but FacetDB never set its status: it holds nothing for it yet.
+    expect([...current.keys()]).toEqual(["7"]);
+    expect(current.get("7")).toEqual({
+      decisions: decided().decisions,
+      status: "done",
+      reviewed: false,
+      updatedAt: new Date(world.clock.now()),
+    });
   });
 });
 
