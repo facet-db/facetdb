@@ -67,6 +67,7 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
       latestAnswers: () => Promise.resolve(new Map()),
       history: () => Promise.resolve([]),
       latestAnswersSince: () => Promise.resolve([]),
+      page: () => Promise.resolve({ entries: [], next: undefined }),
     },
     questionSet: questionSetOf(config, source),
     version: 1,

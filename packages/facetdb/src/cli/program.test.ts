@@ -129,6 +129,7 @@ describe("the facetdb program", () => {
       "preview",
       "backfill",
       "explain",
+      "export",
       "worker",
       "dev",
     ]);

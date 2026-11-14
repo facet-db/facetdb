@@ -112,6 +112,25 @@ export function createDecisionLog(client: SqlClient, sourceId: string): Decision
       );
       return rows.map(toEntry).filter(isAnswer);
     },
+
+    async page(after, limit) {
+      // Keyset paging on the id, the order the log was appended in: a page costs the same at the
+      // millionth row as at the first, and a row appended meanwhile lands on a later page.
+      const rows = await client.query(
+        // The cursor column is not called `id`: `order by id` would sort by that text alias.
+        `select id::text as cursor, ${COLUMNS}
+           from facetdb.decisions
+          where source_id = $1 and id > $2::bigint
+          order by id
+          limit $3::integer`,
+        [sourceId, after ?? 0, limit],
+      );
+      const last = rows.at(-1);
+      return {
+        entries: rows.map(toEntry),
+        next: rows.length < limit || last === undefined ? undefined : integer(last, "cursor"),
+      };
+    },
   };
 }
 

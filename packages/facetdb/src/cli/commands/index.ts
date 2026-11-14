@@ -3,6 +3,7 @@ import { backfillCommand } from "./backfill.ts";
 import { devCommand } from "./dev.ts";
 import { doctorCommand } from "./doctor.ts";
 import { explainCommand } from "./explain.ts";
+import { exportCommand } from "./export.ts";
 import { initCommand } from "./init.ts";
 import { migrateCommand } from "./migrate.ts";
 import { previewCommand } from "./preview.ts";
@@ -18,6 +19,7 @@ export const COMMANDS: readonly RegisteredCommand[] = [
   previewCommand,
   backfillCommand,
   explainCommand,
+  exportCommand,
   workerCommand,
   devCommand,
 ];
@@ -26,6 +28,7 @@ export { backfillCommand } from "./backfill.ts";
 export { devCommand } from "./dev.ts";
 export { doctorCommand } from "./doctor.ts";
 export { explainCommand } from "./explain.ts";
+export { exportCommand } from "./export.ts";
 export { initCommand } from "./init.ts";
 export { migrateCommand } from "./migrate.ts";
 export { previewCommand } from "./preview.ts";

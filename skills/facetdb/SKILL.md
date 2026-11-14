@@ -145,6 +145,7 @@ invocation.
 | `facetdb migrate` | Installs every source: answer columns, jobs table, change capture. Prints the SQL first (`--yes`, `--source`, `--prune`) |
 | `facetdb backfill` | Answers every existing row, paced and resumable, after showing the cost estimate (`--dry-run`, `--pace`, `--question`, `--yes`) |
 | `facetdb explain` | Prints one record's full history in words: every answer and every human decision (`facetdb explain <source> <key>`) |
+| `facetdb export` | Writes a source's whole decision log, oldest first, as JSONL or CSV (`facetdb export --source <name>`, `--format`, `--out`); it reads the FacetDB store only |
 | `facetdb uninstall` | Shows the SQL that removes FacetDB from a source and asks you to type the project name before it runs (`--purge` also deletes the log) |
 | `facetdb worker` | Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API on port 7411 (`--port`, `--no-http`, `--once`); refuses to start without `TYPESAFE_API_KEY` or a `modelUrl` |
 | `facetdb dev` | Runs the worker offline on an embedded Postgres under `.facetdb/dev/` with the fake model, no key needed (`--model-url` for Ollama or another compatible server, `--reset` starts empty) |

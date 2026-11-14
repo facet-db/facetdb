@@ -7,7 +7,6 @@ import {
   decide,
   type HumanEntry,
   type LogEntry,
-  parseQuestionSet,
   type Question,
   type QuestionSet,
   resolveThresholds,
@@ -28,6 +27,7 @@ import {
   questionSetOf,
   requireSecureSource,
   requireSecureUrl,
+  savedQuestionSets,
   singleTarget,
 } from "./database.ts";
 
@@ -117,45 +117,6 @@ function decisionWords(decision: Decision): string {
     return "needs review";
   }
   return typeof decision.value === "boolean" ? yesNo(decision.value) : decision.value;
-}
-
-/**
- * Every saved version of the source's question set that the history mentions. The store's rows are
- * a boundary: a row that no longer parses is an error that names the version, never a guess.
- */
-async function versionsOf(
-  deps: CliDeps,
-  url: string,
-  source: string,
-  versions: readonly number[],
-): Promise<ReadonlyMap<number, QuestionSet>> {
-  const kept = new Map<number, QuestionSet>();
-  if (versions.length === 0) {
-    return kept;
-  }
-  const client = deps.connect(url);
-  try {
-    const rows = await client.query(
-      "select version::text as version, question_set from facetdb.question_set_versions where source_id = $1 and version = any($2::int[])",
-      [source, versions],
-    );
-    for (const row of rows) {
-      const version = Number(row["version"]);
-      const raw = row["question_set"];
-      const parsed = parseQuestionSet(typeof raw === "string" ? JSON.parse(raw) : raw);
-      if (!parsed.ok) {
-        throw new CliError(
-          "question-set-version",
-          `question set v${version} of "${source}" in the FacetDB store cannot be read: ${parsed.errors.join("; ")}`,
-          "open an issue with this message; the store's saved versions are never edited by hand",
-        );
-      }
-      kept.set(version, parsed.questionSet);
-    }
-    return kept;
-  } finally {
-    await client.close();
-  }
 }
 
 function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): ExplainedEntry {
@@ -420,7 +381,7 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
       return { ok: true, source: source.name, key, entries: [] };
     }
 
-    const versions = await versionsOf(deps, url, source.name, [
+    const versions = await savedQuestionSets(deps, url, source.name, [
       ...new Set(history.map((entry) => entry.version)),
     ]);
     const entries = history.map((entry) =>

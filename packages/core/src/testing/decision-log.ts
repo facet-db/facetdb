@@ -1,4 +1,4 @@
-import type { DecisionLog, RecordKey } from "../contracts/index.ts";
+import type { DecisionLog, LogPage, RecordKey } from "../contracts/index.ts";
 import type { AnswerEntry, HumanEntry, LogEntry } from "../log/index.ts";
 import { FakeStore } from "./store.ts";
 
@@ -9,6 +9,7 @@ import { FakeStore } from "./store.ts";
  */
 export class FakeDecisionLog implements DecisionLog {
   readonly #entries = new FakeStore<LogEntry[]>();
+  readonly #all: LogEntry[] = [];
   readonly journal: string[];
 
   constructor(journal: string[] = []) {
@@ -57,7 +58,18 @@ export class FakeDecisionLog implements DecisionLog {
     return Promise.resolve(latest);
   }
 
+  page(after: number | undefined, limit: number): Promise<LogPage> {
+    // The cursor is the position after the last entry returned, as the store's is its last id.
+    const start = after ?? 0;
+    const entries = this.#all.slice(start, start + limit);
+    return Promise.resolve({
+      entries,
+      next: entries.length < limit ? undefined : start + entries.length,
+    });
+  }
+
   #append(entry: LogEntry): void {
+    this.#all.push(entry);
     const entries = this.#entries.get(entry.key) ?? [];
     entries.push(entry);
     this.#entries.set(entry.key, entries);
