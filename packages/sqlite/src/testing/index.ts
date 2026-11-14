@@ -1,5 +1,7 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+export { type TemporaryDatabase, temporaryDatabase } from "./temporary.ts";
+
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {
   LIBSQL_URL: "a libSQL server (sqld); scripts/test-databases.sh up libsql starts one",

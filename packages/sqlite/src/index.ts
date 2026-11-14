@@ -13,3 +13,6 @@ export const ENGINE_NAME = "sqlite";
 export const URL_VARIABLES = ["LIBSQL_URL"] as const;
 
 export type UrlVariable = (typeof URL_VARIABLES)[number];
+
+// The install, uninstall and prune plans, their script and their run on a file.
+export * from "./install/index.ts";
