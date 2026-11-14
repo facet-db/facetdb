@@ -1,0 +1,22 @@
+{
+  "name": "@facetdb/sql-polling",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB's polling connector for any SQL database: a state hash and a last-changed column read through the standard driver behind a dialect, every 10 seconds, proven on CockroachDB (postgres) and Oracle (oracledb in thin mode).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "oracledb": "26.0.0",
+    "postgres": "3.4.9"
+  }
+}

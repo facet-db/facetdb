@@ -7,3 +7,10 @@ packages:
 # before it can be installed, for the whole workspace, with no per-package exceptions.
 minimumReleaseAge: 4320
 minimumReleaseAgeStrict: true
+
+# No dependency lifecycle script runs unless genuinely needed (.npmrc), and pnpm 11 refuses an
+# install while one is undecided. oracledb's install script only checks the Node version and
+# whether a thick-mode binary is present; it compiles nothing, and FacetDB uses thin mode and never
+# calls initOracleClient. Denied, the script never runs.
+allowBuilds:
+  oracledb: false

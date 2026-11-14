@@ -19,8 +19,13 @@
     "@electric-sql/pglite": "0.5.11",
     "@facetdb/core": "workspace:*",
     "@facetdb/model": "workspace:*",
+    "@facetdb/mongodb": "workspace:*",
+    "@facetdb/mssql": "workspace:*",
+    "@facetdb/mysql": "workspace:*",
     "@facetdb/postgres": "workspace:*",
     "@facetdb/server": "workspace:*",
+    "@facetdb/sql-polling": "workspace:*",
+    "@facetdb/sqlite": "workspace:*",
     "commander": "15.0.0",
     "zod": "4.6.7"
   }

@@ -1,0 +1,21 @@
+{
+  "name": "@facetdb/mysql",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB on MySQL 8 and MariaDB 10.5 and later through mysql2: a trigger and the facetdb_jobs table, polled every second, with answers in inline columns or a side table.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "mysql2": "3.24.6"
+  }
+}

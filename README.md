@@ -26,6 +26,11 @@ called by hand with `TYPESAFE_API_KEY`.
 | `packages/core` | `@facetdb/core` | question sets, thresholds, decisions, statuses, the worker loop, the contracts every adapter implements |
 | `packages/model` | `@facetdb/model` | the TypeSafe client, backoff, compatible providers, the fake provider |
 | `packages/postgres` | `@facetdb/postgres` | the Postgres connector, the polling connector, the FacetDB store |
+| `packages/mysql` | `@facetdb/mysql` | the MySQL and MariaDB connector over `mysql2` |
+| `packages/mssql` | `@facetdb/mssql` | the SQL Server and Azure SQL connector over `tedious` |
+| `packages/sqlite` | `@facetdb/sqlite` | the SQLite connector: files over Node's `node:sqlite`, libSQL servers over `@libsql/client` |
+| `packages/mongodb` | `@facetdb/mongodb` | the MongoDB connector, by change streams over `mongodb` |
+| `packages/sql-polling` | `@facetdb/sql-polling` | the polling connector for any SQL database behind a dialect: CockroachDB over `postgres`, Oracle over `oracledb` in thin mode |
 | `packages/server` | `@facetdb/server` | the check API, webhooks, review endpoints |
 | `packages/facetdb` | `facetdb` | the config DSL, the CLI, the SDK, `facetdb/plugin` |
 | `plugins/*` | `@facetdb/<name>` | first-party plugins |

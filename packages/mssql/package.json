@@ -1,0 +1,21 @@
+{
+  "name": "@facetdb/mssql",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB on SQL Server 2016 and later and Azure SQL through tedious: a trigger and the facetdb_jobs table or Change Tracking, polled every second, with answers in inline columns or a side table.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "tedious": "20.3.8"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@facetdb/sqlite",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB on SQLite files through Node's built-in node:sqlite and on libSQL servers (Turso, sqld) through @libsql/client: a trigger and the facetdb_jobs table, polled every second, with answers in inline columns.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts"
+  },
+  "dependencies": {
+    "@facetdb/core": "workspace:*",
+    "@libsql/client": "0.18.0"
+  }
+}
