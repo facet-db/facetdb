@@ -1,8 +1,19 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+export {
+  type FakeDatabaseState,
+  type FakeIndex,
+  type FakeJob,
+  FakeMongo,
+  type FakeMongoCall,
+  type FakePrivilege,
+  type FakeRoleRef,
+  FakeServerError,
+} from "./fake-mongo.ts";
+
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {
-  MONGODB_URL: "a MongoDB 4.2 or later replica set; scripts/test-databases.sh up mongo starts one",
+  MONGODB_URL: "a MongoDB 4.4 or later replica set; scripts/test-databases.sh up mongo starts one",
 };
 
 /** Where the variables are read: `process.env`, or a test's own. */

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "Apache-2.0",
-  "description": "FacetDB on MongoDB 4.2 and later and Atlas through the mongodb driver: change streams on a replica set, with answers in a facetdb subdocument.",
+  "description": "FacetDB on MongoDB 4.4 and later and Atlas through the mongodb driver: change streams on a replica set, with answers in a facetdb subdocument.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

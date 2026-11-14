@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { serverUrl, skipUnless } from "./index.ts";
 
 const UNSET =
-  "environment, not code: MONGODB_URL is unset (point it at a MongoDB 4.2 or later replica set; scripts/test-databases.sh up mongo starts one)";
+  "environment, not code: MONGODB_URL is unset (point it at a MongoDB 4.4 or later replica set; scripts/test-databases.sh up mongo starts one)";
 
 describe("serverUrl", () => {
   it("returns the URL the variable names", () => {

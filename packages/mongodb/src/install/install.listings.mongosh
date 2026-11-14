@@ -1,0 +1,11 @@
+db.getSiblingDB("app").runCommand({ findAndModify: "facetdb_meta", query: { _id: "owner:listings", project: "proj_listings" }, update: { $set: { project: "proj_listings", source: "listings" }, $currentDate: { installedAt: true } }, upsert: true })
+
+db.getSiblingDB("app").runCommand({ create: "facetdb_jobs" })
+
+db.getSiblingDB("app").runCommand({ createIndexes: "facetdb_jobs", indexes: [{ key: { collection: 1, record_key: 1 }, name: "collection_1_record_key_1", unique: true }, { key: { collection: 1, claimed_at: 1 }, name: "collection_1_claimed_at_1" }] })
+
+db.getSiblingDB("app").runCommand({ createRole: "facetdb_worker_listings", privileges: [{ resource: { db: "app", collection: "listings" }, actions: ["find", "update", "changeStream"] }, { resource: { db: "app", collection: "facetdb_jobs" }, actions: ["find", "insert", "update", "remove"] }, { resource: { db: "app", collection: "facetdb_meta" }, actions: ["find"] }], roles: [] })
+
+db.getSiblingDB("app").runCommand({ createUser: "facetdb_worker", pwd: passwordPrompt(), roles: [] })
+
+db.getSiblingDB("app").runCommand({ grantRolesToUser: "facetdb_worker", roles: [{ role: "facetdb_worker_listings", db: "app" }] })
