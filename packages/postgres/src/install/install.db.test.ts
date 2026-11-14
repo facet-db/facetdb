@@ -7,13 +7,12 @@ import { createStore, sourceIdOf } from "../store/index.ts";
 import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
-import { ENQUEUE_ROLE, WORKER_ROLE } from "./sql.ts";
 import { uninstall } from "./uninstall.ts";
 
 /**
  * The install against a real Postgres, for what PGlite cannot prove: the worker login exists with
- * the least permission that works. The role is cluster-wide, so the test drops it at the end and a
- * stale one from an aborted run at the start.
+ * the least permission that works. Roles are cluster-wide, so the install uses the scratch
+ * database's own role names (`roleSuffix`), which `scratch.drop` removes.
  */
 
 const listings: QuestionSet = {
@@ -40,14 +39,8 @@ const open: SqlClient[] = [];
 /** Roles a test created besides FacetDB's, dropped once the scratch database is gone. */
 const roles: string[] = [];
 
-async function dropRole(): Promise<void> {
-  await scratch.admin(`drop role if exists ${WORKER_ROLE}`).catch(() => undefined);
-  await scratch.admin(`drop role if exists ${ENQUEUE_ROLE}`).catch(() => undefined);
-}
-
 beforeAll(async () => {
   scratch = await createScratchDatabase();
-  await dropRole();
   admin = connectPostgres(scratch.url);
   open.push(admin);
   await admin.query(
@@ -63,13 +56,14 @@ beforeAll(async () => {
       source: { table: "listings" },
       questionSet: listings,
       project: { id: "proj_listings", name: "Listings" },
+      roleSuffix: scratch.roleSuffix,
       workerPassword: PASSWORD,
     },
   });
   if (!result.ok) {
     throw new Error(result.reason);
   }
-  worker = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
+  worker = connectPostgres(scratch.as(scratch.workerRole, PASSWORD));
   open.push(worker);
 });
 
@@ -80,7 +74,6 @@ afterAll(async () => {
     await connection.close();
   }
   await scratch.drop();
-  await dropRole();
   for (const role of roles.splice(0).reverse()) {
     await scratch.admin(`drop role if exists ${role}`);
   }
@@ -144,7 +137,7 @@ describe("the worker login on a real Postgres", () => {
   it("needs no superuser and the role is not one", async () => {
     const rows = await admin.query(
       `select rolsuper, rolcreatedb, rolcreaterole from pg_roles where rolname = $1`,
-      [WORKER_ROLE],
+      [scratch.workerRole],
     );
     expect(rows[0]).toMatchObject({ rolsuper: false, rolcreatedb: false, rolcreaterole: false });
   });
@@ -155,12 +148,12 @@ describe("the worker login on a real Postgres", () => {
         where pronamespace = 'facetdb'::regnamespace order by proname`,
     );
     expect(owners).toEqual([
-      { proname: "enqueue", owner: ENQUEUE_ROLE, prosecdef: true },
-      { proname: "enqueue_keep", owner: ENQUEUE_ROLE, prosecdef: true },
+      { proname: "enqueue", owner: scratch.enqueueRole, prosecdef: true },
+      { proname: "enqueue_keep", owner: scratch.enqueueRole, prosecdef: true },
       // The store's function runs with its caller's rights, so its owner lends it none.
       { proname: "reserve_usage", owner: expect.any(String), prosecdef: false },
     ]);
-    const login = connectPostgres(scratch.as(ENQUEUE_ROLE, "anything"));
+    const login = connectPostgres(scratch.as(scratch.enqueueRole, "anything"));
     try {
       await expect(login.query("select 1")).rejects.toThrow(
         /not permitted to log in|authentication failed/,
@@ -178,7 +171,7 @@ describe("the worker login on a real Postgres", () => {
               has_schema_privilege($1, 'facetdb', 'create') as schema,
               (select count(*)::int from pg_class c
                 where c.relnamespace = 'facetdb'::regnamespace and c.relowner = $1::regrole) as owned`,
-      [WORKER_ROLE],
+      [scratch.workerRole],
     );
     expect(rights[0]).toEqual({ database: false, schema: false, owned: 0 });
 
@@ -191,7 +184,7 @@ describe("the worker login on a real Postgres", () => {
       };
     /** A worker-login client that records every statement text it is given. */
     const recorded = (): SqlClient => {
-      const base = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
+      const base = connectPostgres(scratch.as(scratch.workerRole, PASSWORD));
       return {
         query: record(base.query),
         transaction: (work) => base.transaction((query) => work(record(query))),
@@ -204,7 +197,7 @@ describe("the worker login on a real Postgres", () => {
     };
     const recording = recorded();
     const store = await createStore({
-      url: scratch.as(WORKER_ROLE, PASSWORD),
+      url: scratch.as(scratch.workerRole, PASSWORD),
       pgHost: undefined,
       connect: () => recording,
       secret: TEST_SECRET,
@@ -214,7 +207,7 @@ describe("the worker login on a real Postgres", () => {
     // The table source's capture connector, as `facetdb worker` opens it (cli/table-connector.ts)
     // under the same login: the start path of the worker command, short of the CLI itself.
     const capture = createPostgresConnector({
-      workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+      workerUrl: scratch.as(scratch.workerRole, PASSWORD),
       connect: recorded,
       source: { table: "listings", key: "id" },
       questionSet: listings,
@@ -290,7 +283,7 @@ describe("the worker login on a real Postgres", () => {
           where table_schema = 'facetdb' and grantee = $1
             and table_name in ('decisions', 'question_set_versions')
           group by 1 order by 1`,
-        [WORKER_ROLE],
+        [scratch.workerRole],
       );
     const appendOnly = [
       { table_name: "decisions", privileges: "INSERT, SELECT" },
@@ -307,7 +300,7 @@ describe("the worker login on a real Postgres", () => {
     }
     // An earlier install granted update and delete too: migrate takes them back.
     await admin.query(
-      `grant update, delete on facetdb.decisions, facetdb.question_set_versions to ${WORKER_ROLE}`,
+      `grant update, delete on facetdb.decisions, facetdb.question_set_versions to ${scratch.workerRole}`,
     );
     const again = await migrate({
       adminUrl: scratch.url,
@@ -316,6 +309,7 @@ describe("the worker login on a real Postgres", () => {
         source: { table: "listings" },
         questionSet: listings,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
       },
     });
     expect(again).toMatchObject({ ok: true, applied: true });
@@ -330,12 +324,13 @@ describe("the worker login on a real Postgres", () => {
         source: { table: "listings" },
         questionSet: listings,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
         workerPassword: "a-second-long-random-password",
       },
     });
     expect(result).toMatchObject({ ok: true, workerPasswordApplied: true });
-    const stale = connectPostgres(scratch.as(WORKER_ROLE, PASSWORD));
-    const fresh = connectPostgres(scratch.as(WORKER_ROLE, "a-second-long-random-password"));
+    const stale = connectPostgres(scratch.as(scratch.workerRole, PASSWORD));
+    const fresh = connectPostgres(scratch.as(scratch.workerRole, "a-second-long-random-password"));
     try {
       await expect(stale.query("select 1")).rejects.toThrow();
       expect(await fresh.query("select 1 as one")).toEqual([{ one: 1 }]);
@@ -358,7 +353,12 @@ describe("a log-only purge against a concurrent install, on two connections", ()
       adminUrl: scratch.url,
       print: () => undefined,
       ...(connect === undefined ? {} : { connect }),
-      plan: { source: { table: "archive" }, questionSet: listings, project: archive },
+      plan: {
+        source: { table: "archive" },
+        questionSet: listings,
+        project: archive,
+        roleSuffix: scratch.roleSuffix,
+      },
     });
 
   /** Whether some session of this scratch database waits for a lock on `facetdb.table_owners`. */
@@ -377,6 +377,7 @@ describe("a log-only purge against a concurrent install, on two connections", ()
       await uninstall({
         adminUrl: scratch.url,
         source: { table: "listings", name: "listings", projectId: "proj_listings" },
+        roleSuffix: scratch.roleSuffix,
         print: () => undefined,
         confirm: () => Promise.resolve("Listings"),
       }),
@@ -398,6 +399,7 @@ describe("a log-only purge against a concurrent install, on two connections", ()
     const plain = await uninstall({
       adminUrl: scratch.url,
       source: { table: "archive", name: SOURCE, projectId: archive.id },
+      roleSuffix: scratch.roleSuffix,
       print: () => undefined,
       confirm: () => Promise.resolve(archive.name),
     });
@@ -433,6 +435,7 @@ describe("a log-only purge against a concurrent install, on two connections", ()
       const result = await uninstall({
         adminUrl: scratch.url,
         source: { table: "archive", name: SOURCE, projectId: archive.id },
+        roleSuffix: scratch.roleSuffix,
         purge: true,
         print: () => undefined,
         // Every check before the confirmation found the source unused; the install starts now,
@@ -542,6 +545,7 @@ describe("two installs and two admins on a real Postgres", () => {
         source: { table },
         questionSet: listings,
         project: { id: projectId, name: projectId },
+        roleSuffix: scratch.roleSuffix,
       },
     });
   }
@@ -633,6 +637,7 @@ describe("two installs and two admins on a real Postgres", () => {
         source: { table: "pruned" },
         questionSet: wider,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
       },
     });
     expect(installed).toMatchObject({ ok: true, applied: true });
@@ -642,7 +647,7 @@ describe("two installs and two admins on a real Postgres", () => {
            from pg_catalog.pg_attribute a cross join lateral pg_catalog.aclexplode(a.attacl) x
           where a.attrelid = 'public.pruned'::regclass and a.attname = 'notes'
             and x.privilege_type = 'SELECT' and x.grantee = $1::regrole`,
-        [WORKER_ROLE],
+        [scratch.workerRole],
       );
     expect(await grants()).toEqual([{ grantor: owner }]);
     const pruneAs = (role: string) =>
@@ -651,6 +656,7 @@ describe("two installs and two admins on a real Postgres", () => {
         source: { table: "pruned" },
         questionSet: listings,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
         print: () => undefined,
       });
 
@@ -692,7 +698,7 @@ describe("two installs and two admins on a real Postgres", () => {
         await query(`set local role ${dba}`);
         await query(statement);
       });
-    await asDba(`grant update on facetdb.question_set_versions to ${WORKER_ROLE}`);
+    await asDba(`grant update on facetdb.question_set_versions to ${scratch.workerRole}`);
     const again = () =>
       migrate({
         adminUrl: scratch.url,
@@ -701,6 +707,7 @@ describe("two installs and two admins on a real Postgres", () => {
           source: { table: "listings" },
           questionSet: listings,
           project: { id: "proj_listings", name: "Listings" },
+          roleSuffix: scratch.roleSuffix,
         },
       });
     const refused = await again();
@@ -709,7 +716,7 @@ describe("two installs and two admins on a real Postgres", () => {
       expect(refused.reason).toContain(`UPDATE on question_set_versions granted by ${dba}`);
       expect(refused.reason).toContain("or a member of its role");
     }
-    await asDba(`revoke update on facetdb.question_set_versions from ${WORKER_ROLE}`);
+    await asDba(`revoke update on facetdb.question_set_versions from ${scratch.workerRole}`);
     expect(await again()).toMatchObject({ ok: true, applied: true });
   });
 });

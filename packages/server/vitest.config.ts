@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 // TYPESAFE_API_KEY; neither runs silently alongside unit tests.
 export default defineConfig({
   test: {
+    // The project name, for `vitest --project <name>`.
+    name: "server",
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
     // The check tests run on the real store over PGlite: the cluster template is built once before

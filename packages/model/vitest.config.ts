@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 // TYPESAFE_API_KEY; neither runs silently alongside unit tests.
 export default defineConfig({
   test: {
+    // The project name, for `vitest --project <name>`.
+    name: "model",
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
     // Same cap as the root config (an uncapped run spawns one worker per core; see vitest.config.ts).

@@ -96,6 +96,37 @@ export const WORKER_ROLE = "facetdb_worker";
 export const ENQUEUE_ROLE = "facetdb_enqueue";
 
 /**
+ * A suffix on both role names, for one install's own pair of roles: the real-Postgres suites give
+ * every scratch database its own (`_t3f9a1c`), so files and runs sharing one server never touch
+ * each other's cluster-wide roles. Production never sets it: without one the names are the
+ * constants above and the script is byte for byte what it always was.
+ */
+export type RoleSuffix = string;
+
+/** Lower-case letters, digits and `_` only: the name also travels inside a `$$` body's message. */
+const ROLE_SUFFIX = /^[a-z0-9_]*$/;
+
+function suffixed(role: string, suffix: RoleSuffix): string {
+  if (!ROLE_SUFFIX.test(suffix)) {
+    throw new Error(`a role suffix is lower-case letters, digits and _ only, not ${suffix}`);
+  }
+  return `${role}${suffix}`;
+}
+
+/**
+ * The worker login's name under an install's role suffix (none: `facetdb_worker`). Every statement
+ * of install, migrate, prune and uninstall that names a role goes through this or `enqueueRole`.
+ */
+export function workerRole(suffix: RoleSuffix = ""): string {
+  return suffixed(WORKER_ROLE, suffix);
+}
+
+/** The trigger functions' owner under an install's role suffix (none: `facetdb_enqueue`). */
+export function enqueueRole(suffix: RoleSuffix = ""): string {
+  return suffixed(ENQUEUE_ROLE, suffix);
+}
+
+/**
  * Transaction-local settings that carry values into the `do` blocks, which take no parameter:
  * the worker password (`create role` is DDL) and the source's schema and table (a `$$` body cannot
  * quote a name). Each is set by `set_config($n, true)` and read by `current_setting`.
@@ -273,6 +304,8 @@ export function installSql(
     readonly workerPassword?: string;
     /** Side-table mode: roles other than the owner hold select on the source now (migrate looked). */
     readonly sourceReaders?: boolean;
+    /** The install's own role names (`RoleSuffix`); tests only. */
+    readonly roleSuffix?: RoleSuffix;
   } = {},
 ): readonly InstallStatement[] {
   const schema = source.schema ?? "public";
@@ -280,8 +313,10 @@ export function installSql(
   const columns = ownedColumnDefinitions(questionSet);
   const owned = columns.map(([name]) => name);
   const stateColumns = questionSet.read;
-  const worker = quoteIdent(WORKER_ROLE);
-  const enqueuer = quoteIdent(ENQUEUE_ROLE);
+  const workerName = workerRole(options.roleSuffix);
+  const enqueueName = enqueueRole(options.roleSuffix);
+  const worker = quoteIdent(workerName);
+  const enqueuer = quoteIdent(enqueueName);
   const side = source.storage === "side-table";
   const onChange = source.onChange ?? "reset";
   const appendOnly = new Set(STORE_APPEND_ONLY_TABLES);
@@ -292,7 +327,7 @@ export function installSql(
                    and tablename = current_setting('${TABLE_SETTING}')
                    and policyname = ${quoteLiteral(name)}) then
     execute format('create policy %I on %I.%I for ${command} to %I using (true)',
-                   ${quoteLiteral(name)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(WORKER_ROLE)});
+                   ${quoteLiteral(name)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(workerName)});
   end if;`;
 
   return [
@@ -386,8 +421,8 @@ end $$`),
     // admin takes membership so it can hand the functions over (and can again on a later run).
     plain(`do $$
 begin
-  if not exists (select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(ENQUEUE_ROLE)}) then
-    execute format('create role %I nologin', ${quoteLiteral(ENQUEUE_ROLE)});
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(enqueueName)}) then
+    execute format('create role %I nologin', ${quoteLiteral(enqueueName)});
   end if;
 end $$`),
     plain(`grant ${enqueuer} to current_user`),
@@ -440,13 +475,13 @@ end $$`),
 declare
   password text := nullif(current_setting('${PASSWORD_SETTING}', true), '');
 begin
-  if not exists (select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(WORKER_ROLE)}) then
+  if not exists (select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(workerName)}) then
     if password is null then
-      raise exception 'FacetDB: the worker login ${WORKER_ROLE} does not exist and no password was given for it';
+      raise exception 'FacetDB: the worker login ${workerName} does not exist and no password was given for it';
     end if;
-    execute format('create role %I login password %L', ${quoteLiteral(WORKER_ROLE)}, password);
+    execute format('create role %I login password %L', ${quoteLiteral(workerName)}, password);
   elsif password is not null then
-    execute format('alter role %I with login password %L', ${quoteLiteral(WORKER_ROLE)}, password);
+    execute format('alter role %I with login password %L', ${quoteLiteral(workerName)}, password);
   end if;
 end $$`),
     // The least permission that works: read the key, the state columns and FacetDB's own columns
@@ -485,11 +520,11 @@ begin
   if exists (select 1 from pg_catalog.pg_attribute a
               where a.attrelid = format('%I.%I', current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'))::regclass
                 and a.attname = ${quoteLiteral(CREATION_COLUMN)} and not a.attisdropped) then
-    execute format('grant select (%I) on %I.%I to %I', ${quoteLiteral(CREATION_COLUMN)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(WORKER_ROLE)});
+    execute format('grant select (%I) on %I.%I to %I', ${quoteLiteral(CREATION_COLUMN)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(workerName)});
   end if;
 end $$`),
     // Side-table mode: row-level security on the side table, now that both roles exist.
-    ...(side ? sideTableSecurityStatements(source, WORKER_ROLE, ENQUEUE_ROLE).map(plain) : []),
+    ...(side ? sideTableSecurityStatements(source, workerName, enqueueName).map(plain) : []),
     plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
     // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
     // The logs are append-only (read and insert); the version table is read-only, so the worker can
@@ -519,7 +554,7 @@ begin
     from pg_catalog.pg_class c
     cross join lateral pg_catalog.aclexplode(c.relacl) x
    where c.oid in (${STORE_APPEND_ONLY_TABLES.map((name) => `${quoteLiteral(`${quoteIdent(SCHEMA)}.${quoteIdent(name)}`)}::regclass`).join(", ")})
-     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(WORKER_ROLE)})
+     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(workerName)})
      and x.privilege_type in ('UPDATE', 'DELETE');
   if held is not null then
     raise exception using errcode = ${quoteLiteral(LOG_GRANTS_STATE)}, message = format(${quoteLiteral(

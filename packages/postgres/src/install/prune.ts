@@ -22,11 +22,12 @@ import {
   installOwnedColumns,
   ownedColumnDefinitions,
   type ProjectRef,
+  type RoleSuffix,
   renderSql,
   SCHEMA_SETTING,
   TABLE_SETTING,
   type TableSource,
-  WORKER_ROLE,
+  workerRole,
 } from "./sql.ts";
 
 /**
@@ -85,6 +86,7 @@ const NOT_REVOKED_STATE = "FD051";
 function revokedCheck(
   source: TableSource,
   revoked: readonly string[],
+  worker: string,
 ): readonly InstallStatement[] {
   return [
     settingsStatement([
@@ -106,7 +108,7 @@ begin
      and a.attnum > 0
      and a.attname in (select jsonb_array_elements_text(current_setting('${REVOKED_SETTING}')::jsonb))
      and x.privilege_type = 'SELECT'
-     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(WORKER_ROLE)})
+     and x.grantee = (select oid from pg_catalog.pg_roles where rolname = ${quoteLiteral(worker)})
      and x.grantor in (c.relowner, (select oid from pg_catalog.pg_roles where rolname = current_user));
   if still is not null then
     raise exception using errcode = ${quoteLiteral(NOT_REVOKED_STATE)}, message = format(${quoteLiteral(
@@ -232,6 +234,7 @@ export function pruneSql(
   source: TableSource,
   questionSet: QuestionSet,
   catalog: PruneCatalog,
+  options: { readonly roleSuffix?: RoleSuffix } = {},
 ): readonly InstallStatement[] {
   const removed = prunedColumns(source, questionSet, catalog);
   const revoked = revokedColumns(source, questionSet, catalog);
@@ -239,13 +242,14 @@ export function pruneSql(
     return [];
   }
   const table = quoteTable({ schema: source.schema, name: source.table });
+  const worker = workerRole(options.roleSuffix);
   const revokes = [
     ...revoked.map((name, index) =>
       plain(
-        `${index === 0 ? REVOKE_NOTE : ""}revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(WORKER_ROLE)}`,
+        `${index === 0 ? REVOKE_NOTE : ""}revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(worker)}`,
       ),
     ),
-    ...(revoked.length === 0 ? [] : revokedCheck(source, revoked)),
+    ...(revoked.length === 0 ? [] : revokedCheck(source, revoked, worker)),
   ];
   if (removed.length === 0) {
     return [...SCRIPT_HEADER, ...revokes];
@@ -297,6 +301,8 @@ export type PruneOptions = {
   /** Print and stop, touching nothing. */
   readonly dryRun?: boolean;
   readonly connect?: SqlConnect;
+  /** The install's own role names (`RoleSuffix`); tests only. */
+  readonly roleSuffix?: RoleSuffix;
 };
 
 export type PruneResult =
@@ -351,17 +357,14 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
       keyType: installed.keyType,
       storage: side ? "side-table" : "inline",
     };
+    const worker = workerRole(options.roleSuffix);
     const catalog = {
       columns: installed.sideColumns ?? installed.marked,
       // One row per grantor: a column two roles granted is one column to revoke, listed once.
       workerSelect: [
         ...new Set(
           (
-            await client.query(WORKER_SELECT_QUERY, [
-              installed.schema,
-              installed.table,
-              WORKER_ROLE,
-            ])
+            await client.query(WORKER_SELECT_QUERY, [installed.schema, installed.table, worker])
           ).map((row) => String(row["name"])),
         ),
       ],
@@ -372,7 +375,7 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
     );
     const revoked = revokedColumns(source, options.questionSet, catalog);
     const foreignGrants = (
-      await client.query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, WORKER_ROLE])
+      await client.query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, worker])
     )
       .map((row) => ({ column: String(row["name"]), grantor: String(row["grantor"]) }))
       .filter((grant) => revoked.includes(grant.column));
@@ -381,7 +384,12 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
         `${column}: a grant by ${grantor} remains; only that role can revoke it`,
     );
     const listed = { dropped, kept, revoked, notes, foreignGrants };
-    const statements = pruneSql(source, options.questionSet, catalog);
+    const statements = pruneSql(
+      source,
+      options.questionSet,
+      catalog,
+      options.roleSuffix === undefined ? {} : { roleSuffix: options.roleSuffix },
+    );
     if (statements.length === 0) {
       return { ok: true, ...listed, statements, sql: "", applied: false };
     }

@@ -23,11 +23,12 @@ import {
   type InstallStatement,
   type ProjectRef,
   queueKeyPrefix,
+  type RoleSuffix,
   renderSql,
   SCHEMA_SETTING,
   TABLE_SETTING,
   triggerName,
-  WORKER_ROLE,
+  workerRole,
 } from "./sql.ts";
 
 /**
@@ -275,12 +276,12 @@ const UNFINISHED_CURSOR = "not done";
 /** The uninstall script for one table, in the order it runs. */
 export function uninstallSql(
   source: UninstallTarget,
-  options: { readonly purge: boolean },
+  options: { readonly purge: boolean; readonly roleSuffix?: RoleSuffix },
 ): readonly InstallStatement[] {
   const table = quoteTable({ schema: source.schema, name: source.table });
   const sourceSchema = `current_setting('${SCHEMA_SETTING}')`;
   const sourceTable = `current_setting('${TABLE_SETTING}')`;
-  const worker = quoteLiteral(WORKER_ROLE);
+  const worker = quoteLiteral(workerRole(options.roleSuffix));
   const workerExists = `exists (select 1 from pg_catalog.pg_roles where rolname = ${worker})`;
   const purged = options.purge ? source.sourceId : undefined;
   return [
@@ -703,6 +704,8 @@ export type UninstallOptions = {
    */
   readonly alsoUninstalling?: readonly TableName[];
   readonly connect?: SqlConnect;
+  /** The install's own role names (`RoleSuffix`); tests only. */
+  readonly roleSuffix?: RoleSuffix;
 };
 
 export type UninstallResult =
@@ -1158,7 +1161,11 @@ async function forecastStore(
 }
 
 /** What the script removes from the table itself, read from the catalog before it runs. */
-async function tableRemoval(query: SqlQuery, installed: InstalledTable): Promise<TableRemoval> {
+async function tableRemoval(
+  query: SqlQuery,
+  installed: InstalledTable,
+  workerName: string,
+): Promise<TableRemoval> {
   // This script's own revoke decides on the tables installed now, whatever else the run removes.
   const neighbours = await storeRows(
     query,
@@ -1174,7 +1181,7 @@ async function tableRemoval(query: SqlQuery, installed: InstalledTable): Promise
             array(select p.policyname::text from pg_catalog.pg_policies p
                    where p.schemaname = $1 and p.tablename = $2
                      and p.policyname in ('facetdb_reads', 'facetdb_writes') order by 1) as policies`,
-    [installed.schema, installed.table, triggerName(installed), WORKER_ROLE],
+    [installed.schema, installed.table, triggerName(installed), workerName],
   );
   const row = facts[0];
   const worker = row?.["worker"] === true;
@@ -1427,7 +1434,10 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
     // The log is keyed by the table's project and the source's name (`sourceIdOf`), so no other
     // installed table shares it, and `resolveTableLog` never resolves a live store source (one
     // with records); the transaction checks both again (`sharedLogGuardStatement`).
-    const statements = uninstallSql({ ...installed, sourceId: purgedSourceId }, { purge });
+    const statements = uninstallSql(
+      { ...installed, sourceId: purgedSourceId },
+      { purge, ...(options.roleSuffix === undefined ? {} : { roleSuffix: options.roleSuffix }) },
+    );
     const forecast = await forecastStore(client.query, {
       schema: installed.schema,
       table: installed.table,
@@ -1448,7 +1458,7 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
         ? []
         : await otherSourceLogs(client.query, installed.project.id, purgedSourceId);
     const orphan = await orphanSideTable(client.query, installed);
-    const removal = await tableRemoval(client.query, installed);
+    const removal = await tableRemoval(client.query, installed, workerRole(options.roleSuffix));
     // The schemas whose usage the run takes from the worker: each run table's, once no table
     // outside the run is left in it (the last script in that schema revokes it).
     const runSchemas = [

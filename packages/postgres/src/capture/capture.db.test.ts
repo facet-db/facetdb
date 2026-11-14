@@ -1,7 +1,7 @@
 import { connect as connectTcp, createServer, type Socket } from "node:net";
 import type { Clock, QuestionSet, RecordKey } from "@facetdb/core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ENQUEUE_ROLE, migrate, WORKER_ROLE } from "../install/index.ts";
+import { migrate } from "../install/index.ts";
 import { CLAIM_LEASE_MS, connectPostgres, type SqlClient } from "../sql/index.ts";
 import { createScratchDatabase, type ScratchDatabase } from "../testing/index.ts";
 import { createPostgresConnector, type PostgresConnector } from "./connector.ts";
@@ -36,7 +36,7 @@ const open: PostgresConnector[] = [];
 
 function worker(workerId: string, clock: Clock = realClock): PostgresConnector {
   const connector = createPostgresConnector({
-    workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+    workerUrl: scratch.as(scratch.workerRole, PASSWORD),
     source: { table: "listings", key: "id" },
     questionSet,
     clock,
@@ -47,14 +47,8 @@ function worker(workerId: string, clock: Clock = realClock): PostgresConnector {
   return connector;
 }
 
-async function dropRoles(): Promise<void> {
-  await scratch.admin(`drop role if exists ${WORKER_ROLE}`).catch(() => undefined);
-  await scratch.admin(`drop role if exists ${ENQUEUE_ROLE}`).catch(() => undefined);
-}
-
 beforeAll(async () => {
   scratch = await createScratchDatabase();
-  await dropRoles();
   admin = connectPostgres(scratch.url);
   await admin.query(`create table public.listings (id text primary key, title text, body text)`);
   const result = await migrate({
@@ -65,6 +59,7 @@ beforeAll(async () => {
       questionSet,
       project: { id: "proj_listings", name: "Listings" },
       workerPassword: PASSWORD,
+      roleSuffix: scratch.roleSuffix,
     },
   });
   if (!result.ok) {
@@ -78,7 +73,6 @@ afterAll(async () => {
   }
   await admin.close();
   await scratch.drop();
-  await dropRoles();
 });
 
 async function seed(prefix: string, count: number): Promise<RecordKey[]> {
@@ -102,7 +96,7 @@ async function waitForALockWait(): Promise<void> {
   await until("the worker never waited for the application's transaction", async () => {
     const waiting = await admin.query(
       `select 1 from pg_stat_activity where datname = current_database() and usename = $1 and wait_event_type = 'Lock'`,
-      [WORKER_ROLE],
+      [scratch.workerRole],
     );
     return waiting.length > 0;
   });
@@ -166,7 +160,7 @@ async function applicationsWaiting(): Promise<number> {
   const rows = await admin.query(
     `select count(*)::int as n from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock' and usename <> $1`,
-    [WORKER_ROLE],
+    [scratch.workerRole],
   );
   return Number(rows[0]?.["n"]);
 }
@@ -458,7 +452,7 @@ describe("two workers on one queue", () => {
     const relay = await roundTripRelay(new URL(scratch.url));
     try {
       const page = createPostgresConnector({
-        workerUrl: relay.url(new URL(scratch.as(WORKER_ROLE, PASSWORD))),
+        workerUrl: relay.url(new URL(scratch.as(scratch.workerRole, PASSWORD))),
         source: { table: "listings", key: "id" },
         questionSet,
         clock: realClock,
@@ -501,7 +495,7 @@ describe("two workers on one queue", () => {
     // run: two round trips each (measured 40 for these 20 runs, and 40 for the 10 transactions
     // below, before the change).
     const relay = await roundTripRelay(new URL(scratch.url));
-    const client = connectPostgres(relay.url(new URL(scratch.as(WORKER_ROLE, PASSWORD))), {
+    const client = connectPostgres(relay.url(new URL(scratch.as(scratch.workerRole, PASSWORD))), {
       max: 1,
     });
     const READ = "select count(*)::text as n from public.listings where id = $1";
@@ -528,18 +522,24 @@ describe("two workers on one queue", () => {
     }
   });
 
-  it.each(["cold", "warm"] as const)(
+  // The two cases run side by side: each waits out the client's bounded close (5 s, sql/client.ts),
+  // and they share only the queue table, where each touches its own keys (`<state>-…`) alone.
+  it.concurrent.for(["cold", "warm"] as const)(
     "a pipeline whose connection is ended mid-way (%s) rejects at once, and the next statement gets a fresh connection",
-    async (state) => {
+    async (state, { expect }) => {
       // The reserved connection's backend is found by its application_name and ended with
       // pg_terminate_backend while a run of the pipeline waits on a job row an application holds:
       // cold, the run sent alone first on a connection that never described the statement; warm,
       // a run in the second burst of a connection that has. Nothing may be left unsettled (the call
       // would hang), and the dead connection must not go back to the pool (the next statement
       // would be written to a socket that is gone).
-      await drainQueue();
+      const drainOwn = () =>
+        admin.query(`delete from facetdb.jobs where starts_with(record_key, $1)`, [
+          `t:15:public.listings:${state}-`,
+        ]);
+      await drainOwn();
       const name = `facetdb-pipe-${state}`;
-      const url = new URL(scratch.as(WORKER_ROLE, PASSWORD));
+      const url = new URL(scratch.as(scratch.workerRole, PASSWORD));
       url.searchParams.set("application_name", name);
       const page = createPostgresConnector({
         workerUrl: url.toString(),
@@ -556,20 +556,28 @@ describe("two workers on one queue", () => {
       const keys = Array.from({ length: 150 }, (_, i) => `${state}-${String(i).padStart(3, "0")}`);
       const held = (state === "cold" ? keys[0] : keys[120]) ?? "";
       const app = connectPostgres(scratch.url);
+      const mayCommit = gate();
+      let enqueued: Promise<void> = Promise.resolve();
       try {
         const holds = gate();
-        const mayCommit = gate();
         const appDone = app.transaction(async (query) => {
           await query(INSERT_LISTING, [held]);
           holds.open();
           await mayCommit.opened;
         });
         await holds.opened;
-        const enqueued = page.enqueue(keys);
+        enqueued = page.enqueue(keys);
+        // pg_terminate_backend returns before the backend is gone, so the run can fail before
+        // `within` below reads it: handled from here, so that is never an unhandled rejection, and
+        // `within` still reads the rejection from `enqueued` for the assertions.
+        enqueued.catch(() => undefined);
         let pid: unknown;
         await until("the pipeline never waited on the held key", async () => {
+          // This database's backend only: another `test:db` run on the server has a pipeline of
+          // the same name, and ending that one would leave this one waiting.
           const rows = await admin.query(
-            `select pid from pg_stat_activity where application_name = $1 and wait_event_type = 'Lock'`,
+            `select pid from pg_stat_activity
+              where datname = current_database() and application_name = $1 and wait_event_type = 'Lock'`,
             [name],
           );
           pid = rows[0]?.["pid"];
@@ -592,9 +600,14 @@ describe("two workers on one queue", () => {
         // The dead connection is never reused; closing must not wait for it forever.
         expect(await within(10_000, page.close())).toEqual({ value: undefined });
       } finally {
+        // A case that failed half-way leaves no job for the LISTEN test after it: the application's
+        // transaction ends, the pipeline is let finish (it may still be sending), and only then are
+        // this case's jobs deleted. On the passing path each step finds its work done.
+        mayCommit.open();
         await app.close();
+        await within(10_000, enqueued);
+        await drainOwn();
       }
-      await drainQueue();
     },
   );
 
@@ -632,6 +645,7 @@ describe("the worker login on a side-table source", () => {
         source: { table: "notes", storage: "side-table" },
         questionSet,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
       },
     });
     if (!installed.ok) {
@@ -639,7 +653,7 @@ describe("the worker login on a side-table source", () => {
     }
     await admin.query(`insert into public.notes (id, title, body) values ('n1', 'a note', 'b')`);
     const w = createPostgresConnector({
-      workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+      workerUrl: scratch.as(scratch.workerRole, PASSWORD),
       source: { table: "notes", key: "id", storage: "side-table" },
       questionSet,
       clock: realClock,
@@ -692,6 +706,7 @@ describe.each([
         source: { table },
         questionSet,
         project: { id: "proj_listings", name: "Listings" },
+        roleSuffix: scratch.roleSuffix,
       },
     });
     if (!installed.ok) {
@@ -707,7 +722,7 @@ describe.each([
       expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     }
     const w = createPostgresConnector({
-      workerUrl: scratch.as(WORKER_ROLE, PASSWORD),
+      workerUrl: scratch.as(scratch.workerRole, PASSWORD),
       source: { table, key: "id" },
       questionSet,
       clock: realClock,

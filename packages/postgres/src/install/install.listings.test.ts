@@ -7,7 +7,9 @@ import {
   STORE_TABLES,
   STORE_VERSION_TABLE,
 } from "../store/index.ts";
-import { installSql, renderSql, WORKER_ROLE } from "./sql.ts";
+import { pruneSql } from "./prune.ts";
+import { installSql, renderSql, WORKER_ROLE, workerRole } from "./sql.ts";
+import { uninstallSql } from "./uninstall.ts";
 
 /**
  * What the printed install script says about the FacetDB store: the admin creates and owns every
@@ -101,4 +103,54 @@ describe("the printed install script and the store's tables", () => {
       });
     });
   }
+});
+
+describe("a role suffix (the real-Postgres suites' own roles)", () => {
+  const SUFFIX = "_t0a1b2c";
+  /** Every role name in the text, by the two prefixes; a bare or differently suffixed one is a miss. */
+  const roleNames = (sql: string) => new Set(sql.match(/facetdb_(worker|enqueue)\w*/g));
+
+  it.each([
+    ["inline", { table: "listings", key: "id" }],
+    ["side-table", { table: "listings", key: "id", keyType: "integer", storage: "side-table" }],
+  ] as const)("names only the suffixed roles in the %s install script", (_, source) => {
+    const sql = renderSql(
+      installSql(source, listings, project, { workerPassword: "pw", roleSuffix: SUFFIX }),
+    );
+    expect(roleNames(sql)).toEqual(
+      new Set([`facetdb_worker${SUFFIX}`, `facetdb_enqueue${SUFFIX}`]),
+    );
+  });
+
+  it("names only the suffixed worker in the uninstall and prune scripts", () => {
+    const target = {
+      schema: "public",
+      table: "listings",
+      project,
+      marked: ["is_scam"],
+      sideColumns: undefined,
+      viewMarked: false,
+      sourceId: undefined,
+    };
+    const uninstall = renderSql(uninstallSql(target, { purge: false, roleSuffix: SUFFIX }));
+    const prune = renderSql(
+      pruneSql(
+        { table: "listings", key: "id" },
+        listings,
+        { columns: ["is_scam"], workerSelect: ["id", "title", "notes"] },
+        { roleSuffix: SUFFIX },
+      ),
+    );
+    expect(prune).toContain(
+      `revoke select ("notes") on "public"."listings" from "facetdb_worker${SUFFIX}"`,
+    );
+    for (const sql of [uninstall, prune]) {
+      expect(roleNames(sql)).toEqual(new Set([`facetdb_worker${SUFFIX}`]));
+    }
+  });
+
+  it("is the bare name without one, and refuses anything but lower-case letters, digits and _", () => {
+    expect(workerRole()).toBe(WORKER_ROLE);
+    expect(() => workerRole("_x'; drop role postgres; --")).toThrow(/lower-case letters/);
+  });
 });

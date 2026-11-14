@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 // TYPESAFE_API_KEY; neither runs silently alongside unit tests.
 export default defineConfig({
   test: {
+    // The project name, for `vitest --project <name>`.
+    name: "postgres",
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/node_modules/**"],
     // The PGlite cluster template is built once before the workers start (testing/pglite.ts), and a

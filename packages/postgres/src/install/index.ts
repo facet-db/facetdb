@@ -18,6 +18,7 @@ export {
 } from "./prune.ts";
 export {
   ENQUEUE_ROLE,
+  enqueueRole,
   type InstallStatement,
   installOwnedColumns,
   installSql,
@@ -25,10 +26,12 @@ export {
   PASSWORD_SETTING,
   type ProjectRef,
   queueKeyPrefix,
+  type RoleSuffix,
   renderSql,
   type TableSource,
   triggerName,
   WORKER_ROLE,
+  workerRole,
 } from "./sql.ts";
 export {
   type LogOnlyPurge,

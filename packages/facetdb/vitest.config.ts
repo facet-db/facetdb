@@ -6,6 +6,8 @@ import { defineConfig } from "vitest/config";
 // (*.e2e.test.ts) runs through `pnpm test:e2e` (vitest.e2e.config.ts).
 export default defineConfig({
   test: {
+    // The project name, for `vitest --project <name>`.
+    name: "facetdb",
     include: ["src/**/*.test.ts"],
     exclude: ["**/*.db.test.ts", "**/*.live.test.ts", "**/*.e2e.test.ts", "**/node_modules/**"],
     // The `facetdb types` tests spawn tsc on the generated declaration: seconds alone, more on

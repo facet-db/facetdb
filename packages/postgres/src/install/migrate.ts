@@ -10,7 +10,7 @@ import { connectPostgres, type SqlConnect, type SqlQuery, type SqlRow } from "..
 import { rekeyNotes } from "../store/index.ts";
 import {
   anotherProject,
-  ENQUEUE_ROLE,
+  enqueueRole,
   type InstallStatement,
   installOwnedColumns,
   installOwnedColumnTypes,
@@ -18,9 +18,10 @@ import {
   LOG_GRANTS_STATE,
   ownedColumnsQuery,
   type ProjectRef,
+  type RoleSuffix,
   renderSql,
   type TableSource,
-  WORKER_ROLE,
+  workerRole,
 } from "./sql.ts";
 
 /**
@@ -46,6 +47,8 @@ export type MigratePlan = {
   readonly workerPassword?: string;
   /** Reset the shared worker password even though other projects use the login; they must be told. */
   readonly rotateWorkerPassword?: boolean;
+  /** This install's own role names (`RoleSuffix`): the real-Postgres suites set it, production never does. */
+  readonly roleSuffix?: RoleSuffix;
 };
 
 export type MigrateOptions = {
@@ -272,10 +275,11 @@ async function inspect(
     owner = rows.length === 0 ? null : String(rows[0]?.["project_id"]);
     otherProjects = names(await query(OTHER_PROJECTS_QUERY, [project.id]));
   }
-  const worker = await roleFacts(query, WORKER_ROLE);
-  const enqueuer = await roleFacts(query, ENQUEUE_ROLE);
+  const workerName = workerRole(plan.roleSuffix);
+  const worker = await roleFacts(query, workerName);
+  const enqueuer = await roleFacts(query, enqueueRole(plan.roleSuffix));
   const usedElsewhere =
-    worker.exists && (await query(USED_ELSEWHERE_QUERY, [WORKER_ROLE])).length > 0;
+    worker.exists && (await query(USED_ELSEWHERE_QUERY, [workerName])).length > 0;
   const sourceReaders =
     source.storage === "side-table" &&
     (await query(READERS_QUERY, [schema, source.table])).length > 0;
@@ -306,6 +310,8 @@ class Refused extends Error {}
 function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   const { source, project } = plan;
   const table = `${source.schema ?? "public"}.${source.table}`;
+  const workerName = workerRole(plan.roleSuffix);
+  const enqueueName = enqueueRole(plan.roleSuffix);
   if (inspection.primaryKey.length === 0) {
     return `${table} has no primary key; FacetDB keys its jobs and decisions by it. Add one and run migrate again.`;
   }
@@ -342,8 +348,8 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
     return `${table}: ${drifted.join("; ")}; a question's type cannot change in place. Remove the question (migrate --prune drops its columns), then add it back.`;
   }
   for (const [name, facts] of [
-    [WORKER_ROLE, inspection.worker],
-    [ENQUEUE_ROLE, inspection.enqueuer],
+    [workerName, inspection.worker],
+    [enqueueName, inspection.enqueuer],
   ] as const) {
     if (facts.memberOf.length > 0) {
       return `the role ${name} on this server is a member of ${facts.memberOf.join(", ")}; FacetDB's roles belong to no other role (least privilege). Revoke those memberships or drop the role, then run migrate again.`;
@@ -381,13 +387,13 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   }
   const { worker, enqueuer } = inspection;
   if (worker.superuser || worker.bypassRls || worker.createRole || worker.createDb) {
-    return `the role ${WORKER_ROLE} on this server has rights FacetDB never uses (superuser, bypass RLS, create role or create database); FacetDB creates it with login only. Drop or rename that role, then run migrate again.`;
+    return `the role ${workerName} on this server has rights FacetDB never uses (superuser, bypass RLS, create role or create database); FacetDB creates it with login only. Drop or rename that role, then run migrate again.`;
   }
   if (enqueuer.exists && (enqueuer.superuser || enqueuer.canLogin || enqueuer.bypassRls)) {
-    return `the role ${ENQUEUE_ROLE} on this server was not created by FacetDB (it can log in, is a superuser or bypasses RLS); the trigger must not run as it. Drop or rename that role, then run migrate again.`;
+    return `the role ${enqueueName} on this server was not created by FacetDB (it can log in, is a superuser or bypasses RLS); the trigger must not run as it. Drop or rename that role, then run migrate again.`;
   }
   if (!worker.exists && plan.workerPassword === undefined) {
-    return `the worker role ${WORKER_ROLE} does not exist yet and no password was given for it; pass workerPassword on the first install.`;
+    return `the worker role ${workerName} does not exist yet and no password was given for it; pass workerPassword on the first install.`;
   }
   if (worker.exists && plan.workerPassword !== undefined && plan.rotateWorkerPassword !== true) {
     const others = [
@@ -395,7 +401,7 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
       ...(inspection.usedElsewhere ? ["another database on this server"] : []),
     ];
     if (others.length > 0) {
-      return `the worker login ${WORKER_ROLE} is shared with ${others.join(" and ")}; a new password would lock them out. Reuse the stored password, or rotate it on purpose (rotateWorkerPassword) and update every project.`;
+      return `the worker login ${workerName} is shared with ${others.join(" and ")}; a new password would lock them out. Reuse the stored password, or rotate it on purpose (rotateWorkerPassword) and update every project.`;
     }
   }
   return null;
@@ -431,6 +437,7 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
     const statements = installSql(source, plan.questionSet, plan.project, {
       sourceReaders: inspection.sourceReaders,
       ...(plan.workerPassword === undefined ? {} : { workerPassword: plan.workerPassword }),
+      ...(plan.roleSuffix === undefined ? {} : { roleSuffix: plan.roleSuffix }),
     });
     const sql = renderSql(statements);
     options.print(sql);
