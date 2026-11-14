@@ -3,6 +3,7 @@ export type { Crypto } from "./crypto.ts";
 export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.ts";
 export {
   migrateStore,
+  PROJECTS_TABLE_SQL,
   rekeyNotes,
   SCHEMA_VERSION,
   STORE_APPEND_ONLY_TABLES,

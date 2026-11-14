@@ -15,13 +15,15 @@ import {
   quoteLiteral,
   quoteTable,
   type SqlConnect,
+  type SqlQuery,
 } from "../sql/index.ts";
-import { plain, readInstalled, SCRIPT_HEADER, settingsStatement } from "./catalog.ts";
+import { type NotInstalled, readInstalled, SCRIPT_HEADER, settingsStatement } from "./catalog.ts";
 import {
   type InstallStatement,
   installOwnedColumns,
   ownedColumnDefinitions,
   type ProjectRef,
+  plain,
   type RoleSuffix,
   renderSql,
   SCHEMA_SETTING,
@@ -96,7 +98,9 @@ function revokedCheck(
     ]),
     // Only a grant this revoke should have taken back stops it: install's (the owner's) or the
     // running role's own. Another grantor's (a DBA's) stays with a note (`FOREIGN_GRANTS_QUERY`).
-    plain(`do $$
+    plain(
+      "grants",
+      `do $$
 declare
   still text;
 begin
@@ -115,8 +119,19 @@ begin
       "FacetDB: %s.%s: the worker login still reads %s after the revoke; Postgres takes back only grants made by the role that runs it, and install's grants are the table owner's. Run migrate --prune as the table's owner or a member of its role; nothing was changed.",
     )}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), still);
   end if;
-end $$`),
+end $$`,
+    ),
   ];
+}
+
+/**
+ * The check above, which rolls the whole prune back (`NOT_REVOKED_STATE`), as the refusal it is, in
+ * its own words; undefined for any other error. The driver's error is a boundary, read by its code.
+ */
+export function pruneRefusal(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error && error.code === NOT_REVOKED_STATE
+    ? error.message.replace(/^FacetDB: /, "")
+    : undefined;
 }
 
 /** The FacetDB columns the catalog shows: marked ones on the table, or the side table's. */
@@ -146,8 +161,11 @@ export function revokedColumns(
   return (catalog.workerSelect ?? []).filter((name) => !kept.has(name));
 }
 
+/** Why a marked column stays although the set no longer owns it: the engine's keep says it. */
+export const KEPT_REASON = "storeProbabilities is off";
+
 /** What the output says about a marked column that stays although the set no longer owns it. */
-export const KEPT_NOTE = "kept (storeProbabilities is off)";
+export const KEPT_NOTE = `kept (${KEPT_REASON})`;
 
 /**
  * The marked columns of questions still in the set that the set no longer owns: a choice
@@ -246,6 +264,7 @@ export function pruneSql(
   const revokes = [
     ...revoked.map((name, index) =>
       plain(
+        "grants",
         `${index === 0 ? REVOKE_NOTE : ""}revoke select (${quoteIdent(name)}) on ${table} from ${quoteIdent(worker)}`,
       ),
     ),
@@ -258,7 +277,9 @@ export function pruneSql(
     return [
       ...SCRIPT_HEADER,
       ...revokes,
-      ...removed.map((name) => plain(`alter table ${table} drop column ${quoteIdent(name)}`)),
+      ...removed.map((name) =>
+        plain("columns", `alter table ${table} drop column ${quoteIdent(name)}`),
+      ),
     ];
   }
   const side = sideTableRelation(source);
@@ -284,10 +305,11 @@ export function pruneSql(
       whileViewDropped: removed.map(
         (name) => `alter table ${side} drop column ${quoteIdent(name)}`,
       ),
-    }).map(plain),
+    }).map((text) => plain("columns", text)),
   ];
 }
 
+/** @deprecated as an export: `EngineTarget` (core) with `postgresEngine.planPrune`. */
 export type PruneOptions = {
   /** The admin connection string; used for this call and not retained. */
   readonly adminUrl: string;
@@ -305,6 +327,10 @@ export type PruneOptions = {
   readonly roleSuffix?: RoleSuffix;
 };
 
+/**
+ * @deprecated as an export: the `EnginePlan` of `postgresEngine.planPrune` (its removes, keeps and
+ * notes) and the `RunResult` of `run`.
+ */
 export type PruneResult =
   | {
       readonly ok: true;
@@ -331,65 +357,107 @@ export type PruneResult =
     }
   | { readonly ok: false; readonly reason: string };
 
+/** The prune as planned, before anything is printed or run: `prune`'s and the engine's. */
+export type PruneDraft =
+  | {
+      readonly ok: true;
+      /** The table as the catalog shows it, `schema.table`. */
+      readonly table: string;
+      readonly dropped: readonly DroppedColumn[];
+      /** The marked columns that stay, each for `KEPT_REASON`. */
+      readonly keptColumns: readonly string[];
+      /** The source table's columns whose select the worker loses. */
+      readonly revoked: readonly string[];
+      /** One line per grant another role made on a revoked column, which only that role can take back. */
+      readonly notes: readonly string[];
+      readonly foreignGrants: readonly ForeignGrant[];
+      /** Empty when there is nothing to prune. */
+      readonly statements: readonly InstallStatement[];
+    }
+  | ({ readonly ok: false } & NotInstalled);
+
 /**
- * Reads the catalog, prints the prune script and runs exactly its statements in one transaction.
- * The storage mode comes from what install left (a marked side table means side-table mode), so a
+ * Reads the catalog with `query` and writes the prune script, or says in plain words why the table
+ * cannot be pruned (`absent` when nothing of FacetDB's is on it yet). Nothing is changed. The
+ * storage mode comes from what install left (a marked side table means side-table mode), so a
  * config that changed its mind cannot point the drops at the wrong relation.
  */
-export async function prune(options: PruneOptions): Promise<PruneResult> {
-  const client = (options.connect ?? connectPostgres)(options.adminUrl);
-  try {
-    const installed = await readInstalled(client.query, options.source);
-    if ("reason" in installed) {
-      return { ok: false, reason: installed.reason };
-    }
-    if (installed.project.id !== options.project.id) {
-      return {
-        ok: false,
-        reason: `${installed.schema}.${installed.table} belongs to another project (${installed.project.id}); prune it from that project.`,
-      };
-    }
-    const side = installed.sideColumns !== undefined;
-    const source: TableSource = {
-      table: installed.table,
-      schema: installed.schema,
-      key: installed.key,
-      keyType: installed.keyType,
-      storage: side ? "side-table" : "inline",
+export async function draftPrune(
+  query: SqlQuery,
+  options: Pick<PruneOptions, "source" | "questionSet" | "project" | "roleSuffix">,
+): Promise<PruneDraft> {
+  const installed = await readInstalled(query, options.source);
+  if ("reason" in installed) {
+    return { ok: false, ...installed };
+  }
+  if (installed.project.id !== options.project.id) {
+    return {
+      ok: false,
+      reason: `${installed.schema}.${installed.table} belongs to another project (${installed.project.id}); prune it from that project.`,
+      absent: false,
     };
-    const worker = workerRole(options.roleSuffix);
-    const catalog = {
-      columns: installed.sideColumns ?? installed.marked,
-      // One row per grantor: a column two roles granted is one column to revoke, listed once.
-      workerSelect: [
-        ...new Set(
-          (
-            await client.query(WORKER_SELECT_QUERY, [installed.schema, installed.table, worker])
-          ).map((row) => String(row["name"])),
+  }
+  const side = installed.sideColumns !== undefined;
+  const source: TableSource = {
+    table: installed.table,
+    schema: installed.schema,
+    key: installed.key,
+    keyType: installed.keyType,
+    storage: side ? "side-table" : "inline",
+  };
+  const worker = workerRole(options.roleSuffix);
+  const catalog = {
+    columns: installed.sideColumns ?? installed.marked,
+    // One row per grantor: a column two roles granted is one column to revoke, listed once.
+    workerSelect: [
+      ...new Set(
+        (await query(WORKER_SELECT_QUERY, [installed.schema, installed.table, worker])).map((row) =>
+          String(row["name"]),
         ),
-      ],
-    };
-    const dropped = droppedColumns(source, options.questionSet, catalog);
-    const kept = keptColumns(source, options.questionSet, catalog).map(
-      (name) => `${name}: ${KEPT_NOTE}`,
-    );
-    const revoked = revokedColumns(source, options.questionSet, catalog);
-    const foreignGrants = (
-      await client.query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, worker])
-    )
-      .map((row) => ({ column: String(row["name"]), grantor: String(row["grantor"]) }))
-      .filter((grant) => revoked.includes(grant.column));
-    const notes = foreignGrants.map(
+      ),
+    ],
+  };
+  const revoked = revokedColumns(source, options.questionSet, catalog);
+  const foreignGrants = (
+    await query(FOREIGN_GRANTS_QUERY, [installed.schema, installed.table, worker])
+  )
+    .map((row) => ({ column: String(row["name"]), grantor: String(row["grantor"]) }))
+    .filter((grant) => revoked.includes(grant.column));
+  return {
+    ok: true,
+    table: `${installed.schema}.${installed.table}`,
+    dropped: droppedColumns(source, options.questionSet, catalog),
+    keptColumns: keptColumns(source, options.questionSet, catalog),
+    revoked,
+    notes: foreignGrants.map(
       ({ column, grantor }) =>
         `${column}: a grant by ${grantor} remains; only that role can revoke it`,
-    );
-    const listed = { dropped, kept, revoked, notes, foreignGrants };
-    const statements = pruneSql(
+    ),
+    foreignGrants,
+    statements: pruneSql(
       source,
       options.questionSet,
       catalog,
       options.roleSuffix === undefined ? {} : { roleSuffix: options.roleSuffix },
-    );
+    ),
+  };
+}
+
+/**
+ * Reads the catalog, prints the prune script and runs exactly its statements in one transaction.
+ *
+ * @deprecated as an export: `postgresEngine.planPrune`, `render` and `run`.
+ */
+export async function prune(options: PruneOptions): Promise<PruneResult> {
+  const client = (options.connect ?? connectPostgres)(options.adminUrl);
+  try {
+    const draft = await draftPrune(client.query, options);
+    if (!draft.ok) {
+      return { ok: false, reason: draft.reason };
+    }
+    const { dropped, revoked, notes, foreignGrants, statements } = draft;
+    const kept = draft.keptColumns.map((name) => `${name}: ${KEPT_NOTE}`);
+    const listed = { dropped, kept, revoked, notes, foreignGrants };
     if (statements.length === 0) {
       return { ok: true, ...listed, statements, sql: "", applied: false };
     }
@@ -406,8 +474,9 @@ export async function prune(options: PruneOptions): Promise<PruneResult> {
       });
     } catch (error) {
       // The script's own check (`revokedCheck`) rolled everything back: a refusal, in its words.
-      if (error instanceof Error && "code" in error && error.code === NOT_REVOKED_STATE) {
-        return { ok: false, reason: error.message.replace(/^FacetDB: /, "") };
+      const refused = pruneRefusal(error);
+      if (refused !== undefined) {
+        return { ok: false, reason: refused };
       }
       throw error;
     }

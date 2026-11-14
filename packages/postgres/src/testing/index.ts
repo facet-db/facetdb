@@ -10,6 +10,29 @@ export {
   resetPgliteWorld,
 } from "./pglite.ts";
 export { createScratchDatabase, type ScratchDatabase, serverUrl } from "./postgres.ts";
+// The world the uninstall and prune tests (install/) and the engine's tests (engine/) share.
+export {
+  APP_COLUMNS,
+  columns,
+  count,
+  decisionLog,
+  everyType,
+  freshWorld,
+  install,
+  LOG_ID,
+  logOf,
+  present,
+  project,
+  q,
+  recording,
+  registerSource,
+  runUninstall,
+  SOURCE_ID,
+  snapshot,
+  useUninstallWorld,
+  withoutCategory,
+  world,
+} from "./uninstall-world.ts";
 
 /** The secret every test store is made with; it protects nothing. */
 export const TEST_SECRET = "a-long-random-secret-for-tests-only";

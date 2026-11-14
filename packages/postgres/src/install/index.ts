@@ -1,5 +1,8 @@
-export type { InstalledTable } from "./catalog.ts";
+export type { InstalledTable, NotInstalled } from "./catalog.ts";
 export {
+  draftInstall,
+  type InstallDraft,
+  installRefusal,
   type MigrateOptions,
   type MigratePlan,
   type MigrateResult,
@@ -8,15 +11,21 @@ export {
 } from "./migrate.ts";
 export {
   type DroppedColumn,
+  draftPrune,
   type ForeignGrant,
+  KEPT_REASON,
   type PruneCatalog,
+  type PruneDraft,
   type PruneOptions,
   type PruneResult,
   prune,
   prunedColumns,
+  pruneRefusal,
   pruneSql,
 } from "./prune.ts";
+export { scramVerifier } from "./scram.ts";
 export {
+  anotherProjectOwner,
   ENQUEUE_ROLE,
   enqueueRole,
   type InstallStatement,
@@ -24,28 +33,37 @@ export {
   installSql,
   ownedColumnsQuery,
   PASSWORD_SETTING,
+  PASSWORD_STATEMENT,
   type ProjectRef,
   queueKeyPrefix,
   type RoleSuffix,
   renderSql,
+  renderStatement,
+  type ScriptStatement,
+  type StatementDatabase,
   type TableSource,
   triggerName,
   WORKER_ROLE,
   workerRole,
 } from "./sql.ts";
 export {
+  draftUninstall,
   type LogOnlyPurge,
   type OtherSourceLog,
   type OtherTable,
   type ProjectKeptBy,
+  ranNote,
   type SourceLog,
   type TableName,
   type TableRemoval,
+  type UninstallDraft,
+  type UninstallDraftOptions,
   type UninstallOptions,
   type UninstallPlan,
   type UninstallResult,
   type UninstallSource,
   type UninstallTarget,
   uninstall,
+  uninstallRefusal,
   uninstallSql,
 } from "./uninstall.ts";

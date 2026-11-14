@@ -10,7 +10,7 @@ import {
   registerSource,
   runUninstall,
   useUninstallWorld,
-} from "./uninstall-world.ts";
+} from "../testing/index.ts";
 
 /**
  * What `uninstall` keeps on PGlite: the shared queue, the store's tables and a project's

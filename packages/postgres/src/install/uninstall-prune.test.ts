@@ -1,6 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { prune } from "./prune.ts";
-import { renderSql } from "./sql.ts";
 import {
   columns,
   freshWorld,
@@ -12,7 +10,9 @@ import {
   useUninstallWorld,
   withoutCategory,
   world,
-} from "./uninstall-world.ts";
+} from "../testing/index.ts";
+import { prune } from "./prune.ts";
+import { renderSql } from "./sql.ts";
 
 /**
  * `migrate --prune` on PGlite: it drops columns on purpose, so every test reads the catalog

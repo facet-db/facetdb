@@ -2,9 +2,11 @@ import {
   type AnswerColumnKind,
   answerColumns,
   type OnChange,
+  type PlanStatement,
   type QuestionSet,
   REVIEWED_COLUMN,
   STATUS_COLUMN,
+  type StatementPurpose,
   UPDATED_AT_COLUMN,
 } from "@facetdb/core";
 import { OWNED_MARK } from "../polling/index.ts";
@@ -23,8 +25,9 @@ import {
   VIEW_NAME_SETTING,
   VIEW_SCHEMA_SETTING,
 } from "../scan/index.ts";
-import { JOBS_TABLE, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
+import { JOBS_TABLE, jobsTableSql, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
 import {
+  PROJECTS_TABLE_SQL,
   STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
   STORE_SEQUENCES,
@@ -72,6 +75,9 @@ export type ProjectRef = {
  * One statement as `migrate` runs it: text with `$n` placeholders and the parameters for them.
  * `redacted` marks a statement whose parameter is a secret (the worker password): the printed
  * script shows a placeholder for it and nothing else ever renders it.
+ *
+ * @deprecated as an export: the engine plan's `PlanStatement` (core) replaces it for every caller
+ * outside this package (`postgresEngine.planInstall`).
  */
 export type InstallStatement = {
   readonly text: string;
@@ -83,7 +89,28 @@ export type InstallStatement = {
    * the row belongs to another project (two installs racing on one table).
    */
   readonly claimsOwner?: boolean;
+  /** What part of the script it is, as the engine's plan names it. */
+  readonly purpose: StatementPurpose;
+  /**
+   * The database it serves, by the table it serves and never by the function that wrote it
+   *: `store` for the FacetDB store's own tables, which the engine
+   * plans only when the store is the source's database; `source` for everything the source's
+   * database needs whatever the store.
+   */
+  readonly database: StatementDatabase;
 };
+
+/** The database a statement serves (`PlanStatement.database`). */
+export type StatementDatabase = PlanStatement["database"];
+
+/** A statement with no parameter, printed exactly as it runs. */
+export function plain(
+  purpose: StatementPurpose,
+  text: string,
+  database: StatementDatabase = "source",
+): InstallStatement {
+  return { text, params: [], purpose, database };
+}
 
 /** The one login FacetDB creates in a customer's database; the only credential it ever stores. */
 export const WORKER_ROLE = "facetdb_worker";
@@ -132,6 +159,14 @@ export function enqueueRole(suffix: RoleSuffix = ""): string {
  * quote a name). Each is set by `set_config($n, true)` and read by `current_setting`.
  */
 export const PASSWORD_SETTING = "facetdb.worker_password";
+
+/**
+ * The statement that gives the role block its password: a fresh SCRAM verifier bound to `$1`, so
+ * neither the password nor the verifier is ever SQL text. `migrate` binds it from the plan; the
+ * engine's `run` binds it at the plan's `secret` statement, whose printed text is a comment.
+ */
+export const PASSWORD_STATEMENT = `select set_config('${PASSWORD_SETTING}', $1, true)`;
+
 export const SCHEMA_SETTING = "facetdb.install_schema";
 export const TABLE_SETTING = "facetdb.install_table";
 /** The installing project's id, for the owner check in the script (a value a `do` block cannot take). */
@@ -148,9 +183,52 @@ export function anotherProject(table: string, owner: string): string {
   return `${table} already carries FacetDB columns from another project (${owner}); one table belongs to one project. Uninstall there first, or point this project at another table.`;
 }
 
+/**
+ * The project a message of `anotherProject` names for this table (`schema.table`), or undefined
+ * when the message is any other: the engine's `run` reads the script's own owner check by it
+ *, never by a guess at the words.
+ */
+export function anotherProjectOwner(table: string, message: string): string | undefined {
+  const marker = "\u0000";
+  const template = anotherProject(table, marker);
+  const at = template.indexOf(marker);
+  const before = template.slice(0, at);
+  const after = template.slice(at + marker.length);
+  return message.length > before.length + after.length &&
+    message.startsWith(before) &&
+    message.endsWith(after)
+    ? message.slice(before.length, message.length - after.length)
+    : undefined;
+}
+
 const SCHEMA = "facetdb";
 const PROJECTS_TABLE = `${quoteIdent(SCHEMA)}.${quoteIdent("projects")}`;
 const OWNERS_TABLE = `${quoteIdent(SCHEMA)}.${quoteIdent("table_owners")}`;
+
+/**
+ * The store's tables the source's database needs whatever the store: the queue the triggers write
+ * to, and the projects `table_owners` references. Their statements and the worker's grants on them
+ * are `source`; every other store table is the store's.
+ */
+const SOURCE_STORE_TABLES: ReadonlySet<string> = new Set(["jobs", "projects"]);
+
+/**
+ * The store's own statements the source's database needs, by the table each one makes: the
+ * `facetdb` schema, the queue and its index (`jobsTableSql`, which makes the schema too), and
+ * `facetdb.projects`. Compared as text, so a statement is tagged by what it creates, never by the
+ * function that listed it.
+ */
+const SOURCE_STORE_STATEMENTS: ReadonlyMap<string, StatementPurpose> = new Map([
+  ...jobsTableSql().map((text) => [text, "queue"] as const),
+  [`create schema if not exists ${quoteIdent(SCHEMA)}`, "schema"],
+  [PROJECTS_TABLE_SQL, "schema"],
+]);
+
+/** One statement of the store's install script, tagged by the table it serves. */
+function storeStatement(text: string): InstallStatement {
+  const purpose = SOURCE_STORE_STATEMENTS.get(text);
+  return purpose === undefined ? plain("schema", text, "store") : plain(purpose, text);
+}
 const ENQUEUE_FUNCTIONS: Readonly<Record<OnChange, string>> = {
   reset: "enqueue",
   keep: "enqueue_keep",
@@ -320,7 +398,6 @@ export function installSql(
   const side = source.storage === "side-table";
   const onChange = source.onChange ?? "reset";
   const appendOnly = new Set(STORE_APPEND_ONLY_TABLES);
-  const plain = (text: string): InstallStatement => ({ text, params: [] });
   const policy = (name: string, command: "select" | "update") =>
     `  if not exists (select 1 from pg_catalog.pg_policies
                  where schemaname = current_setting('${SCHEMA_SETTING}')
@@ -333,29 +410,36 @@ export function installSql(
   return [
     // The literal rules this script relies on, pinned for the transaction whatever the server's
     // default: a backslash inside a quoted name is a backslash.
-    plain("set local standard_conforming_strings = on"),
+    plain("settings", "set local standard_conforming_strings = on"),
     // The `alter table` statements take ACCESS EXCLUSIVE on the customer's table: better a failed
     // migrate after ten seconds than the application's queries piling up behind it.
-    plain("set local lock_timeout = '10s'"),
+    plain("settings", "set local lock_timeout = '10s'"),
     // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
     // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
-    ...storeInstallStatements().map(plain),
+    ...storeInstallStatements().map(storeStatement),
     // The project marker: which project installed on which table; `facetdb.projects` is the store's.
-    plain(`create table if not exists ${OWNERS_TABLE} (
+    plain(
+      "marker",
+      `create table if not exists ${OWNERS_TABLE} (
   table_schema text not null,
   table_name text not null,
   project_id text not null references ${PROJECTS_TABLE} (id),
   installed_at timestamptz not null default now(),
   primary key (table_schema, table_name)
-)`),
+)`,
+    ),
     {
       text: `insert into ${PROJECTS_TABLE} (id, name) values ($1, $2) on conflict (id) do nothing`,
       params: [project.id, project.name],
+      purpose: "marker",
+      database: "source",
     },
     {
       text: `insert into ${OWNERS_TABLE} (table_schema, table_name, project_id) values ($1, $2, $3) on conflict (table_schema, table_name) do nothing`,
       params: [schema, source.table, project.id],
       claimsOwner: true,
+      purpose: "marker",
+      database: "source",
     },
     // The same owner check in the script itself, so the printed script run by hand later (after
     // another project claimed the table) stops here and changes nothing. The claim above waited for
@@ -363,8 +447,12 @@ export function installSql(
     {
       text: `select set_config('${SCHEMA_SETTING}', $1, true), set_config('${TABLE_SETTING}', $2, true), set_config('${PROJECT_SETTING}', $3, true)`,
       params: [schema, source.table, project.id],
+      purpose: "settings",
+      database: "source",
     },
-    plain(`do $$
+    plain(
+      "marker",
+      `do $$
 declare
   owner text;
 begin
@@ -375,7 +463,8 @@ begin
     raise exception using message = format(${quoteLiteral(`FacetDB: ${anotherProject("%s.%s", "%s")}`)},
       current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), owner);
   end if;
-end $$`),
+end $$`,
+    ),
     ...(side
       ? // Side-table mode: the application's table is not altered. The side table carries the
         // same columns, keyed by the same key, and the view joins them; both are FacetDB's whole.
@@ -391,11 +480,14 @@ end $$`),
               schema,
               source.table,
             ],
-          },
-          ...sideTableStatements(source, columns).map(plain),
+            purpose: "settings",
+            database: "source",
+          } satisfies InstallStatement,
+          ...sideTableStatements(source, columns).map((text) => plain("columns", text)),
           // Whoever may read the source table may read its answers: the table's readers get select
           // on the side table and usage on the schema, or the security-invoker view would refuse them.
           plain(
+            "grants",
             `${
               options.sourceReaders === true
                 ? // No table or schema name here: a name with a newline would end the comment and
@@ -409,42 +501,48 @@ end $$`),
           // The answer and status columns, marked as FacetDB's (a later install adopts marked
           // columns and refuses unmarked ones; uninstall drops only marked ones).
           plain(
+            "columns",
             `alter table ${table}\n${columns
               .map(([name, type]) => `  add column if not exists ${quoteIdent(name)} ${type}`)
               .join(",\n")}`,
           ),
           ...owned.map((name) =>
-            plain(`comment on column ${table}.${quoteIdent(name)} is '${OWNED_MARK}'`),
+            plain("columns", `comment on column ${table}.${quoteIdent(name)} is '${OWNED_MARK}'`),
           ),
         ]),
     // The owner of the trigger functions: no login, insert on the queue and nothing else. The
     // admin takes membership so it can hand the functions over (and can again on a later run).
-    plain(`do $$
+    plain(
+      "capture",
+      `do $$
 begin
   if not exists (select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(enqueueName)}) then
     execute format('create role %I nologin', ${quoteLiteral(enqueueName)});
   end if;
-end $$`),
-    plain(`grant ${enqueuer} to current_user`),
-    plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
-    plain(`grant insert on ${JOBS_TABLE} to ${enqueuer}`),
+end $$`,
+    ),
+    plain("capture", `grant ${enqueuer} to current_user`),
+    plain("grants", `grant usage on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
+    plain("grants", `grant insert on ${JOBS_TABLE} to ${enqueuer}`),
     // `on conflict (record_key)` reads the arbiter column, so the inserter needs select on it, and
     // its `do update` clears the claim, so it needs update on those two columns and nothing else.
     plain(
+      "grants",
       `grant select (record_key), update (claimed_at, claimed_by) on ${JOBS_TABLE} to ${enqueuer}`,
     ),
-    ...(side ? sideTableEnqueuerGrants(source, enqueuer).map(plain) : []),
+    ...(side ? sideTableEnqueuerGrants(source, enqueuer).map((text) => plain("grants", text)) : []),
     // Change capture: the functions and the trigger on the state columns only.
-    ...enqueueFunctions(side).map(plain),
+    ...enqueueFunctions(side).map((text) => plain("capture", text)),
     // A new owner must hold CREATE on the function's schema (a superuser skips that check, a
     // customer's admin on RDS, Supabase or Neon does not); granted for the hand-over and revoked.
-    plain(`grant create on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
-    plain(`alter function ${functionName("reset")}() owner to ${enqueuer}`),
-    plain(`alter function ${functionName("keep")}() owner to ${enqueuer}`),
-    ...(side ? [plain(`alter function ${SIDE_FUNCTION}() owner to ${enqueuer}`)] : []),
-    plain(`revoke create on schema ${quoteIdent(SCHEMA)} from ${enqueuer}`),
-    plain(`drop trigger if exists ${quoteIdent(triggerName(source))} on ${table}`),
+    plain("capture", `grant create on schema ${quoteIdent(SCHEMA)} to ${enqueuer}`),
+    plain("capture", `alter function ${functionName("reset")}() owner to ${enqueuer}`),
+    plain("capture", `alter function ${functionName("keep")}() owner to ${enqueuer}`),
+    ...(side ? [plain("capture", `alter function ${SIDE_FUNCTION}() owner to ${enqueuer}`)] : []),
+    plain("capture", `revoke create on schema ${quoteIdent(SCHEMA)} from ${enqueuer}`),
+    plain("capture", `drop trigger if exists ${quoteIdent(triggerName(source))} on ${table}`),
     plain(
+      "capture",
       `create trigger ${quoteIdent(triggerName(source))} before insert or update of ${stateColumns
         .map(quoteIdent)
         .join(", ")}
@@ -466,12 +564,16 @@ end $$`),
           {
             // A SCRAM verifier, never the password: nothing the server logs or keeps in an
             // error's context can give the password back (install/scram.ts).
-            text: `select set_config('${PASSWORD_SETTING}', $1, true)`,
+            text: PASSWORD_STATEMENT,
             params: [scramVerifier(options.workerPassword)],
             redacted: true,
-          },
+            purpose: "login",
+            database: "source",
+          } satisfies InstallStatement,
         ]),
-    plain(`do $$
+    plain(
+      "login",
+      `do $$
 declare
   password text := nullif(current_setting('${PASSWORD_SETTING}', true), '');
 begin
@@ -483,14 +585,16 @@ begin
   elsif password is not null then
     execute format('alter role %I with login password %L', ${quoteLiteral(workerName)}, password);
   end if;
-end $$`),
+end $$`,
+    ),
     // The least permission that works: read the key, the state columns and FacetDB's own columns
     // (an `update … where facetdb_reviewed = false` needs select on the column it tests); write
     // only FacetDB's own columns; on the queue, select and delete, plus insert
     // and update because claims are updates and a backfill enqueues (sql/jobs.ts).
-    plain(`grant usage on schema ${quoteIdent(schema)} to ${worker}`),
+    plain("grants", `grant usage on schema ${quoteIdent(schema)} to ${worker}`),
     // Side-table mode: the worker reads the source's key and state and writes only the side table.
     plain(
+      "grants",
       `grant select (${[
         source.key,
         ...stateColumns.filter((c) => c !== source.key),
@@ -501,48 +605,74 @@ end $$`),
   on ${table} to ${worker}`,
     ),
     ...(side
-      ? sideTableWorkerGrants(source, owned, worker).map(plain)
-      : [plain(`grant update (${owned.map(quoteIdent).join(", ")})\n  on ${table} to ${worker}`)]),
+      ? sideTableWorkerGrants(source, owned, worker).map((text) => plain("grants", text))
+      : [
+          plain(
+            "grants",
+            `grant update (${owned.map(quoteIdent).join(", ")})\n  on ${table} to ${worker}`,
+          ),
+        ]),
     // The policies, for a table with row-level security on: the names reach the block as settings.
     {
       text: `select set_config('${SCHEMA_SETTING}', $1, true), set_config('${TABLE_SETTING}', $2, true)`,
       params: [schema, source.table],
+      purpose: "settings",
+      database: "source",
     },
-    plain(`do $$
+    plain(
+      "grants",
+      `do $$
 begin
 ${policy("facetdb_reads", "select")}${side ? "" : `\n${policy("facetdb_writes", "update")}`}
-end $$`),
+end $$`,
+    ),
     // The creation marker, when the table has one, so `scan` can order newest first: the worker
     // reads that one column more (and cannot see a column it holds no right on, so the scan would
     // fall back to the key silently). Names reach the block as settings, as for the policies.
-    plain(`do $$
+    plain(
+      "grants",
+      `do $$
 begin
   if exists (select 1 from pg_catalog.pg_attribute a
               where a.attrelid = format('%I.%I', current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'))::regclass
                 and a.attname = ${quoteLiteral(CREATION_COLUMN)} and not a.attisdropped) then
     execute format('grant select (%I) on %I.%I to %I', ${quoteLiteral(CREATION_COLUMN)}, current_setting('${SCHEMA_SETTING}'), current_setting('${TABLE_SETTING}'), ${quoteLiteral(workerName)});
   end if;
-end $$`),
+end $$`,
+    ),
     // Side-table mode: row-level security on the side table, now that both roles exist.
-    ...(side ? sideTableSecurityStatements(source, workerName, enqueueName).map(plain) : []),
-    plain(`grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
+    ...(side
+      ? sideTableSecurityStatements(source, workerName, enqueueName).map((text) =>
+          plain("grants", text),
+        )
+      : []),
+    plain("grants", `grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
     // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
     // The logs are append-only (read and insert); the version table is read-only, so the worker can
-    // see the store is current and never migrates.
+    // see the store is current and never migrates. The queue and the projects serve the source's
+    // database whatever the store; the rest are the store's.
     ...STORE_TABLES.map((name) =>
       plain(
+        "grants",
         `grant ${appendOnly.has(name) ? "select, insert" : "select, insert, update, delete"} on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+        SOURCE_STORE_TABLES.has(name) ? "source" : "store",
       ),
     ),
     // An earlier install granted update and delete on the logs too: taken back, so an existing
     // install converges on the same rights (revoking what is not held changes nothing).
     ...STORE_APPEND_ONLY_TABLES.map((name) =>
-      plain(`revoke update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} from ${worker}`),
+      plain(
+        "grants",
+        `revoke update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} from ${worker}`,
+        "store",
+      ),
     ),
-    // A revoke takes back only grants made by the role running it (or the owner's, for the owner or
-    // a member of its role), and the driver drops the warning when it takes nothing: so the script
-    // checks, and stops with who must run it (as prune does).
-    plain(`do $$
+    // A revoke takes back only grants made by the role running it (or the owner's, for the owner
+    // or a member of its role), and the driver drops the warning when it takes nothing: so the
+    // script checks, and stops with who must run it (as prune does).
+    plain(
+      "grants",
+      `do $$
 declare
   held text;
   owner text;
@@ -561,16 +691,24 @@ begin
       `FacetDB: the worker login still holds %s on the append-only logs after the revoke; Postgres takes back only grants made by the role that runs it. Run facetdb migrate as the owner of the store's tables (%s) or a member of its role, or have the role that granted it revoke it; nothing was changed.`,
     )}, held, owner);
   end if;
-end $$`),
-    plain(`grant select on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_VERSION_TABLE)} to ${worker}`),
+end $$`,
+      "store",
+    ),
+    plain(
+      "grants",
+      `grant select on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_VERSION_TABLE)} to ${worker}`,
+      "store",
+    ),
     ...STORE_SEQUENCES.map((name) =>
       plain(
+        "grants",
         `grant usage, select on sequence ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+        "store",
       ),
     ),
     // Security invoker, so the rights above still decide what the function may touch.
     ...STORE_FUNCTIONS.map((signature) =>
-      plain(`grant execute on function ${signature} to ${worker}`),
+      plain("grants", `grant execute on function ${signature} to ${worker}`, "store"),
     ),
   ];
 }
@@ -580,14 +718,21 @@ end $$`),
  * order, each parameter shown as the literal it will be bound to, a redacted one as a placeholder.
  * A `$n` is replaced only in statements that have parameters, so a `$$` body is never touched.
  */
-export function renderSql(statements: readonly InstallStatement[]): string {
+export function renderSql(statements: readonly ScriptStatement[]): string {
   // One transaction, as `migrate` runs it: the script relies on `set local`, transaction-local
   // settings and a temp table that lives to the commit; run statement by statement in autocommit
   // it would set the placeholder as the password and lose the view's grants.
   return `begin;\n\n${statements.map(renderStatement).join(";\n\n")};\n\ncommit;\n`;
 }
 
-function renderStatement(statement: InstallStatement): string {
+/** What printing a statement reads of it: a recorded run prints the same way (uninstall's tests). */
+export type ScriptStatement = Pick<InstallStatement, "text" | "params" | "redacted">;
+
+/**
+ * One statement as the printed script shows it: its parameters written as literals, the worker
+ * password's as a comment. The engine's plan holds exactly this text, and `run` executes it.
+ */
+export function renderStatement(statement: ScriptStatement): string {
   if (statement.params.length === 0) {
     return statement.text;
   }

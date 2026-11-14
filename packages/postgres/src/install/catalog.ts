@@ -1,7 +1,7 @@
 import { OWNED_MARK } from "../polling/index.ts";
 import { SIDE_MARK, SIDE_TABLE_SCHEMA } from "../scan/index.ts";
 import { quoteLiteral, type SqlQuery, type SqlRow } from "../sql/index.ts";
-import type { InstallStatement, ProjectRef } from "./sql.ts";
+import { type InstallStatement, type ProjectRef, plain } from "./sql.ts";
 
 /**
  * What an earlier install left on a table, read from the catalog: `migrate --prune` and `uninstall`
@@ -63,23 +63,33 @@ const ALL_COLUMNS = `select a.attname as name
  where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass and a.attnum > 0 and not a.attisdropped
  order by a.attnum`;
 
+/**
+ * Why there is nothing to read: `absent` when the table or its install is not there (a prune of a
+ * source not installed yet has nothing to do), not when an install lost its key.
+ */
+export type NotInstalled = { readonly reason: string; readonly absent: boolean };
+
 /** Reads what FacetDB installed on a table, or says in plain words why there is nothing to read. */
 export async function readInstalled(
   query: SqlQuery,
   source: { readonly table: string; readonly schema?: string },
-): Promise<InstalledTable | { readonly reason: string }> {
+): Promise<InstalledTable | NotInstalled> {
   const schema = source.schema ?? "public";
   const { table } = source;
   const label = `${schema}.${table}`;
   const flag = (rows: readonly SqlRow[]) => rows[0]?.["present"] === true;
   if (!flag(await query(TABLE_PRESENT, [schema, table]))) {
-    return { reason: `${label} does not exist; there is nothing of FacetDB's on it to remove.` };
+    return {
+      reason: `${label} does not exist; there is nothing of FacetDB's on it to remove.`,
+      absent: true,
+    };
   }
   const owners = flag(await query(OWNERS_PRESENT)) ? await query(OWNER, [schema, table]) : [];
   const owner = owners[0];
   if (owner === undefined) {
     return {
       reason: `FacetDB is not installed on ${label} (facetdb.table_owners has no row for it); run migrate first, or check the source's schema and table.`,
+      absent: true,
     };
   }
   const keys = await query(PRIMARY_KEY, [schema, table]);
@@ -87,6 +97,7 @@ export async function readInstalled(
   if (keys.length !== 1 || keyRow === undefined) {
     return {
       reason: `${label} no longer has a single-column primary key, which FacetDB installed by; restore it first.`,
+      absent: false,
     };
   }
   const key = String(keyRow["name"]);
@@ -110,11 +121,6 @@ export async function readInstalled(
   };
 }
 
-/** A statement with no parameter: printed exactly as it runs. */
-export function plain(text: string): InstallStatement {
-  return { text, params: [] };
-}
-
 /**
  * Transaction-local settings as one plain statement, the values written as literals (outside any
  * `do` body, so `quoteLiteral` is enough): the `do` blocks read them with `current_setting`, and the
@@ -124,6 +130,7 @@ export function settingsStatement(
   settings: readonly (readonly [name: string, value: string])[],
 ): InstallStatement {
   return plain(
+    "settings",
     `select ${settings
       .map(([name, value]) => `set_config(${quoteLiteral(name)}, ${quoteLiteral(value)}, true)`)
       .join(", ")}`,
@@ -132,6 +139,6 @@ export function settingsStatement(
 
 /** The rules every destructive script pins for its transaction, as install does. */
 export const SCRIPT_HEADER: readonly InstallStatement[] = [
-  plain("set local standard_conforming_strings = on"),
-  plain("set local lock_timeout = '10s'"),
+  plain("settings", "set local standard_conforming_strings = on"),
+  plain("settings", "set local lock_timeout = '10s'"),
 ];

@@ -7,6 +7,8 @@ export const FACETDB_SCHEMA = "facetdb";
 export const FACETDB_PREFIX = "facetdb_";
 
 export * from "./capture/index.ts";
+// The engine the CLI calls: plans, render, run, open, doctor (DatabaseEngine).
+export * from "./engine/index.ts";
 export * from "./install/index.ts";
 export * from "./polling/index.ts";
 export * from "./scan/index.ts";

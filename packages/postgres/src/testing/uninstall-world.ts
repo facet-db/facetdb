@@ -1,17 +1,24 @@
 import type { QuestionSet } from "@facetdb/core";
 import { afterAll, afterEach, beforeAll, expect } from "vitest";
+import {
+  type MigrateSource,
+  migrate,
+  type ProjectRef,
+  type ScriptStatement,
+  type TableName,
+  type UninstallResult,
+  uninstall,
+} from "../install/index.ts";
 import type { SqlClient, SqlConnect, SqlQuery } from "../sql/index.ts";
 import { sourceIdOf } from "../store/index.ts";
-import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
-import { type MigrateSource, migrate } from "./migrate.ts";
-import type { InstallStatement, ProjectRef } from "./sql.ts";
-import { type TableName, type UninstallResult, uninstall } from "./uninstall.ts";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "./pglite.ts";
 
 /**
- * The world the `migrate --prune` and `uninstall` tests share (uninstall.test.ts,
+ * The world the `migrate --prune` and `uninstall` tests share (install/uninstall.test.ts,
  * uninstall-prune.test.ts, uninstall-purge.test.ts and uninstall-kept.test.ts, split by subject so
- * no file passes 10 s): one PGlite per test file, a `listings` table, the install, and the
- * catalog readers. Each file calls `useUninstallWorld()` once at its top.
+ * no file passes 10 s), and the engine's tests of the same scenarios (engine/):
+ * one PGlite per test file, a `listings` table, the install, and the catalog readers. Each file
+ * calls `useUninstallWorld()` once at its top.
  */
 
 export const everyType: QuestionSet = {
@@ -113,9 +120,9 @@ export async function install(
  */
 export function recording(): {
   readonly connect: SqlConnect;
-  readonly executed: InstallStatement[];
+  readonly executed: ScriptStatement[];
 } {
-  const executed: InstallStatement[] = [];
+  const executed: ScriptStatement[] = [];
   const client: SqlClient = {
     query: world.client.query,
     transaction: (work) =>

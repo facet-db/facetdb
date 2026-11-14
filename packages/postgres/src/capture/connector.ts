@@ -87,6 +87,12 @@ export type PostgresConnector = Connector & {
 
 type Parsed = ReadRow;
 
+/**
+ * The runtime connector of a table source under the worker login.
+ *
+ * @deprecated as a direct call outside this package: `postgresEngine.open` reads the table's key
+ * from the catalog and opens it.
+ */
 export function createPostgresConnector(options: PostgresConnectorOptions): PostgresConnector {
   const { source, questionSet, clock, installer, connect = connectPostgres } = options;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;

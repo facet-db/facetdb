@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { pollingInstallSql } from "../polling/index.ts";
 import { sourceIdOf } from "../store/index.ts";
-import { type ProjectRef, renderSql } from "./sql.ts";
-import { uninstall } from "./uninstall.ts";
 import {
   APP_COLUMNS,
   columns,
@@ -22,7 +20,9 @@ import {
   snapshot,
   useUninstallWorld,
   world,
-} from "./uninstall-world.ts";
+} from "../testing/index.ts";
+import { type ProjectRef, renderSql } from "./sql.ts";
+import { uninstall } from "./uninstall.ts";
 
 /**
  * `uninstall --purge` on PGlite: which decision log a purge deletes, found by the source's

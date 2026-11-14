@@ -26,13 +26,19 @@ import {
 
 /**
  * `migrate`: inspect the table, refuse what install must not touch, print the complete SQL, run it
- * in one transaction with the admin credential, and forget that credential. The command in
- * `facetdb` wraps this; the connector's `install` calls it.
+ * in one transaction with the admin credential, and forget that credential. The command in `facetdb` wraps this; the connector's `install` calls it.
+ * `draftInstall` is the first half, the inspection and the script, which the engine's
+ * `planInstall` shares.
  */
 
-/** What the caller knows about the source; the key comes from the catalog unless given. */
+/**
+ * What the caller knows about the source; the key comes from the catalog unless given.
+ *
+ * @deprecated as an export: `EngineTarget` (core) with `postgresEngine.planInstall`.
+ */
 export type MigrateSource = Omit<TableSource, "key" | "keyType"> & { readonly key?: string };
 
+/** @deprecated as an export: `EngineTarget` and `InstallOptions` (core) with `postgresEngine.planInstall`. */
 export type MigratePlan = {
   readonly source: MigrateSource;
   readonly questionSet: QuestionSet;
@@ -51,6 +57,7 @@ export type MigratePlan = {
   readonly roleSuffix?: RoleSuffix;
 };
 
+/** @deprecated as an export: `InstallOptions` (core) with `postgresEngine.planInstall`, `render` and `run`. */
 export type MigrateOptions = {
   /** The admin connection string; used for this call and not retained. */
   readonly adminUrl: string;
@@ -63,6 +70,7 @@ export type MigrateOptions = {
   readonly connect?: SqlConnect;
 };
 
+/** @deprecated as an export: the `PlanResult` of `postgresEngine.planInstall` and the `RunResult` of `run`. */
 export type MigrateResult =
   | {
       readonly ok: true;
@@ -407,45 +415,91 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   return null;
 }
 
+/** The install as planned, before anything is printed or run: `migrate`'s and the engine's. */
+export type InstallDraft =
+  | {
+      readonly ok: true;
+      /** The key column, as inspected or given. */
+      readonly key: string;
+      readonly statements: readonly InstallStatement[];
+      /** Whether the table lacked any of FacetDB's columns: false on a repeat. */
+      readonly changed: boolean;
+      /** Whether the script sets the worker role's password (created or reset). */
+      readonly workerPasswordApplied: boolean;
+      /** What the store's migrations in the script cannot settle (`rekeyNotes`). */
+      readonly notes: readonly string[];
+    }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Inspects the table with `query` and writes its install script, or says in plain words why the
+ * table must not be touched. Nothing is changed: `migrate` prints and runs the script, the engine
+ * makes its plan of it.
+ */
+export async function draftInstall(query: SqlQuery, plan: MigratePlan): Promise<InstallDraft> {
+  const inspection = await inspect(query, plan);
+  if ("missing" in inspection) {
+    const table = `${plan.source.schema ?? "public"}.${plan.source.table}`;
+    return {
+      ok: false,
+      reason: `${table} does not exist; FacetDB adds columns to a table, it does not create one.`,
+    };
+  }
+  const reason = refusal(plan, inspection);
+  if (reason !== null) {
+    return { ok: false, reason };
+  }
+  const key = inspection.primaryKey[0] as string;
+  const source: TableSource = {
+    ...plan.source,
+    key,
+    ...(inspection.keyType === undefined ? {} : { keyType: inspection.keyType }),
+  };
+  const statements = installSql(source, plan.questionSet, plan.project, {
+    sourceReaders: inspection.sourceReaders,
+    ...(plan.workerPassword === undefined ? {} : { workerPassword: plan.workerPassword }),
+    ...(plan.roleSuffix === undefined ? {} : { roleSuffix: plan.roleSuffix }),
+  });
+  const present = plan.source.storage === "side-table" ? inspection.sideColumns : inspection.marked;
+  return {
+    ok: true,
+    key,
+    statements,
+    changed: installOwnedColumns(plan.questionSet).some((name) => !present.includes(name)),
+    workerPasswordApplied: plan.workerPassword !== undefined,
+    notes: await rekeyNotes(query),
+  };
+}
+
+/**
+ * The script's own check on the logs' grants, which rolls the whole install back (`LOG_GRANTS_STATE`),
+ * as the refusal it is, in its own words; undefined for any other error. The driver's error is a
+ * boundary, read by its code.
+ */
+export function installRefusal(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error && error.code === LOG_GRANTS_STATE
+    ? error.message.replace(/^FacetDB: /, "")
+    : undefined;
+}
+
 /**
  * Inspects, refuses, prints, and only then runs the install in one transaction. The admin
  * connection is closed before this returns, whatever happened, and nothing retains it.
+ *
+ * @deprecated as an export: `postgresEngine.planInstall`, `render` and `run`.
  */
 export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
   const connect = options.connect ?? connectPostgres;
   const client = connect(options.adminUrl);
   try {
     const { plan } = options;
-    const inspection = await inspect(client.query, plan);
-    if ("missing" in inspection) {
-      const table = `${plan.source.schema ?? "public"}.${plan.source.table}`;
-      return {
-        ok: false,
-        reason: `${table} does not exist; FacetDB adds columns to a table, it does not create one.`,
-      };
+    const draft = await draftInstall(client.query, plan);
+    if (!draft.ok) {
+      return draft;
     }
-    const reason = refusal(plan, inspection);
-    if (reason !== null) {
-      return { ok: false, reason };
-    }
-    const key = inspection.primaryKey[0] as string;
-    const source: TableSource = {
-      ...plan.source,
-      key,
-      ...(inspection.keyType === undefined ? {} : { keyType: inspection.keyType }),
-    };
-    const statements = installSql(source, plan.questionSet, plan.project, {
-      sourceReaders: inspection.sourceReaders,
-      ...(plan.workerPassword === undefined ? {} : { workerPassword: plan.workerPassword }),
-      ...(plan.roleSuffix === undefined ? {} : { roleSuffix: plan.roleSuffix }),
-    });
+    const { key, statements, changed, workerPasswordApplied, notes } = draft;
     const sql = renderSql(statements);
     options.print(sql);
-    const present =
-      plan.source.storage === "side-table" ? inspection.sideColumns : inspection.marked;
-    const changed = installOwnedColumns(plan.questionSet).some((name) => !present.includes(name));
-    const workerPasswordApplied = plan.workerPassword !== undefined;
-    const notes = await rekeyNotes(client.query);
     if (options.dryRun === true) {
       return {
         ok: true,
@@ -481,8 +535,9 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
         return { ok: false, reason: error.message };
       }
       // The script's own check on the logs' grants rolled everything back: a refusal, in its words.
-      if (error instanceof Error && "code" in error && error.code === LOG_GRANTS_STATE) {
-        return { ok: false, reason: error.message.replace(/^FacetDB: /, "") };
+      const refused = installRefusal(error);
+      if (refused !== undefined) {
+        return { ok: false, reason: refused };
       }
       throw error;
     }

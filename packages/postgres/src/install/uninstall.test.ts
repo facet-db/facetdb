@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import type { SqlClient } from "../sql/index.ts";
-import { prune } from "./prune.ts";
-import { renderSql } from "./sql.ts";
 import {
   APP_COLUMNS,
   columns,
@@ -21,7 +19,9 @@ import {
   useUninstallWorld,
   withoutCategory,
   world,
-} from "./uninstall-world.ts";
+} from "../testing/index.ts";
+import { prune } from "./prune.ts";
+import { renderSql } from "./sql.ts";
 
 /**
  * `uninstall` on PGlite: these statements destroy data on purpose, so every test reads the

@@ -14,6 +14,16 @@ export const RESERVE_USAGE_FUNCTION = "facetdb.reserve_usage";
 /** The function with its argument types, as `grant`, `revoke` and `drop function` name it. */
 export const RESERVE_USAGE_FUNCTION_SIGNATURE = `${RESERVE_USAGE_FUNCTION}(text, text, bigint, bigint, bigint, bigint)`;
 
+/**
+ * Migration 1's `facetdb.projects`, named so the install can tell it apart: `table_owners`
+ * references it, so the source's database needs it whatever the store (install/sql.ts).
+ */
+export const PROJECTS_TABLE_SQL = `create table if not exists facetdb.projects (
+  id text primary key,
+  name text not null,
+  created_at timestamptz not null default now()
+)`;
+
 const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -23,11 +33,7 @@ const MIGRATIONS: readonly Migration[] = [
   key text primary key,
   value text not null
 )`,
-      `create table if not exists facetdb.projects (
-  id text primary key,
-  name text not null,
-  created_at timestamptz not null default now()
-)`,
+      PROJECTS_TABLE_SQL,
       `create table if not exists facetdb.sources (
   id text primary key,
   project_id text not null references facetdb.projects (id),
