@@ -1,5 +1,35 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+export {
+  DEFAULT_SQL_MODE,
+  MARIADB_SQL_MODE,
+  type ScriptedColumn,
+  type ScriptedDatabase,
+  type ScriptedRights,
+  type ScriptedTable,
+  type ScriptedTrigger,
+  scriptedDatabase,
+} from "./catalog.ts";
+export {
+  ADMIN_URL,
+  ENGINE_DEPS,
+  freshListings,
+  installedListings,
+  LISTINGS_JOBS,
+  LISTINGS_PROJECT,
+  LISTINGS_QUESTIONS,
+  LISTINGS_TABLE,
+  LISTINGS_TRIGGERS,
+  listingsTarget,
+} from "./listings.ts";
+export {
+  type Answer,
+  mysqlError,
+  type RecordingDriver,
+  recordingDriver,
+  type Sent,
+} from "./recording.ts";
+
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {
   MYSQL_URL: "a MySQL 8 server; scripts/test-databases.sh up mysql starts one",
