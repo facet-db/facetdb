@@ -9,9 +9,14 @@ import type {
 import { createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { sourceIdOf } from "@facetdb/postgres";
-import { createMemoryStore } from "@facetdb/postgres/testing";
+import {
+  createMemoryStore,
+  freshPglite,
+  type PGlite,
+  resetPglite,
+} from "@facetdb/postgres/testing";
 import { createCheckStore, createServer, onlyRecord } from "@facetdb/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createClient,
   FacetdbApiError,
@@ -83,18 +88,29 @@ class ScriptedProvider implements ModelProvider {
   }
 }
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let pglite: PGlite;
 const closers: (() => Promise<void>)[] = [];
+
+beforeAll(async () => {
+  pglite = await freshPglite();
+});
 
 afterEach(async () => {
   for (const close of closers.splice(0)) {
     await close();
   }
+  await resetPglite(pglite);
+});
+
+afterAll(async () => {
+  await pglite.close();
 });
 
 /** The server app over the real FacetDB store (PGlite), called in-process through the SDK's `fetch`. */
 async function rig() {
   const clock = new FakeClock(1_700_000_000_000);
-  const memory = await createMemoryStore(clock);
+  const memory = await createMemoryStore(clock, pglite);
   closers.push(() => memory.close());
   const { store } = memory;
   await store.ensureProject({ id: PROJECT, name: "one" });

@@ -1,6 +1,6 @@
 import type { QuestionSet } from "@facetdb/core";
-import { afterEach, describe, expect, it } from "vitest";
-import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import { type MigrateSource, migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
 import type { ProjectRef } from "./sql.ts";
@@ -23,13 +23,19 @@ const titleOnly: QuestionSet = { ...both, read: ["title"] };
 
 const project: ProjectRef = { id: "proj_listings", name: "Listings" };
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
 let world: PgliteWorld;
-const worlds: PgliteWorld[] = [];
+
+beforeAll(async () => {
+  world = await createPgliteWorld();
+});
 
 afterEach(async () => {
-  for (const w of worlds.splice(0)) {
-    await w.close();
-  }
+  await resetPgliteWorld(world);
+});
+
+afterAll(async () => {
+  await world.close();
 });
 
 const choice = (storeProbabilities: boolean): QuestionSet["questions"][number] => ({
@@ -63,8 +69,6 @@ async function installed(
   source: MigrateSource = { table: "listings" },
   questionSet: QuestionSet = both,
 ): Promise<void> {
-  world = await createPgliteWorld();
-  worlds.push(world);
   await world.client.query(
     `create table public.listings (id serial primary key, title text, description text, created_at timestamptz default now())`,
   );

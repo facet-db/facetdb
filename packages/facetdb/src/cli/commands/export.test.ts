@@ -1,7 +1,12 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { createStore, type SqlConnect, type Store, sourceIdOf } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  resetPgliteWorld,
+  TEST_SECRET,
+} from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, score } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
 import { questionSetOf } from "./database.ts";
@@ -50,8 +55,16 @@ let pageLimits: number[];
 /** The files `--out` wrote. */
 let files: Map<string, string>;
 
-beforeEach(async () => {
+// One engine for the file, emptied after every test: a boot per test cost 440 ms.
+beforeAll(async () => {
   world = await createPgliteWorld();
+});
+
+afterAll(async () => {
+  await world.close();
+});
+
+beforeEach(async () => {
   store = await createStore({ pglite: world.db, secret: TEST_SECRET, clock: new FakeClock(0) });
   pageLimits = [];
   files = new Map();
@@ -59,7 +72,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await store.close();
-  await world.close();
+  await resetPgliteWorld(world);
 });
 
 function run(argv: readonly string[], env: Record<string, string> = defaultEnv()) {

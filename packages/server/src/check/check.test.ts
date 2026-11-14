@@ -11,8 +11,13 @@ import type {
 import { createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { type ApiKeyStore, sourceIdOf } from "@facetdb/postgres";
-import { createMemoryStore } from "@facetdb/postgres/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  createMemoryStore,
+  freshPglite,
+  type PGlite,
+  resetPglite,
+} from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
 import { CHECK_POLL_MS, CHECK_WAIT_MS, createCheckService } from "./service.ts";
@@ -87,12 +92,26 @@ class ScriptedProvider implements ModelProvider {
   }
 }
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let pglite: PGlite;
 const closers: (() => Promise<void>)[] = [];
 
-afterEach(async () => {
+beforeAll(async () => {
+  pglite = await freshPglite();
+});
+
+/** Closes the test's stores and empties the engine, as a fresh one would start. */
+async function emptyEngine(): Promise<void> {
   for (const close of closers.splice(0)) {
     await close();
   }
+  await resetPglite(pglite);
+}
+
+afterEach(emptyEngine);
+
+afterAll(async () => {
+  await pglite.close();
 });
 
 /** The real key store, remembering which secrets `verify` was asked about. */
@@ -118,7 +137,7 @@ async function rig(
   outage?: OutagePolicy,
 ) {
   const clock = new FakeClock(1_700_000_000_000);
-  const memory = await createMemoryStore(clock);
+  const memory = await createMemoryStore(clock, pglite);
   closers.push(() => memory.close());
   const { store } = memory;
   await store.ensureProject({ id: PROJECT, name: "one" });
@@ -416,6 +435,8 @@ describe("POST /v1/check when the answer does not come", () => {
       expect(again.status).toBe(200);
       expect(again.json).toEqual({ id: "T-1042", status: verdict, answers: {} });
       expect(t.provider.requests).toHaveLength(1);
+      // The next verdict starts from an empty store, as on a fresh engine.
+      await emptyEngine();
     }
   });
 

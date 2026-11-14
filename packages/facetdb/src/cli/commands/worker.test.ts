@@ -8,9 +8,14 @@ import {
   type SqlConnect,
   type Store,
 } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  resetPgliteWorld,
+  TEST_SECRET,
+} from "@facetdb/postgres/testing";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import type { HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
@@ -86,8 +91,16 @@ let poolsAsked: {
   readonly clients: { readonly url: string; readonly max: number | undefined }[];
 };
 
-beforeEach(async () => {
+// One engine for the file, emptied after every test: a boot per test cost 440 ms.
+beforeAll(async () => {
   world = await createPgliteWorld();
+});
+
+afterAll(async () => {
+  await world.close();
+});
+
+beforeEach(async () => {
   clock = new SteppedClock(START);
   store = await createStore({ pglite: world.db, secret: TEST_SECRET, clock });
   provider = createFakeProvider({ defaults: { noul: 0.01 } });
@@ -118,7 +131,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await store.close();
-  await world.close();
+  await resetPgliteWorld(world);
 });
 
 function run(

@@ -1,6 +1,6 @@
 import { type SqlConnect, sourceIdOf, uninstall } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { runInProcess, runProgram } from "../program.ts";
 import { COMMANDS } from "./index.ts";
@@ -31,10 +31,18 @@ const LISTINGS: SourceInput = {
 
 const config: ProjectConfig = facetdb({ model: "jev-1.14.0", sources: [LISTINGS] });
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
 let world: PgliteWorld;
 
-beforeEach(async () => {
+beforeAll(async () => {
   world = await createPgliteWorld();
+});
+
+afterAll(async () => {
+  await world.close();
+});
+
+beforeEach(async () => {
   await world.client.query(
     "create table public.listings (id text primary key, title text not null, description text)",
   );
@@ -42,7 +50,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await world.close();
+  await resetPgliteWorld(world);
 });
 
 const q = (text: string, params?: readonly unknown[]) => world.client.query(text, params);

@@ -1,8 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import type { QuestionSet } from "@facetdb/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlClient, SqlConnect } from "../sql/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import { type MigratePlan, type MigrateResult, migrate } from "./migrate.ts";
 import { ENQUEUE_ROLE, installSql, queueKeyPrefix, renderSql, WORKER_ROLE } from "./sql.ts";
 
@@ -58,13 +58,19 @@ const everyType: QuestionSet = {
   thresholds: {},
 };
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
 let world: PgliteWorld;
-const worlds: PgliteWorld[] = [];
+
+beforeAll(async () => {
+  world = await createPgliteWorld();
+});
 
 afterEach(async () => {
-  for (const w of worlds.splice(0)) {
-    await w.close();
-  }
+  await resetPgliteWorld(world);
+});
+
+afterAll(async () => {
+  await world.close();
 });
 
 async function listingsTable(
@@ -74,8 +80,6 @@ async function listingsTable(
     readonly compositeKey?: boolean;
   } = {},
 ): Promise<PgliteWorld> {
-  world = await createPgliteWorld();
-  worlds.push(world);
   const name = options.table ?? "listings";
   const composite = options.compositeKey === true;
   const key = composite ? "id integer, region text" : "id serial primary key";
@@ -734,8 +738,6 @@ describe("migrate on PGlite", () => {
   });
 
   it("refuses a generated primary key, a FacetDB role with memberships, and a name holding the body tag", async () => {
-    world = await createPgliteWorld();
-    worlds.push(world);
     await world.client.query(
       `create table public.listings (n integer, id integer generated always as (n * 2) stored primary key, title text, description text)`,
     );
@@ -745,6 +747,8 @@ describe("migrate on PGlite", () => {
       expect(generated.result.reason).toContain("generated");
     }
 
+    // Each case starts from an empty cluster, as on a fresh engine.
+    await resetPgliteWorld(world);
     await listingsTable();
     await world.client.query(`create role facetdb_worker login`);
     await world.client.query(`grant pg_read_all_data to facetdb_worker`);
@@ -754,6 +758,7 @@ describe("migrate on PGlite", () => {
       expect(member.result.reason).toContain("pg_read_all_data");
     }
 
+    await resetPgliteWorld(world);
     await listingsTable({ table: "odd$fdb$name" });
     const tagged = await run({ source: { table: "odd$fdb$name" } });
     expect(tagged.result).toMatchObject({ ok: false });

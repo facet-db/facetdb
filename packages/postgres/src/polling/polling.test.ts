@@ -1,9 +1,9 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { Connector, QuestionSet, RecordDecision, RecordKey, StateValue } from "@facetdb/core";
 import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlClient } from "../sql/index.ts";
-import { freshPglite } from "../testing/index.ts";
+import { freshPglite, resetPglite } from "../testing/index.ts";
 import { createPollingConnector, type PollingConnector, pollingInstallSql } from "./index.ts";
 import { pgliteClient } from "./pglite-client.ts";
 
@@ -52,7 +52,7 @@ class World {
   }
 
   async create(): Promise<this> {
-    this.db = await freshPglite();
+    this.db = engine;
     await this.db.exec(
       `create table listings (id ${this.keyType} primary key, title text, body text, price numeric(10,2), updated_at timestamptz not null default now())`,
     );
@@ -143,13 +143,25 @@ class World {
     return rows.map((row) => row.column_name);
   }
 
+  /** Closes the connectors and empties the file's engine for the next test. */
   async close(): Promise<void> {
     for (const connector of this.open.splice(0)) {
       await connector.close();
     }
-    await this.db.close();
+    await resetPglite(this.db);
   }
 }
+
+/** One engine for the file, emptied after every test by `World.close`: a boot cost 440 ms. */
+let engine: PGlite;
+
+beforeAll(async () => {
+  engine = await freshPglite();
+});
+
+afterAll(async () => {
+  await engine.close();
+});
 
 const worlds: World[] = [];
 async function newWorld(options?: WorldOptions): Promise<World> {

@@ -1,6 +1,6 @@
 import type { QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlClient, SqlConnect } from "../sql/index.ts";
 import {
   createStore,
@@ -13,7 +13,12 @@ import {
   StoreNotInstalledError,
   sourceIdOf,
 } from "../store/index.ts";
-import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "../testing/index.ts";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  resetPgliteWorld,
+  TEST_SECRET,
+} from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 
 /**
@@ -32,16 +37,23 @@ const listings: QuestionSet = {
   thresholds: {},
 };
 
-const worlds: PgliteWorld[] = [];
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let shared: PgliteWorld;
+
+beforeAll(async () => {
+  shared = await createPgliteWorld();
+});
+
 afterEach(async () => {
-  for (const w of worlds.splice(0)) {
-    await w.close();
-  }
+  await resetPgliteWorld(shared);
+});
+
+afterAll(async () => {
+  await shared.close();
 });
 
 async function installed(): Promise<PgliteWorld> {
-  const world = await createPgliteWorld();
-  worlds.push(world);
+  const world = shared;
   await world.client.query(
     `create table public.listings (id serial primary key, title text, description text)`,
   );
@@ -384,8 +396,7 @@ describe("the install script and the store", () => {
   });
 
   it("createStore still migrates a database the old install left, when the login may", async () => {
-    const world = await createPgliteWorld();
-    worlds.push(world);
+    const world = shared;
     const store = await createStore({
       url: "postgres://admin@localhost/store",
       pgHost: undefined,

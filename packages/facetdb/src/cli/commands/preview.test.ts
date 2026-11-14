@@ -1,8 +1,13 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
 import { createStore, type SqlConnect } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  resetPgliteWorld,
+  TEST_SECRET,
+} from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
 import { COMMANDS } from "./index.ts";
@@ -41,8 +46,16 @@ function configWith(
 
 let world: PgliteWorld;
 
-beforeEach(async () => {
+// One engine for the file, emptied after every test: a boot per test cost 440 ms.
+beforeAll(async () => {
   world = await createPgliteWorld();
+});
+
+afterAll(async () => {
+  await world.close();
+});
+
+beforeEach(async () => {
   await world.client.query(
     `create table public.listings (
        id text primary key, title text not null, created_at timestamptz not null default now())`,
@@ -56,7 +69,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await world.close();
+  await resetPgliteWorld(world);
 });
 
 async function tableSnapshot(): Promise<string> {

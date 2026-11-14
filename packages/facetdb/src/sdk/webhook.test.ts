@@ -1,7 +1,7 @@
 import type { ActionRecord } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { migrateStore, pgliteClient } from "@facetdb/postgres";
-import { freshPglite } from "@facetdb/postgres/testing";
+import { freshPglite, type PGlite, resetPglite } from "@facetdb/postgres/testing";
 import {
   createOutbox,
   createWebhookAction,
@@ -9,19 +9,26 @@ import {
   WEBHOOK_SIGNATURE_HEADER,
   type WebhookFetch,
 } from "@facetdb/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { signWebhook, verifyWebhook } from "./webhook.ts";
 
 const SECRET = "whsec-sender-test";
 const START = 1_700_000_000_000;
 const ENDPOINT = "https://hooks.example.com/facetdb";
 
-const closers: (() => Promise<void>)[] = [];
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let pglite: PGlite;
+
+beforeAll(async () => {
+  pglite = await freshPglite();
+});
 
 afterEach(async () => {
-  for (const close of closers.splice(0)) {
-    await close();
-  }
+  await resetPglite(pglite);
+});
+
+afterAll(async () => {
+  await pglite.close();
 });
 
 type Sent = { headers: Record<string, string>; body: string };
@@ -29,8 +36,6 @@ type Sent = { headers: Record<string, string>; body: string };
 /** The real sender (the outbox and the webhook action of @facetdb/server) over PGlite, capturing what it sends. */
 async function sender() {
   const clock = new FakeClock(START);
-  const pglite = await freshPglite();
-  closers.push(() => pglite.close());
   const client = pgliteClient(pglite);
   // The outbox table is the store's: made by its migrations, never by the outbox.
   await migrateStore(client);

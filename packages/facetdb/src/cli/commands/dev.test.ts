@@ -4,8 +4,8 @@ import { join } from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
 import { FakeClock } from "@facetdb/core/testing";
 import { pgliteClient } from "@facetdb/postgres";
-import { freshPglite } from "@facetdb/postgres/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { freshPglite, resetPglite } from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { diskEmbedded } from "../embedded.ts";
 import type { EmbeddedDatabases } from "../program.ts";
@@ -37,25 +37,40 @@ const config: ProjectConfig = facetdb({
   ],
 });
 
-/** One PGlite per directory, kept open across the command's opens and closes, as a disk would. */
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let engine: PGlite;
+
+beforeAll(async () => {
+  engine = await freshPglite();
+});
+
+afterAll(async () => {
+  await engine.close();
+});
+
+/**
+ * The directory's database, kept open across the command's opens and closes, as a disk would: the
+ * file's engine, which a wipe empties as deleting the directory would. These tests use one
+ * directory, so one engine serves it.
+ */
 class KeptDatabases implements EmbeddedDatabases {
-  readonly databases = new Map<string, PGlite>();
+  dir: string | undefined;
   readonly calls: string[] = [];
 
   async open(dir: string) {
     this.calls.push(`open ${dir}`);
-    let pglite = this.databases.get(dir);
-    if (pglite === undefined) {
-      pglite = await freshPglite();
-      this.databases.set(dir, pglite);
+    if (this.dir !== undefined && this.dir !== dir) {
+      throw new Error(`the test's embedded databases keep one directory, ${this.dir}, not ${dir}`);
     }
-    return { pglite, close: () => Promise.resolve() };
+    this.dir = dir;
+    return { pglite: engine, close: () => Promise.resolve() };
   }
 
   async wipe(dir: string) {
     this.calls.push(`wipe ${dir}`);
-    await this.databases.get(dir)?.close();
-    this.databases.delete(dir);
+    if (this.dir === dir) {
+      await resetPglite(engine);
+    }
   }
 
   /** The test's own door into a directory's database, as `psql` would be. */
@@ -63,12 +78,6 @@ class KeptDatabases implements EmbeddedDatabases {
     const { pglite } = await this.open(dir);
     this.calls.pop();
     return pgliteClient(pglite).query(sql);
-  }
-
-  async closeAll() {
-    for (const pglite of this.databases.values()) {
-      await pglite.close();
-    }
   }
 }
 
@@ -79,7 +88,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await embedded.closeAll();
+  await resetPglite(engine);
 });
 
 function run(argv: readonly string[], deps: { readonly embedded?: EmbeddedDatabases } = {}) {

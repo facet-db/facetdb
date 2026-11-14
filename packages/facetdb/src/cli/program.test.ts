@@ -1,6 +1,6 @@
 import type { SqlConnect } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../config/index.ts";
 import { COMMANDS } from "./commands/index.ts";
 import {
@@ -40,13 +40,21 @@ const config: ProjectConfig = facetdb({
 
 let world: PgliteWorld;
 
-beforeEach(async () => {
+// One engine for the file, emptied after every test: a boot per test cost 440 ms.
+beforeAll(async () => {
   world = await createPgliteWorld();
+});
+
+afterAll(async () => {
+  await world.close();
+});
+
+beforeEach(async () => {
   await world.client.query("create table public.listings (id text primary key, title text)");
 });
 
 afterEach(async () => {
-  await world.close();
+  await resetPgliteWorld(world);
 });
 
 function run(

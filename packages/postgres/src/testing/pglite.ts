@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { pgliteClient } from "../polling/index.ts";
+import { pgliteClient, unlistenAll } from "../polling/index.ts";
 import type { SqlClient, SqlConnect } from "../sql/index.ts";
 
 /**
@@ -63,6 +63,67 @@ export async function freshPglite(): Promise<PGlite> {
   const db = new PGlite({ loadDataDir: await templateDataDir() });
   await db.waitReady;
   return db;
+}
+
+/**
+ * Drops what a test left in the cluster: every schema but the system ones (`public` with them,
+ * then recreated as initdb leaves it), and every role a test or an install created.
+ */
+const EMPTY_CLUSTER = `
+do $$
+declare
+  schemas text;
+  roles text;
+begin
+  select string_agg(format('%I', nspname), ', ') into schemas
+    from pg_namespace
+    where nspname not in ('pg_catalog', 'information_schema', 'pg_toast')
+      and nspname not like 'pg\\_temp\\_%' and nspname not like 'pg\\_toast\\_temp\\_%';
+  if schemas is not null then
+    execute 'drop schema ' || schemas || ' cascade';
+  end if;
+  -- initdb's roles (the bootstrap superuser and the pg_* roles) all sit below FirstNormalObjectId.
+  select string_agg(format('%I', rolname), ', ') into roles from pg_roles where oid >= 16384;
+  if roles is not null then
+    execute 'drop owned by ' || roles || ' cascade';
+    execute 'drop role ' || roles;
+  end if;
+end
+$$;
+create schema public authorization pg_database_owner;
+grant usage on schema public to public;
+comment on schema public is 'standard public schema';
+`;
+
+/**
+ * Returns an engine to the empty cluster it booted as, without a reboot (a boot is 440 ms, this
+ * 3 ms empty and about 20 after an install). It ends a transaction a failed test left open
+ * (first: an unlisten inside an aborted transaction throws), lets go of every listener the
+ * `pgliteClient`s over it registered, discards the session (role, settings, prepared statements,
+ * temporary tables, `LISTEN`s), then drops every user schema and role; sequences go with their
+ * schemas, so a new `serial` starts at 1 again. A file boots one engine in `beforeAll` and resets
+ * it `afterEach`.
+ *
+ * Known limits (no FacetDB SQL meets them; a test that does cleans up after itself):
+ * - default privileges shared between two roles (`alter default privileges for role a … to b`)
+ *   make `drop owned by … cascade` fail with "could not find tuple for default ACL" and wedge the
+ *   file's engine: a test that needs them revokes them itself;
+ * - a custom `facetdb.*` setting a test set reads '' after the reset, where a fresh engine raises
+ *   "unrecognized configuration parameter" (Postgres keeps the placeholder);
+ * - database-level settings, grants and the database's comment survive the reset;
+ * - only listeners registered through `pgliteClient` are released: a test calling `db.listen`
+ *   directly unlistens itself.
+ */
+export async function resetPglite(db: PGlite): Promise<void> {
+  await db.exec("rollback");
+  await unlistenAll(db);
+  await db.exec("discard all");
+  await db.exec(EMPTY_CLUSTER);
+}
+
+/** `resetPglite` for a world: its client and `connect` keep working over the emptied engine. */
+export async function resetPgliteWorld(world: PgliteWorld): Promise<void> {
+  await resetPglite(world.db);
 }
 
 /**

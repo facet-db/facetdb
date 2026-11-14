@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import type { SqlClient, SqlQuery } from "./client.ts";
 import {
   CLAIM_LEASE_MS,
@@ -11,14 +11,22 @@ import {
 
 /** The queue's SQL on PGlite: what each statement does to the rows, and how many it names. */
 
-let world: PgliteWorld | undefined;
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let world: PgliteWorld;
+
+beforeAll(async () => {
+  world = await createPgliteWorld();
+});
+
 afterEach(async () => {
-  await world?.close();
-  world = undefined;
+  await resetPgliteWorld(world);
+});
+
+afterAll(async () => {
+  await world.close();
 });
 
 async function queue(): Promise<PgliteWorld> {
-  world = await createPgliteWorld();
   for (const statement of jobsTableSql()) {
     await world.client.query(statement);
   }

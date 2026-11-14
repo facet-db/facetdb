@@ -1,27 +1,32 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { AnswerEntry, HumanEntry, LogEntry } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
-import { freshPglite } from "../testing/index.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { freshPglite, resetPglite } from "../testing/index.ts";
 import { createStore, type Store } from "./store.ts";
 
 const SECRET = "a-long-random-secret-for-tests-only";
 
-const opened: PGlite[] = [];
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let pglite: PGlite;
 const stores: Store[] = [];
+
+beforeAll(async () => {
+  pglite = await freshPglite();
+});
 
 afterEach(async () => {
   for (const store of stores.splice(0)) {
     await store.close();
   }
-  for (const db of opened.splice(0)) {
-    await db.close();
-  }
+  await resetPglite(pglite);
+});
+
+afterAll(async () => {
+  await pglite.close();
 });
 
 async function newStore(): Promise<Store> {
-  const pglite = await freshPglite();
-  opened.push(pglite);
   const store = await createStore({ pglite, secret: SECRET, clock: new FakeClock(0) });
   stores.push(store);
   return store;

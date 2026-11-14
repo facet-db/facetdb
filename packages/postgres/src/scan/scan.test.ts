@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import type { QuestionSet, ScanCursor } from "@facetdb/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   installSql,
   type MigratePlan,
@@ -9,7 +9,7 @@ import {
   renderSql,
 } from "../install/index.ts";
 import type { SqlQuery } from "../sql/index.ts";
-import { createPgliteWorld, type PgliteWorld } from "../testing/index.ts";
+import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import { createScan, type ScanOptions } from "./scan.ts";
 import { answerTarget, sideTableName, sideViewName } from "./side-table.ts";
 
@@ -38,17 +38,24 @@ const listings: QuestionSet = {
 
 const project = { id: "proj_listings", name: "Listings" };
 
-const worlds: PgliteWorld[] = [];
-afterEach(async () => {
-  for (const w of worlds.splice(0)) {
-    await w.close();
-  }
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let shared: PgliteWorld;
+
+beforeAll(async () => {
+  shared = await createPgliteWorld();
 });
 
+afterEach(async () => {
+  await resetPgliteWorld(shared);
+});
+
+afterAll(async () => {
+  await shared.close();
+});
+
+/** The file's engine, as the previous test left it emptied. */
 async function world(): Promise<PgliteWorld> {
-  const w = await createPgliteWorld();
-  worlds.push(w);
-  return w;
+  return shared;
 }
 
 /** Decision-log rows in the table the install made (its checks want a model and answers, or a human). */
@@ -757,6 +764,8 @@ describe("side-table install", () => {
       expect(side.reason).toContain("inline install");
     }
 
+    // Each case starts from an empty cluster, as on a fresh engine.
+    await resetPgliteWorld(w);
     const w2 = await world();
     await seed(w2, 1);
     await migrateOn(w2);
@@ -766,6 +775,7 @@ describe("side-table install", () => {
       expect(inline.reason).toContain("side-table mode");
     }
 
+    await resetPgliteWorld(w2);
     const w3 = await world();
     await seed(w3, 1);
     await w3.client.query(`create schema facetdb`);

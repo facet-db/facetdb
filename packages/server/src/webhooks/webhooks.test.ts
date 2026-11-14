@@ -12,8 +12,8 @@ import type {
 import { configureAction, createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createStore, migrateStore, pgliteClient, sourceIdOf } from "@facetdb/postgres";
-import { freshPglite, TEST_SECRET } from "@facetdb/postgres/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { freshPglite, type PGlite, resetPglite, TEST_SECRET } from "@facetdb/postgres/testing";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
 import { createCheckService } from "../check/service.ts";
@@ -224,22 +224,29 @@ class ScriptedProvider implements ModelProvider {
   }
 }
 
+/** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
+let pglite: PGlite;
 const closers: (() => Promise<void>)[] = [];
+
+beforeAll(async () => {
+  pglite = await freshPglite();
+});
 
 afterEach(async () => {
   for (const close of closers.splice(0)) {
     await close();
   }
+  await resetPglite(pglite);
+});
+
+afterAll(async () => {
+  await pglite.close();
 });
 
 async function rig() {
   const clock = new FakeClock(START);
-  const pglite = await freshPglite();
   const store = await createStore({ pglite, secret: TEST_SECRET, clock });
-  closers.push(async () => {
-    await store.close();
-    await pglite.close();
-  });
+  closers.push(() => store.close());
   const client = pgliteClient(pglite);
   await store.ensureProject({ id: PROJECT, name: "one" });
   await store.ensureSource({ projectId: PROJECT, name: SOURCE, kind: "api" });
