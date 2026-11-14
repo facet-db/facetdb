@@ -99,6 +99,22 @@ describe("the scheme table", () => {
     },
   );
 
+  it.each(["mysql://u:p@127.0.0.1:3306/app", "mariadb://u:p@127.0.0.1:3307/app"])(
+    "%s is read by the MySQL engine main.ts registers",
+    async (url) => {
+      const { engines } = processDeps();
+      expect(readsUrl(engines, url)).toBe(true);
+      const engine = await engineFor(engines, url);
+      expect(engine.name).toBe("mysql");
+      expect(engine.schemes).toEqual(["mysql", "mariadb"]);
+      expect(engine.capabilities).toMatchObject({
+        multipleWorkers: true,
+        pushWakeup: false,
+        sideTable: false,
+      });
+    },
+  );
+
   it("says which schemes an engine is registered for without loading any", () => {
     const counted = entry("postgres", ["postgres", "postgresql"]);
     expect(readsUrl([counted.entry], "postgres://db.example.com/app")).toBe(true);

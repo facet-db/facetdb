@@ -40,7 +40,8 @@ import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
  * run and never kept. The database engines a source's scheme picks from are built here: the
  * Postgres engine over the same driver and pools as the store, judged with the environment's
  * `PGHOST`, and the polling engine `connector: "polling"` picks over the Postgres dialect, the same
- * driver and the same `PGHOST`, and the SQLite engine over node:sqlite; later tasks append theirs.
+ * driver and the same `PGHOST`, the SQLite engine over node:sqlite and the MySQL engine over
+ * mysql2; later tasks append theirs.
  */
 
 const clock: Clock = {
@@ -162,6 +163,13 @@ export function processDeps(): CliDeps {
       lazyEngine("sqlite", async () => {
         const { createSqliteEngine } = await import("@facetdb/sqlite");
         return createSqliteEngine();
+      }),
+      // MySQL 8 and MariaDB 10.5 and later (mysql:, mariadb:) through mysql2: one admin connection
+      // per plan or run, a pool under the worker login for the connector, polling the jobs table
+      // every second.
+      lazyEngine("mysql", async () => {
+        const { createMysqlEngine } = await import("@facetdb/mysql");
+        return createMysqlEngine();
       }),
     ],
     connect,

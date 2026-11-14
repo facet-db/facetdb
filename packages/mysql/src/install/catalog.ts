@@ -247,26 +247,66 @@ export async function readViews(
   );
 }
 
+/**
+ * `table_type` of a table (`BASE TABLE`, `VIEW`), or undefined when there is none the login can see:
+ * `information_schema` lists only what the account has some privilege on, so under the worker login
+ * (the connector's `open`, doctor) an unseen table reads as missing.
+ */
+export async function readTableType(
+  query: MysqlQuery,
+  schema: string,
+  table: string,
+): Promise<string | undefined> {
+  return optionalText((await query(TABLE_TYPE, [schema, table]))[0]?.["type"]);
+}
+
+/** The primary key's columns in key order; none when the table has no primary key. */
+export async function readPrimaryKey(
+  query: MysqlQuery,
+  schema: string,
+  table: string,
+): Promise<readonly string[]> {
+  return names(await query(PRIMARY_KEY, [schema, table]));
+}
+
+/** The columns of a table the login can see, in table order (`CatalogColumn`). */
+export async function readColumns(
+  query: MysqlQuery,
+  schema: string,
+  table: string,
+): Promise<readonly CatalogColumn[]> {
+  return (await query(COLUMNS, [schema, table])).map(column);
+}
+
+/** Which of FacetDB's two tables (the queue, the marker) the schema has, as the login sees them. */
+export async function readFacetdbTables(
+  query: MysqlQuery,
+  schema: string,
+): Promise<{ readonly jobs: boolean; readonly owners: boolean }> {
+  const facetdb = names(await query(FACETDB_TABLES, [schema, JOBS_TABLE, OWNERS_TABLE]));
+  return { jobs: facetdb.includes(JOBS_TABLE), owners: facetdb.includes(OWNERS_TABLE) };
+}
+
 /** The table as the plans read it, and FacetDB's objects in its schema. Nothing is changed. */
 export async function readCatalog(
   query: MysqlQuery,
   schema: string,
   table: string,
 ): Promise<Catalog> {
-  const tableType = optionalText((await query(TABLE_TYPE, [schema, table]))[0]?.["type"]);
+  const tableType = await readTableType(query, schema, table);
   const present = tableType !== undefined;
-  const facetdb = names(await query(FACETDB_TABLES, [schema, JOBS_TABLE, OWNERS_TABLE]));
-  const jobsPresent = facetdb.includes(JOBS_TABLE);
-  const ownersPresent = facetdb.includes(OWNERS_TABLE);
+  const facetdb = await readFacetdbTables(query, schema);
+  const jobsPresent = facetdb.jobs;
+  const ownersPresent = facetdb.owners;
   return {
     schema,
     tableType,
-    columns: present ? (await query(COLUMNS, [schema, table])).map(column) : [],
-    primaryKey: present ? names(await query(PRIMARY_KEY, [schema, table])) : [],
+    columns: present ? await readColumns(query, schema, table) : [],
+    primaryKey: present ? await readPrimaryKey(query, schema, table) : [],
     jobs: {
       present: jobsPresent,
-      columns: jobsPresent ? (await query(COLUMNS, [schema, JOBS_TABLE])).map(column) : [],
-      primaryKey: jobsPresent ? names(await query(PRIMARY_KEY, [schema, JOBS_TABLE])) : [],
+      columns: jobsPresent ? await readColumns(query, schema, JOBS_TABLE) : [],
+      primaryKey: jobsPresent ? await readPrimaryKey(query, schema, JOBS_TABLE) : [],
     },
     ownersPresent,
     owners: ownersPresent

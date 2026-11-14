@@ -7,9 +7,9 @@ import { queuePrefix } from "./connector.ts";
 import { createStore, type Store } from "./store.ts";
 
 /**
- * The store against a real Postgres. PGlite runs one connection, so it serializes every statement and
- * proves shape, never concurrency. The two things the store leans on the
- * database for are proven here, with separate connections:
+ * The store against a real Postgres. PGlite runs one connection, so it serializes every statement
+ * and proves shape, never concurrency. The two things the store leans on the database for are
+ * proven here, with separate connections:
  *  - `reserve` locks the month's `usage` row, so reservations that arrive together cannot all see the
  *    same count, and reads the count after the lock with a fresh snapshot, so it counts what the
  *    holder committed (operations.ts, the function of store migration 3);
@@ -443,7 +443,7 @@ describe("claim on a real Postgres", () => {
     const [first, second] = await Promise.all([newStore(), newStore()]);
     await queue(first, ["k1", "k2", "k3", "k4"]);
     const lock = holdLock("select 1 from facetdb.jobs where record_key = $1 for update", [
-      queuePrefix(SOURCE) + "k1",
+      `${queuePrefix(SOURCE)}k1`,
     ]);
     await lock.holding;
     const one = first.connector({ sourceId: SOURCE, fields: FIELDS, workerId: "one" });

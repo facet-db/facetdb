@@ -29,6 +29,13 @@ export {
   recordingDriver,
   type Sent,
 } from "./recording.ts";
+export {
+  type FakeJob,
+  type FakeServer,
+  type FakeServerOptions,
+  fakeServer,
+  type PoolSent,
+} from "./server.ts";
 
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {

@@ -95,6 +95,33 @@ export function adminUrlRefusal(url: string, allowInsecure: boolean): Refusal | 
 }
 
 /**
+ * The worker login's connection string's refusal, before `open` or `doctor` connects (and
+ * `checkUrl`'s), under the code the Postgres engine gives the same refusal, naming the string as
+ * `subject` (the variable the CLI read it from, else "the source's connection string").
+ */
+export function workerUrlRefusal(
+  url: string,
+  allowInsecure: boolean,
+  subject: string,
+): Refusal | undefined {
+  const problem = tlsProblem(url, allowInsecure);
+  if (problem === undefined) {
+    return undefined;
+  }
+  return problem === "invalid"
+    ? {
+        code: "database-url-tls",
+        message: `${subject} is not a connection string (mysql://user:password@host:3306/database); no connection was made`,
+        fix: `set ${subject} to mysql://facetdb_worker:<the worker password>@<host>:3306/<database>?${TLS_PARAMETER}`,
+      }
+    : {
+        code: "database-url-tls",
+        message: `${subject} reaches ${problem.host} without TLS, so the password in it would travel in the clear; no connection was made`,
+        fix: `add ?${TLS_PARAMETER} to ${subject} (mysql2 reads ssl as a JSON object, so ssl=true does not turn TLS on), or pass --allow-insecure if that network is trusted`,
+      };
+}
+
+/**
  * An error's message with every secret blanked out: each value given, and the password inside one
  * that is a URL. The run passes the worker password both as given and as the driver escaped it; the
  * `secret` statement's own failure it reports by number and code alone, since a server's "near '…'"

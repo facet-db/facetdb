@@ -14,4 +14,5 @@ export {
   TLS_PARAMETER,
   type TlsProblem,
   tlsProblem,
+  workerUrlRefusal,
 } from "./urls.ts";
