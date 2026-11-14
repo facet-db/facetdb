@@ -50,6 +50,18 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-
       - name: install (frozen lockfile)
         run: pnpm install --frozen-lockfile
+      # The engines' test databases (infra/test-databases/compose.yml), every one, started with the
+      # runner's Docker Compose and healthy before the tests. The script prints one
+      # `export NAME=url` per engine; $GITHUB_ENV hands them to the steps below. The postgres
+      # service above stays the store's (DATABASE_URL). The step's own timeout: a stuck engine
+      # fails it, not the job's whole budget.
+      - name: test databases (scripts/test-databases.sh up)
+        timeout-minutes: 10
+        env:
+          TEST_DATABASES_COMPOSE: docker
+        run: |
+          set -o pipefail
+          ./scripts/test-databases.sh up | sed 's/^export //' | tee -a "$GITHUB_ENV"
       - name: build
         run: pnpm run build
       - name: lint
