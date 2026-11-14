@@ -6,6 +6,8 @@ export {
   type MssqlConnect,
   type MssqlQuery,
   type MssqlRow,
+  type MssqlSession,
+  openSession,
   serverFailure,
 } from "./client.ts";
 export { qualifiedName, quoteName, quoteString } from "./identifier.ts";
@@ -20,4 +22,5 @@ export {
   tlsProblem,
   URL_FORM,
   withoutSecrets,
+  workerUrlRefusal,
 } from "./url.ts";

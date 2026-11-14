@@ -8,21 +8,19 @@ import type {
 import { FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import {
-  type RecordingScript,
-  recordingClient,
-  serverError,
-  serverErrors,
-} from "../testing/index.ts";
-import {
   answer,
   freshWorld,
   installedWorld,
   LISTINGS,
   LISTINGS_COLUMNS,
+  type RecordingScript,
+  recordingClient,
   SQL_SERVER,
+  serverError,
+  serverErrors,
   typed,
   type World,
-} from "./catalog-world.ts";
+} from "../testing/index.ts";
 import { createInstaller } from "./installer.ts";
 import { render } from "./render.ts";
 import { WORKER_KEPT } from "./uninstall.ts";

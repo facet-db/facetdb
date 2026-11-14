@@ -115,6 +115,22 @@ describe("the scheme table", () => {
     },
   );
 
+  it.each(["mssql://u:p@127.0.0.1:1433/app", "sqlserver://u:p@127.0.0.1:1433/app"])(
+    "%s is read by the SQL Server engine main.ts registers",
+    async (url) => {
+      const { engines } = processDeps();
+      expect(readsUrl(engines, url)).toBe(true);
+      const engine = await engineFor(engines, url);
+      expect(engine.name).toBe("mssql");
+      expect(engine.schemes).toEqual(["mssql", "sqlserver"]);
+      expect(engine.capabilities).toMatchObject({
+        multipleWorkers: true,
+        pushWakeup: false,
+        sideTable: false,
+      });
+    },
+  );
+
   it("says which schemes an engine is registered for without loading any", () => {
     const counted = entry("postgres", ["postgres", "postgresql"]);
     expect(readsUrl([counted.entry], "postgres://db.example.com/app")).toBe(true);

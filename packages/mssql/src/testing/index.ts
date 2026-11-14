@@ -1,5 +1,30 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+// The scripted catalog of a database the install, uninstall, prune, connector and doctor tests
+// read.
+export {
+  AZURE_SQL,
+  answer,
+  COLLATION,
+  CONTAINED_SQL_SERVER,
+  catalogColumn,
+  DATABASE,
+  everyType,
+  freshWorld,
+  installedWorld,
+  LISTINGS,
+  LISTINGS_COLUMNS,
+  listings,
+  SQL_SERVER,
+  typed,
+  type World,
+  type WorldColumn,
+  type WorldGrant,
+  type WorldMarkerRow,
+  type WorldObject,
+  type WorldServer,
+  type WorldTable,
+} from "./catalog-world.ts";
 // The statement-recording fake driver the unit tests hand in through `MssqlConnect`.
 export {
   type RecordedStatement,
@@ -39,6 +64,36 @@ export function serverUrl(variable: UrlVariable, env: Environment = process.env)
     throw unsetError(variable);
   }
   return url;
+}
+
+/** The hosts of this machine, where the test container listens. */
+const LOCAL_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The test server's URL as the db suites connect with it. The container `scripts/test-databases.sh
+ * up mssql` starts presents a self-signed certificate, which tedious refuses by default, and
+ * `MSSQL_URL` as the script prints it says nothing of TLS. So a URL that names this machine and
+ * says nothing of `encrypt` or `trustServerCertificate` gets `trustServerCertificate=true` here,
+ * and nowhere else: only the db suites call this, a customer's connection string never passes
+ * through it, and the URL rule (`tlsProblem`) still refuses that setting toward any other machine.
+ * A URL that names another host, or a TLS setting of its own, is returned as it is.
+ */
+export function testServerUrl(variable: UrlVariable, env: Environment = process.env): string {
+  const url = serverUrl(variable, env);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const said = [...parsed.searchParams.keys()].some((key) =>
+    ["encrypt", "trustservercertificate"].includes(key.toLowerCase()),
+  );
+  if (said || !LOCAL_HOSTS.has(parsed.hostname.toLowerCase())) {
+    return url;
+  }
+  parsed.searchParams.set("trustServerCertificate", "true");
+  return parsed.toString();
 }
 
 /**

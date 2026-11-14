@@ -1,33 +1,31 @@
 import type { EngineTarget, QuestionSet } from "@facetdb/core";
-import type { MssqlRow } from "../sql/index.ts";
-import type { RecordingScript } from "../testing/index.ts";
 import {
   type CatalogColumn,
   COLUMNS_QUERY,
+  CREATION_COLUMN,
   DATABASE_WORKER_QUERY,
   GRANTS_QUERY,
+  JOBS_TABLE,
   KEY_QUERY,
+  MARKER_TABLE,
+  markerQuery,
   OBJECTS_QUERY,
   OWNER_QUERY,
-  QUEUE_USERS_QUERY,
-  ROLES_QUERY,
-  SERVER_QUERY,
-  WORKER_QUERY,
-} from "./catalog.ts";
-import { markerQuery } from "./marker.ts";
-import {
-  CREATION_COLUMN,
-  JOBS_TABLE,
-  MARKER_TABLE,
   ownedColumns,
   QUEUE_KEY_COLLATION,
   QUEUE_KEY_LENGTH,
   QUEUE_NAME_LENGTH,
+  QUEUE_USERS_QUERY,
+  ROLES_QUERY,
+  SERVER_QUERY,
   SHARED_SCHEMA,
   tableNames,
+  triggerText,
+  WORKER_QUERY,
   WORKER_USER,
-} from "./objects.ts";
-import { triggerText } from "./trigger.ts";
+} from "../install/index.ts";
+import type { MssqlRow } from "../sql/index.ts";
+import type { RecordingScript } from "./recording-client.ts";
 
 /**
  * A SQL Server database as the install, uninstall and prune tests script it (no server): the

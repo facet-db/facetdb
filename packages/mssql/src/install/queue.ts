@@ -16,8 +16,11 @@ import {
  * `table_name` is the table as `[schema].[table]`, `record_key` the key as text, so keys of two
  * tables never meet (key 1 of listings and key 1 of orders are two jobs) and a uniqueidentifier key
  * sits beside an int one. The primary key is the pair, `ignore_dup_key` on, so a key queued twice
- * at once is one job. The worker claims a job with `claim_token` under a lease on `claimed_at` and
- * finds a table's unclaimed and expired jobs by the index on (`table_name`, `claimed_at`).
+ * at once is one job. The worker claims a job with `claim_token` under a lease on `claimed_at`,
+ * reading the clustered key: a claim through the index on (`table_name`, `claimed_at`) looks each
+ * row up in the clustered key afterwards, and that lookup waits on a row another transaction holds
+ * where `readpast` would skip it. The index serves the worker's watch of a table's unclaimed keys
+ * and doctor's counts, which it answers alone.
  */
 
 /**

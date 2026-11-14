@@ -8,7 +8,6 @@ import type {
 } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import { recordingClient } from "../testing/index.ts";
 import {
   answer,
   freshWorld,
@@ -16,9 +15,10 @@ import {
   LISTINGS,
   LISTINGS_COLUMNS,
   listings,
+  recordingClient,
   typed,
   type World,
-} from "./catalog-world.ts";
+} from "../testing/index.ts";
 import { createInstaller } from "./installer.ts";
 import { KEPT_REASON } from "./prune.ts";
 import { render } from "./render.ts";

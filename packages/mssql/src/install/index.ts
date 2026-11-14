@@ -1,13 +1,34 @@
+// The catalog's reads, shared with the runtime connector and doctor, which read the same views
+// under the worker login; the queries themselves for the scripted catalog of the tests.
 export {
   AZURE_SQL_DATABASE,
   AZURE_SQL_MANAGED_INSTANCE,
   type CatalogColumn,
+  type CatalogObject,
+  COLUMNS_QUERY,
   columnType,
+  DATABASE_WORKER_QUERY,
+  GRANTS_QUERY,
+  KEY_QUERY,
+  OBJECTS_QUERY,
+  OWNER_QUERY,
+  QUEUE_USERS_QUERY,
+  ROLES_QUERY,
+  readColumns,
+  readGrants,
+  readKey,
+  readMarker,
+  readObjects,
+  readServer,
+  SERVER_QUERY,
   type ServerFacts,
+  sharedObject,
+  WORKER_QUERY,
+  type WorkerGrant,
 } from "./catalog.ts";
 export { containedUsers, LOGIN_NOTE, planInstall, REMAP_NOTE } from "./install.ts";
 export { createInstaller, type MssqlInstaller } from "./installer.ts";
-export { anotherProject, SCRIPT_ERROR, SCRIPT_PREFIX } from "./marker.ts";
+export { anotherProject, markerQuery, SCRIPT_ERROR, SCRIPT_PREFIX } from "./marker.ts";
 export {
   COLUMN_MARK,
   CREATION_COLUMN,
@@ -35,5 +56,5 @@ export {
 export { keyText, keyTextLength } from "./queue.ts";
 export { ONE_TRANSACTION, render } from "./render.ts";
 export { runPlan } from "./run.ts";
-export { triggerText } from "./trigger.ts";
+export { sameTrigger, triggerText } from "./trigger.ts";
 export { planUninstall, ranNote, WORKER_KEPT } from "./uninstall.ts";

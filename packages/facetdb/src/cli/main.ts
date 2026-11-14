@@ -40,8 +40,8 @@ import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
  * run and never kept. The database engines a source's scheme picks from are built here: the
  * Postgres engine over the same driver and pools as the store, judged with the environment's
  * `PGHOST`, and the polling engine `connector: "polling"` picks over the Postgres dialect, the same
- * driver and the same `PGHOST`, the SQLite engine over node:sqlite and the MySQL engine over
- * mysql2; later tasks append theirs.
+ * driver and the same `PGHOST`, the SQLite engine over node:sqlite, the MySQL engine over mysql2
+ * and the SQL Server engine over tedious; other engines append theirs.
  */
 
 const clock: Clock = {
@@ -170,6 +170,14 @@ export function processDeps(): CliDeps {
       lazyEngine("mysql", async () => {
         const { createMysqlEngine } = await import("@facetdb/mysql");
         return createMysqlEngine();
+      }),
+      // SQL Server 2016 and later and Azure SQL (mssql:, sqlserver:) through tedious: one admin
+      // connection per plan or run, a pool under the worker login for the connector, polling the
+      // jobs table every second. tedious loads @azure/identity and MSAL, so only a source of these
+      // schemes pays for them.
+      lazyEngine("mssql", async () => {
+        const { createMssqlEngine } = await import("@facetdb/mssql");
+        return createMssqlEngine();
       }),
     ],
     connect,

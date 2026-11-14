@@ -191,6 +191,50 @@ export function adminUrlRefusal(url: string, allowInsecure: boolean): Refusal | 
 }
 
 /**
+ * The worker login's connection string refused before anything connects (`checkUrl`, `open`,
+ * doctor; "connections use TLS"), worded with `subject`, the variable that names it: undefined when
+ * it may be used. The worker's password is the one credential FacetDB keeps, so it never crosses
+ * the network in the clear or past an unchecked certificate unless the operator passed
+ * `--allow-insecure`.
+ */
+export function workerUrlRefusal(
+  url: string,
+  allowInsecure: boolean,
+  subject: string,
+): Refusal | undefined {
+  let parsed: MssqlUrl;
+  try {
+    parsed = parseMssqlUrl(url);
+  } catch (error) {
+    if (!(error instanceof MssqlUrlError)) {
+      throw error;
+    }
+    return {
+      code: "database-url",
+      message: `${subject} ${error.message}; no connection was made`,
+      fix: error.ambiguous
+        ? `percent-encode every @ in the user and password of ${subject} as %40`
+        : `set ${subject} to mssql://facetdb_worker:<the worker password>@<host>:1433/<database>; a named instance (host\\instance) and an ADO.NET, ODBC, JDBC or Prisma key=value string are not read: give the instance's TCP port, and write the string as that URL`,
+    };
+  }
+  const problem = tlsProblem(parsed, allowInsecure);
+  if (problem === undefined) {
+    return undefined;
+  }
+  return problem.kind === "plaintext"
+    ? {
+        code: "database-url-tls",
+        message: `${subject} reaches ${problem.host} without TLS (encrypt=false), so the worker password would travel in the clear; no connection was made`,
+        fix: `remove encrypt=false from ${subject}, or pass --allow-insecure if that network is trusted`,
+      }
+    : {
+        code: "database-url-tls",
+        message: `${subject} takes any certificate ${problem.host} shows (trustServerCertificate=true), so a machine in between could read the worker password; no connection was made`,
+        fix: `remove trustServerCertificate=true from ${subject} and give the server a certificate this machine trusts, or pass --allow-insecure if that network is trusted`,
+      };
+}
+
+/**
  * An error's message with every secret blanked out: a connection string and the password in it,
  * the worker password. Nothing a run returns ever carries one.
  */

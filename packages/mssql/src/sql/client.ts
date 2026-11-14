@@ -173,7 +173,18 @@ function settled(start: (done: (error: Error | null | undefined) => void) => voi
   });
 }
 
-async function open(config: ConnectionConfiguration): Promise<Session> {
+/**
+ * One tedious connection, open: statements one at a time, a transaction, and its end.
+ * `connectMssql` holds one for a plan's run; the runtime connector's pool holds several and lets go
+ * of one that `broken` says is dead.
+ */
+export type MssqlSession = MssqlClient & {
+  /** True once a socket error ended the connection, or it closed: no statement can run on it. */
+  readonly broken: boolean;
+};
+
+/** Opens one connection with `config` and logs in; a connection that cannot is the error. */
+export async function openSession(config: ConnectionConfiguration): Promise<MssqlSession> {
   const { Connection } = await tedious();
   const connection = new Connection(config);
   const session: Session = { connection, fail: undefined, broken: undefined };
@@ -185,26 +196,13 @@ async function open(config: ConnectionConfiguration): Promise<Session> {
     session.fail?.(error);
   });
   await settled((done) => connection.connect(done));
-  return session;
-}
-
-/**
- * One tedious connection per client: an install, an uninstall or a prune is a handful of statements
- * on one session, so nothing here pools (the runtime connector has a pool of its own). A connection
- * string that cannot be read throws here, before anything connects.
- */
-export const connectMssql: MssqlConnect = (url) => {
-  const config = connectionConfig(parseMssqlUrl(url));
-  let opened: Promise<Session> | undefined;
-  const session = (): Promise<Session> => {
-    opened ??= open(config);
-    return opened;
-  };
-  const query: MssqlQuery = async (text, params = []) => execute(await session(), text, params);
+  const query: MssqlQuery = (text, params = []) => execute(session, text, params);
   return {
     query,
+    get broken() {
+      return session.broken !== undefined || connection.closed;
+    },
     async transaction(work) {
-      const { connection } = await session();
       await settled((done) => connection.beginTransaction(done));
       try {
         const result = await work(query);
@@ -218,15 +216,37 @@ export const connectMssql: MssqlConnect = (url) => {
       }
     },
     async close() {
-      // A connection that never opened has nothing to let go of; its error was its caller's.
-      const live = await opened?.catch(() => undefined);
-      if (live === undefined || live.connection.closed) {
+      if (connection.closed) {
         return;
       }
       await new Promise<void>((resolve) => {
-        live.connection.once("end", resolve);
-        live.connection.close();
+        connection.once("end", resolve);
+        connection.close();
       });
+    },
+  };
+}
+
+/**
+ * One tedious connection per client: an install, an uninstall or a prune is a handful of
+ * statements on one session, so nothing here pools (the runtime connector's pool is in
+ * `connector/client.ts`). A connection string that cannot be read throws here, before anything
+ * connects.
+ */
+export const connectMssql: MssqlConnect = (url) => {
+  const config = connectionConfig(parseMssqlUrl(url));
+  let opened: Promise<MssqlSession> | undefined;
+  const session = (): Promise<MssqlSession> => {
+    opened ??= openSession(config);
+    return opened;
+  };
+  return {
+    query: async (text, params) => (await session()).query(text, params),
+    transaction: async (work) => (await session()).transaction(work),
+    async close() {
+      // A connection that never opened has nothing to let go of; its error was its caller's.
+      const live = await opened?.catch(() => undefined);
+      await live?.close();
     },
   };
 };

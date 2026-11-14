@@ -10,8 +10,6 @@ import type {
 } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import { type RecordingScript, recordingClient, serverError } from "../testing/index.ts";
-import { SERVER_QUERY } from "./catalog.ts";
 import {
   AZURE_SQL,
   answer,
@@ -22,11 +20,15 @@ import {
   LISTINGS,
   LISTINGS_COLUMNS,
   listings,
+  type RecordingScript,
+  recordingClient,
   SQL_SERVER,
+  serverError,
   typed,
   type World,
   type WorldColumn,
-} from "./catalog-world.ts";
+} from "../testing/index.ts";
+import { SERVER_QUERY } from "./catalog.ts";
 import { LOGIN_NOTE, REMAP_NOTE } from "./install.ts";
 import { createInstaller } from "./installer.ts";
 import { ownedColumns } from "./objects.ts";
