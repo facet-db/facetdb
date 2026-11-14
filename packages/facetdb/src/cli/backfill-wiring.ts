@@ -9,7 +9,7 @@ import {
   type SpendingGate,
   spendingGate,
 } from "@facetdb/core";
-import type { ProjectRef, Store } from "@facetdb/postgres";
+import { type ProjectRef, type Store, sourceIdOf } from "@facetdb/postgres";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { questionSetOf } from "./commands/database.ts";
 
@@ -87,21 +87,18 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
   const questionSet = questionSetOf(config, source);
   await store.ensureProject(project);
   // A table source keeps its answers in the customer's database; the store holds its log and
-  // versions under the source's name, registered as a plugin-kind source (the store has no third kind).
-  await store.ensureSource({
-    id: source.name,
-    projectId: project.id,
-    name: source.name,
-    kind: "plugin",
-  });
-  const version = await store.questionSets.record(source.name, questionSet);
+  // versions under `sourceIdOf(project, name)`, registered as a plugin-kind source (the store has
+  // no third kind).
+  await store.ensureSource({ projectId: project.id, name: source.name, kind: "plugin" });
+  const sourceId = sourceIdOf(project.id, source.name);
+  const version = await store.questionSets.record(sourceId, questionSet);
   const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
   return {
     connector: wiring.connector,
     worker: wiring.provider,
     clock,
     cursorStore: store.cursors,
-    log: store.log(source.name),
+    log: store.log(sourceId),
     questionSet,
     version: version.version,
     ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),

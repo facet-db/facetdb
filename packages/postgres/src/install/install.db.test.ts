@@ -3,7 +3,7 @@ import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresConnector } from "../capture/index.ts";
 import { connectPostgres, type SqlClient, type SqlConnect, type SqlQuery } from "../sql/index.ts";
-import { createStore } from "../store/index.ts";
+import { createStore, sourceIdOf } from "../store/index.ts";
 import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
@@ -225,20 +225,16 @@ describe("the worker login on a real Postgres", () => {
       // What `runWorkers` does first: the project, each source and its question-set version (a
       // second record of the same set is the restart case, which inserts nothing), the heartbeat.
       await store.ensureProject({ id: "proj_listings", name: "Listings" });
-      await store.ensureSource({
-        id: "listings",
-        projectId: "proj_listings",
-        name: "listings",
-        kind: "plugin",
-      });
-      expect((await store.questionSets.record("listings", listings)).version).toBe(1);
-      expect((await store.questionSets.record("listings", listings)).version).toBe(1);
+      await store.ensureSource({ projectId: "proj_listings", name: "listings", kind: "plugin" });
+      const sourceId = sourceIdOf("proj_listings", "listings");
+      expect((await store.questionSets.record(sourceId, listings)).version).toBe(1);
+      expect((await store.questionSets.record(sourceId, listings)).version).toBe(1);
       await admin.query(`update public.listings set title = 'asked again' where id = 1`);
       expect(await capture.claim(5)).toEqual(["1"]);
       await capture.ack(["1"]);
       await store.alerts.saveHeartbeat("proj_listings", 1_700_000_000_000);
       expect(await store.alerts.lastHeartbeat("proj_listings")).toBe(1_700_000_000_000);
-      await store.log("src_listings").appendAnswer({
+      await store.log(sourceId).appendAnswer({
         kind: "answer",
         key: "1",
         version: 1,
@@ -249,7 +245,7 @@ describe("the worker login on a real Postgres", () => {
         at: new Date("2026-11-01T20:00:00Z"),
       });
       const queue = store.connector({
-        sourceId: "src_listings",
+        sourceId: sourceId,
         fields: ["title"],
         workerId: "w1",
       });
@@ -353,6 +349,8 @@ describe("the worker login on a real Postgres", () => {
 describe("a log-only purge against a concurrent install, on two connections", () => {
   const archive = { id: "proj_archive", name: "Archive" };
   const SOURCE = "t_archive";
+  /** The id the worker writes the source's log under. */
+  const ARCHIVE_LOG = sourceIdOf(archive.id, SOURCE);
 
   /** Installs `public.archive` for its project; `connect` lets a test hold the transaction open. */
   const installArchive = (connect?: SqlConnect) =>
@@ -374,12 +372,11 @@ describe("a log-only purge against a concurrent install, on two connections", ()
   }
 
   it("waits for the install's owner row inside its transaction, sees it, and deletes nothing", async () => {
-    // No other table may be installed for a purge to run (two projects' same-named sources share
-    // a log): the suite's `listings` goes first, with a plain uninstall.
+    // The suite's `listings` goes first, with a plain uninstall, so the archive is the only table.
     expect(
       await uninstall({
         adminUrl: scratch.url,
-        source: { table: "listings", sourceId: "listings" },
+        source: { table: "listings", name: "listings", projectId: "proj_listings" },
         print: () => undefined,
         confirm: () => Promise.resolve("Listings"),
       }),
@@ -390,17 +387,17 @@ describe("a log-only purge against a concurrent install, on two connections", ()
     expect(await installArchive()).toMatchObject({ ok: true, applied: true });
     // The worker's registration of the source, and its log, as a first start leaves them.
     await admin.query(
-      `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $1, 'plugin')`,
-      [SOURCE, archive.id],
+      `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $3, 'plugin')`,
+      [ARCHIVE_LOG, archive.id, SOURCE],
     );
     await admin.query(
       `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
        values ($1, '1', 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
-      [SOURCE],
+      [ARCHIVE_LOG],
     );
     const plain = await uninstall({
       adminUrl: scratch.url,
-      source: { table: "archive", sourceId: SOURCE },
+      source: { table: "archive", name: SOURCE, projectId: archive.id },
       print: () => undefined,
       confirm: () => Promise.resolve(archive.name),
     });
@@ -435,7 +432,7 @@ describe("a log-only purge against a concurrent install, on two connections", ()
     try {
       const result = await uninstall({
         adminUrl: scratch.url,
-        source: { table: "archive", sourceId: SOURCE },
+        source: { table: "archive", name: SOURCE, projectId: archive.id },
         purge: true,
         print: () => undefined,
         // Every check before the confirmation found the source unused; the install starts now,
@@ -458,7 +455,7 @@ describe("a log-only purge against a concurrent install, on two connections", ()
       expect(await concurrent).toMatchObject({ ok: true, applied: true });
       expect(result).toMatchObject({ ok: false });
       expect(result.ok === false && result.reason).toContain(
-        `the decision log of source "${SOURCE}" is live again: public.archive is now installed for its project; nothing was changed`,
+        `the decision log of source "${ARCHIVE_LOG}" is live again: public.archive is now installed for its project; nothing was changed`,
       );
     } finally {
       // Whatever failed above, the held install commits and its connection closes.
@@ -466,11 +463,13 @@ describe("a log-only purge against a concurrent install, on two connections", ()
       await Promise.allSettled([concurrent, releaser]);
     }
     expect(
-      await admin.query(`select record_key from facetdb.decisions where source_id = $1`, [SOURCE]),
+      await admin.query(`select record_key from facetdb.decisions where source_id = $1`, [
+        ARCHIVE_LOG,
+      ]),
     ).toEqual([{ record_key: "1" }]);
-    expect(await admin.query(`select id from facetdb.sources where id = $1`, [SOURCE])).toEqual([
-      { id: SOURCE },
-    ]);
+    expect(
+      await admin.query(`select id from facetdb.sources where id = $1`, [ARCHIVE_LOG]),
+    ).toEqual([{ id: ARCHIVE_LOG }]);
   });
 });
 

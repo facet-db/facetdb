@@ -7,6 +7,7 @@ import {
   sideViewName,
 } from "../scan/index.ts";
 import { connectPostgres, type SqlConnect, type SqlQuery, type SqlRow } from "../sql/index.ts";
+import { rekeyNotes } from "../store/index.ts";
 import {
   anotherProject,
   ENQUEUE_ROLE,
@@ -72,6 +73,11 @@ export type MigrateResult =
       readonly changed: boolean;
       /** Whether the worker role's password was set by this run (created or reset). */
       readonly workerPasswordApplied: boolean;
+      /**
+       * What the store's migrations in the script cannot settle, read before it runs (store
+       * version 4's shared logs, `rekeyNotes`); `facetdb migrate` prints them.
+       */
+      readonly notes: readonly string[];
     }
   | {
       /** A refusal: the table as it is must not be touched. The reason says what to do. */
@@ -432,8 +438,18 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       plan.source.storage === "side-table" ? inspection.sideColumns : inspection.marked;
     const changed = installOwnedColumns(plan.questionSet).some((name) => !present.includes(name));
     const workerPasswordApplied = plan.workerPassword !== undefined;
+    const notes = await rekeyNotes(client.query);
     if (options.dryRun === true) {
-      return { ok: true, key, statements, sql, applied: false, changed, workerPasswordApplied };
+      return {
+        ok: true,
+        key,
+        statements,
+        sql,
+        applied: false,
+        changed,
+        workerPasswordApplied,
+        notes,
+      };
     }
     const schema = plan.source.schema ?? "public";
     try {
@@ -463,7 +479,7 @@ export async function migrate(options: MigrateOptions): Promise<MigrateResult> {
       }
       throw error;
     }
-    return { ok: true, key, statements, sql, applied: true, changed, workerPasswordApplied };
+    return { ok: true, key, statements, sql, applied: true, changed, workerPasswordApplied, notes };
   } finally {
     await client.close();
   }

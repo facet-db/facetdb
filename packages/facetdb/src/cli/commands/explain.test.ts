@@ -1,5 +1,5 @@
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, type SqlConnect, type Store } from "@facetdb/postgres";
+import { createStore, type SqlConnect, type Store, sourceIdOf } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
@@ -43,6 +43,9 @@ function configWith(
   });
 }
 
+/** The project `projectRef` derives from `PROJECT_DIR`, and the id the log is kept under. */
+const PROJECT_DIR = "/work/listings-app";
+const LOG_ID = sourceIdOf("listings-app", "listings");
 const FIRST_WORDING = "Is this listing a scam?";
 const SECOND_WORDING = "Does this listing look like fraud?";
 const CURRENT_WORDING = "Is this listing fraudulent in any way?";
@@ -82,7 +85,7 @@ function run(
   return runInProcess(
     argv,
     {
-      projectDir: "/work/listings-app",
+      projectDir: PROJECT_DIR,
       env,
       loadConfig: () => Promise.resolve(config),
       connect,
@@ -106,13 +109,13 @@ function setOf(config: ProjectConfig) {
 
 /** r1: asked under v1 (unsure), asked again under v2 (sure), then a person decided under v2. */
 async function seedHistory(): Promise<void> {
-  const v1 = await store.questionSets.record("listings", setOf(configWith(FIRST_WORDING)));
+  const v1 = await store.questionSets.record(LOG_ID, setOf(configWith(FIRST_WORDING)));
   const v2 = await store.questionSets.record(
-    "listings",
+    LOG_ID,
     setOf(configWith(SECOND_WORDING, { yesAbove: 0.5 })),
   );
   expect([v1.version, v2.version]).toEqual([1, 2]);
-  const log = store.log("listings");
+  const log = store.log(LOG_ID);
   await log.appendAnswer({
     kind: "answer",
     key: "r1",

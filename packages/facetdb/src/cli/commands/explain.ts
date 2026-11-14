@@ -11,7 +11,12 @@ import {
   type QuestionSet,
   resolveThresholds,
 } from "@facetdb/core";
-import { installOwnedColumns, SIDE_TABLE_SCHEMA, sideTableName } from "@facetdb/postgres";
+import {
+  installOwnedColumns,
+  SIDE_TABLE_SCHEMA,
+  sideTableName,
+  sourceIdOf,
+} from "@facetdb/postgres";
 import type { SourceConfig } from "../../config/index.ts";
 import {
   type CliDeps,
@@ -24,6 +29,7 @@ import {
 import {
   ALLOW_INSECURE_OPTION,
   loadProjectConfig,
+  projectRef,
   questionSetOf,
   requireSecureSource,
   requireSecureUrl,
@@ -198,7 +204,7 @@ async function currentState(
     try {
       const rows = await client.query(
         "select status, decision, reviewed from facetdb.records where source_id = $1 and record_key = $2",
-        [source.name, key],
+        [sourceIdOf(projectRef(deps.projectDir).id, source.name), key],
       );
       const row = rows[0];
       if (row === undefined) {
@@ -366,9 +372,10 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     requireSecureUrl(url, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
     requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
     const store = await deps.store({ allowInsecure });
+    const sourceId = sourceIdOf(projectRef(deps.projectDir).id, source.name);
     let history: readonly LogEntry[];
     try {
-      history = await store.log(source.name).history(key);
+      history = await store.log(sourceId).history(key);
     } finally {
       await store.close();
     }
@@ -381,7 +388,7 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
       return { ok: true, source: source.name, key, entries: [] };
     }
 
-    const versions = await savedQuestionSets(deps, url, source.name, [
+    const versions = await savedQuestionSets(deps, url, sourceId, [
       ...new Set(history.map((entry) => entry.version)),
     ]);
     const entries = history.map((entry) =>

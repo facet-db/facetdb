@@ -22,6 +22,7 @@ import { CLAIM_LEASE_MS, jobsTableSql } from "../sql/index.ts";
 import { freshPglite } from "../testing/index.ts";
 import { createCrypto, newSalt } from "./crypto.ts";
 import { SCHEMA_VERSION } from "./schema.ts";
+import { sourceIdOf } from "./source-id.ts";
 import {
   AmbiguousHostError,
   createStore,
@@ -164,6 +165,35 @@ describe("the decision log", () => {
     expect(await log.latestAnswer("a")).toEqual(second);
     expect(await log.history("a")).toEqual([first, second, human]);
     expect(await log.history("other")).toEqual([]);
+  });
+
+  it("keeps two logs for two projects with a same-named source", async () => {
+    const { store, db } = await newStore();
+    for (const projectId of ["proj_a", "proj_b"]) {
+      await store.ensureProject({ id: projectId, name: projectId });
+      await store.ensureSource({ projectId, name: "listings", kind: "plugin" });
+    }
+    expect(sourceIdOf("proj_a", "listings")).toBe("proj_a:listings");
+    const a = store.log(sourceIdOf("proj_a", "listings"));
+    const b = store.log(sourceIdOf("proj_b", "listings"));
+    const fromA = answerEntry("1", 1, "2026-10-31T10:00:00Z", 0.9);
+    const fromB = answerEntry("1", 1, "2026-10-31T11:00:00Z", 0.2);
+    await a.appendAnswer(fromA);
+    await b.appendAnswer(fromB);
+    await b.appendAnswer(answerEntry("2", 1, "2026-10-31T11:00:00Z", 0.4));
+
+    expect([...(await a.latestAnswers(["1", "2"])).entries()]).toEqual([["1", fromA]]);
+    expect((await b.latestAnswers(["1"])).get("1")).toEqual(fromB);
+    expect(await a.history("1")).toEqual([fromA]);
+    expect(await a.history("2")).toEqual([]);
+    expect(await a.latestAnswersSince()).toEqual([fromA]);
+    const sources = await db.query<{ id: string; project_id: string; name: string }>(
+      "select id, project_id, name from facetdb.sources order by id",
+    );
+    expect(sources.rows).toEqual([
+      { id: "proj_a:listings", project_id: "proj_a", name: "listings" },
+      { id: "proj_b:listings", project_id: "proj_b", name: "listings" },
+    ]);
   });
 
   it("keeps a choice value and a human note exactly, and omits an absent note", async () => {
@@ -830,8 +860,11 @@ describe("alerts, cursors and question-set versions", () => {
   it("number question-set versions by content, reusing the version when nothing changed", async () => {
     const { store, db, clock } = await newStore();
     await store.ensureProject({ id: "p", name: "P" });
-    await store.ensureSource({ id: "src", projectId: "p", name: "issues", kind: "plugin" });
-    await store.ensureSource({ id: "src", projectId: "p", name: "issues", kind: "plugin" });
+    await store.ensureSource({ projectId: "p", name: "issues", kind: "plugin" });
+    await store.ensureSource({ projectId: "p", name: "issues", kind: "plugin" });
+    expect(
+      (await db.query<{ id: string }>("select id from facetdb.sources")).rows.map((r) => r.id),
+    ).toEqual(["p:issues"]);
     const set: QuestionSet = {
       questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
       read: ["body"],

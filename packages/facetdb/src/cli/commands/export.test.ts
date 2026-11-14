@@ -1,5 +1,5 @@
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, type SqlConnect, type Store } from "@facetdb/postgres";
+import { createStore, type SqlConnect, type Store, sourceIdOf } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, score } from "../../config/index.ts";
@@ -15,6 +15,9 @@ import { COMMANDS } from "./index.ts";
 
 // The source's own database is never opened: this URL has no server behind it.
 const SOURCE_URL = "postgres://facetdb_worker:worker-password@source.invalid:5432/app";
+/** The project `projectRef` derives from `PROJECT_DIR`, and the id the log is kept under. */
+const PROJECT_DIR = "/work/listings-app";
+const LOG_ID = sourceIdOf("listings-app", "listings");
 
 const CONFIG: ProjectConfig = facetdb({
   model: "jev-1.14.0",
@@ -64,7 +67,7 @@ function run(argv: readonly string[], env: Record<string, string> = defaultEnv()
   return runInProcess(
     argv,
     {
-      projectDir: "/work/listings-app",
+      projectDir: PROJECT_DIR,
       env,
       loadConfig: () => Promise.resolve(CONFIG),
       connect,
@@ -111,8 +114,8 @@ function setOf(config: ProjectConfig) {
 
 /** r1 answered under v1, answered again, and decided by a person; r2 answered once. */
 async function seed(): Promise<void> {
-  await store.questionSets.record("listings", setOf(CONFIG));
-  const log = store.log("listings");
+  await store.questionSets.record(LOG_ID, setOf(CONFIG));
+  const log = store.log(LOG_ID);
   await log.appendAnswer({
     kind: "answer",
     key: "r2",
@@ -278,7 +281,7 @@ describe("facetdb export", () => {
   });
 
   it("never breaks a CSV line on a quote, a comma or a newline inside a value", async () => {
-    await store.log("listings").appendHuman({
+    await store.log(LOG_ID).appendHuman({
       kind: "human",
       key: 'a "quoted", key\nwith a break',
       question: "category",
@@ -310,7 +313,7 @@ describe("facetdb export", () => {
   });
 
   it("reads 1,000 log rows in pages, never in one query", async () => {
-    const log = store.log("listings");
+    const log = store.log(LOG_ID);
     for (let n = 0; n < 1000; n += 1) {
       await log.appendAnswer({
         kind: "answer",

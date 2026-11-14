@@ -92,7 +92,7 @@ class World {
         const result = await uninstall({
           adminUrl: "pglite://admin",
           connect: this.pg.connect,
-          source: { table: "listings", sourceId: "listings" },
+          source: { table: "listings", name: "listings", projectId: "proj_listings" },
           print: () => undefined,
           confirm: ({ project: asked }) => Promise.resolve(asked.name),
         });

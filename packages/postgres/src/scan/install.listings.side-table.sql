@@ -201,6 +201,38 @@ revoke all on function facetdb.reserve_usage(text, text, bigint, bigint, bigint,
 
 insert into facetdb.store_migrations (version) values (3) on conflict (version) do nothing;
 
+do $$
+declare
+  v_source record;
+  v_old_prefix text;
+  v_new_prefix text;
+begin
+  for v_source in select id, project_id, name from facetdb.sources where id = name loop
+    v_old_prefix := (char_length(v_source.id)
+        + (select count(*) from unnest(string_to_array(v_source.id, null)) c where ascii(c) > 65535))::text
+      || ':' || v_source.id || ':';
+    v_new_prefix := (char_length(v_source.project_id || ':' || v_source.name)
+        + (select count(*) from unnest(string_to_array(v_source.project_id || ':' || v_source.name, null)) c
+            where ascii(c) > 65535))::text
+      || ':' || v_source.project_id || ':' || v_source.name || ':';
+    if exists (select 1 from facetdb.records r where r.source_id = v_source.id) then
+      update facetdb.jobs set record_key = v_new_prefix || substr(record_key, char_length(v_old_prefix) + 1)
+       where left(record_key, char_length(v_old_prefix)) = v_old_prefix;
+    end if;
+    update facetdb.records set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.decisions set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.question_set_versions set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.sources set id = v_source.project_id || ':' || v_source.name
+     where id = v_source.id;
+  end loop;
+end
+$$;
+
+insert into facetdb.store_migrations (version) values (4) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,

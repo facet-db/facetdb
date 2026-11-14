@@ -10,7 +10,7 @@ import {
   type ThresholdOverride,
 } from "@facetdb/core";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { createStore, queueKeyPrefix, type Store } from "@facetdb/postgres";
+import { createStore, queueKeyPrefix, type Store, sourceIdOf } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { questionSetOf } from "../cli/commands/database.ts";
@@ -36,6 +36,8 @@ import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/ind
  */
 
 const PROJECT_DIR = fileURLToPath(new URL("./fixtures/listings-app/", import.meta.url));
+/** The id the worker keeps the `listings` source's log under: its project (the directory) and name. */
+const LOG_ID = sourceIdOf("listings-app", "listings");
 const ADMIN_URL = "postgres://admin:e2e-admin-password@localhost:5432/listings_app";
 const REVIEWER = "ana@example.com";
 const REWORDED = "Is this listing trying to cheat the buyer?";
@@ -378,7 +380,7 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
       reapplyThresholds(
         questionSetOf(current, source),
         listingsSource(tightened).thresholds,
-        store.log("listings"),
+        store.log(LOG_ID),
         (key, decision, hash) => connector.write(key, decision, hash),
       ),
     );
@@ -401,7 +403,7 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
 
   it("writes a person's decision through core, and it survives a rewording and a threshold change", async () => {
     const source = listingsSource(current);
-    const log = store.log("listings");
+    const log = store.log(LOG_ID);
     const key = "l41";
 
     // The review screen's card for l41: its state as read now, and the model's answers behind it.

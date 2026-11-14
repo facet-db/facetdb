@@ -3,6 +3,7 @@ export type { Crypto } from "./crypto.ts";
 export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.ts";
 export {
   migrateStore,
+  rekeyNotes,
   SCHEMA_VERSION,
   STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
@@ -18,5 +19,6 @@ export type {
   CreatedApiKey,
   CredentialStore,
 } from "./secrets.ts";
+export { sourceIdOf } from "./source-id.ts";
 export type { SourceKind, Store, StoreOptions } from "./store.ts";
 export { AmbiguousHostError, createStore, PlaintextUrlError, requireTls } from "./store.ts";

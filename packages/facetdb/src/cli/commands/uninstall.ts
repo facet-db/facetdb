@@ -4,6 +4,7 @@ import {
   ALLOW_INSECURE_OPTION,
   adminUrl,
   loadProjectConfig,
+  projectRef,
   refused,
   sameAsShown,
   type TableTarget,
@@ -42,8 +43,14 @@ type Shown = {
   readonly notes: readonly string[];
 };
 
-function uninstallSource(target: TableTarget) {
-  return { table: target.table, schema: target.schema, sourceId: target.source.name };
+/** The table and the source as the connector resolves its log: `sourceIdOf(project, name)`. */
+function uninstallSource(deps: CliDeps, target: TableTarget) {
+  return {
+    table: target.table,
+    schema: target.schema,
+    name: target.source.name,
+    projectId: projectRef(deps.projectDir).id,
+  };
 }
 
 const label = (target: TableTarget) => `${target.schema}.${target.table}`;
@@ -64,7 +71,7 @@ async function show(
 ): Promise<Shown> {
   const result = await uninstall({
     adminUrl: url,
-    source: uninstallSource(target),
+    source: uninstallSource(deps, target),
     purge,
     print: () => undefined,
     // A dry run asks nothing; the name is asked once, for every table, after all scripts are shown.
@@ -240,7 +247,7 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       try {
         result = await uninstall({
           adminUrl: url,
-          source: uninstallSource(item.target),
+          source: uninstallSource(deps, item.target),
           purge: options.purge,
           print: sameAsShown(item.sql),
           confirm: () => Promise.resolve(typed),

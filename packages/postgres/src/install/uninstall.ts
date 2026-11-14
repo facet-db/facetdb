@@ -11,7 +11,7 @@ import {
   type SqlQuery,
   type SqlRow,
 } from "../sql/index.ts";
-import { STORE_FUNCTIONS, STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
+import { STORE_FUNCTIONS, STORE_TABLES, STORE_VERSION_TABLE, sourceIdOf } from "../store/index.ts";
 import {
   type InstalledTable,
   plain,
@@ -61,10 +61,15 @@ export type UninstallSource = {
   readonly schema?: string;
   /**
    * The source's name as the caller's config knows it. It is never compared with the table's name:
-   * the log is found through the store's `sources` row of that name, the one the worker registers
-   * for the source and writes the log under (see `resolveTableLog`).
+   * the log is found through the store's `sources` row `sourceIdOf(project, name)`, the one the
+   * worker registers for the source and writes the log under (see `resolveTableLog`).
    */
-  readonly sourceId: string;
+  readonly name: string;
+  /**
+   * The caller's project. A table's purge keys the log by the project of the table's owner row; a
+   * log-only purge (the owner row is gone) by this one.
+   */
+  readonly projectId: string;
 };
 
 /**
@@ -551,19 +556,26 @@ const installMarks = (relation: string) => `exists (
          and obj_description(k.conrelid, 'pg_class') = ${quoteLiteral(SIDE_MARK)})`;
 
 /**
- * The words of a purge refused because another table is installed. The store keys a source's
- * log by its name alone (`ensureSource` registers `id = name`, `on conflict do nothing`), so two
- * projects whose sources share a name write one log: while any other table is installed, the log
- * may be partly its source's. Shared by the check before the confirmation and the guard below.
+ * The words of a log-only purge refused because another table of the source's project is
+ * installed: the store keys a log by project and name (`sourceIdOf`) but does not record which
+ * table a source reads, so with its own table's owner row gone, any installed table of the project
+ * may be the one the source now reads. Another project's tables never share it. Shared by the
+ * check before the confirmation and the guard below.
  */
 const sharedLogReason = (source: string, table: string, project: string) =>
   `the decision log of source "${source}" may be shared with ${table} (project ${project}), which is still installed; uninstall that table first, or keep the log. Nothing was changed.`;
 
+/** The words of a purge refused because a live store source (one holding records) writes the log. */
+const liveStoreSourceReason = (source: string, project: string) =>
+  `the decision log of source "${source}" is shared with the store source "${source}" of project ${project}, which holds records and is live; nothing was changed.`;
+
 /**
  * Every purge's guard, first inside its transaction when it deletes a log: the owner rows are
- * locked (`share` waits for an install in flight and keeps a new one out until the purge commits),
- * and an owner row of any table but this one, of any project in any schema, raises
- * `object_in_use` with `sharedLogReason`'s words.
+ * locked (`share` waits for an install in flight and keeps a new one out until the purge commits).
+ * Then another live source of the same project that resolves to this log raises `object_in_use`
+ * naming it: a store source holding records under the log's id, or, for a log-only purge (this
+ * table has no owner row), an installed table of the project, which the source may read now.
+ * Another project's tables and sources never resolve to it (their ids carry their project).
  */
 function sharedLogGuardStatement(): InstallStatement {
   return plain(`do $$
@@ -572,19 +584,31 @@ declare
   v_table text := current_setting('${TABLE_SETTING}');
   v_project text := current_setting('${PROJECT_SETTING}');
   v_source text := current_setting('${SOURCE_SETTING}');
+  v_name text;
   v_owner text;
-  v_owner_project text;
 begin
+  if to_regclass('facetdb.sources') is not null then
+    select s.name into v_name from facetdb.sources s where s.id = v_source;
+  end if;
+  v_name := coalesce(v_name, v_source);
   if to_regclass('facetdb.table_owners') is not null then
     lock table facetdb.table_owners in share mode;
-    select format('%I.%I', o.table_schema, o.table_name), o.project_id
-      into v_owner, v_owner_project
-      from facetdb.table_owners o
-     where not (o.table_schema = v_schema and o.table_name = v_table)
-     order by o.project_id = v_project desc, 1
-     limit 1;
-    if v_owner is not null then
-      raise exception '${sharedLogReason("%", "%", "%")}', v_source, v_owner, v_owner_project
+    if not exists (select 1 from facetdb.table_owners o
+                    where o.table_schema = v_schema and o.table_name = v_table) then
+      select format('%I.%I', o.table_schema, o.table_name) into v_owner
+        from facetdb.table_owners o
+       where o.project_id = v_project
+       order by 1
+       limit 1;
+      if v_owner is not null then
+        raise exception '${sharedLogReason("%", "%", "%")}', v_name, v_owner, v_project
+          using errcode = 'object_in_use';
+      end if;
+    end if;
+  end if;
+  if to_regclass('facetdb.records') is not null then
+    if exists (select 1 from facetdb.records r where r.source_id = v_source) then
+      raise exception '${liveStoreSourceReason("%", "%")}', v_name, v_name, v_project
         using errcode = 'object_in_use';
     end if;
   end if;
@@ -795,8 +819,8 @@ async function logCounts(query: SqlQuery, sourceId: string): Promise<LogCounts> 
 }
 
 /**
- * The log of an installed table's source: the store's `sources` row of the table's project whose
- * name is the one given (unique per project), as the worker registered it, and not a store-backed
+ * The log of an installed table's source: the store's `sources` row `sourceIdOf(project, name)` of
+ * the table's project and the name given, as the worker registered it, and not a store-backed
  * source (no records). Never a name compared with the table's: `facetdb init` may name a source
  * `t_listings` or lowercase it, and a source may be renamed.
  */
@@ -805,14 +829,15 @@ async function resolveTableLog(
   installed: InstalledTable,
   given: string,
 ): Promise<SourceLog> {
+  const id = sourceIdOf(installed.project.id, given);
   const candidates = await pluginSources(query, "s.project_id = $1", [installed.project.id]);
-  const match = candidates.find((source) => source.name === given && !source.hasRecords);
+  const match = candidates.find((source) => source.id === id && !source.hasRecords);
   if (match === undefined) {
     return {
       status: "not-found",
       given,
       found: candidates.map((source) => source.name),
-      logged: await storeRows(query, "decisions", "source_id = $1", [given]),
+      logged: await storeRows(query, "decisions", "source_id = $1", [id]),
     };
   }
   return { status: "found", given, sourceId: match.id, ...(await logCounts(query, match.id)) };
@@ -841,26 +866,24 @@ async function otherSourceLogs(
 }
 
 /**
- * An installed table other than this one, of any project in any schema (the project's own
- * first): while one exists, a log may be shared (`sharedLogReason`) and no purge runs.
+ * An installed table of the source's project other than this one, in any schema: while one
+ * exists, a log-only purge's source may be live on it (`sharedLogReason`) and the purge waits.
  */
 async function otherInstalledTable(
   query: SqlQuery,
   target: { readonly schema: string; readonly table: string; readonly projectId: string },
-): Promise<{ readonly table: string; readonly projectId: string } | undefined> {
+): Promise<string | undefined> {
   if (!(await relationPresent(query, "facetdb.table_owners"))) {
     return undefined;
   }
   const rows = await query(
-    `select format('%I.%I', table_schema, table_name) as name, project_id from facetdb.table_owners
-      where not (table_schema = $1 and table_name = $2)
-      order by project_id = $3 desc, 1 limit 1`,
+    `select format('%I.%I', table_schema, table_name) as name from facetdb.table_owners
+      where project_id = $3 and not (table_schema = $1 and table_name = $2)
+      order by 1 limit 1`,
     [target.schema, target.table, target.projectId],
   );
   const row = rows[0];
-  return row === undefined
-    ? undefined
-    : { table: String(row["name"]), projectId: String(row["project_id"]) };
+  return row === undefined ? undefined : String(row["name"]);
 }
 
 /** What a log-only purge acts on, or why it cannot. */
@@ -871,11 +894,11 @@ type LogOnlyTarget =
 const listed = (names: readonly string[]) => (names.length === 0 ? "none" : names.join(", "));
 
 /**
- * The source of a log-only purge, when the table's owner row is gone: the one plugin-kind source of
- * the store with the name given. It is refused while anything may still write its log: a store
- * source's records, or any installed table at all (the store does not record which table a source
- * reads, and two projects' same-named sources share one log). The log must hold something. The
- * transaction checks the same again (`liveRecheckStatement`, `sharedLogGuardStatement`).
+ * The source of a log-only purge, when the table's owner row is gone: the plugin-kind source
+ * `sourceIdOf(project, name)` of the caller's project. It is refused while anything may still
+ * write its log: a store source's records, or another installed table of the project (the store
+ * does not record which table a source reads). The log must hold something. The transaction
+ * checks the same again (`liveRecheckStatement`, `sharedLogGuardStatement`).
  */
 async function resolveLogOnlyTarget(
   query: SqlQuery,
@@ -883,21 +906,16 @@ async function resolveLogOnlyTarget(
   schema: string,
   label: string,
 ): Promise<LogOnlyTarget> {
-  const given = source.sourceId;
+  const given = source.name;
   const notInstalled = `FacetDB is not installed on ${label} (facetdb.table_owners has no row for it)`;
-  const candidates = await pluginSources(query, "s.name = $1", [given]);
-  const [match, ...others] = candidates;
+  const [match] = await pluginSources(query, "s.id = $1", [sourceIdOf(source.projectId, given)]);
   if (match === undefined) {
-    const found = (await pluginSources(query, "true", [])).map((s) => s.name);
+    const found = (await pluginSources(query, "s.project_id = $1", [source.projectId])).map(
+      (s) => s.name,
+    );
     return {
       ok: false,
-      reason: `${notInstalled}, and the FacetDB store registers no source named "${given}" whose decision log could be purged (sources found: ${listed(found)}). Check the source's name, table and schema.`,
-    };
-  }
-  if (others.length > 0) {
-    return {
-      ok: false,
-      reason: `${notInstalled}, and the source name "${given}" is registered by several projects (${candidates.map((s) => s.projectId).join(", ")}); nothing was purged, since the log to delete cannot be told apart.`,
+      reason: `${notInstalled}, and the FacetDB store registers no source named "${given}" of project ${source.projectId} whose decision log could be purged (sources found: ${listed(found)}). Check the source's name, table and schema.`,
     };
   }
   if (match.hasRecords) {
@@ -912,7 +930,7 @@ async function resolveLogOnlyTarget(
     projectId: match.projectId,
   });
   if (other !== undefined) {
-    return { ok: false, reason: sharedLogReason(given, other.table, other.projectId) };
+    return { ok: false, reason: sharedLogReason(given, other, match.projectId) };
   }
   const counts = await logCounts(query, match.id);
   if (counts.decisions + counts.versions === 0) {
@@ -1183,7 +1201,7 @@ function purgeNote(applied: boolean, log: SourceLog): string {
   if (log.status === "not-found") {
     return `purge: no source named "${log.given}" belongs to this table or its project, so no decision was deleted (the script has no delete of the log). The project's sources in the FacetDB store: ${listed(log.found)}.`;
   }
-  return `purge: ${applied ? "deleted" : "will delete"} ${log.decisions} decision(s) and ${log.versions} question-set version(s) of source "${log.sourceId}".`;
+  return `purge: ${applied ? "deleted" : "will delete"} ${log.decisions} decision(s) and ${log.versions} question-set version(s) of source "${log.given}".`;
 }
 
 /** The note for a log a plain uninstall leaves behind, and how it can be deleted later. */
@@ -1193,7 +1211,7 @@ function keptLogNote(log: SourceLog, later: LogOnlyPurge | undefined): string | 
   }
   const kept = `the decision log of source "${log.given}" stays (${log.decisions} decision(s), ${log.versions} question-set version(s))`;
   return later === undefined
-    ? `${kept}; it can be purged once no other table is installed in this database (facetdb uninstall --purge --source ${log.given}).`
+    ? `${kept}; it can be purged once no other table of its project is installed in this database (facetdb uninstall --purge --source ${log.given}).`
     : `${kept}; to delete it later: ${later.command}`;
 }
 
@@ -1321,7 +1339,7 @@ async function logOnlyPurge(
   options: UninstallOptions,
   schema: string,
 ): Promise<UninstallResult> {
-  const given = options.source.sourceId;
+  const given = options.source.name;
   const { table } = options.source;
   const label = `${schema}.${table}`;
   const target = await resolveLogOnlyTarget(client.query, options.source, schema, label);
@@ -1404,23 +1422,11 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
     if ("reason" in installed) {
       return { ok: false, reason: installed.reason };
     }
-    const log = await resolveTableLog(client.query, installed, options.source.sourceId);
+    const log = await resolveTableLog(client.query, installed, options.source.name);
     const purgedSourceId = purge && log.status === "found" ? log.sourceId : undefined;
-    // A purge that would delete a log runs only while no other table is installed: two projects'
-    // same-named sources write one log (the transaction checks again, `sharedLogGuardStatement`).
-    if (purgedSourceId !== undefined) {
-      const other = await otherInstalledTable(client.query, {
-        schema: installed.schema,
-        table: installed.table,
-        projectId: installed.project.id,
-      });
-      if (other !== undefined) {
-        return {
-          ok: false,
-          reason: sharedLogReason(options.source.sourceId, other.table, other.projectId),
-        };
-      }
-    }
+    // The log is keyed by the table's project and the source's name (`sourceIdOf`), so no other
+    // installed table shares it, and `resolveTableLog` never resolves a live store source (one
+    // with records); the transaction checks both again (`sharedLogGuardStatement`).
     const statements = uninstallSql({ ...installed, sourceId: purgedSourceId }, { purge });
     const forecast = await forecastStore(client.query, {
       schema: installed.schema,
@@ -1434,7 +1440,7 @@ export async function uninstall(options: UninstallOptions): Promise<UninstallRes
       !purge &&
       log.status === "found" &&
       log.decisions + log.versions > 0 &&
-      forecast.otherTables.length === 0
+      !forecast.otherTables.some((other) => other.projectId === installed.project.id)
         ? { source: log.given, command: `facetdb uninstall --purge --source ${log.given}` }
         : undefined;
     const others =

@@ -10,7 +10,7 @@ import type {
 } from "@facetdb/core";
 import { createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import type { ApiKeyStore } from "@facetdb/postgres";
+import { type ApiKeyStore, sourceIdOf } from "@facetdb/postgres";
 import { createMemoryStore } from "@facetdb/postgres/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
@@ -22,7 +22,7 @@ import { onlyRecord } from "./target.ts";
 const PROJECT = "project-1";
 const OTHER_PROJECT = "project-2";
 const SOURCE = "support_tickets";
-const SOURCE_ID = "src-support-tickets";
+const SOURCE_ID = sourceIdOf(PROJECT, SOURCE);
 const FIELDS = ["subject", "body"] as const;
 
 const UNLIMITED: SpendingGate = {
@@ -123,7 +123,7 @@ async function rig(
   const { store } = memory;
   await store.ensureProject({ id: PROJECT, name: "one" });
   await store.ensureProject({ id: OTHER_PROJECT, name: "two" });
-  await store.ensureSource({ id: SOURCE_ID, projectId: PROJECT, name: SOURCE, kind: "api" });
+  await store.ensureSource({ projectId: PROJECT, name: SOURCE, kind: "api" });
 
   const connectorOf = (workerId: string) =>
     store.connector({ sourceId: SOURCE_ID, fields: FIELDS, workerId });
@@ -153,7 +153,7 @@ async function rig(
   const check = createCheckService({
     store: createCheckStore(
       store,
-      [{ projectId: PROJECT, name: SOURCE, sourceId: SOURCE_ID, fields: FIELDS }],
+      [{ projectId: PROJECT, name: SOURCE, fields: FIELDS }],
       "check-api",
     ),
     worker: { forRecord: (_projectId, _name, key) => worker(key) },
@@ -454,7 +454,7 @@ describe("POST /v1/check when the answer does not come", () => {
 describe("the check store", () => {
   it("serves a declared source to its own project only, and refuses a duplicate declaration", async () => {
     const t = await rig();
-    const declared = { projectId: PROJECT, name: SOURCE, sourceId: SOURCE_ID, fields: FIELDS };
+    const declared = { projectId: PROJECT, name: SOURCE, fields: FIELDS };
     const checkStore = createCheckStore(t.store, [declared], "w");
     expect(checkStore.apiSource(PROJECT, SOURCE)?.fields).toEqual(FIELDS);
     expect(checkStore.apiSource(OTHER_PROJECT, SOURCE)).toBeUndefined();

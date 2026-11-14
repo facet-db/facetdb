@@ -11,7 +11,7 @@ import type {
 } from "@facetdb/core";
 import { configureAction, createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, migrateStore, pgliteClient } from "@facetdb/postgres";
+import { createStore, migrateStore, pgliteClient, sourceIdOf } from "@facetdb/postgres";
 import { freshPglite, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
@@ -36,7 +36,7 @@ import { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "
 
 const PROJECT = "project-1";
 const SOURCE = "support_tickets";
-const SOURCE_ID = "src-support-tickets";
+const SOURCE_ID = sourceIdOf(PROJECT, SOURCE);
 const FIELDS = ["subject", "body"] as const;
 const ENDPOINT = "https://hooks.example.com/facetdb";
 const SECRET = "whsec-test-secret";
@@ -242,7 +242,7 @@ async function rig() {
   });
   const client = pgliteClient(pglite);
   await store.ensureProject({ id: PROJECT, name: "one" });
-  await store.ensureSource({ id: SOURCE_ID, projectId: PROJECT, name: SOURCE, kind: "api" });
+  await store.ensureSource({ projectId: PROJECT, name: SOURCE, kind: "api" });
 
   const receiver = new Receiver(clock);
   const timers = new FakeTimeouts(clock);
@@ -297,7 +297,7 @@ async function rig() {
     check: createCheckService({
       store: createCheckStore(
         store,
-        [{ projectId: PROJECT, name: SOURCE, sourceId: SOURCE_ID, fields: FIELDS }],
+        [{ projectId: PROJECT, name: SOURCE, fields: FIELDS }],
         "check-api",
       ),
       worker: {

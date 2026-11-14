@@ -1,12 +1,14 @@
-import type { Store } from "@facetdb/postgres";
+import { type Store, sourceIdOf } from "@facetdb/postgres";
 import type { ApiSource, CheckStore } from "./service.ts";
 
-/** An API source of a project as the config declares it, and the id it has in `facetdb.sources`. */
+/**
+ * An API source of a project as the config declares it; its id in `facetdb.sources` is
+ * `sourceIdOf(projectId, name)`.
+ */
 export type DeclaredApiSource = {
   readonly projectId: string;
   /** The name callers send as `source` in `POST /v1/check`. */
   readonly name: string;
-  readonly sourceId: string;
   /** The state fields the questions read (`read` in the config), in config order. */
   readonly fields: readonly string[];
 };
@@ -31,7 +33,11 @@ export function createCheckStore(
     }
     sources.set(id, {
       fields: source.fields,
-      connector: store.connector({ sourceId: source.sourceId, fields: source.fields, workerId }),
+      connector: store.connector({
+        sourceId: sourceIdOf(source.projectId, source.name),
+        fields: source.fields,
+        workerId,
+      }),
     });
   }
   return { apiSource: (projectId, name) => sources.get(sourceKey(projectId, name)) };

@@ -8,6 +8,7 @@ import type {
 } from "@facetdb/core";
 import { createWorker, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
+import { sourceIdOf } from "@facetdb/postgres";
 import { createMemoryStore } from "@facetdb/postgres/testing";
 import { createCheckStore, createServer, onlyRecord } from "@facetdb/server";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,7 +23,7 @@ import {
 
 const PROJECT = "project-1";
 const SOURCE = "support_tickets";
-const SOURCE_ID = "src-support-tickets";
+const SOURCE_ID = sourceIdOf(PROJECT, SOURCE);
 const FIELDS = ["subject", "body"] as const;
 const URL = "https://facetdb.test";
 
@@ -97,7 +98,7 @@ async function rig() {
   closers.push(() => memory.close());
   const { store } = memory;
   await store.ensureProject({ id: PROJECT, name: "one" });
-  await store.ensureSource({ id: SOURCE_ID, projectId: PROJECT, name: SOURCE, kind: "api" });
+  await store.ensureSource({ projectId: PROJECT, name: SOURCE, kind: "api" });
 
   const checkConnector = store.connector({
     sourceId: SOURCE_ID,
@@ -123,7 +124,7 @@ async function rig() {
     store: {
       ...createCheckStore(
         store,
-        [{ projectId: PROJECT, name: SOURCE, sourceId: SOURCE_ID, fields: FIELDS }],
+        [{ projectId: PROJECT, name: SOURCE, fields: FIELDS }],
         "check-api",
       ),
       apiKeys: store.apiKeys,

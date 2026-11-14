@@ -200,7 +200,84 @@ $$`,
       `revoke all on function ${RESERVE_USAGE_FUNCTION_SIGNATURE} from public`,
     ],
   },
+  {
+    version: 4,
+    statements: [
+      // A source's id is `<project>:<name>` (`sourceIdOf`). Every `sources` row whose id is still
+      // the bare name is rekeyed with its own `project_id`, in the migration's transaction,
+      // together with each column that holds the id: `decisions.source_id`,
+      // `question_set_versions.source_id`, `records.source_id`, and `jobs.record_key`, which embeds
+      // it as the store queue's prefix `<length>:<id>:` (connector.ts `queuePrefix`, the length in
+      // UTF-16 code units as JavaScript counts it). Only a source holding records has store jobs: a
+      // table source's jobs, in the same table when the store shares the customer's database, are
+      // keyed by the table's own key and left alone. Nothing else embeds a source id: a cursor's
+      // `run` is `all@v<version>` or `only@v<version>:<questions>`, and an outbox row holds the
+      // project, the endpoint and the payload. A log a second project wrote under the first's row
+      // cannot be told apart and stays with the first (`rekeyNotes` names it). A row already
+      // rekeyed never has `id = name`, so the statement runs again harmlessly.
+      `do $$
+declare
+  v_source record;
+  v_old_prefix text;
+  v_new_prefix text;
+begin
+  for v_source in select id, project_id, name from facetdb.sources where id = name loop
+    v_old_prefix := (char_length(v_source.id)
+        + (select count(*) from unnest(string_to_array(v_source.id, null)) c where ascii(c) > 65535))::text
+      || ':' || v_source.id || ':';
+    v_new_prefix := (char_length(v_source.project_id || ':' || v_source.name)
+        + (select count(*) from unnest(string_to_array(v_source.project_id || ':' || v_source.name, null)) c
+            where ascii(c) > 65535))::text
+      || ':' || v_source.project_id || ':' || v_source.name || ':';
+    if exists (select 1 from facetdb.records r where r.source_id = v_source.id) then
+      update facetdb.jobs set record_key = v_new_prefix || substr(record_key, char_length(v_old_prefix) + 1)
+       where left(record_key, char_length(v_old_prefix)) = v_old_prefix;
+    end if;
+    update facetdb.records set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.decisions set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.question_set_versions set source_id = v_source.project_id || ':' || v_source.name
+     where source_id = v_source.id;
+    update facetdb.sources set id = v_source.project_id || ':' || v_source.name
+     where id = v_source.id;
+  end loop;
+end
+$$`,
+    ],
+  },
 ];
+
+/** The migration that rekeys every source id to `<project>:<name>`. */
+const REKEY_VERSION = 4;
+
+/**
+ * What migration 4 cannot settle, said before it runs: a source registered under its bare name
+ * whose log another project of the store may have written to (before version 4 a second project's
+ * registration of the same name was skipped, and its worker wrote under the first's id). Those rows
+ * cannot be told apart, so they stay with the registered project; each note names the source.
+ * Empty on a store without sources, or once every id is rekeyed.
+ */
+export async function rekeyNotes(query: SqlQuery): Promise<string[]> {
+  const present = await query(
+    `select to_regclass('facetdb.sources') is not null and to_regclass('facetdb.projects') is not null as present`,
+  );
+  if (present[0]?.["present"] !== true) {
+    return [];
+  }
+  const rows = await query(
+    `select s.name, s.project_id, string_agg(p.id, ', ' order by p.id) as others
+       from facetdb.sources s join facetdb.projects p on p.id <> s.project_id
+      where s.id = s.name
+      group by s.name, s.project_id
+      order by s.name, s.project_id`,
+  );
+  return rows.map((row) => {
+    const name = String(row["name"]);
+    const project = String(row["project_id"]);
+    return `the decision log of source "${name}" is now keyed by project ${project} and its name; if project(s) ${String(row["others"])} of this store also ran a source named "${name}" before, their rows cannot be told apart from ${project}'s and stay in ${project}'s log`;
+  });
+}
 
 /** The newest migration number this version of FacetDB knows. */
 export const SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
@@ -303,12 +380,13 @@ export class StoreNotInstalledError extends Error {
  * once. A store written by a newer FacetDB is refused rather than guessed at. A store that is
  * already current is only read, with no DDL (not even `if not exists`, which a login without CREATE
  * is refused); one that is behind is migrated when the login may create, and otherwise the error
- * names the fix (`StoreNotInstalledError`).
+ * names the fix (`StoreNotInstalledError`). Returns the notes of the migrations it ran (store
+ * version 4's shared logs, `rekeyNotes`), for the caller to print.
  */
-export async function migrateStore(client: SqlClient): Promise<void> {
+export async function migrateStore(client: SqlClient): Promise<readonly string[]> {
   const seen = await currentVersions(client.query);
   if (seen !== undefined && isCurrent(seen)) {
-    return;
+    return [];
   }
   const may = await client.query(
     `select case when to_regnamespace('facetdb') is null
@@ -318,12 +396,13 @@ export async function migrateStore(client: SqlClient): Promise<void> {
   if (may[0]?.["may"] !== true) {
     throw new StoreNotInstalledError(Math.max(0, ...(seen ?? [])));
   }
-  await client.transaction(async (query) => {
+  return client.transaction(async (query) => {
     await query("select pg_advisory_xact_lock(hashtext($1))", [SCHEMA_LOCK]);
     await query(`create schema if not exists ${quoteIdent("facetdb")}`);
     await query(VERSION_TABLE_SQL);
     const applied = await appliedVersions(query);
     refuseNewer(applied);
+    const notes = applied.includes(REKEY_VERSION) ? [] : await rekeyNotes(query);
     for (const migration of MIGRATIONS) {
       if (applied.includes(migration.version)) {
         continue;
@@ -333,6 +412,7 @@ export async function migrateStore(client: SqlClient): Promise<void> {
       }
       await query(recordMigration(migration.version));
     }
+    return notes;
   });
 }
 

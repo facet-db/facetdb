@@ -282,7 +282,9 @@ export function createStoreConnector(
     // The store's tables are created at start; install brings them up to date, which is a no-op
     // when they are. A source adds no objects of its own, so there is nothing for uninstall to
     // remove: the records and the log are the customer's data and go only by an explicit purge.
-    install: () => migrateStore(client),
+    install: async () => {
+      await migrateStore(client);
+    },
     uninstall: () => Promise.resolve(),
     watch,
     read,

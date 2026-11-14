@@ -27,6 +27,7 @@ import {
   createApiKeyStore,
   createCredentialStore,
 } from "./secrets.ts";
+import { sourceIdOf } from "./source-id.ts";
 
 export type StoreOptions = {
   /**
@@ -70,9 +71,16 @@ export type Store = {
   readonly apiKeys: ApiKeyStore;
   /** Registers a project; registering it again changes nothing. */
   ensureProject(project: { readonly id: string; readonly name: string }): Promise<void>;
-  /** Registers a plugin or API source of a project; registering it again changes nothing. */
+  /**
+   * What opening the store migrated and could not settle (store version 4's shared logs), for the
+   * caller to print; empty when the store was already current.
+   */
+  readonly migrationNotes: readonly string[];
+  /**
+   * Registers a plugin or API source of a project under `sourceIdOf(projectId, name)`, the id its
+   * log, versions and records are keyed by; registering it again changes nothing.
+   */
   ensureSource(source: {
-    readonly id: string;
     readonly projectId: string;
     readonly name: string;
     readonly kind: SourceKind;
@@ -207,10 +215,11 @@ export async function createStore(options: StoreOptions): Promise<Store> {
 
   let closed = false;
   try {
-    await migrateStore(client);
+    const migrationNotes = await migrateStore(client);
     const crypto = createCrypto(secret, await installSalt(client));
 
     return {
+      migrationNotes,
       usage: createUsageStore(client),
       alerts: createAlertStore(client),
       cursors: createCursorStore(client),
@@ -228,7 +237,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
         await client.query(
           `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, $3, $4)
            on conflict (id) do nothing`,
-          [source.id, source.projectId, source.name, source.kind],
+          [sourceIdOf(source.projectId, source.name), source.projectId, source.name, source.kind],
         );
       },
 

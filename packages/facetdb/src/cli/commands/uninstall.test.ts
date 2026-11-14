@@ -1,4 +1,4 @@
-import { type SqlConnect, uninstall } from "@facetdb/postgres";
+import { type SqlConnect, sourceIdOf, uninstall } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
@@ -18,6 +18,8 @@ const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app
 /** The project directory's name is the project's id and name: what uninstall asks to have typed back. */
 const PROJECT_DIR = "/work/listings-market";
 const PROJECT = "listings-market";
+/** The id the worker keeps the `listings` source's log under. */
+const LOG_ID = sourceIdOf(PROJECT, "listings");
 
 const LISTINGS: SourceInput = {
   name: "listings",
@@ -128,18 +130,19 @@ async function runSeeingPrompts(
 /** The source as the worker registers it on its first start, with a decision log of its own. */
 async function registerSourceWithLog(): Promise<void> {
   await q(
-    `insert into facetdb.sources (id, project_id, name, kind) values ('listings', $1, 'listings', 'plugin')`,
-    [PROJECT],
+    `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, 'listings', 'plugin')`,
+    [LOG_ID, PROJECT],
   );
   for (const key of ["1", "2"]) {
     await q(
       `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
-       values ('listings', $1, 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
-      [key],
+       values ($1, $2, 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
+      [LOG_ID, key],
     );
   }
   await q(
-    `insert into facetdb.question_set_versions (source_id, version, content_hash, question_set) values ('listings', 1, 'h', '{}')`,
+    `insert into facetdb.question_set_versions (source_id, version, content_hash, question_set) values ($1, 1, 'h', '{}')`,
+    [LOG_ID],
   );
 }
 
@@ -158,7 +161,7 @@ async function connectorNotes(purge: boolean): Promise<readonly string[]> {
   const result = await uninstall({
     adminUrl: ADMIN_URL,
     connect: world.connect,
-    source: { table: "listings", sourceId: "listings" },
+    source: { table: "listings", name: "listings", projectId: PROJECT },
     purge,
     dryRun: true,
     print: () => undefined,
@@ -377,20 +380,22 @@ describe("what the purge's checks say, through the CLI", () => {
     expect(installed.code, installed.stderr).toBe(0);
   }
 
-  it("refuses a purge while another installed table may share the log, changing nothing", async () => {
+  it("purges the table's log while another table of the project is installed: its log has its own id", async () => {
     await registerSourceWithLog();
     await installOrders();
     const result = await run(
       ["uninstall", "--purge", "--source", "listings", "--admin-url", ADMIN_URL],
-      [],
+      [PROJECT],
       twoTables,
     );
-    expect(result.code).toBe(1);
-    expect(result.prompts).toEqual([]);
-    expect(result.stderr).toContain(
-      `error: the decision log of source "listings" may be shared with public.orders (project ${PROJECT}), which is still installed; uninstall that table first, or keep the log. Nothing was changed.`,
-    );
-    expect(await q(`select count(*)::int as n from facetdb.decisions`)).toEqual([{ n: 2 }]);
+    expect(result.code, result.stderr).toBe(0);
+    // Its rows were the log's last, so the emptied log table went with them.
+    expect(await q(`select to_regclass('facetdb.decisions') is null as gone`)).toEqual([
+      { gone: true },
+    ]);
+    expect(await q(`select table_name from facetdb.table_owners order by table_name`)).toEqual([
+      { table_name: "orders" },
+    ]);
   });
 
   it("a plain uninstall says the log stays because another table may share it", async () => {
@@ -410,7 +415,7 @@ describe("what the purge's checks say, through the CLI", () => {
       "This removes: from public.listings: 5 FacetDB columns (is_scam, is_scam_probability, facetdb_status, facetdb_updated_at, facetdb_reviewed), the trigger facetdb_listings, the policies facetdb_reads and facetdb_writes, its queued jobs and the facetdb_worker login's rights on it.\n",
     );
     expect(result.stdout).toContain(
-      `note: the decision log of source "listings" stays (2 decision(s), 1 question-set version(s)); it can be purged once no other table is installed in this database (${LATER}).\n`,
+      `note: the decision log of source "listings" stays (2 decision(s), 1 question-set version(s)); it can be purged once no other table of its project is installed in this database (${LATER}).\n`,
     );
   });
 

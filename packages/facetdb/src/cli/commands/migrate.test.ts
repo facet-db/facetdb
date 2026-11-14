@@ -1,5 +1,5 @@
 import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
-import type { SqlConnect } from "@facetdb/postgres";
+import { type SqlConnect, sourceIdOf } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
@@ -70,9 +70,13 @@ async function facetdbSchemaExists(): Promise<boolean> {
  * project migrate installed: what `--purge` finds the log by.
  */
 async function registerSource(): Promise<void> {
+  const owners = await world.client.query(
+    "select project_id from facetdb.table_owners where table_name = 'listings'",
+  );
+  const projectId = String(owners[0]?.["project_id"]);
   await world.client.query(
-    `insert into facetdb.sources (id, project_id, name, kind)
-     select 'listings', project_id, 'listings', 'plugin' from facetdb.table_owners where table_name = 'listings'`,
+    `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, 'listings', 'plugin')`,
+    [sourceIdOf(projectId, "listings"), projectId],
   );
 }
 

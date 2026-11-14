@@ -17,7 +17,13 @@ import {
   createResilientProvider,
   DEFAULT_MAX_MS,
 } from "@facetdb/model";
-import type { ProjectRef, SqlClient, SqlConnect, Store } from "@facetdb/postgres";
+import {
+  type ProjectRef,
+  type SqlClient,
+  type SqlConnect,
+  type Store,
+  sourceIdOf,
+} from "@facetdb/postgres";
 import {
   type AlertFailure,
   createCheckStore,
@@ -171,7 +177,12 @@ export async function runWorkers(
     limiter: createInFlightLimiter({ clock }),
   });
   const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
+  for (const note of store.migrationNotes) {
+    print(`note: ${note}`);
+  }
   await store.ensureProject(project);
+  /** The source's id in the store: its log, versions, records and queue are keyed by it. */
+  const idOf = (source: SourceConfig) => sourceIdOf(project.id, source.name);
   const spending: SpendingGate = projectSpending(config, store, alerts, clock, project.id);
 
   /** The question-set version each source runs under, recorded once at start. */
@@ -189,7 +200,7 @@ export async function runWorkers(
     return createWorker({
       connector,
       provider,
-      log: store.log(source.name),
+      log: store.log(idOf(source)),
       reviews: NO_REVIEW_CARDS,
       actions: [],
       clock,
@@ -214,8 +225,8 @@ export async function runWorkers(
   }
 
   async function start(source: SourceConfig, kind: "api" | "plugin"): Promise<void> {
-    await store.ensureSource({ id: source.name, projectId: project.id, name: source.name, kind });
-    const recorded = await store.questionSets.record(source.name, questionSetOf(config, source));
+    await store.ensureSource({ projectId: project.id, name: source.name, kind });
+    const recorded = await store.questionSets.record(idOf(source), questionSetOf(config, source));
     versions.set(source.name, recorded.version);
     if (source.actions.length > 0) {
       print(
@@ -227,7 +238,6 @@ export async function runWorkers(
   const running: Running[] = [];
   const apiSources: {
     readonly name: string;
-    readonly sourceId: string;
     readonly fields: readonly string[];
   }[] = [];
   let listener: HttpListener | undefined;
@@ -235,9 +245,13 @@ export async function runWorkers(
     for (const source of config.sources) {
       if (source.api) {
         await start(source, "api");
-        const connector = store.connector({ sourceId: source.name, fields: source.read, workerId });
+        const connector = store.connector({
+          sourceId: idOf(source),
+          fields: source.read,
+          workerId,
+        });
         const worker = workerFor(source, connector, true);
-        apiSources.push({ name: source.name, sourceId: source.name, fields: source.read });
+        apiSources.push({ name: source.name, fields: source.read });
         running.push({
           source: source.name,
           worker,
@@ -317,7 +331,7 @@ export async function runWorkers(
               throw new Error(`the project ${projectId} has no API source named ${name}`);
             }
             const connector = store.connector({
-              sourceId: source.name,
+              sourceId: idOf(source),
               fields: source.read,
               workerId,
             });

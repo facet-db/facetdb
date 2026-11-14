@@ -10,10 +10,12 @@ import {
   type QuestionSet,
   resolveThresholds,
 } from "@facetdb/core";
+import { sourceIdOf } from "@facetdb/postgres";
 import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
 import {
   ALLOW_INSECURE_OPTION,
   loadProjectConfig,
+  projectRef,
   requireSecureUrl,
   savedQuestionSets,
 } from "./database.ts";
@@ -276,7 +278,9 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
     requireSecureUrl(url, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
 
     const store = await deps.store({ allowInsecure });
-    const log = store.log(source.name);
+    // The log is kept under the project-scoped id, never the bare source name.
+    const sourceId = sourceIdOf(projectRef(deps.projectDir).id, source.name);
+    const log = store.log(sourceId);
     const versions = new Map<number, QuestionSet>();
     const asked = new Set<number>();
     let rows = 0;
@@ -302,7 +306,7 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
           const missing = [
             ...new Set(page.entries.map((entry) => entry.version).filter((v) => !asked.has(v))),
           ];
-          for (const [version, set] of await savedQuestionSets(deps, url, source.name, missing)) {
+          for (const [version, set] of await savedQuestionSets(deps, url, sourceId, missing)) {
             versions.set(version, set);
           }
           for (const version of missing) {

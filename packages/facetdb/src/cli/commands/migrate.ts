@@ -78,6 +78,8 @@ type Shown = {
   /** Undefined without `--prune`, or when the table is not installed yet. */
   readonly pruned: Pruned | undefined;
   readonly sql: string;
+  /** The store migration's notes, read before the script runs (the same for every table). */
+  readonly notes: readonly string[];
 };
 
 /**
@@ -194,7 +196,7 @@ async function show(
   if (!result.ok) {
     throw refused("migrate-refused", result.reason);
   }
-  return { target, plan, pruneSql, pruned, sql: result.sql };
+  return { target, plan, pruneSql, pruned, sql: result.sql, notes: result.notes };
 }
 
 /**
@@ -278,6 +280,11 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       }
       print(`-- facetdb migrate: ${item.target.source.name} (${label(item.target)})`);
       print(item.sql);
+    }
+    // Store version 4 rekeys each source id to `<project>:<name>`; a log another project shared
+    // stays with the registered one, said once before anything runs.
+    for (const note of new Set(shown.flatMap((item) => item.notes))) {
+      print(`note: ${note}`);
     }
     const summary = (applied: boolean) => ({
       ok: true,

@@ -11,6 +11,7 @@ import {
   STORE_TABLES,
   STORE_VERSION_TABLE,
   StoreNotInstalledError,
+  sourceIdOf,
 } from "../store/index.ts";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
@@ -243,6 +244,113 @@ describe("the install script and the store", () => {
     expect(
       await world.client.query(`select count(*)::int as n from facetdb.store_migrations`),
     ).toEqual([{ n: SCHEMA_VERSION }]);
+  });
+
+  it("a store at version 3 with rows is rekeyed to `<project>:<name>` by migration 4, with a note for a shared log", async () => {
+    const world = await installed();
+    const q = (sql: string, params: readonly unknown[] = []) => world.client.query(sql, params);
+    await q(`delete from facetdb.store_migrations where version = 4`);
+    // The old shape: ids are bare names. B's worker found A's `listings` row and wrote under it.
+    await q(`insert into facetdb.projects (id, name) values ('proj_a', 'A'), ('proj_b', 'B')`);
+    await q(`insert into facetdb.sources (id, project_id, name, kind) values
+      ('listings', 'proj_a', 'listings', 'plugin'),
+      ('tickets', 'proj_b', 'tickets', 'api'),
+      ('😀', 'proj_b', '😀', 'api')`);
+    for (const [source, key] of [
+      ["listings", "1"],
+      ["listings", "1"],
+      ["listings", "2"],
+      ["tickets", "t1"],
+    ]) {
+      await q(
+        `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+         values ($1, $2, 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
+        [source, key],
+      );
+    }
+    await q(`insert into facetdb.question_set_versions (source_id, version, content_hash, question_set)
+      values ('listings', 1, 'h', '{}'), ('listings', 2, 'h2', '{}'), ('tickets', 1, 'h', '{}')`);
+    await q(`insert into facetdb.records (source_id, record_key, state, hash, status) values
+      ('tickets', 't1', '{}', 'h', 'pending'), ('tickets', 't2', '{}', 'h', 'pending'),
+      ('😀', 'e1', '{}', 'h', 'pending')`);
+    // The store queue's keys embed the id, length-prefixed in UTF-16 units (`queuePrefix`); a
+    // table source's job (its own key, the store sharing the database) is not the store's.
+    const prefix = (id: string) => `${id.length}:${id}:`;
+    await q(
+      `insert into facetdb.jobs (record_key) values ($1), ($2), ($3), ('42'), ('9:listings:x')`,
+      [`${prefix("tickets")}t1`, `${prefix("tickets")}t2`, `${prefix("😀")}e1`],
+    );
+    await q(`insert into facetdb.cursors (run, cursor, done) values ('all@v1', 'k', false)`);
+    const count = async (table: string) =>
+      (await q(`select count(*)::int as n from facetdb.${table}`))[0]?.["n"];
+    const counts = async () =>
+      Object.fromEntries(
+        await Promise.all(
+          ["sources", "decisions", "question_set_versions", "records", "jobs", "cursors"].map(
+            async (table) => [table, await count(table)] as const,
+          ),
+        ),
+      );
+    const before = await counts();
+
+    const store = await createStore({
+      url: "postgres://admin@localhost/listings",
+      pgHost: undefined,
+      connect: () => world.client,
+      secret: TEST_SECRET,
+      clock: new FakeClock(),
+    });
+    expect(store.migrationNotes).toEqual([
+      `the decision log of source "listings" is now keyed by project proj_a and its name; if project(s) proj_b, proj_listings of this store also ran a source named "listings" before, their rows cannot be told apart from proj_a's and stay in proj_a's log`,
+      `the decision log of source "tickets" is now keyed by project proj_b and its name; if project(s) proj_a, proj_listings of this store also ran a source named "tickets" before, their rows cannot be told apart from proj_b's and stay in proj_b's log`,
+      `the decision log of source "😀" is now keyed by project proj_b and its name; if project(s) proj_a, proj_listings of this store also ran a source named "😀" before, their rows cannot be told apart from proj_b's and stay in proj_b's log`,
+    ]);
+    expect(await counts()).toEqual(before);
+    const ids = async (table: string, column = "source_id") =>
+      (await q(`select distinct ${column} as id from facetdb.${table} order by 1`)).map(
+        (row) => row["id"],
+      );
+    expect(await ids("sources", "id")).toEqual([
+      sourceIdOf("proj_a", "listings"),
+      sourceIdOf("proj_b", "tickets"),
+      sourceIdOf("proj_b", "😀"),
+    ]);
+    expect(await ids("decisions")).toEqual(["proj_a:listings", "proj_b:tickets"]);
+    expect(await ids("question_set_versions")).toEqual(["proj_a:listings", "proj_b:tickets"]);
+    expect(await ids("records")).toEqual(["proj_b:tickets", "proj_b:😀"]);
+    expect(
+      (await q(`select record_key from facetdb.jobs order by 1`)).map((r) => r["record_key"]),
+    ).toEqual(
+      [
+        "14:proj_b:tickets:t1",
+        "14:proj_b:tickets:t2",
+        `${prefix("proj_b:😀")}e1`,
+        "42",
+        "9:listings:x",
+      ].sort(),
+    );
+    // Every record's history reads as before, under the new id (what `facetdb explain` prints).
+    expect(
+      (await store.log(sourceIdOf("proj_a", "listings")).history("1")).map((e) => e.kind),
+    ).toEqual(["answer", "answer"]);
+    expect(await store.log(sourceIdOf("proj_a", "listings")).history("2")).toHaveLength(1);
+    expect(await store.log("listings").history("1")).toEqual([]);
+    expect(await q(`select run from facetdb.cursors`)).toEqual([{ run: "all@v1" }]);
+    await store.close();
+
+    // A store at 4 runs nothing more: the install script's rekey finds no bare id, and the
+    // store opens with no note.
+    await install(world);
+    expect(await ids("sources", "id")).toEqual(["proj_a:listings", "proj_b:tickets", "proj_b:😀"]);
+    const again = await createStore({
+      url: "postgres://admin@localhost/listings",
+      pgHost: undefined,
+      connect: () => world.client,
+      secret: TEST_SECRET,
+      clock: new FakeClock(),
+    });
+    expect(again.migrationNotes).toEqual([]);
+    await again.close();
   });
 
   it("a second run changes nothing", async () => {
