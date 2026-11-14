@@ -40,7 +40,7 @@ import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
  * run and never kept. The database engines a source's scheme picks from are built here: the
  * Postgres engine over the same driver and pools as the store, judged with the environment's
  * `PGHOST`, and the polling engine `connector: "polling"` picks over the Postgres dialect, the same
- * driver and the same `PGHOST`; later tasks append theirs.
+ * driver and the same `PGHOST`, and the SQLite engine over node:sqlite; later tasks append theirs.
  */
 
 const clock: Clock = {
@@ -156,6 +156,12 @@ export function processDeps(): CliDeps {
             process.stderr.write(`warning: ${message}\n`);
           },
         });
+      }),
+      // A SQLite file (sqlite:, file: or a bare .db path) through Node's own node:sqlite: the
+      // worker opens the file itself, one worker per file, polling every second.
+      lazyEngine("sqlite", async () => {
+        const { createSqliteEngine } = await import("@facetdb/sqlite");
+        return createSqliteEngine();
       }),
     ],
     connect,

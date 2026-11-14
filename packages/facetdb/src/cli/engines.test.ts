@@ -87,6 +87,18 @@ describe("the scheme table", () => {
     expect(isPostgresUrl("mysql://db.example.com/app")).toBe(false);
   });
 
+  it.each(["sqlite:///var/lib/app.db", "file:./app.db", "./data/app.db", "/var/lib/app.db"])(
+    "%s is read by the SQLite engine main.ts registers",
+    async (url) => {
+      const { engines } = processDeps();
+      expect(readsUrl(engines, url)).toBe(true);
+      const engine = await engineFor(engines, url);
+      expect(engine.name).toBe("sqlite");
+      expect(engine.schemes).toEqual(["sqlite", "file"]);
+      expect(engine.capabilities).toMatchObject({ multipleWorkers: false, pushWakeup: false });
+    },
+  );
+
   it("says which schemes an engine is registered for without loading any", () => {
     const counted = entry("postgres", ["postgres", "postgresql"]);
     expect(readsUrl([counted.entry], "postgres://db.example.com/app")).toBe(true);
