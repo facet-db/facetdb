@@ -42,6 +42,7 @@ export type {
   StatementPurpose,
   UninstallOptions,
 } from "./engine.ts";
+export { EngineRefusal } from "./engine.ts";
 export type { PluginKind, PluginManifest } from "./plugin.ts";
 export { PLUGIN_KINDS } from "./plugin.ts";
 export type { ModelProvider, ProviderRequest, ProviderResponse, Usage } from "./provider.ts";

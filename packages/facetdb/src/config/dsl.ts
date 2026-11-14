@@ -118,10 +118,19 @@ export function score(
 export type StorageMode = "inline" | "side-table";
 export type OnCapReached = "pause" | "continue";
 
+/**
+ * How a source's database is watched when its scheme's own way does not fit: `"polling"` scans for
+ * changed rows and compares a state hash, for a host that forbids triggers. Absent, the connection
+ * string's scheme picks the engine.
+ */
+export type ConnectorChoice = "polling";
+
 export type SourceInput = {
   readonly name: string;
   /** The connection string, read from the environment: `process.env.DATABASE_URL`. */
   readonly database?: string | undefined;
+  /** Overrides the engine the scheme picks: `"polling"` for a host that forbids triggers. */
+  readonly connector?: ConnectorChoice;
   /** An API source: your code sends the records to `/v1/check`. */
   readonly api?: boolean;
   readonly table?: string;
@@ -156,6 +165,8 @@ export type SourceConfig = {
   readonly database?: string;
   /** The environment variable the connection string came from; the JSON export carries this. */
   readonly databaseEnv?: string;
+  /** The engine chosen over the scheme's: `"polling"`; absent, the scheme picks it. */
+  readonly connector?: ConnectorChoice;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -218,6 +229,7 @@ function sourceConfig(input: SourceInput): SourceConfig {
     name: input.name,
     api: input.api === true,
     database: input.database,
+    connector: input.connector,
     table: input.table,
     where: input.where,
     read: input.read,

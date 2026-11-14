@@ -1,26 +1,26 @@
 import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import {
-  createStore,
-  migrate,
-  type SqlClient,
-  type SqlConnect,
-  type Store,
-} from "@facetdb/postgres";
-import {
-  createPgliteWorld,
-  type PgliteWorld,
-  resetPgliteWorld,
-  TEST_SECRET,
-} from "@facetdb/postgres/testing";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { engineFor, openConnector } from "../engines.ts";
+import { sharePools } from "../pools.ts";
 import type { HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
-import { openTableConnector } from "../table-connector.ts";
-import { projectRef, questionSetOf } from "./database.ts";
+import {
+  createPgliteWorld,
+  createStore,
+  migrate,
+  type PgliteWorld,
+  postgresEngines,
+  resetPgliteWorld,
+  type SqlClient,
+  type SqlConnect,
+  type Store,
+  TEST_SECRET,
+} from "../testing.ts";
+import { engineTarget, projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 import { DEFAULT_PORT, deliverUntil, WORKER_CONNECTIONS } from "./worker.ts";
 
@@ -170,6 +170,11 @@ function run(
             return client.pipeline(text, paramSets);
           },
         };
+  // The composition root's wiring: the store and the engine share one driver, pools by URL.
+  const connect = sharePools((url, connectOptions) => {
+    poolsAsked.clients.push({ url, max: connectOptions?.max });
+    return recorded(world.connect(url, connectOptions));
+  });
   return runInProcess(
     argv,
     {
@@ -179,10 +184,8 @@ function run(
         TYPESAFE_API_KEY: "ts-test-key",
       },
       loadConfig: () => Promise.resolve(options.config ?? config),
-      connect: (url, connectOptions) => {
-        poolsAsked.clients.push({ url, max: connectOptions?.max });
-        return recorded(world.connect(url, connectOptions));
-      },
+      engines: postgresEngines(connect),
+      connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: (storeOptions) => {
         storeAsked.push(storeOptions?.allowInsecure === true);
@@ -325,6 +328,7 @@ describe("facetdb worker", () => {
           projectDir: PROJECT_DIR,
           env: options?.env ?? {},
           loadConfig: () => Promise.resolve(options?.config ?? config),
+          engines: postgresEngines(noConnection),
           connect: noConnection,
           store: (storeOptions) => {
             storeAsked.push(storeOptions?.allowInsecure === true);
@@ -368,17 +372,21 @@ describe("facetdb worker", () => {
     });
 
     it("the connector refuses it too, before it connects, whoever opens it", async () => {
+      // Through the engine, as the worker, backfill, preview and explain open it.
+      const own = ownUrl(REMOTE_PLAIN);
+      const source = own.sources[0] as SourceConfig;
+      const engine = await engineFor(postgresEngines(noConnection), REMOTE_PLAIN);
       await expect(
-        openTableConnector({
-          source: ownUrl(REMOTE_PLAIN).sources[0] as SourceConfig,
-          url: REMOTE_PLAIN,
-          connect: noConnection,
-          questionSet: questionSetOf(config, config.sources[0] as SourceConfig),
-          clock,
-          workerId: "w",
-          allowInsecure: false,
-          pgHost: undefined,
-        }),
+        openConnector(
+          engine,
+          engineTarget(
+            own,
+            { source, schema: "public", table: "listings" },
+            projectRef(PROJECT_DIR),
+          ),
+          REMOTE_PLAIN,
+          { clock, allowInsecure: false, storeShared: false, workerId: "w" },
+        ),
       ).rejects.toThrow(/LISTINGS_URL reaches db.example.com without TLS/);
     });
 

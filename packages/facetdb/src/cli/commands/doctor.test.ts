@@ -1,8 +1,6 @@
 import { HEARTBEAT_LOSS_MS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { createStore, type SqlConnect, WORKER_ROLE } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   ConfigError,
@@ -12,7 +10,17 @@ import {
   type ProjectConfig,
   type SourceInput,
 } from "../../config/index.ts";
-import { CliError, runInProcess } from "../program.ts";
+import { CliError, type EngineEntry, runInProcess } from "../program.ts";
+import {
+  createPgliteWorld,
+  createStore,
+  freshPglite,
+  type PgliteWorld,
+  postgresEngines,
+  readingDatabaseUrl,
+  type SqlConnect,
+  WORKER_ROLE,
+} from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -133,14 +141,15 @@ function asWorker(role: string | null = WORKER_ROLE): SqlConnect {
   };
 }
 
-/** Installs with the real `facetdb migrate`, as the admin. */
+/** Installs with the real `facetdb migrate`, as the admin, the store in the source's database. */
 async function install(config: ProjectConfig): Promise<void> {
   const result = await runInProcess(
     ["migrate", "--yes", "--admin-url", ADMIN_URL],
     {
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(config),
+      loadConfig: () => Promise.resolve(readingDatabaseUrl(config)),
+      engines: postgresEngines(world.connect),
       connect: world.connect,
     },
     COMMANDS,
@@ -167,17 +176,22 @@ type Setup = {
   readonly loadConfig?: () => Promise<ProjectConfig>;
   /** The project directory, whose name is the project's id; the default one has a heartbeat saved. */
   readonly projectDir?: string;
+  /** Engines registered beside the Postgres one, as main.ts appends theirs. */
+  readonly moreEngines?: readonly EngineEntry[];
 };
 
 function doctor(argv: readonly string[], setup: Setup = {}) {
   const provider = setup.provider ?? fakeModel();
+  // The source's engine and the store door connect through the same driver, as in the process.
+  const connect = setup.connect ?? asWorker();
   return runInProcess(
     ["doctor", ...argv],
     {
       projectDir: setup.projectDir ?? PROJECT_DIR,
       env: setup.env ?? goodEnv,
       loadConfig: setup.loadConfig ?? (() => Promise.resolve(setup.config ?? configWith())),
-      connect: setup.connect ?? asWorker(),
+      engines: [...postgresEngines(connect), ...(setup.moreEngines ?? [])],
+      connect,
       provider: () => provider,
       clock,
     },
@@ -1001,6 +1015,195 @@ describe("facetdb doctor, a transaction-mode pooler", () => {
     expect(lineFor(result.stdout, "pooler")).toMatch(/^ok/);
     // The source's database and the store's are two connections, each probed once.
     expect(probe.pools).toEqual([1, 1]);
+  });
+});
+
+describe("facetdb doctor with the store in its own database", () => {
+  /** The store in another database: same server, another database name, as a separate Postgres. */
+  const STORE_URL = `postgres://${WORKER_ROLE}:s3cret-worker-password@localhost:5432/facetdb`;
+
+  it("prints a source group and a store group, each with its own checks, and passes", async () => {
+    await beat(0);
+    const result = await doctor([], { env: { ...goodEnv, DATABASE_URL: STORE_URL } });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    const printed = lines(result.stdout);
+    expect(printed.map((text) => (text.endsWith(":") ? text : text.split(":")[0]))).toEqual([
+      "ok    config",
+      "ok    model key",
+      "ok    model reachable",
+      "source listings:",
+      "ok    database",
+      "ok    pooler",
+      "ok    install",
+      "store:",
+      "ok    store",
+      "ok    pooler",
+      "ok    worker heartbeat",
+      "ok    FACETDB_SECRET",
+      "All 10 checks passed.",
+    ]);
+    expect(lineFor(result.stdout, "store")).toMatch(
+      /^ok {4}store: the FacetDB store on localhost:5432\/facetdb is reachable and current \(schema version \d+\)$/,
+    );
+    expect(printed[9]).toBe(
+      "ok    pooler: prepared statements stay on one server session on the store (a direct connection or a session pooler)",
+    );
+    expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
+
+    const json = await doctor(["--json"], { env: { ...goodEnv, DATABASE_URL: STORE_URL } });
+    const parsed = JSON.parse(json.stdout) as {
+      checks: { id: string; group?: string }[];
+    };
+    expect(parsed.checks.map((check) => `${check.group ?? "-"} ${check.id}`)).toEqual([
+      "- config",
+      "- model-key",
+      "- model-reachable",
+      "source listings database",
+      "source listings pooler",
+      "source listings install",
+      "store store",
+      "store pooler",
+      "store worker",
+      "store secret",
+    ]);
+  });
+
+  it("gives each table source its group when there are several, and checks the store once", async () => {
+    await beat(0);
+    const listings = configWith();
+    const gadgets = configWith({ name: "gadgets", table: "gadgets", storage: "side-table" });
+    const config: ProjectConfig = {
+      ...listings,
+      sources: [...listings.sources, ...gadgets.sources],
+    };
+    const result = await doctor(["--offline"], { config });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    const printed = lines(result.stdout);
+    expect(printed.filter((text) => text.endsWith(":"))).toEqual([
+      "source listings:",
+      "source gadgets:",
+      "store:",
+    ]);
+    expect(printed.filter((text) => text.startsWith("ok    worker heartbeat"))).toHaveLength(1);
+  });
+
+  it("fails the database check of a source whose scheme no engine here reads, naming the engines", async () => {
+    await beat(0);
+    const result = await doctor(["--offline"], {
+      config: configWith({ database: "mysql://facetdb_worker:s3cret-mysql@db.example.com/shop" }),
+    });
+    expect(result.code).toBe(1);
+    const database = lineFor(result.stdout, "database");
+    expect(database).toContain(
+      `"listings": the connection string is MySQL or MariaDB's (mysql:), and no MySQL or MariaDB engine is registered here; the engines registered here read postgres (postgres://, postgresql://)`,
+    );
+    expect(database).toContain("https://docs.facetdb.dev/databases");
+    expect(lineFor(result.stdout, "install")).toMatch(/^skip/);
+    expect(result.stdout + result.stderr).not.toContain("s3cret-mysql");
+  });
+
+  it("fails the database check of a source whose engine does not load, and still checks the rest", async () => {
+    await beat(0);
+    const listings = configWith();
+    const orders = configWith({
+      name: "orders",
+      database: "sqlserver://facetdb_worker:s3cret-mssql@db.example.com/shop",
+      table: "orders",
+    });
+    const config: ProjectConfig = {
+      ...listings,
+      sources: [...listings.sources, ...orders.sources],
+    };
+    const result = await doctor(["--offline"], {
+      config,
+      moreEngines: [
+        { key: "mssql", load: () => Promise.reject(new Error("Cannot find module 'tedious'")) },
+      ],
+    });
+    expect(result.code).toBe(1);
+    const printed = lines(result.stdout);
+    const ordersGroup = printed.slice(printed.indexOf("source orders:"));
+    expect(ordersGroup[1]).toBe(
+      `FAIL  database: "orders": the engine for its database could not be loaded: Cannot find module 'tedious' Fix: reinstall facetdb with its dependencies (npm install facetdb), then run facetdb doctor again.`,
+    );
+    expect(ordersGroup[2]).toMatch(/^skip {2}pooler/);
+    // The other source and the store are still checked.
+    const listingsGroup = printed.slice(printed.indexOf("source listings:"));
+    expect(listingsGroup.slice(1, 4).every((text) => text.startsWith("ok"))).toBe(true);
+    expect(lineFor(result.stdout, "store")).toMatch(/^ok/);
+    expect(result.stdout + result.stderr).not.toContain("s3cret-mssql");
+  });
+
+  it("fails the database check of a source of another kind that reads DATABASE_URL, the store's variable", async () => {
+    const MYSQL_URL = "mysql://facetdb_worker:s3cret-mysql@db.example.com/shop";
+    const base = configWith({ database: MYSQL_URL });
+    const config: ProjectConfig = {
+      ...base,
+      sources: base.sources.map((source) => ({ ...source, databaseEnv: "DATABASE_URL" })),
+    };
+    const result = await doctor(["--offline"], {
+      config,
+      env: { ...goodEnv, DATABASE_URL: MYSQL_URL },
+    });
+    expect(result.code).toBe(1);
+    expect(lineFor(result.stdout, "database")).toContain(
+      `the source "listings" reads DATABASE_URL, the store's variable, and its database is not a Postgres (mysql); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
+    );
+    expect(lineFor(result.stdout, "store")).toContain(
+      "DATABASE_URL names a mysql: database, and the FacetDB store is always a Postgres",
+    );
+    expect(result.stdout + result.stderr).not.toContain("s3cret-mysql");
+  });
+
+  it("fails the store check of a PGlite store outside facetdb dev, and says what to point it at", async () => {
+    const seen: string[] = [];
+    const inner = asWorker();
+    const result = await doctor(["--offline"], {
+      env: { ...goodEnv, DATABASE_URL: "pglite://.facetdb/dev" },
+      connect: (url, options) => {
+        seen.push(url);
+        return inner(url, options);
+      },
+    });
+    expect(result.code).toBe(1);
+    const store = lineFor(result.stdout, "store");
+    expect(store).toMatch(/^FAIL/);
+    expect(store).toContain("a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres");
+    expect(store).toContain("Fix: set DATABASE_URL to a Postgres connection string");
+    expect(lineFor(result.stdout, "worker heartbeat")).toContain(
+      "a PGlite store is for facetdb dev",
+    );
+    expect(result.stderr).toContain("see: https://docs.facetdb.dev/fix/doctor-store");
+    // The store is never opened: nothing connected to the PGlite URL.
+    expect(seen.filter((url) => url.startsWith("pglite:"))).toEqual([]);
+  });
+
+  it("while facetdb dev runs on its own PGlite store, whatever DATABASE_URL says", async () => {
+    const devDb = await freshPglite();
+    try {
+      const result = await runInProcess(
+        ["dev", "--once", "--no-http"],
+        {
+          projectDir: "/work/dev-app",
+          env: { DATABASE_URL: "pglite://.facetdb/dev" },
+          loadConfig: () => Promise.resolve(configWith()),
+          connect: () => {
+            throw new Error("dev connected to a database outside the embedded one");
+          },
+          clock,
+          embedded: {
+            open: () => Promise.resolve({ pglite: devDb, close: () => Promise.resolve() }),
+            wipe: () => Promise.resolve(),
+          },
+        },
+        COMMANDS,
+      );
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+      expect(result.stdout).toContain("answers come from the scripted fake provider");
+      expect(result.stdout + result.stderr).not.toContain("a PGlite store is for facetdb dev");
+    } finally {
+      await devDb.close();
+    }
   });
 });
 

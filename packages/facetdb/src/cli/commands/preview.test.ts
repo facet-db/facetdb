@@ -1,15 +1,17 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
-import { createStore, type SqlConnect } from "@facetdb/postgres";
-import {
-  createPgliteWorld,
-  type PgliteWorld,
-  resetPgliteWorld,
-  TEST_SECRET,
-} from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
+import {
+  createPgliteWorld,
+  createStore,
+  type PgliteWorld,
+  postgresEngines,
+  resetPgliteWorld,
+  type SqlConnect,
+  TEST_SECRET,
+} from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -81,7 +83,7 @@ function run(
   argv: readonly string[],
   provider: FakeProvider,
   config: ProjectConfig = configWith(),
-  connect = world.connect,
+  connect: SqlConnect = world.connect,
 ) {
   return runInProcess(
     argv,
@@ -89,6 +91,7 @@ function run(
       projectDir: "/work/listings-app",
       env: {},
       loadConfig: () => Promise.resolve(config),
+      engines: postgresEngines(connect),
       connect,
       provider: () => provider,
     },

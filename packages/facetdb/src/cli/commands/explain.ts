@@ -1,48 +1,49 @@
+import { randomUUID } from "node:crypto";
 import {
   type Answer,
   type AnswerEntry,
-  answerColumns,
+  type Connector,
+  type CurrentDecision,
   choiceConfidence,
+  type DatabaseEngine,
   type Decision,
   decide,
+  type EngineDeps,
+  type EngineTarget,
   type HumanEntry,
   type LogEntry,
   type Question,
   type QuestionSet,
   resolveThresholds,
 } from "@facetdb/core";
+import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
+import { engineFor, openConnector, requireUsableUrl } from "../engines.ts";
 import {
-  installOwnedColumns,
-  SIDE_TABLE_SCHEMA,
-  sideTableName,
-  sourceIdOf,
-} from "@facetdb/postgres";
-import type { SourceConfig } from "../../config/index.ts";
-import {
-  type CliDeps,
   CliError,
   defineCommand,
   EXIT_USAGE,
   likelyYes,
+  type OpenStore,
   percent,
 } from "../program.ts";
+import { requireUsableStoreUrl, storeSharedFor, storeSourceId } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  engineTarget,
   loadProjectConfig,
   projectRef,
-  questionSetOf,
-  requireSecureSource,
-  requireSecureUrl,
   savedQuestionSets,
   singleTarget,
+  sourceUrlOf,
 } from "./database.ts";
 
 /**
  * `facetdb explain <source> <key>`: one record's full history, oldest first, in words. Each model
  * answer and each human decision is shown with the wording and thresholds of the question-set
  * version it ran under, read from the store's saved versions, never from today's config: the
- * history says what was asked then. It reads and writes nothing else; the decision log is
- * append-only.
+ * history says what was asked then. The record as it stands now is its connector's `current`: the
+ * engine's for a table source, the store's for an API source. It writes nothing; the decision log
+ * is append-only.
  */
 
 type ExplainOptions = {
@@ -92,10 +93,6 @@ type CurrentState = {
 /** `2026-10-28 14:02`, in UTC, so the same history reads the same on every machine. */
 function when(at: Date): string {
   return at.toISOString().slice(0, 16).replace("T", " ");
-}
-
-function quote(identifier: string): string {
-  return `"${identifier.replaceAll('"', '""')}"`;
 }
 
 function yesNo(value: boolean): string {
@@ -177,138 +174,92 @@ function lineOf(entry: ExplainedEntry): string[] {
   ];
 }
 
-function describe(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "not answered";
-  }
-  return typeof value === "boolean" ? yesNo(value) : String(value);
-}
-
-/** Reads the record's own FacetDB columns from its table, or its row in the store for an API source. */
+/**
+ * The record as its connector's `current` holds it now, in words: each question's decision, or
+ * "not answered" while it holds none (not answered yet, or waiting for a person).
+ */
 async function currentState(
-  deps: CliDeps,
-  config: Parameters<typeof questionSetOf>[0],
-  source: SourceConfig,
+  connector: Pick<Connector, "current">,
+  questions: readonly Question[],
   key: string,
-  storeUrl: string,
+  where: string,
 ): Promise<CurrentState> {
-  const questionSet = questionSetOf(config, source);
-  const fail = (cause: unknown, where: string) =>
-    new CliError(
+  let current: CurrentDecision | undefined;
+  try {
+    current = (await connector.current([key])).get(key);
+  } catch (cause) {
+    throw new CliError(
       "row-read",
       `the record's current state could not be read from ${where}: ${cause instanceof Error ? cause.message : String(cause)}`,
       "run facetdb doctor to check the connection and the login's permissions",
     );
-  if (source.table === undefined) {
-    const client = deps.connect(storeUrl);
-    try {
-      const rows = await client.query(
-        "select status, decision, reviewed from facetdb.records where source_id = $1 and record_key = $2",
-        [sourceIdOf(projectRef(deps.projectDir).id, source.name), key],
-      );
-      const row = rows[0];
-      if (row === undefined) {
-        return { found: false, values: {} };
-      }
-      const decision = row["decision"];
-      const parsed: unknown = typeof decision === "string" ? JSON.parse(decision) : decision;
-      const values: Record<string, string> = {};
-      if (typeof parsed === "object" && parsed !== null) {
-        for (const [name, value] of Object.entries(parsed)) {
-          values[name] = describe(value);
-        }
-      }
-      return {
-        found: true,
-        status: String(row["status"]),
-        reviewed: row["reviewed"] === true,
-        values,
-      };
-    } catch (cause) {
-      throw fail(cause, "the FacetDB store");
-    } finally {
-      await client.close();
-    }
   }
+  if (current === undefined) {
+    return { found: false, values: {} };
+  }
+  const values: Record<string, string> = {};
+  for (const question of questions) {
+    const decision = current.decisions[question.name];
+    values[question.name] =
+      decision === undefined
+        ? "not answered"
+        : typeof decision.value === "boolean"
+          ? yesNo(decision.value)
+          : decision.value;
+  }
+  return { found: true, status: current.status, reviewed: current.reviewed, values };
+}
 
-  const { schema, table } = singleTarget(config, source.name);
-  const url = source.database;
-  if (url === undefined) {
-    throw new CliError(
-      "database-url",
-      `the source "${source.name}" has no connection string`,
-      `set ${source.databaseEnv ?? "DATABASE_URL"} to the connection string of the database that holds ${table}`,
-    );
+/** A table source as explain reads it: its engine, its target and the worker login's URL. */
+type TableRead = {
+  readonly engine: DatabaseEngine;
+  readonly target: EngineTarget;
+  readonly url: string;
+  /** `schema.table`, what a failure to read it names. */
+  readonly label: string;
+};
+
+/** The table source's engine, target and URL; its URL refused before anything connects. */
+async function tableRead(
+  entries: Parameters<typeof engineFor>[0],
+  config: ProjectConfig,
+  source: SourceConfig,
+  project: ReturnType<typeof projectRef>,
+  allowInsecure: boolean,
+): Promise<TableRead> {
+  const table = singleTarget(config, source.name);
+  const url = sourceUrlOf(
+    source,
+    `the connection string of the database that holds ${table.table}`,
+  );
+  const engine = await engineFor(entries, url, source.connector);
+  const target = engineTarget(config, table, project);
+  requireUsableUrl(engine, target, url, allowInsecure);
+  return { engine, target, url, label: `${table.schema}.${table.table}` };
+}
+
+/** The record now: its table's FacetDB columns through its engine, or its row in the store. */
+async function readCurrent(
+  store: OpenStore,
+  table: TableRead | undefined,
+  source: SourceConfig,
+  key: string,
+  deps: Pick<EngineDeps, "clock" | "allowInsecure" | "storeShared">,
+  sourceId: string,
+): Promise<CurrentState> {
+  const workerId = `explain-${randomUUID()}`;
+  if (table === undefined) {
+    const connector = store.connector({ sourceId, fields: source.read, workerId });
+    return currentState(connector, source.questions, key, "the FacetDB store");
   }
-  // Side-table mode keeps the answers and the status on facetdb.<table>_answers (install never
-  // adds them to the app's table), keyed by the source's key; the worker login can read that
-  // table and its key from the catalog, but not the app table's constraints (as doctor does).
-  const [answerSchema, answerTable] =
-    source.storage === "side-table" ? [SIDE_TABLE_SCHEMA, sideTableName(table)] : [schema, table];
-  const client = deps.connect(url);
+  const connector = await openConnector(table.engine, table.target, table.url, {
+    ...deps,
+    workerId,
+  });
   try {
-    const keyRows =
-      source.storage === "side-table"
-        ? await client.query(
-            `select a.attname as name
-               from pg_catalog.pg_index i
-               join pg_catalog.pg_attribute a on a.attrelid = i.indrelid and a.attnum = any (i.indkey)
-              where i.indrelid = to_regclass($1) and i.indisprimary
-              order by array_position(i.indkey::int2[], a.attnum)`,
-            [`${quote(answerSchema)}.${quote(answerTable)}`],
-          )
-        : await client.query(
-            `select kcu.column_name as name
-               from information_schema.table_constraints tc
-               join information_schema.key_column_usage kcu
-                 on kcu.constraint_name = tc.constraint_name
-                and kcu.constraint_schema = tc.constraint_schema
-                and kcu.table_schema = tc.table_schema
-                and kcu.table_name = tc.table_name
-              where tc.table_schema = $1 and tc.table_name = $2 and tc.constraint_type = 'PRIMARY KEY'
-              order by kcu.ordinal_position`,
-            [schema, table],
-          );
-    const keyColumns = keyRows.map((row) => String(row["name"]));
-    const [keyColumn] = keyColumns;
-    if (keyColumn === undefined || keyColumns.length > 1) {
-      throw new CliError(
-        "primary-key",
-        `${answerSchema}.${answerTable} needs a single-column primary key, and has ${keyColumns.length === 0 ? "none" : keyColumns.join(", ")}`,
-        source.storage === "side-table"
-          ? "run facetdb migrate: the side table is made with the source's key"
-          : "add a primary key (or a surrogate key) to the table; FacetDB keys its answers by it",
-      );
-    }
-    const columns = installOwnedColumns(questionSet);
-    const rows = await client.query(
-      `select ${columns.map(quote).join(", ")} from ${quote(answerSchema)}.${quote(answerTable)} where ${quote(keyColumn)}::text = $1`,
-      [key],
-    );
-    const row = rows[0];
-    if (row === undefined) {
-      return { found: false, values: {} };
-    }
-    const values: Record<string, string> = {};
-    for (const question of questionSet.questions) {
-      const value = answerColumns(question).find((column) => column.role === "value");
-      if (value !== undefined) {
-        values[question.name] = describe(row[value.name]);
-      }
-    }
-    return {
-      found: true,
-      status: String(row["facetdb_status"]),
-      reviewed: row["facetdb_reviewed"] === true,
-      values,
-    };
-  } catch (cause) {
-    if (cause instanceof CliError) {
-      throw cause;
-    }
-    throw fail(cause, `${answerSchema}.${answerTable}`);
+    return await currentState(connector, source.questions, key, table.label);
   } finally {
-    await client.close();
+    await connector.close();
   }
 }
 
@@ -367,19 +318,34 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
       );
     }
     // Before any connection: the store's, then the source's own (a table source's current state is
-    // read from its database with the worker login).
+    // read from its database with the worker login, through its engine).
     const allowInsecure = options.allowInsecure === true;
-    requireSecureUrl(url, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
-    requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
+    requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
+    const project = projectRef(deps.projectDir);
+    const table =
+      source.table === undefined
+        ? undefined
+        : await tableRead(deps.engines, config, source, project, allowInsecure);
     const store = await deps.store({ allowInsecure });
-    const sourceId = sourceIdOf(projectRef(deps.projectDir).id, source.name);
+    const sourceId = storeSourceId(project.id, source.name);
     let history: readonly LogEntry[];
+    let state: CurrentState | undefined;
     try {
       history = await store.log(sourceId).history(key);
+      if (history.length > 0) {
+        state = await readCurrent(
+          store,
+          table,
+          source,
+          key,
+          { clock: deps.clock, allowInsecure, storeShared: storeSharedFor(deps.env, source) },
+          sourceId,
+        );
+      }
     } finally {
       await store.close();
     }
-    if (history.length === 0) {
+    if (state === undefined) {
       print(
         `FacetDB has no history for record ${key} of "${source.name}".\n` +
           `Is the source right? The sources in the config are: ${config.sources.map((candidate) => candidate.name).join(", ")}.\n` +
@@ -396,7 +362,6 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
         ? explainAnswer(entry, versions.get(entry.version))
         : explainHuman(entry, versions.get(entry.version)),
     );
-    const state = await currentState(deps, config, source, key, url);
 
     print(`History of record ${key} of "${source.name}", oldest first:`);
     for (const entry of entries) {

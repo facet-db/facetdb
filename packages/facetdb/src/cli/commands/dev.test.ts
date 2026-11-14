@@ -3,13 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
 import { FakeClock } from "@facetdb/core/testing";
-import { pgliteClient } from "@facetdb/postgres";
-import { freshPglite, resetPglite } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { diskEmbedded } from "../embedded.ts";
 import type { EmbeddedDatabases } from "../program.ts";
 import { runInProcess } from "../program.ts";
+import { freshPglite, pgliteClient, resetPglite } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
 /**

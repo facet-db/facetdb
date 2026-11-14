@@ -6,17 +6,18 @@ import type {
   PlanResult,
   QuestionSet,
 } from "@facetdb/core";
+import { EngineRefusal } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlConnect } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
-import { createPostgresEngine, EngineRefusal } from "./engine.ts";
+import { createPostgresEngine } from "./engine.ts";
 
 /**
- * The engine's doctor and `open` on PGlite: the checks the CLI's doctor.ts computes for
- * a table source, with the same names, details, fixes and statuses (the variable that holds the URL
- * is the one word the engine cannot know), the list `doctor --dry-run` prints, and the connector
- * `open` hands out once it read the key from the catalog, where the CLI used to read it.
+ * The engine's doctor and `open` on PGlite: the checks the CLI's doctor.ts computes for a table
+ * source, with the same names, details, fixes and statuses (the variable that holds the URL is the
+ * one word the engine cannot know), the list `doctor --dry-run` prints, and the connector `open`
+ * hands out once it read the key from the catalog, where the CLI used to read it.
  */
 
 const listings: QuestionSet = {
@@ -47,7 +48,10 @@ afterAll(async () => {
 });
 
 /** The admin's engine: PGlite's one superuser connection. */
-const admin = createPostgresEngine({ connect: (url, options) => world.connect(url, options) });
+const admin = createPostgresEngine({
+  connect: (url, options) => world.connect(url, options),
+  pgHost: undefined,
+});
 
 /** The worker login's connection: every statement runs as `role` on the same engine. */
 function as(role: string): SqlConnect {
@@ -66,7 +70,7 @@ function as(role: string): SqlConnect {
   });
 }
 
-const worker = createPostgresEngine({ connect: as("facetdb_worker") });
+const worker = createPostgresEngine({ connect: as("facetdb_worker"), pgHost: undefined });
 
 function target(overrides: Partial<EngineTarget> = {}): EngineTarget {
   return {
@@ -256,6 +260,7 @@ describe("doctor", () => {
       connect: () => {
         throw new Error("a connection was opened");
       },
+      pgHost: undefined,
     });
     const remote = "postgres://facetdb_worker:s3cret-worker-password@db.example.com/app";
     const checks = await never.doctor(target(), remote, shared);
@@ -284,6 +289,14 @@ describe("doctor", () => {
       status: "fail",
       detail: `"listings" cannot connect to db.example.com/app: a connection was opened`,
       fix: "check the host, port, user and password in the source's connection string, and that the database accepts connections from this machine (a firewall or an allow-list)",
+    });
+    // With the variable the CLI read the URL from, the words name it where they said the phrase.
+    const named = await never.doctor({ ...target(), urlVariable: "LISTINGS_URL" }, remote, shared);
+    expect(named[0]).toEqual({
+      name: "database",
+      status: "fail",
+      detail: `"listings": LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear`,
+      fix: "add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
     });
   });
 });

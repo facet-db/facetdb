@@ -1,5 +1,5 @@
 import type { PGlite } from "@electric-sql/pglite";
-import type { BackfillDeps, Clock, ModelProvider } from "@facetdb/core";
+import type { BackfillDeps, Clock, DatabaseEngine, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
 import type { WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
@@ -63,6 +63,37 @@ export function likelyYes(probability: number): string {
   return `${percent(probability)} likely yes`;
 }
 
+/** Where a connection string points, without its user or password: what a confirmation names. */
+export function databaseLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const name = parsed.pathname.replace(/^\//, "");
+    return name === "" ? parsed.host : `${parsed.host}/${name}`;
+  } catch {
+    return "the database";
+  }
+}
+
+/** An error's message with every secret it carries blanked out, so nothing printed holds one. */
+export function plainMessage(error: unknown, secrets: readonly (string | undefined)[]): string {
+  let message = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret === undefined || secret === "") {
+      continue;
+    }
+    message = message.replaceAll(secret, "***");
+    try {
+      const password = decodeURIComponent(new URL(secret).password);
+      if (password !== "") {
+        message = message.replaceAll(password, "***");
+      }
+    } catch {
+      // Not a URL: the whole value was already blanked.
+    }
+  }
+  return message;
+}
+
 /** The terminal, as the commands see it; the composition root passes the process's, a test its own. */
 export type CliIo = {
   readonly stdout: (text: string) => void;
@@ -95,7 +126,17 @@ export type CliDeps = {
   readonly env: Readonly<Record<string, string | undefined>>;
   /** Loads and validates the config file at a path relative to the project directory. */
   readonly loadConfig: (path: string) => Promise<ProjectConfig>;
-  /** Opens a database connection for a URL: postgres.js in the process, PGlite in a test. */
+  /**
+   * The database engines a source's connection string picks from by its scheme (`cli/engines.ts`),
+   * each loaded on first use only, so a driver no source needs is never imported: the composition
+   * root registers the Postgres engine, other engines append theirs. A command reaches a source's
+   * database through its engine and nothing else.
+   */
+  readonly engines: readonly EngineEntry[];
+  /**
+   * Opens a connection to the FacetDB store's Postgres (the store door, `cli/store-door.ts`):
+   * postgres.js in the process, PGlite in a test. Never a source's database: that is its engine's.
+   */
   readonly connect: SqlConnect;
   /**
    * The FacetDB store, opened on first use from `DATABASE_URL` and `FACETDB_SECRET`; a command that
@@ -148,6 +189,23 @@ export type HttpListener = {
   readonly port: number;
   close(): Promise<void>;
 };
+
+/**
+ * A database engine as the composition root registers it: the key the scheme table names it by
+ * (`postgres`, `mysql`, `polling`; `cli/engines.ts`), and how to make it, called on first use for a
+ * source of that key only (`lazyEngine` keeps what it made), so `facetdb` never imports a driver
+ * no source of the project needs (SQL Server's alone loads a whole identity library).
+ */
+export type EngineEntry = {
+  readonly key: string;
+  readonly load: () => Promise<DatabaseEngine>;
+};
+
+/** A connection to the store's Postgres, as `CliDeps.connect` opens it. */
+export type StoreClient = ReturnType<SqlConnect>;
+
+/** The FacetDB store's services, as `CliDeps.store` opens them. */
+export type OpenStore = Store;
 
 /** An embedded database opened on a data directory; closing it flushes the directory. */
 export type EmbeddedDatabase = {
@@ -357,6 +415,7 @@ export type CapturedRun = {
 
 /** What a test may leave out: each one fails the run, in words, if a command reaches for it. */
 type OptionalInTests =
+  | "engines"
   | "store"
   | "provider"
   | "workspace"
@@ -405,6 +464,8 @@ export async function runInProcess(
   const code = await runProgram(
     argv,
     {
+      // No engine: a command that picks one is refused in words naming none registered.
+      engines: [],
       store: () => Promise.reject(new Error("this test gave the command no store")),
       provider: () => {
         throw new Error("this test gave the command no model provider");

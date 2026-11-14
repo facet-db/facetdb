@@ -1,0 +1,679 @@
+import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS } from "@facetdb/core";
+import {
+  AmbiguousHostError,
+  migrateStore,
+  PlaintextUrlError,
+  type PurgedSource,
+  readStoreLog,
+  rekeyNotes,
+  requireTls,
+  SCHEMA_VERSION,
+  SECRET_VARIABLE,
+  type SqlConnect,
+  type StoreLog,
+  StoreNotInstalledError,
+  sourceIdOf,
+  storeInstallStatements,
+  storePurgeRefusal,
+  storePurgeStatements,
+  storeVersion,
+} from "@facetdb/postgres";
+import type { SourceConfig } from "../config/index.ts";
+import { isPostgresUrl, schemeOf } from "./engines.ts";
+import { CliError, databaseLabel, plainMessage } from "./program.ts";
+
+/**
+ * The store door: everything the CLI does with the FacetDB store, which is always the Postgres that
+ * `DATABASE_URL` names, whatever engine a source has. A command reaches a source's database through
+ * its engine and the store through here; the composition root opens the store's services
+ * (`createStore`, main.ts). When the store is a source's own database (`storeShared`) the engine's
+ * plans carry the store's statements, today's one script; otherwise migrate's store part,
+ * uninstall's purge and doctor's store group are here.
+ */
+
+type Env = Readonly<Record<string, string | undefined>>;
+
+/** The variable that names the store. */
+export const STORE_VARIABLE = "DATABASE_URL";
+
+/** The store's secret's variable: it encrypts what the store keeps. */
+export const STORE_SECRET_VARIABLE = SECRET_VARIABLE;
+
+/** The id the store keeps a source's log, versions and registration under: project and name. */
+export const storeSourceId = sourceIdOf;
+
+/** `DATABASE_URL`, or undefined when it is unset or empty. */
+export function storeUrlOf(env: Env): string | undefined {
+  const url = env[STORE_VARIABLE];
+  return url === undefined || url === "" ? undefined : url;
+}
+
+/**
+ * What the store's TLS rule (`requireTls`) says about a connection string: undefined when it may
+ * be used, `"invalid"` when it is not a URL, `"ambiguous"` when its host cannot be read for sure
+ * (more than one `@` before the path), else the host it would reach without TLS. `pgHost` is the
+ * environment's `PGHOST`, where the driver goes for a URL that names no host.
+ */
+function tlsRefusal(
+  url: string,
+  allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
+): "invalid" | "ambiguous" | { readonly host: string; readonly viaPgHost: boolean } | undefined {
+  try {
+    requireTls(url, allowInsecure ?? false, pgHost);
+    return undefined;
+  } catch (error) {
+    if (error instanceof AmbiguousHostError) {
+      return "ambiguous";
+    }
+    return error instanceof PlaintextUrlError
+      ? { host: error.host, viaPgHost: error.viaPgHost }
+      : "invalid";
+  }
+}
+
+const AMBIGUOUS =
+  "has more than one @ before the path, so its host cannot be read for sure (the driver and the check would read different hosts)";
+const ambiguousFix = (target: string) =>
+  `percent-encode every @ in the user and password of ${target} as %40`;
+
+/** Where a refused URL would go: its host, or `PGHOST`'s when the URL names none. */
+const reaches = (
+  subject: string,
+  refusal: { readonly host: string; readonly viaPgHost: boolean },
+) =>
+  refusal.viaPgHost
+    ? `${subject} names no host, so the driver reaches PGHOST (${refusal.host}) without TLS`
+    : `${subject} reaches ${refusal.host} without TLS`;
+
+const fixFor = (target: string, viaPgHost: boolean) =>
+  `add ?sslmode=require to ${target},${viaPgHost ? " point PGHOST at this machine or a socket directory," : ""} or pass --allow-insecure if that network is trusted`;
+
+/**
+ * The words for a Postgres connection string (`variable` names where it came from) that the
+ * store's TLS rule refuses, with the fix, or undefined when the URL may be used.
+ */
+function tlsProblem(
+  url: string,
+  variable: string,
+  allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
+): { readonly problem: string; readonly fix: string } | undefined {
+  const refusal = tlsRefusal(url, allowInsecure, pgHost);
+  if (refusal === undefined) {
+    return undefined;
+  }
+  if (refusal === "ambiguous") {
+    return { problem: `${variable} ${AMBIGUOUS}`, fix: ambiguousFix(variable) };
+  }
+  return refusal === "invalid"
+    ? {
+        problem: `${variable} is not a connection string (postgres://user:password@host/database)`,
+        fix: fixFor(variable, false),
+      }
+    : {
+        problem: `${reaches(variable, refusal)}, so the password in it would travel in the clear`,
+        fix: fixFor(variable, refusal.viaPgHost),
+      };
+}
+
+/** Q1b: a `pglite://` store is `facetdb dev`'s embedded one, never a store elsewhere. */
+export const PGLITE_STORE = "a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres";
+
+const PGLITE_FIX =
+  "set DATABASE_URL to a Postgres connection string (postgres://user:password@host/database; a free Supabase or Neon project is enough), or run facetdb dev, which keeps its own store under .facetdb/dev/";
+
+/**
+ * Why the store's URL may not be used, before anything connects; undefined when it may: a PGlite
+ * store outside `facetdb dev`, a database of another kind (the store is always a Postgres), or a
+ * password in the clear to another machine.
+ */
+export function storeUrlProblem(
+  url: string,
+  allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
+):
+  | {
+      readonly code: "store-pglite" | "store-not-postgres" | "database-url-tls";
+      readonly problem: string;
+      readonly fix: string;
+    }
+  | undefined {
+  const scheme = schemeOf(url);
+  if (scheme === "pglite") {
+    return { code: "store-pglite", problem: PGLITE_STORE, fix: PGLITE_FIX };
+  }
+  // A string with no scheme is no connection string at all: the TLS rule's words say so.
+  if (scheme !== undefined && !isPostgresUrl(url)) {
+    return {
+      code: "store-not-postgres",
+      problem: `DATABASE_URL names a ${scheme}: database, and the FacetDB store is always a Postgres`,
+      fix: "point DATABASE_URL at a Postgres (postgres://user:password@host/database; a free Supabase or Neon project is enough), and read a source's own database from a variable of its own",
+    };
+  }
+  const tls = tlsProblem(url, STORE_VARIABLE, allowInsecure, pgHost);
+  return tls === undefined ? undefined : { code: "database-url-tls", ...tls };
+}
+
+/** Refuses a store URL that may not be used, before any connection, in the words a command prints. */
+export function requireUsableStoreUrl(
+  url: string,
+  allowInsecure: boolean | undefined,
+  pgHost: string | undefined,
+): void {
+  const refused = storeUrlProblem(url, allowInsecure, pgHost);
+  if (refused !== undefined) {
+    throw new CliError(
+      refused.code,
+      refused.code === "database-url-tls"
+        ? `${refused.problem}; no connection was made`
+        : refused.problem,
+      refused.fix,
+    );
+  }
+}
+
+/**
+ * The store's URL, refused before anything connects when it is unset, PGlite's, another kind of
+ * database's or plaintext.
+ */
+export function requireStoreUrl(env: Env, allowInsecure: boolean | undefined): string {
+  const url = storeUrlOf(env);
+  if (url === undefined) {
+    throw new CliError(
+      "database-url",
+      "DATABASE_URL is not set, so FacetDB has no database for its store",
+      "set DATABASE_URL to the connection string of the database FacetDB keeps its store in",
+    );
+  }
+  requireUsableStoreUrl(url, allowInsecure, env["PGHOST"]);
+  return url;
+}
+
+/**
+ * Where a Postgres URL connects, as postgres.js resolves it (3.4.9's `parseOptions`): the URL's
+ * host, else `PGHOST`, else localhost; its port, else `PGPORT`, else 5432; its database (the path
+ * as written, which the driver does not decode), else `PGDATABASE`, else the user, which is the
+ * URL's, else `PGUSERNAME`, else `PGUSER`, else the machine's own (the same for both sides, so
+ * written as empty). Undefined for any other URL.
+ */
+function addressOf(
+  url: string,
+  env: Env,
+): { readonly host: string; readonly port: string; readonly database: string } | undefined {
+  if (!isPostgresUrl(url)) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  /** A part of the URL, absent when empty, as the driver's `||` reads it. */
+  const given = (text: string) => (text === "" ? undefined : text);
+  const setting = (name: string) => given(env[name] ?? "");
+  const user =
+    given(decodeURIComponent(parsed.username)) ?? setting("PGUSERNAME") ?? setting("PGUSER") ?? "";
+  return {
+    host: (given(parsed.hostname) ?? setting("PGHOST") ?? "localhost").toLowerCase(),
+    port: given(parsed.port) ?? setting("PGPORT") ?? "5432",
+    database: given(parsed.pathname.slice(1)) ?? setting("PGDATABASE") ?? user,
+  };
+}
+
+/**
+ * Whether two connection strings reach one database (`storeShared`, the CLI's to compute): the same
+ * host, port and database once postgres.js's defaults apply to both, read from `env` as the driver
+ * reads `process.env`, so two URLs the driver routes to different databases never compare equal,
+ * and a port written on one side matches `PGPORT` on the other. Logins may differ.
+ */
+export function sameDatabase(a: string, b: string, env: Env): boolean {
+  const left = addressOf(a, env);
+  const right = addressOf(b, env);
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.host === right.host &&
+    left.port === right.port &&
+    left.database === right.database
+  );
+}
+
+/**
+ * The variable a source's own connection string is read from when it is not the store's: never
+ * `DATABASE_URL`, which names the store, so a source called `database` reads `DATABASE_SOURCE_URL`.
+ */
+export function ownVariable(sourceName: string): string {
+  const variable = `${sourceName.toUpperCase()}_URL`;
+  return variable === STORE_VARIABLE ? `${sourceName.toUpperCase()}_SOURCE_URL` : variable;
+}
+
+/**
+ * A source that reads `DATABASE_URL`, the store's variable, for a database that is not a Postgres:
+ * a configuration error, since the store is always a Postgres, as the error to print (doctor makes
+ * it the source's failed database check); undefined for any other source.
+ */
+export function storeVariableMisuse(
+  source: SourceConfig,
+  url: string | undefined,
+): CliError | undefined {
+  if (source.databaseEnv !== STORE_VARIABLE || url === undefined || isPostgresUrl(url)) {
+    return undefined;
+  }
+  const variable = ownVariable(source.name);
+  return new CliError(
+    "store-not-postgres",
+    `the source "${source.name}" reads DATABASE_URL, the store's variable, and its database is not a Postgres (${schemeOf(url) ?? "no scheme"}); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
+    `write database: process.env.${variable} for the source in facetdb.config.ts, set ${variable} to its connection string, and point DATABASE_URL at the store's Postgres`,
+  );
+}
+
+/**
+ * Whether the store is this source's own database. A Postgres source whose connection string the
+ * config reads from `DATABASE_URL` is, by definition: the loader read it there. Any other Postgres
+ * source is compared with `DATABASE_URL` (`sameDatabase`), and without it has no store yet. A
+ * source of another kind never shares the store, which is always a Postgres; one that reads
+ * `DATABASE_URL` is refused in words (`storeVariableMisuse`), so no later engine shares by
+ * accident.
+ */
+export function storeSharedFor(env: Env, source: SourceConfig): boolean {
+  const misuse = storeVariableMisuse(source, source.database);
+  if (misuse !== undefined) {
+    throw misuse;
+  }
+  if (source.database !== undefined && !isPostgresUrl(source.database)) {
+    return false;
+  }
+  if (source.databaseEnv === STORE_VARIABLE) {
+    return true;
+  }
+  const store = storeUrlOf(env);
+  return (
+    store !== undefined &&
+    source.database !== undefined &&
+    sameDatabase(store, source.database, env)
+  );
+}
+
+/** A script as the engines print theirs: one transaction, a blank line between statements. */
+function scriptOf(statements: readonly string[]): string {
+  return `begin;\n\n${statements.join(";\n\n")};\n\ncommit;\n`;
+}
+
+/** The store's part of `facetdb migrate` when it is its own database, as shown before it runs. */
+export type StoreMigration = {
+  /** Where it runs: `host/db`, what the script's header and the confirmation name. */
+  readonly label: string;
+  /**
+   * Whether the store is at this FacetDB's schema version already: then nothing runs there, no
+   * DDL is shown, and `--json` reports nothing applied.
+   */
+  readonly current: boolean;
+  /** The store's whole idempotent DDL, what migrate brings it to; empty when it is current. */
+  readonly script: string;
+  /** What its migrations cannot settle (store version 4's shared logs), said before it runs. */
+  readonly notes: readonly string[];
+};
+
+/**
+ * The store's part as it stands, read and nothing else: current, or the DDL that brings it to this
+ * version. A store newer than this FacetDB is refused here, before the confirmation, in words.
+ */
+export async function showStoreMigration(
+  connect: SqlConnect,
+  url: string,
+): Promise<StoreMigration> {
+  const client = connect(url);
+  try {
+    const label = databaseLabel(url);
+    const found = await storeVersion(client.query);
+    if (found.kind === "found" && found.newest > SCHEMA_VERSION) {
+      throw new CliError(
+        "store-newer",
+        `the FacetDB store on ${label} is at schema version ${found.newest}, newer than this FacetDB knows (${SCHEMA_VERSION}); nothing was run`,
+        "upgrade FacetDB to the version that wrote the store, then run facetdb migrate again",
+      );
+    }
+    const current = found.kind === "found" && found.current;
+    return {
+      label,
+      current,
+      script: current ? "" : scriptOf(storeInstallStatements()),
+      notes: current ? [] : await rekeyNotes(client.query),
+    };
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * Brings the store to this FacetDB's schema version (`migrateStore`): what the script shown holds,
+ * the missing migrations only, under the store's advisory lock, before the source's part runs.
+ */
+export async function runStoreMigration(connect: SqlConnect, url: string): Promise<void> {
+  const client = connect(url);
+  try {
+    await migrateStore(client);
+  } catch (error) {
+    if (error instanceof StoreNotInstalledError) {
+      throw new CliError(
+        "store-login",
+        `the login in DATABASE_URL may not create the store's tables in ${databaseLabel(url)}; nothing was run`,
+        "point DATABASE_URL at a login that may create tables in that database (its owner, as a free Supabase or Neon project gives you), then run facetdb migrate again",
+      );
+    }
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+/** The store's part of `facetdb uninstall --purge` when it is its own database, as shown. */
+export type StorePurge = {
+  readonly label: string;
+  readonly statements: readonly string[];
+  readonly script: string;
+  readonly log: StoreLog;
+};
+
+export async function showStorePurge(
+  connect: SqlConnect,
+  url: string,
+  source: PurgedSource,
+): Promise<StorePurge> {
+  const client = connect(url);
+  try {
+    const statements = storePurgeStatements(source);
+    return {
+      label: databaseLabel(url),
+      statements,
+      script: scriptOf(statements),
+      log: await readStoreLog(client.query, source.id),
+    };
+  } finally {
+    await client.close();
+  }
+}
+
+/** The fix of a refused purge, in the words of the engine's refusals. */
+const REFUSED_FIX =
+  "change the table or the config as the message says, then run the command again; nothing was changed";
+
+/** Runs the purge shown, as shown, in one transaction; its guard's refusal is the CLI's error. */
+export async function runStorePurge(
+  connect: SqlConnect,
+  url: string,
+  purge: StorePurge,
+): Promise<void> {
+  const client = connect(url);
+  try {
+    await client.transaction(async (query) => {
+      for (const statement of purge.statements) {
+        await query(statement);
+      }
+    });
+  } catch (error) {
+    const refused = storePurgeRefusal(error);
+    if (refused !== undefined) {
+      throw new CliError("uninstall-refused", refused, REFUSED_FIX);
+    }
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+const ok = (name: string, detail: string): DoctorCheck => ({ name, status: "ok", detail });
+const fail = (name: string, detail: string, fix: string): DoctorCheck => ({
+  name,
+  status: "fail",
+  detail,
+  fix,
+});
+
+const DATABASE_URL_FIX =
+  "set DATABASE_URL to the connection string of the database FacetDB keeps its store in";
+
+/** Opens a connection, runs `work` and closes it, whatever happens. */
+async function withConnection<T>(
+  connect: SqlConnect,
+  url: string,
+  work: (query: ReturnType<SqlConnect>["query"]) => Promise<T>,
+): Promise<T> {
+  const client = connect(url);
+  try {
+    return await work(client.query);
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * doctor's store check: `DATABASE_URL` is set, a Postgres (never a PGlite store outside `facetdb
+ * dev`, Q1b), reached with TLS, and at this FacetDB's schema version. It reads; nothing is created,
+ * so a store that is behind says so instead of being migrated.
+ */
+export async function storeCheck(
+  connect: SqlConnect,
+  env: Env,
+  allowInsecure: boolean | undefined,
+): Promise<DoctorCheck> {
+  const url = storeUrlOf(env);
+  if (url === undefined) {
+    return fail(
+      "store",
+      "DATABASE_URL is not set, so FacetDB has no database for its store",
+      DATABASE_URL_FIX,
+    );
+  }
+  const refused = storeUrlProblem(url, allowInsecure, env["PGHOST"]);
+  if (refused !== undefined) {
+    return fail("store", refused.problem, refused.fix);
+  }
+  const label = databaseLabel(url);
+  try {
+    const found = await withConnection(connect, url, storeVersion);
+    if (found.kind === "absent") {
+      return fail(
+        "store",
+        `the FacetDB store on ${label} is not installed`,
+        "run facetdb migrate with the admin credential: it prints the store's SQL first and installs it",
+      );
+    }
+    if (found.newest > SCHEMA_VERSION) {
+      return fail(
+        "store",
+        `the FacetDB store on ${label} is at schema version ${found.newest}, newer than this FacetDB knows (${SCHEMA_VERSION})`,
+        "upgrade FacetDB to the version that wrote it",
+      );
+    }
+    return found.current
+      ? ok(
+          "store",
+          `the FacetDB store on ${label} is reachable and current (schema version ${SCHEMA_VERSION})`,
+        )
+      : fail(
+          "store",
+          `the FacetDB store on ${label} is at schema version ${found.newest}, behind this FacetDB (${SCHEMA_VERSION})`,
+          "run facetdb migrate with the admin credential: it brings the store to this version",
+        );
+  } catch (error) {
+    return fail(
+      "store",
+      `the FacetDB store on ${label} could not be read: ${plainMessage(error, [url, env[SECRET_VARIABLE]])}`,
+      "check the host, port, user and password in DATABASE_URL, and that the database accepts connections from this machine (a firewall or an allow-list)",
+    );
+  }
+}
+
+/** A statement with a parameter, so the driver prepares it under a name, as it does the worker's. */
+const POOLER_PROBE = "select pg_backend_pid() as pid, $1::int as run";
+
+/** The server's error code, read off the driver's error (a boundary). */
+function sqlState(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+/**
+ * Supabase serves transaction mode on port 6543: Supavisor on its pooler hosts
+ * (`*.pooler.supabase.com`, session mode on 5432) and the dedicated PgBouncer beside the database
+ * (`db.<project ref>.supabase.co`, the database itself on 5432).
+ */
+function supabaseTransactionPort(url: string): boolean {
+  try {
+    const { port, hostname } = new URL(url);
+    return (
+      port === "6543" &&
+      (hostname.endsWith(".pooler.supabase.com") || /^db\.[^.]+\.supabase\.co$/.test(hostname))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why the store's connection cannot keep the worker's prepared statements, or undefined when it
+ * can: one prepared statement run twice on one client connection (`max: 1`) either finds itself
+ * gone (SQLSTATE 26000) or runs in two server sessions behind a transaction pooler.
+ */
+async function transactionPooler(connect: SqlConnect, url: string): Promise<string | undefined> {
+  if (supabaseTransactionPort(url)) {
+    return "port 6543 of a Supabase host is its transaction-mode pooler";
+  }
+  const client = connect(url, { max: 1 });
+  try {
+    const first = await client.query(POOLER_PROBE, [1]);
+    const second = await client.query(POOLER_PROBE, [2]);
+    return first[0]?.["pid"] === second[0]?.["pid"]
+      ? undefined
+      : "one prepared statement ran in two server sessions on one connection";
+  } catch (error) {
+    if (sqlState(error) === "26000") {
+      return "a prepared statement was gone on its second run (SQLSTATE 26000, prepared statement does not exist)";
+    }
+    throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+const STORE_POOLER_FIX =
+  "use the session pooler (port 5432) or a direct connection in DATABASE_URL; the worker prepares each statement once per connection";
+
+/**
+ * The store's connection keeps a prepared statement from one run to the next, as the engine's
+ * pooler check proves a source's: the store's pool is the worker's busiest.
+ */
+export async function storePoolerCheck(connect: SqlConnect, url: string): Promise<DoctorCheck> {
+  const where = `the store on ${databaseLabel(url)}`;
+  try {
+    const why = await transactionPooler(connect, url);
+    return why === undefined
+      ? ok(
+          "pooler",
+          "prepared statements stay on one server session on the store (a direct connection or a session pooler)",
+        )
+      : fail(
+          "pooler",
+          `${where}: the database is behind a transaction-mode pooler (Supabase port 6543, PgBouncer transaction mode): ${why}`,
+          STORE_POOLER_FIX,
+        );
+  } catch (error) {
+    return fail(
+      "pooler",
+      `${where}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
+      STORE_POOLER_FIX,
+    );
+  }
+}
+
+function ageOf(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 120) {
+    return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+  }
+  const minutes = Math.round(seconds / 60);
+  return minutes < 120 ? `${minutes} minutes` : `${Math.round(minutes / 60)} hours`;
+}
+
+/**
+ * The worker has reported within the last two minutes, read from the store with one plain select
+ * over its own connection: opening the store (`createStore`) would create its schema and salt,
+ * which a check never does and the worker login cannot.
+ */
+export async function heartbeatCheck(
+  connect: SqlConnect,
+  env: Env,
+  clock: Clock,
+  projectId: string,
+  allowInsecure: boolean | undefined,
+): Promise<DoctorCheck> {
+  const url = storeUrlOf(env);
+  if (url === undefined) {
+    return fail(
+      "worker",
+      "DATABASE_URL is not set, so there is no store to read",
+      DATABASE_URL_FIX,
+    );
+  }
+  const refused = storeUrlProblem(url, allowInsecure, env["PGHOST"]);
+  if (refused !== undefined) {
+    return fail("worker", refused.problem, refused.fix);
+  }
+  let last: number | undefined;
+  try {
+    const rows = await withConnection(connect, url, (query) =>
+      query("select at::text as at from facetdb.heartbeats where project = $1", [projectId]),
+    );
+    const at = rows[0]?.["at"];
+    last = at === undefined ? undefined : Number(at);
+  } catch (error) {
+    const message = plainMessage(error, [url, env[SECRET_VARIABLE]]);
+    if (/permission denied/i.test(message)) {
+      return fail(
+        "worker",
+        `the login in DATABASE_URL may not read the store's heartbeats: ${message}`,
+        "grant select on facetdb.heartbeats to the login in DATABASE_URL, or point DATABASE_URL at a login that can read it",
+      );
+    }
+    if (/does not exist/i.test(message)) {
+      return fail(
+        "worker",
+        `the store has no heartbeats table yet: ${message}`,
+        "run facetdb migrate with the admin credential: it installs the store's tables, and the worker only uses them",
+      );
+    }
+    return fail("worker", `the store could not be read: ${message}`, DATABASE_URL_FIX);
+  }
+  if (last === undefined) {
+    return fail(
+      "worker",
+      "the worker has never sent a heartbeat for this project",
+      "start it with facetdb worker, and leave it running",
+    );
+  }
+  const age = clock.now() - last;
+  return age >= HEARTBEAT_LOSS_MS
+    ? fail(
+        "worker",
+        `the last heartbeat was ${ageOf(age)} ago, and a worker counts as down after 2 minutes`,
+        "start the worker with facetdb worker, or restart it, and read its log for why it stopped",
+      )
+    : ok("worker", `the last heartbeat was ${ageOf(age)} ago`);
+}
+
+/** The store's secret is in the environment: it encrypts the credentials the store holds. */
+export function secretCheck(env: Env): DoctorCheck {
+  const secret = env[SECRET_VARIABLE];
+  return secret === undefined || secret === ""
+    ? fail(
+        "secret",
+        `${SECRET_VARIABLE} is not set`,
+        `set ${SECRET_VARIABLE} to a long random string (openssl rand -hex 32) and keep it: it encrypts the credentials the store holds`,
+      )
+    : ok("secret", `${SECRET_VARIABLE} is set`);
+}

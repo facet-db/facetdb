@@ -2,9 +2,11 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { FakeEngine } from "@facetdb/core/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../../config/index.ts";
-import { runInProcess, type Workspace } from "../program.ts";
+import { lazyEngine } from "../engines.ts";
+import { type EngineEntry, runInProcess, type Workspace } from "../program.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -62,6 +64,7 @@ function run(
     readonly answers?: readonly string[];
     readonly claudeOnPath?: boolean;
     readonly env?: Record<string, string | undefined>;
+    readonly engines?: readonly EngineEntry[];
   } = {},
 ) {
   return runInProcess(
@@ -72,6 +75,7 @@ function run(
       loadConfig: async (path) =>
         (await loadConfig(path, { projectDir: dir, env: process.env, stderr: process.stderr }))
           .config,
+      ...(options.engines === undefined ? {} : { engines: options.engines }),
       connect: () => {
         throw new Error("init opens no database connection");
       },
@@ -302,5 +306,94 @@ describe("facetdb init offers the agent skills", () => {
     expect(flagged.code).toBe(2);
     expect(flagged.stderr).toContain("pass --skills plugin, --skills npx or --skills none");
     expect((await run(flags, { answers: ["both"] })).code).toBe(2);
+  });
+});
+
+describe("facetdb init asks for the store's Postgres only for a source that is not Postgres", () => {
+  const MYSQL_URL = "mysql://facetdb_worker:s3cret-mysql-password@db.example.com:3306/shop";
+  const STORE_URL = "postgres://store:s3cret-store-password@store.example.com:5432/facetdb";
+  /** A MySQL engine registered as main.ts registers engines: by its key, loaded on first use. */
+  const mysql = lazyEngine("mysql", () =>
+    Promise.resolve(new FakeEngine({ name: "mysql", schemes: ["mysql", "mariadb"] })),
+  );
+  const STORE_PROMPT =
+    "Store connection string, a Postgres (checked, never written to the file; the store is DATABASE_URL): ";
+
+  it("says why in one sentence, asks for the store, and reads the source from a variable of its own", async () => {
+    const result = await run(["init", "--database-url", MYSQL_URL, "--table", "orders"], {
+      answers: [STORE_URL],
+      engines: [mysql],
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.prompts).toEqual([STORE_PROMPT]);
+    expect(result.stdout).toContain(
+      "FacetDB keeps the decision log, usage and alerts in a Postgres of yours; a free Supabase or Neon project is enough.",
+    );
+    expect(result.stdout).toContain(
+      "Created facetdb.config.ts for orders on db.example.com:3306/shop, with the store on store.example.com:5432/facetdb.",
+    );
+    expect(result.stdout).toContain(
+      "Set ORDERS_URL to the source's connection string, and DATABASE_URL to the store's Postgres",
+    );
+    const file = await configFile();
+    expect(file).toContain("database: process.env.ORDERS_URL,");
+    expect(file + result.stdout + result.stderr).not.toContain("s3cret");
+
+    const flagged = await run(
+      [
+        "init",
+        "--force",
+        "--database-url",
+        MYSQL_URL,
+        "--store-url",
+        STORE_URL,
+        "--table",
+        "orders",
+      ],
+      { engines: [mysql] },
+    );
+    expect(flagged.code, flagged.stderr).toBe(0);
+    expect(flagged.prompts).toEqual([]);
+  });
+
+  it("never names the source's variable DATABASE_URL, the store's: a table named database reads DATABASE_SOURCE_URL", async () => {
+    const result = await run(
+      ["init", "--database-url", MYSQL_URL, "--store-url", STORE_URL, "--table", "database"],
+      { engines: [mysql] },
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(await configFile()).toContain("database: process.env.DATABASE_SOURCE_URL,");
+    expect(result.stdout).toContain(
+      "Set DATABASE_SOURCE_URL to the source's connection string, and DATABASE_URL to the store's Postgres",
+    );
+  });
+
+  it("never asks for a store when the source is Postgres: its database holds the store", async () => {
+    const result = await run(flags, { engines: [mysql] });
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.prompts).toEqual([]);
+    expect(result.stdout).not.toContain("a Postgres of yours");
+    expect(await configFile()).toContain("database: process.env.DATABASE_URL,");
+  });
+
+  it("refuses a store that is not a Postgres, a PGlite one included, without echoing it", async () => {
+    const mysqlStore = await run(["init", "--database-url", MYSQL_URL, "--table", "orders"], {
+      answers: ["mysql://root:hunter2@store/facetdb"],
+      engines: [mysql],
+    });
+    expect(mysqlStore.code).toBe(2);
+    expect(mysqlStore.stderr).toContain(
+      "error: the store's connection string is not a Postgres connection string",
+    );
+    expect(mysqlStore.stderr).not.toContain("hunter2");
+    const pglite = await run(["init", "--database-url", MYSQL_URL, "--table", "orders"], {
+      answers: ["pglite://.facetdb/dev"],
+      engines: [mysql],
+    });
+    expect(pglite.code).toBe(2);
+    expect(pglite.stderr).toContain(
+      "error: a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres",
+    );
+    await expect(configFile()).rejects.toThrow();
   });
 });

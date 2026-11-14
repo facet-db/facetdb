@@ -1,11 +1,17 @@
-import { ENQUEUE_ROLE, type SourceLog, type UninstallPlan, WORKER_ROLE } from "@facetdb/postgres";
+import type { EngineObject, KeptObject, ObjectKind } from "@facetdb/core";
 
 /**
- * The words `facetdb uninstall` prints about what goes and what stays, each built from a field of
- * the connector's plan, never guessed here. A table's own words (its columns, trigger, grants, its
- * source's log) come from that table's plan; the run's words (the project entry, the queue, the
- * shared tables, the schema) come from the plan of the run's last table, which counts the run's
- * other tables as gone (`alsoUninstalling`).
+ * The words `facetdb uninstall` prints about what goes and what stays, each built from an object of
+ * the engine's plan (its removes and keeps; the old field to new place table is the header of the
+ * Postgres engine's engine.ts), never guessed here. A table's own words (its columns, trigger,
+ * grants, its source's log) come from its plan's `source`-scoped objects; the run's words (the
+ * project entry, the queue, the shared tables, the schema) from the `run`-scoped objects of the
+ * run's last plan, which counts the run's other tables as gone (`alsoUninstalling`). An object's
+ * reason is printed as the engine wrote it, after the separator its form takes: a log kept for a
+ * later purge ": ", the "which … may share" and "another source of …" forms ", ", log tables "(…)"
+ * or ", which …", an unresolved name "the decision log: …". Each mapping is a switch over every
+ * `ObjectKind`, so a kind added to the contract does not compile until it has words here; an object
+ * the phrases do not cover is said plainly by its kind and name, never left out.
  */
 
 /** `1,240 decisions`, `1 decision`. */
@@ -21,193 +27,402 @@ function inWords(items: readonly string[]): string {
     : `${items.slice(0, -1).join(", ")} and ${last}`;
 }
 
-function logSize(log: SourceLog & { readonly status: "found" }): string {
-  return `${counted(log.decisions, "decision", "decisions")}, ${counted(log.versions, "question-set version", "question-set versions")}`;
+const DECISIONS = "facetdb.decisions";
+const VERSIONS = "facetdb.question_set_versions";
+/** The project register; with `of`, one project's entry in it. */
+const PROJECTS = "facetdb.projects";
+/** The table-ownership marks. */
+const OWNERS = "facetdb.table_owners";
+
+/** A log's size in words: `2 decisions, 1 question-set version`. */
+export function logSize(decisions: number, versions: number): string {
+  return `${counted(decisions, "decision", "decisions")}, ${counted(versions, "question-set version", "question-set versions")}`;
+}
+
+/** The phrase of a source's whole log, as a purge removes it or a plain uninstall keeps it. */
+export function sourceLog(source: string, decisions: number, versions: number): string {
+  return `the decision log of source ${source} (${logSize(decisions, versions)})`;
+}
+
+/** What each kind is called where the phrases do not word it. */
+const NOUNS: Readonly<Record<ObjectKind, string>> = {
+  column: "column",
+  field: "field",
+  "side-table": "side table",
+  view: "view",
+  trigger: "trigger",
+  function: "function",
+  "jobs-table": "jobs table",
+  marker: "marker table",
+  schema: "schema",
+  login: "login",
+  grant: "rights of the login",
+  policy: "policy",
+  index: "index",
+  collection: "collection",
+  log: "decision log table",
+  "store-table": "FacetDB store table",
+};
+
+/**
+ * An object no phrase covers, by its kind and name (`the index facetdb_jobs_due`), with what it is
+ * on unless that is the table the words are already about.
+ */
+function plainly(object: EngineObject, within?: string): string {
+  const on = object.of === undefined || object.of === within ? "" : ` on ${object.of}`;
+  return `the ${NOUNS[object.kind]} ${object.name}${on}`;
+}
+
+const ofKind = <T extends EngineObject>(objects: readonly T[], kind: EngineObject["kind"]) =>
+  objects.filter((object) => object.kind === kind);
+
+/** ` (why)`, or nothing when the plan gives no reason for what goes. */
+const inParentheses = (reason: string | undefined) => (reason === undefined ? "" : ` (${reason})`);
+
+/** `, why`, or nothing when the plan gives no reason for what goes. */
+const afterComma = (reason: string | undefined) => (reason === undefined ? "" : `, ${reason}`);
+
+/** Each source's entries in the log, in order: its decisions and, when given, its versions. */
+function logEntries<T extends EngineObject>(
+  objects: readonly T[],
+): readonly { readonly source: string; readonly decisions: T; readonly versions?: T }[] {
+  const entries: { source: string; decisions: T; versions?: T }[] = [];
+  for (const object of ofKind(objects, "log")) {
+    if (object.of === undefined) {
+      continue;
+    }
+    const entry = entries.find((one) => one.source === object.of);
+    if (object.name === DECISIONS) {
+      if (entry === undefined) {
+        entries.push({ source: object.of, decisions: object });
+      } else {
+        entry.decisions = object;
+      }
+    } else if (object.name === VERSIONS && entry !== undefined) {
+      entry.versions = object;
+    }
+  }
+  return entries;
+}
+
+/** The size of a source's log entries: decisions, and versions when the plan counts them. */
+function entrySize(entry: {
+  readonly decisions: EngineObject;
+  readonly versions?: EngineObject;
+}): string {
+  const decisions = entry.decisions.count ?? 0;
+  return entry.versions === undefined
+    ? counted(decisions, "decision", "decisions")
+    : logSize(decisions, entry.versions.count ?? 0);
 }
 
 /**
- * The server-wide roles stay whatever the run removes: the worker login, and the enqueue role that
- * owns the trigger functions, with the admin's membership in it (install grants it).
+ * What a table's plan removes from the table, and from its source's log: the plan's own
+ * (`source`-scoped) objects, in the order the phrases word them.
  */
-export const ROLES_KEPT = `the ${WORKER_ROLE} and ${ENQUEUE_ROLE} logins (uninstall never drops them: every project on the server may share them)`;
-
-/** Why the store's shared tables stay, one phrase per reason the plan gives. */
-function sharedTablesReasons(plan: UninstallPlan): readonly string[] {
-  const own: string[] = [];
-  const store: string[] = [];
-  for (const reason of plan.projectKeptBy) {
-    switch (reason) {
-      case "another-table":
-        own.push(
-          `another installed table (${inWords(
-            plan.otherTables
-              .filter((other) => other.projectId === plan.projectId)
-              .map((other) => other.name),
-          )})`,
-        );
+export function tableRemoved(removes: readonly EngineObject[]): readonly string[] {
+  const own = removes.filter((object) => object.scope === "source");
+  const table = own.find((object) => object.kind !== "log")?.of;
+  const columns: string[] = [];
+  const fields: string[] = [];
+  const sideTables: string[] = [];
+  const views: string[] = [];
+  const triggers: string[] = [];
+  const policies: string[] = [];
+  const others: string[] = [];
+  const grants: string[] = [];
+  let jobs = false;
+  for (const object of own) {
+    const { kind } = object;
+    switch (kind) {
+      case "column":
+        columns.push(object.name);
         break;
-      case "usage":
-        own.push("usage");
+      case "field":
+        fields.push(object.name);
         break;
-      case "heartbeats":
-        own.push("worker heartbeats");
+      case "side-table":
+        sideTables.push(`the side table ${object.name}`);
         break;
-      case "pending-deliveries":
-        own.push(
-          counted(plan.pendingDeliveries, "pending webhook delivery", "pending webhook deliveries"),
-        );
+      case "view":
+        views.push(`the view ${object.name}`);
         break;
-      case "records":
-        own.push("records of an API or plugin source");
+      case "trigger":
+        triggers.push(`the trigger ${object.name}`);
         break;
-      case "store-in-use":
-        store.push("the FacetDB store still registers a source, a credential or an API key");
+      case "policy":
+        policies.push(object.name);
         break;
-      case "cursors":
-        store.push(
-          `a backfill is unfinished (run ${inWords(plan.unfinishedCursors)}; it finishes, or its cursor is deleted)`,
-        );
+      case "jobs-table":
+        // Its queued jobs: the table's part of the shared queue.
+        jobs = true;
+        break;
+      case "grant":
+        grants.push(`the ${object.name} login's rights on it`);
+        break;
+      case "function":
+      case "marker":
+      case "schema":
+      case "login":
+      case "index":
+      case "collection":
+      case "store-table":
+        others.push(plainly(object, table));
+        break;
+      case "log":
+        // A source's entries in the log: their own phrase, after the table's.
         break;
       default:
-        // A reason the connector adds later must get its words here before it can be printed.
-        throw new Error(`no words for why a project stays: ${reason satisfies never}`);
+        throw new Error(`no words for a removed ${kind satisfies never}`);
     }
   }
-  const foreignTables = plan.otherTables
-    .filter((other) => other.projectId !== plan.projectId)
-    .map((other) => other.name);
+  const parts = [
+    ...(columns.length === 0
+      ? []
+      : [
+          `${counted(columns.length, "FacetDB column", "FacetDB columns")} (${columns.join(", ")})`,
+        ]),
+    ...(fields.length === 0
+      ? []
+      : [`${counted(fields.length, "FacetDB field", "FacetDB fields")} (${fields.join(", ")})`]),
+    ...sideTables,
+    ...views,
+    ...triggers,
+    ...(policies.length === 0
+      ? []
+      : [`${policies.length === 1 ? "the policy" : "the policies"} ${inWords(policies)}`]),
+    ...others,
+    ...(jobs ? ["its queued jobs"] : []),
+    ...grants,
+  ];
   return [
-    ...(own.length === 0 ? [] : [`project ${plan.projectId} still has ${inWords(own)}`]),
-    ...store,
-    ...(foreignTables.length === 0
+    ...(parts.length === 0
       ? []
-      : [`${inWords(foreignTables)} ${foreignTables.length === 1 ? "is" : "are"} still installed`]),
-    ...(plan.otherProjects.length === 0
-      ? []
-      : [
-          `${plan.otherProjects.length === 1 ? "project" : "projects"} ${inWords(plan.otherProjects)} ${plan.otherProjects.length === 1 ? "remains" : "remain"}`,
-        ]),
-    ...(plan.pendingElsewhere === 0
-      ? []
-      : [
-          `${counted(plan.pendingElsewhere, "webhook delivery", "webhook deliveries")} of other projects ${plan.pendingElsewhere === 1 ? "is" : "are"} pending`,
-        ]),
+      : [table === undefined ? inWords(parts) : `from ${table}: ${inWords(parts)}`]),
+    ...logEntries(own).map(
+      (entry) => `the decision log of source ${entry.source} (${entrySize(entry)})`,
+    ),
   ];
 }
 
-/** What one table's script removes from the table and from its source's log. */
-export function tableRemoved(plan: UninstallPlan): readonly string[] {
-  const removal = plan.tableRemoval;
-  const table = `${plan.schema}.${plan.table}`;
-  const parts =
-    removal === undefined
-      ? []
-      : [
-          ...(removal.columns.length === 0
-            ? []
-            : [
-                `${counted(removal.columns.length, "FacetDB column", "FacetDB columns")} (${removal.columns.join(", ")})`,
-              ]),
-          ...(removal.sideTable === undefined ? [] : [`the side table ${removal.sideTable}`]),
-          ...(removal.view === undefined ? [] : [`the view ${removal.view}`]),
-          ...(removal.trigger === undefined ? [] : [`the trigger ${removal.trigger}`]),
-          ...(removal.policies.length === 0
-            ? []
-            : [
-                `${removal.policies.length === 1 ? "the policy" : "the policies"} ${inWords(removal.policies)}`,
-              ]),
-          "its queued jobs",
-          ...(removal.workerGrants ? [`the ${WORKER_ROLE} login's rights on it`] : []),
-        ];
-  return [
-    ...(parts.length === 0 ? [] : [`from ${table}: ${inWords(parts)}`]),
-    ...(plan.purge && plan.log.status === "found"
-      ? [`the decision log of source ${plan.log.given} (${logSize(plan.log)})`]
-      : []),
-  ];
-}
-
-/** What the run removes besides its tables: the project's entry, the queue, the shared tables. */
-export function runRemoved(plan: UninstallPlan): readonly string[] {
-  const schemas = plan.schemaUsageRevoked;
+/**
+ * What the run removes besides its tables: the worker's use of a schema, the project's entry, the
+ * enqueue functions, the queue and the marks, the shared tables, the emptied log tables and schema.
+ * With the store in another database the project register (`facetdb.projects`, a marker with no
+ * `of`) stands where the store's shared tables would be.
+ */
+export function runRemoved(removes: readonly EngineObject[]): readonly string[] {
+  const grants: EngineObject[] = [];
+  let entry: EngineObject | undefined;
+  let register: EngineObject | undefined;
+  let marks = false;
+  let functions: EngineObject | undefined;
+  let jobs = false;
+  let shared: EngineObject | undefined;
+  let logTables: EngineObject | undefined;
+  const schemas: string[] = [];
+  const others: string[] = [];
+  for (const object of removes.filter((one) => one.scope === "run")) {
+    const { kind } = object;
+    switch (kind) {
+      case "grant":
+        grants.push(object);
+        break;
+      case "marker":
+        if (object.name === PROJECTS && object.of !== undefined) {
+          entry ??= object;
+        } else if (object.name === PROJECTS) {
+          register ??= object;
+        } else if (object.name === OWNERS) {
+          marks = true;
+        } else {
+          others.push(plainly(object));
+        }
+        break;
+      case "function":
+        functions ??= object;
+        break;
+      case "jobs-table":
+        jobs = true;
+        break;
+      case "store-table":
+        shared ??= object;
+        break;
+      case "log":
+        logTables ??= object;
+        break;
+      case "schema":
+        schemas.push(`the ${object.name} schema${afterComma(object.reason)}`);
+        break;
+      case "column":
+      case "field":
+      case "side-table":
+      case "view":
+      case "trigger":
+      case "login":
+      case "policy":
+      case "index":
+      case "collection":
+        others.push(plainly(object));
+        break;
+      default:
+        throw new Error(`no words for a removed ${kind satisfies never}`);
+    }
+  }
+  const usage = grants
+    .map((object) => object.of)
+    .filter((schema): schema is string => schema !== undefined);
   return [
     // The last script in a schema takes the worker's usage of it, so it is the run's, not a table's.
-    ...(schemas.length === 0
+    ...(grants[0] === undefined
       ? []
       : [
-          `the ${WORKER_ROLE} login's usage of ${schemas.length === 1 ? "schema" : "schemas"} ${inWords(schemas)}`,
+          `the ${grants[0].name} login's usage of ${usage.length === 1 ? "schema" : "schemas"} ${inWords(usage)}`,
         ]),
-    ...(plan.projectKeptBy.length === 0 && !plan.sharedTablesDropped
-      ? [`project ${plan.projectId}'s entry in the FacetDB store (nothing of it remains)`]
-      : []),
-    ...(plan.queueFunctionsDropped
-      ? ["the enqueue trigger functions (no trigger uses them any more)"]
-      : []),
-    ...(plan.jobsTableDropped
+    ...(entry === undefined
+      ? []
+      : [`project ${entry.of}'s entry in the FacetDB store${inParentheses(entry.reason)}`]),
+    ...(functions === undefined
+      ? []
+      : [`the enqueue trigger functions${inParentheses(functions.reason)}`]),
+    ...(jobs
       ? ["the jobs table and the table-ownership marks (facetdb.jobs, facetdb.table_owners)"]
-      : plan.markerTablesDropped
+      : marks
         ? ["the table-ownership marks (facetdb.table_owners)"]
         : []),
-    ...(plan.sharedTablesDropped
-      ? ["the shared FacetDB tables and the alert history in them (no project remains)"]
-      : []),
-    ...(plan.logTablesDropped ? ["the decision log tables, now empty"] : []),
-    ...(plan.schemaDropped ? ["the facetdb schema, now empty"] : []),
+    ...(shared === undefined
+      ? []
+      : [`the shared FacetDB tables and the alert history in them${inParentheses(shared.reason)}`]),
+    ...(register === undefined
+      ? []
+      : [`the project register facetdb.projects${inParentheses(register.reason)}`]),
+    ...others,
+    ...(logTables === undefined ? [] : [`the decision log tables${afterComma(logTables.reason)}`]),
+    ...schemas,
   ];
 }
 
-/** What stays of one table: its source's log, and what the script leaves in place on purpose. */
-export function tableKept(plan: UninstallPlan): readonly string[] {
-  const { log } = plan;
+/** How a log entry kept reads before its reason: a later purge after ": ", the rest after ", ". */
+const separatorOf = (reason: string) => (reason.startsWith("run ") ? ": " : ", ");
+
+/** What stays of one table: its source's log and why, and what the script leaves in place on purpose. */
+export function tableKept(keeps: readonly KeptObject[]): readonly string[] {
+  const own = keeps.filter((object) => object.scope === "source");
   const kept: string[] = [];
-  if (!plan.purge) {
-    if (log.status === "found" && log.decisions + log.versions > 0) {
-      const later = plan.logOnlyPurge;
-      // A purge waits while any other table is installed: it may share this source's log.
-      kept.push(
-        later === undefined
-          ? `the decision log of source ${log.given} (${logSize(log)}), which ${inWords(plan.otherTables.map((other) => other.name))} may share: run \`facetdb uninstall --purge --source ${log.given}\` once no other table is installed to delete it`
-          : `the decision log of source ${log.given} (${logSize(log)}): run \`${later.command}\` later to delete it`,
-      );
-    } else {
-      kept.push("the decision log tables (only --purge deletes a log)");
-    }
-  } else {
-    for (const other of plan.otherSourceLogs) {
-      kept.push(
-        `the decision log of source ${other.source} (${counted(other.decisions, "decision", "decisions")}), another source of project ${plan.projectId}: run \`facetdb uninstall --purge --source ${other.source}\` if it was this table's under an earlier name`,
-      );
-    }
-    if (!plan.logTablesDropped && plan.otherSourceLogs.length === 0) {
-      kept.push(
-        log.status === "found"
-          ? "the decision log tables, which other sources or the FacetDB store still use"
-          : log.logged === 0
-            ? `the decision log tables (no decisions were ever logged for source ${log.given})`
-            : `the decision log: no source named "${log.given}" belongs to this table's project, so none of it is deleted (sources found: ${log.found.length === 0 ? "none" : log.found.join(", ")})`,
-      );
-    }
+  for (const entry of logEntries(own)) {
+    const { reason } = entry.decisions;
+    kept.push(
+      reason.startsWith("no source named")
+        ? `the decision log: ${reason}`
+        : `the decision log of source ${entry.source} (${entrySize(entry)})${separatorOf(reason)}${reason}`,
+    );
   }
-  for (const name of plan.leftInPlace) {
-    kept.push(`${name}, left in place (see the note above)`);
+  const tables = ofKind(own, "log").filter((object) => object.of === undefined);
+  const tablesReason = tables[0]?.reason;
+  if (tablesReason !== undefined) {
+    kept.push(
+      tablesReason.startsWith("which ")
+        ? `the decision log tables, ${tablesReason}`
+        : `the decision log tables (${tablesReason})`,
+    );
+  }
+  for (const object of own) {
+    const { kind } = object;
+    switch (kind) {
+      case "log":
+        // Said above: a source's entries, or the log's tables.
+        break;
+      case "side-table":
+        kept.push(`${object.name}, left in place (${object.reason})`);
+        break;
+      case "column":
+      case "field":
+      case "view":
+      case "trigger":
+      case "function":
+      case "jobs-table":
+      case "marker":
+      case "schema":
+      case "login":
+      case "grant":
+      case "policy":
+      case "index":
+      case "collection":
+      case "store-table":
+        kept.push(`${plainly(object)}, left in place (${object.reason})`);
+        break;
+      default:
+        throw new Error(`no words for a kept ${kind satisfies never}`);
+    }
   }
   return kept;
 }
 
-/** What the run leaves of FacetDB's shared objects, each with why; the worker login always. */
-export function runKept(plan: UninstallPlan): readonly string[] {
+/** What the run leaves of FacetDB's shared objects, each with why; the logins always, last. */
+export function runKept(keeps: readonly KeptObject[]): readonly string[] {
+  let shared: KeptObject | undefined;
+  let register: KeptObject | undefined;
+  const jobs: KeptObject[] = [];
+  const functions: KeptObject[] = [];
+  const logins: KeptObject[] = [];
+  const others: string[] = [];
+  for (const object of keeps.filter((one) => one.scope === "run")) {
+    const { kind } = object;
+    switch (kind) {
+      case "store-table":
+        shared ??= object;
+        break;
+      case "marker":
+        if (object.name === PROJECTS) {
+          register ??= object;
+        } else {
+          others.push(`${plainly(object)}, because ${object.reason}`);
+        }
+        break;
+      case "jobs-table":
+        jobs.push(object);
+        break;
+      case "function":
+        functions.push(object);
+        break;
+      case "login":
+        logins.push(object);
+        break;
+      case "column":
+      case "field":
+      case "side-table":
+      case "view":
+      case "trigger":
+      case "schema":
+      case "grant":
+      case "policy":
+      case "index":
+      case "collection":
+      case "log":
+        others.push(`${plainly(object)}, because ${object.reason}`);
+        break;
+      default:
+        throw new Error(`no words for a kept ${kind satisfies never}`);
+    }
+  }
   return [
-    ...(plan.sharedTablesDropped
+    ...(shared === undefined ? [] : [`the shared FacetDB tables, because ${shared.reason}`]),
+    ...(register === undefined
       ? []
-      : [`the shared FacetDB tables, because ${inWords(sharedTablesReasons(plan))}`]),
-    ...(plan.markerTablesDropped && (plan.queueTriggers.length > 0 || plan.queuedElsewhere > 0)
-      ? [
-          plan.queueTriggers.length > 0
-            ? `the jobs table and the enqueue functions (a trigger on ${inWords(plan.queueTriggers)} still uses them)`
-            : `the jobs table (it holds ${counted(plan.queuedElsewhere, "queued job", "queued jobs")} of other tables)`,
-        ]
-      : []),
-    ROLES_KEPT,
+      : [`the project register facetdb.projects, because ${register.reason}`]),
+    ...jobs.map((object) =>
+      functions.length > 0
+        ? `the jobs table and the enqueue functions (${object.reason})`
+        : `the jobs table (${object.reason})`,
+    ),
+    // Functions kept with no queue kept are said on their own.
+    ...(jobs.length > 0 || functions[0] === undefined
+      ? []
+      : [`the enqueue functions (${functions[0].reason})`]),
+    ...others,
+    ...(logins.length === 0
+      ? []
+      : [`the ${logins.map((object) => object.name).join(" and ")} logins (${logins[0]?.reason})`]),
   ];
 }
 

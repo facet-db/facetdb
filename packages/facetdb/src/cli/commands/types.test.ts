@@ -2,10 +2,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type QuestionSet, REVIEWED_COLUMN, UPDATED_AT_COLUMN } from "@facetdb/core";
-import { pollingInstallSql, STATE_HASH_COLUMN } from "@facetdb/postgres";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { facetdb, noul } from "../../config/index.ts";
+import { pollingInstallSql, STATE_HASH_COLUMN } from "../testing.ts";
 import { supportMessages } from "./fixtures/support-messages.ts";
 import {
   renderDeclaration,
@@ -121,8 +121,8 @@ describe("facetdb types: the support-messages example", () => {
     expect(renderDrizzle(supportMessages)).toBe(await fixture("support-messages.drizzle.txt"));
   });
 
-  // Spawns tsc: a few seconds alone, more on a loaded machine (6.3 s seen at load 15 on
-  // 2026-11-01, past vitest's 5 s default).
+  // Spawns tsc: a few seconds alone, more on a loaded machine (6.3 s seen at load 15 on 2026-11-01,
+  // past vitest's 5 s default).
   it("writes a declaration that typechecks under strict settings", () => {
     const declaration = renderDeclaration(supportMessages);
     expect(typecheck(declaration)).toEqual([]);

@@ -1,5 +1,3 @@
-import type { SqlConnect } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../config/index.ts";
 import { COMMANDS } from "./commands/index.ts";
@@ -13,6 +11,14 @@ import {
   type RegisteredCommand,
   runInProcess,
 } from "./program.ts";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  postgresEngines,
+  readingDatabaseUrl,
+  resetPgliteWorld,
+  type SqlConnect,
+} from "./testing.ts";
 
 /**
  * The program every command is registered on: `--dry-run` and `--json` on each, exit code 2 for a
@@ -25,18 +31,21 @@ const ADMIN_URL = "postgres://admin:admin@localhost:5432/app";
 /** The commands that run SQL with an admin connection string; init and doctor are tested in their own files. */
 const ADMIN_COMMANDS = ["migrate", "uninstall"] as const;
 
-const config: ProjectConfig = facetdb({
-  model: "jev-1.14.0",
-  sources: [
-    {
-      name: "listings",
-      database: "postgres://facetdb_worker:worker-password@localhost:5432/app",
-      table: "listings",
-      read: ["title"],
-      questions: { is_scam: noul("Is this listing a scam?") },
-    },
-  ],
-});
+/** The source reads DATABASE_URL, as the loader records it: the store is its database. */
+const config: ProjectConfig = readingDatabaseUrl(
+  facetdb({
+    model: "jev-1.14.0",
+    sources: [
+      {
+        name: "listings",
+        database: "postgres://facetdb_worker:worker-password@localhost:5432/app",
+        table: "listings",
+        read: ["title"],
+        questions: { is_scam: noul("Is this listing a scam?") },
+      },
+    ],
+  }),
+);
 
 let world: PgliteWorld;
 
@@ -64,7 +73,13 @@ function run(
 ) {
   return runInProcess(
     argv,
-    { projectDir: "/work/app", env: {}, loadConfig: () => Promise.resolve(config), connect },
+    {
+      projectDir: "/work/app",
+      env: {},
+      loadConfig: () => Promise.resolve(config),
+      engines: postgresEngines(connect),
+      connect,
+    },
     commands,
   );
 }
@@ -97,6 +112,7 @@ describe("the facetdb program", () => {
         projectDir: "/work/app",
         env: {},
         loadConfig: () => Promise.resolve(config),
+        engines: postgresEngines(world.connect),
         connect: world.connect,
         store: () => Promise.reject(new Error("unused")),
         provider: () => {

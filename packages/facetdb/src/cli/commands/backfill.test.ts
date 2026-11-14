@@ -20,8 +20,14 @@ import {
 } from "../../config/index.ts";
 import { wireBackfillDryRun } from "../backfill-wiring.ts";
 import { runInProcess } from "../program.ts";
+import { postgresEngines, type SqlConnect } from "../testing.ts";
 import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
+
+/** The driver the command never reaches: a backfill reads its source through the connector. */
+const noDatabase: SqlConnect = () => {
+  throw new Error("backfill reaches the database only through its connector");
+};
 
 /**
  * `facetdb backfill` through the in-process runner. The engine is core's; these tests prove the
@@ -158,9 +164,9 @@ function run(
       projectDir: "/work/listings-app",
       env: setup.env ?? {},
       loadConfig: () => Promise.resolve(setup.config ?? config),
-      connect: () => {
-        throw new Error("backfill reaches the database only through its connector");
-      },
+      // The source's engine says whether its URL may be used, and connects to nothing for that.
+      engines: postgresEngines(noDatabase),
+      connect: noDatabase,
       // The same split the composition root makes: a dry run is wired without any store
       // (`world.log` and `world.cursors` stand for the store and are not handed to it).
       backfill: (_config, _source, mode) => {

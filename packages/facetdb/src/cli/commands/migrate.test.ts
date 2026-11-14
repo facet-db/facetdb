@@ -1,9 +1,19 @@
 import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
-import { type SqlConnect, sourceIdOf } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "@facetdb/postgres/testing";
+import { FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
+import { lazyEngine } from "../engines.ts";
 import { runInProcess, runProgram } from "../program.ts";
+import {
+  createPgliteWorld,
+  migrate,
+  type PgliteWorld,
+  postgresEngines,
+  readingDatabaseUrl,
+  resetPgliteWorld,
+  type SqlConnect,
+  sourceIdOf,
+} from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -133,13 +143,16 @@ function run(
     readonly connect?: SqlConnect;
   } = {},
 ) {
+  const connect = options.connect ?? world.connect;
   return runInProcess(
     argv,
     {
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(options.config ?? fullConfig),
-      connect: options.connect ?? world.connect,
+      // The source reads DATABASE_URL, as the loader records it: the store is its database.
+      loadConfig: () => Promise.resolve(readingDatabaseUrl(options.config ?? fullConfig)),
+      engines: postgresEngines(connect),
+      connect,
       ...(options.answers === undefined ? {} : { answers: options.answers }),
     },
     COMMANDS,
@@ -176,7 +189,8 @@ async function runSeeingPrompts(
       },
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(config),
+      loadConfig: () => Promise.resolve(readingDatabaseUrl(config)),
+      engines: postgresEngines(world.connect),
       connect: world.connect,
       store: () => Promise.reject(new Error("no store")),
       provider: () => {
@@ -297,9 +311,10 @@ describe("facetdb migrate", () => {
 
   it("runs nothing when the database changed after the SQL was shown", async () => {
     const before = await columns();
-    // Connections: 0 checks the worker role, 1 is the dry run, 2 the run; before 2, the key changes.
+    // Connections: 0 is the engine's plan shown, 1 the plan made again at the run (the engine plans
+    // and runs on its own connections); before 1, the key changes.
     const { connect, transactions } = recordingConnect(async (index) => {
-      if (index === 2) {
+      if (index === 1) {
         await world.client.query("alter table public.listings rename column id to listing_id");
       }
     });
@@ -551,6 +566,287 @@ describe("facetdb migrate", () => {
   it("never prints a raw probability", async () => {
     const result = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
     expect(result.stdout).not.toContain("noul=");
+  });
+});
+
+describe("the store is the Postgres DATABASE_URL names", () => {
+  const STORE_URL = "postgres://store-owner:s3cret-store-password@localhost:5432/facetdb";
+
+  /** A source reading its own variable, as the loader makes of `database: process.env.LISTINGS_URL`. */
+  const ownVariable: ProjectConfig = {
+    ...fullConfig,
+    sources: fullConfig.sources.map((source) => ({ ...source, databaseEnv: "LISTINGS_URL" })),
+  };
+
+  function runWithStore(argv: readonly string[], answers?: readonly string[]) {
+    return runInProcess(
+      argv,
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(ownVariable),
+        engines: postgresEngines(world.connect),
+        connect: world.connect,
+        ...(answers === undefined ? {} : { answers }),
+      },
+      COMMANDS,
+    );
+  }
+
+  it("prints today's one script, with no header, when the store is the source's database", async () => {
+    const result = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(result.code, result.stderr).toBe(0);
+    // The pre-058 path's dry run on the same database: the oracle, byte for byte.
+    const today = await migrate({
+      adminUrl: ADMIN_URL,
+      connect: world.connect,
+      print: () => undefined,
+      dryRun: true,
+      plan: {
+        source: { table: "listings", schema: "public", onChange: "reset", storage: "inline" },
+        questionSet: {
+          questions: fullConfig.sources[0]?.questions ?? [],
+          read: ["title", "description"],
+          model: "jev-1.14.0",
+          thresholds: {},
+        },
+        project: { id: "listings-app", name: "listings-app" },
+        workerPassword: "worker-password",
+      },
+    });
+    if (!today.ok) {
+      throw new Error(today.reason);
+    }
+    expect(result.stdout).toBe(
+      `-- facetdb migrate: listings (public.listings)\n${today.sql}Dry run: nothing was changed.\n`,
+    );
+    expect(result.stdout).not.toContain("-- store:");
+    expect(result.stdout).not.toContain("-- source ");
+  });
+
+  it("prints the store's part and the source's part under the database each runs in, and asks once", async () => {
+    const dry = await runWithStore(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(
+      dry.stdout.startsWith(
+        '-- store: localhost:5432/facetdb\nbegin;\n\ncreate schema if not exists "facetdb";',
+      ),
+    ).toBe(true);
+    const source = dry.stdout.indexOf(
+      "-- source listings: localhost:5432/app\n-- facetdb migrate: listings (public.listings)\nbegin;\n",
+    );
+    expect(source).toBeGreaterThan(0);
+    // The store's tables are in the store's part alone; the source's part holds its own objects.
+    const storePart = dry.stdout.slice(0, source);
+    const sourcePart = dry.stdout.slice(source);
+    expect(storePart).toContain("facetdb.decisions");
+    expect(sourcePart).not.toContain("facetdb.decisions");
+    expect(sourcePart).toContain('"is_scam"');
+    expect(dry.stdout + dry.stderr).not.toContain("s3cret-store-password");
+    expect(await facetdbSchemaExists()).toBe(false);
+
+    const json = await runWithStore(["migrate", "--dry-run", "--json", "--admin-url", ADMIN_URL]);
+    const parsed = JSON.parse(json.stdout) as {
+      store: { database: string; current: boolean; sql: string; applied: boolean };
+      sources: { sql: string }[];
+    };
+    expect(parsed.store).toMatchObject({
+      database: "localhost:5432/facetdb",
+      current: false,
+      applied: false,
+    });
+    expect(parsed.store.sql).toContain("create table if not exists facetdb.decisions");
+    expect(parsed.sources[0]?.sql).not.toContain("facetdb.decisions");
+
+    const real = await runWithStore(["migrate", "--admin-url", ADMIN_URL], ["yes"]);
+    expect(real.code, real.stderr).toBe(0);
+    expect(real.prompts).toEqual([
+      "Run the SQL above on localhost:5432/facetdb and localhost:5432/app? Type yes to continue: ",
+    ]);
+    // Each part is said as it runs: the store's first, then the source's.
+    const after = real.stdout.slice(real.stdout.indexOf("Migrated the FacetDB store"));
+    expect(after).toBe(
+      "Migrated the FacetDB store on localhost:5432/facetdb.\nInstalled on public.listings (source listings).\n",
+    );
+    expect(await columns()).toEqual(expect.arrayContaining(["is_scam", "category"]));
+    const versions = await world.client.query(
+      "select count(*)::int as n from facetdb.store_migrations",
+    );
+    expect(versions[0]?.["n"]).toBeGreaterThan(0);
+  });
+
+  it("says a current store is current instead of showing DDL that will not run, and never reports it applied", async () => {
+    expect((await runWithStore(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    const dry = await runWithStore(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(
+      dry.stdout.startsWith(
+        "-- store: localhost:5432/facetdb\n-- the FacetDB store is current: nothing to run there\n-- source listings: localhost:5432/app\n",
+      ),
+    ).toBe(true);
+    expect(dry.stdout).not.toContain("create table if not exists facetdb.decisions");
+
+    const real = await runWithStore(["migrate", "--json", "--admin-url", ADMIN_URL], ["yes"]);
+    expect(real.code, real.stderr).toBe(0);
+    // Nothing runs on the store, so the confirmation names the source's database alone.
+    expect(real.prompts).toEqual([
+      "Run the SQL above on localhost:5432/app? Type yes to continue: ",
+    ]);
+    expect(real.stderr).toContain(
+      "The FacetDB store on localhost:5432/facetdb was current: nothing ran there.",
+    );
+    const parsed = JSON.parse(real.stdout) as {
+      store: { current: boolean; sql: string; applied: boolean };
+      sources: { applied: boolean }[];
+    };
+    expect(parsed.store).toEqual({
+      database: "localhost:5432/facetdb",
+      current: true,
+      sql: "",
+      applied: false,
+    });
+    expect(parsed.sources[0]?.applied).toBe(true);
+  });
+
+  it("refuses a store newer than this FacetDB before the confirmation, and runs nothing", async () => {
+    expect((await runWithStore(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    const newest = await world.client.query(
+      "select max(version)::int as v from facetdb.store_migrations",
+    );
+    const newer = Number(newest[0]?.["v"]) + 1;
+    await world.client.query("insert into facetdb.store_migrations (version) values ($1)", [newer]);
+    const result = await runWithStore(["migrate", "--admin-url", ADMIN_URL], ["yes"]);
+    expect(result.code).toBe(1);
+    expect(result.prompts).toEqual([]);
+    expect(result.stderr).toContain(
+      `error: the FacetDB store on localhost:5432/facetdb is at schema version ${newer}, newer than this FacetDB knows (${newer - 1}); nothing was run`,
+    );
+    expect(result.stderr).toContain(
+      "fix: upgrade FacetDB to the version that wrote the store, then run facetdb migrate again",
+    );
+    expect(result.stdout).not.toContain("-- store:");
+  });
+
+  it("a source refused after the store's migration ran says the store moved", async () => {
+    // The second connection to the store is the run's; once it closes, the source's table is
+    // renamed, so the source's part is refused after the store's part has committed.
+    let storeConnections = 0;
+    const connect: SqlConnect = (url, options) => {
+      const inner = world.connect(url, options);
+      if (url !== STORE_URL) {
+        return inner;
+      }
+      storeConnections += 1;
+      const runStep = storeConnections === 2;
+      return {
+        ...inner,
+        close: async () => {
+          await inner.close();
+          if (runStep) {
+            await world.client.query("alter table public.listings rename to listings_old");
+          }
+        },
+      };
+    };
+    const result = await runInProcess(
+      ["migrate", "--yes", "--json", "--admin-url", ADMIN_URL],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(ownVariable),
+        engines: postgresEngines(connect),
+        connect,
+      },
+      COMMANDS,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Migrated the FacetDB store on localhost:5432/facetdb.");
+    const parsed = JSON.parse(result.stdout) as {
+      error: { message: string };
+      details: unknown;
+    };
+    expect(parsed.error.message).toContain(
+      "Already run in this run, before this, and kept: the FacetDB store's migration on localhost:5432/facetdb.",
+    );
+    expect(parsed.error.message).not.toContain("nothing was run");
+    expect(parsed.details).toEqual({ storeMigrated: "localhost:5432/facetdb", installed: [] });
+    const versions = await world.client.query(
+      "select count(*)::int as n from facetdb.store_migrations",
+    );
+    expect(versions[0]?.["n"]).toBeGreaterThan(0);
+  });
+
+  it("refuses a source of another kind that reads DATABASE_URL, the store's variable, before anything connects", async () => {
+    const MYSQL_URL = "mysql://facetdb_worker:s3cret-mysql@db.example.com/shop";
+    const mysql = lazyEngine("mysql", () =>
+      Promise.resolve(new FakeEngine({ name: "mysql", schemes: ["mysql", "mariadb"] })),
+    );
+    const noConnection: SqlConnect = (url) => {
+      throw new Error(`a connection was opened to ${url}`);
+    };
+    const readsStore: ProjectConfig = {
+      ...fullConfig,
+      sources: fullConfig.sources.map((source) => ({
+        ...source,
+        database: MYSQL_URL,
+        databaseEnv: "DATABASE_URL",
+      })),
+    };
+    const result = await runInProcess(
+      ["migrate", "--dry-run", "--admin-url", "mysql://root:s3cret-root@db.example.com/shop"],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: MYSQL_URL },
+        loadConfig: () => Promise.resolve(readsStore),
+        engines: [...postgresEngines(noConnection), mysql],
+        connect: noConnection,
+      },
+      COMMANDS,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      `error: the source "listings" reads DATABASE_URL, the store's variable, and its database is not a Postgres (mysql); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
+    );
+    expect(result.stderr).toContain(
+      "fix: write database: process.env.LISTINGS_URL for the source in facetdb.config.ts, set LISTINGS_URL to its connection string, and point DATABASE_URL at the store's Postgres",
+    );
+    expect(result.stdout + result.stderr).not.toContain("s3cret");
+  });
+
+  it("refuses a source on its own variable with no DATABASE_URL, and a PGlite store, before anything connects", async () => {
+    const noConnection: SqlConnect = (url) => {
+      throw new Error(`a connection was opened to ${url}`);
+    };
+    const unset = await runInProcess(
+      ["migrate", "--dry-run", "--admin-url", ADMIN_URL],
+      {
+        projectDir: PROJECT_DIR,
+        env: {},
+        loadConfig: () => Promise.resolve(ownVariable),
+        engines: postgresEngines(noConnection),
+        connect: noConnection,
+      },
+      COMMANDS,
+    );
+    expect(unset.code).toBe(1);
+    expect(unset.stderr).toContain(
+      "error: DATABASE_URL is not set, so FacetDB has no database for its store",
+    );
+    const pglite = await runInProcess(
+      ["migrate", "--dry-run", "--admin-url", ADMIN_URL],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: "pglite://.facetdb/dev" },
+        loadConfig: () => Promise.resolve(ownVariable),
+        engines: postgresEngines(noConnection),
+        connect: noConnection,
+      },
+      COMMANDS,
+    );
+    expect(pglite.code).toBe(1);
+    expect(pglite.stderr).toContain(
+      "error: a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres",
+    );
   });
 });
 

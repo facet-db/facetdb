@@ -4,19 +4,21 @@ import { access, mkdir, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
-import type { Clock } from "@facetdb/core";
+import type { Clock, OpenConnector } from "@facetdb/core";
 import { selectProvider } from "@facetdb/model";
 import {
   connectPostgres,
+  createPostgresEngine,
   createStore,
-  type PostgresConnector,
   SECRET_VARIABLE,
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
-import { projectRef, questionSetOf, requireSecureUrl } from "./commands/database.ts";
+import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
 import { diskEmbedded } from "./embedded.ts";
+import { engineFor, lazyEngine, openConnector } from "./engines.ts";
+import { sharePools } from "./pools.ts";
 import {
   type CliDeps,
   CliError,
@@ -26,7 +28,7 @@ import {
   type Workspace,
 } from "./program.ts";
 import { serveHttp } from "./serve.ts";
-import { openTableConnector, workerUrlOf } from "./table-connector.ts";
+import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
 
 /**
  * The composition root of the `facetdb` process: the only place that touches the process's
@@ -34,7 +36,9 @@ import { openTableConnector, workerUrlOf } from "./table-connector.ts";
  * runs the program, and sets the exit code the program returns (0, 1 or 2). Secrets come from the
  * environment only: `TYPESAFE_API_KEY` for the model, `FACETDB_SECRET` for the store, the
  * connection strings the config reads (`DATABASE_URL`); an admin connection string is asked for per
- * run and never kept.
+ * run and never kept. The database engines a source's scheme picks from are built here: the
+ * Postgres engine over the same driver and pools as the store, judged with the environment's
+ * `PGHOST`; later tasks append theirs.
  */
 
 const clock: Clock = {
@@ -121,6 +125,9 @@ function processIo(): CliIo {
 export function processDeps(): CliDeps {
   const env = process.env;
   const projectDir = process.cwd();
+  // One driver for the store and the Postgres engine, its pools shared by URL: the worker's store
+  // pool is lent to the engine's connector of a table on the store's own database (cli/pools.ts).
+  const connect = sharePools(connectPostgres);
   const deps: CliDeps = {
     io: processIo(),
     workspace: diskWorkspace(projectDir, env),
@@ -129,20 +136,20 @@ export function processDeps(): CliDeps {
     env,
     loadConfig: async (path) =>
       (await loadConfig(path, { projectDir, env, stderr: process.stderr })).config,
-    connect: connectPostgres,
+    // Each engine is made on first use for a source of its key only, so a driver no source needs is
+    // never imported (later engines load their package here with `import()`). Never the default
+    // `postgresEngine`: without PGHOST a hostless URL with a remote PGHOST would pass the TLS
+    // refusal.
+    engines: [
+      lazyEngine("postgres", () =>
+        Promise.resolve(createPostgresEngine({ connect, pgHost: env["PGHOST"] })),
+      ),
+    ],
+    connect,
     store: (options) => {
-      const url = env["DATABASE_URL"];
-      if (url === undefined || url === "") {
-        return Promise.reject(
-          new CliError(
-            "database-url",
-            "DATABASE_URL is not set, so FacetDB has no database for its store",
-            "set DATABASE_URL to the connection string of the database FacetDB keeps its store in",
-          ),
-        );
-      }
+      let url: string;
       try {
-        requireSecureUrl(url, "DATABASE_URL", options?.allowInsecure, env["PGHOST"]);
+        url = requireStoreUrl(env, options?.allowInsecure);
       } catch (error) {
         return Promise.reject(error);
       }
@@ -151,7 +158,7 @@ export function processDeps(): CliDeps {
         pgHost: env["PGHOST"],
         secret: env[SECRET_VARIABLE],
         clock,
-        connect: options?.connect ?? connectPostgres,
+        connect: options?.connect ?? connect,
         ...(options?.allowInsecure === true ? { allowInsecure: true } : {}),
       });
     },
@@ -172,26 +179,16 @@ export function processDeps(): CliDeps {
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
-        const connector = await sourceConnector(
-          config,
-          source,
-          mode.allowInsecure === true,
-          env["PGHOST"],
-        );
+        const connector = await sourceConnector(deps, config, source, mode.allowInsecure === true);
         return {
           deps: wireBackfillDryRun({ config, source, connector, clock }),
           close: () => connector.close(),
         };
       }
       const store = await deps.store({ allowInsecure: mode.allowInsecure === true });
-      let connector: PostgresConnector | undefined;
+      let connector: OpenConnector | undefined;
       try {
-        connector = await sourceConnector(
-          config,
-          source,
-          mode.allowInsecure === true,
-          env["PGHOST"],
-        );
+        connector = await sourceConnector(deps, config, source, mode.allowInsecure === true);
         const wired = await wireBackfill({
           config,
           source,
@@ -229,25 +226,31 @@ function provider(config: ProjectConfig, env: Readonly<Record<string, string | u
 }
 
 /**
- * The connector of a table source: the Postgres capture runtime under the worker login, so what a
- * backfill queues lands in the source's own jobs table, where `facetdb worker` claims it.
+ * The connector of a table source from its engine, under the worker login, so what a backfill
+ * queues lands in the source's own queue, where `facetdb worker` claims it.
  */
-function sourceConnector(
+async function sourceConnector(
+  deps: CliDeps,
   config: ProjectConfig,
   source: SourceConfig,
   allowInsecure: boolean,
-  pgHost: string | undefined,
-): Promise<PostgresConnector> {
-  return openTableConnector({
-    source,
-    url: workerUrlOf(source),
-    connect: connectPostgres,
-    questionSet: questionSetOf(config, source),
-    clock,
-    workerId: `backfill-${randomUUID()}`,
-    allowInsecure,
-    pgHost,
-  });
+): Promise<OpenConnector> {
+  const url = sourceUrlOf(source, "the worker login's connection string");
+  return openConnector(
+    await engineFor(deps.engines, url, source.connector),
+    engineTarget(
+      config,
+      { source, ...splitTable(source.table ?? "") },
+      projectRef(deps.projectDir),
+    ),
+    url,
+    {
+      clock,
+      allowInsecure,
+      storeShared: storeSharedFor(deps.env, source),
+      workerId: `backfill-${randomUUID()}`,
+    },
+  );
 }
 
 async function main(): Promise<void> {

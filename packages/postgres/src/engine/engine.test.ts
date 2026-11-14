@@ -7,10 +7,10 @@ import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testin
 import { createPostgresEngine } from "./engine.ts";
 
 /**
- * The Postgres engine's install on PGlite: the plan renders today's script byte for
- * byte (the two committed fixtures), tags every statement by the table it serves, runs as printed
- * with the worker password bound at its `secret` statement and nowhere else, and stops with the
- * script's own refusal when another project claims the table between the plan and the run.
+ * The Postgres engine's install on PGlite: the plan renders today's script byte for byte (the two
+ * committed fixtures), tags every statement by the table it serves, runs as printed with the worker
+ * password bound at its `secret` statement and nowhere else, and stops with the script's own
+ * refusal when another project claims the table between the plan and the run.
  */
 
 const FIXTURES = {
@@ -84,7 +84,10 @@ afterAll(async () => {
   await world.close();
 });
 
-const engine = createPostgresEngine({ connect: (url, options) => world.connect(url, options) });
+const engine = createPostgresEngine({
+  connect: (url, options) => world.connect(url, options),
+  pgHost: undefined,
+});
 
 function target(overrides: Partial<EngineTarget> = {}): EngineTarget {
   return {
@@ -359,10 +362,12 @@ describe("run", () => {
           }),
         ),
     });
-    const result = await createPostgresEngine({ connect: echoing }).run(target(), plan, ADMIN, {
-      ...shared,
-      workerPassword: PASSWORD,
-    });
+    const result = await createPostgresEngine({ connect: echoing, pgHost: undefined }).run(
+      target(),
+      plan,
+      ADMIN,
+      { ...shared, workerPassword: PASSWORD },
+    );
     expect(result).toMatchObject({
       ran: [],
       stopped: { at: plan.statements.findIndex((statement) => statement.secret === true) },
@@ -460,15 +465,43 @@ describe("refusals", () => {
       },
     });
     await listingsTable();
-    expect(await engine.planInstall(target(), ADMIN, shared)).toEqual({
+    // A login to create and no password for it: the contract's own code, before anything is
+    // drafted, so the CLI says how to put the password in the source's connection string.
+    expect(
+      await engine.planInstall({ ...target(), urlVariable: "LISTINGS_URL" }, ADMIN, shared),
+    ).toEqual({
       ok: false,
       refusal: {
-        code: "migrate-refused",
+        code: "worker-login",
         message:
-          "the worker role facetdb_worker does not exist yet and no password was given for it; pass workerPassword on the first install.",
-        fix: FIX,
+          "the worker login facetdb_worker does not exist yet, and no password was given to create it with",
+        fix: "put the worker login and a long random password in LISTINGS_URL: postgres://facetdb_worker:<a long random password>@<host>/<database>; the install creates the login with that password",
       },
     });
+  });
+
+  it("refuses a plaintext worker URL without connecting (checkUrl), in words that name its variable", () => {
+    const opened = () => {
+      throw new Error("a connection was opened");
+    };
+    const never = createPostgresEngine({ connect: opened, pgHost: undefined });
+    const remote = "postgres://facetdb_worker:s3cret@db.example.com/app";
+    expect(never.checkUrl({ ...target(), urlVariable: "LISTINGS_URL" }, remote, shared)).toEqual({
+      code: "database-url-tls",
+      message:
+        "LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+      fix: "add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
+    });
+    expect(never.checkUrl(target(), remote, shared)?.message).toContain(
+      "the source's connection string reaches db.example.com",
+    );
+    expect(never.checkUrl(target(), `${remote}?sslmode=require`, shared)).toBeUndefined();
+    expect(never.checkUrl(target(), remote, { allowInsecure: true })).toBeUndefined();
+    // A URL that names no host goes where the driver goes: the engine was built with PGHOST.
+    const viaPgHost = createPostgresEngine({ connect: opened, pgHost: "db.example.com" });
+    expect(
+      viaPgHost.checkUrl(target(), "postgres:///app?user=facetdb_worker", shared)?.message,
+    ).toContain("names no host, so the driver reaches PGHOST (db.example.com) without TLS");
   });
 
   it("refuses a plaintext admin URL to another machine before it connects", async () => {
@@ -476,6 +509,7 @@ describe("refusals", () => {
       connect: () => {
         throw new Error("a connection was opened");
       },
+      pgHost: undefined,
     });
     const remote = "postgres://admin:s3cret@db.example.com/app";
     const refusal = {

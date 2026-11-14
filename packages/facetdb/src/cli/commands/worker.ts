@@ -5,6 +5,7 @@ import {
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type ModelProvider,
+  type OpenConnector,
   type PassReport,
   type ReviewQueue,
   type SpendingGate,
@@ -18,13 +19,6 @@ import {
   DEFAULT_MAX_MS,
 } from "@facetdb/model";
 import {
-  type ProjectRef,
-  type SqlClient,
-  type SqlConnect,
-  type Store,
-  sourceIdOf,
-} from "@facetdb/postgres";
-import {
   type AlertFailure,
   createCheckStore,
   createOutbox,
@@ -34,31 +28,41 @@ import {
 } from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
+import { engineFor, openConnector, requireUsableUrl } from "../engines.ts";
 import {
   CliError,
   type CommandContext,
   defineCommand,
   EXIT_USAGE,
   type HttpListener,
+  type OpenStore,
+  type StoreClient,
 } from "../program.ts";
-import { openTableConnector, workerUrlOf } from "../table-connector.ts";
+import {
+  requireUsableStoreUrl,
+  STORE_VARIABLE,
+  storeSharedFor,
+  storeSourceId,
+} from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  engineTarget,
   loadProjectConfig,
+  type ProjectRef,
   projectRef,
   questionSetOf,
-  requireSecureSource,
-  requireSecureUrl,
+  sourceUrlOf,
+  splitTable,
 } from "./database.ts";
 
 /**
  * `facetdb worker`: one process that answers every source of the config. Per table source it runs
- * the Postgres capture connector under the worker login; per API source the store's queue. Every
- * worker shares the resilient provider (backoff and the in-flight limit), the project's spending
- * gate and its alerts, and beats the heartbeat `facetdb doctor` reads. Next to the loops it
- * delivers the webhook outbox and serves the HTTP surface (the check API) on `--port` unless
- * `--no-http`. SIGINT stops it after the pass in hand, so every claim is acked or released before
- * it exits; `--once` answers what is queued and exits.
+ * the connector its engine opens (the Postgres capture connector) under the worker login; per API
+ * source the store's queue. Every worker shares the resilient provider (backoff and the in-flight
+ * limit), the project's spending gate and its alerts, and beats the heartbeat `facetdb doctor`
+ * reads. Next to the loops it delivers the webhook outbox and serves the HTTP surface (the check
+ * API) on `--port` unless `--no-http`. SIGINT stops it after the pass in hand, so every claim is
+ * acked or released before it exits; `--once` answers what is queued and exits.
  */
 
 export const DEFAULT_PORT = 7411;
@@ -93,14 +97,17 @@ export type WorkerOptions = {
 export type WorkerParts = {
   readonly config: ProjectConfig;
   readonly project: ProjectRef;
-  readonly store: Store;
+  readonly store: OpenStore;
   /** The store's own database, for the webhook outbox. */
-  readonly storeClient: SqlClient;
-  /** Opens a table source's database; `databaseOf` names the URL it is given. */
-  readonly connect: SqlConnect;
-  readonly databaseOf: (source: SourceConfig) => string;
-  /** The worker's password may cross a network without TLS (`--allow-insecure`); `dev` is in-process. */
-  readonly allowInsecure: boolean;
+  readonly storeClient: StoreClient;
+  /**
+   * Opens a table source's connector through its engine, under the worker login; the caller
+   * closes it. `worker` checked every source's URL before the store opened; `dev` is in-process.
+   */
+  readonly openTable: (
+    source: SourceConfig,
+    options: { readonly workerId: string; readonly maxConnections: number },
+  ) => Promise<OpenConnector>;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
 };
@@ -182,7 +189,7 @@ export async function runWorkers(
   }
   await store.ensureProject(project);
   /** The source's id in the store: its log, versions, records and queue are keyed by it. */
-  const idOf = (source: SourceConfig) => sourceIdOf(project.id, source.name);
+  const idOf = (source: SourceConfig) => storeSourceId(project.id, source.name);
   const spending: SpendingGate = projectSpending(config, store, alerts, clock, project.id);
 
   /** The question-set version each source runs under, recorded once at start. */
@@ -262,15 +269,8 @@ export async function runWorkers(
         });
         continue;
       }
-      const connector = await openTableConnector({
-        source,
-        url: parts.databaseOf(source),
-        connect: parts.connect,
-        questionSet: questionSetOf(config, source),
-        clock,
+      const connector = await parts.openTable(source, {
         workerId,
-        allowInsecure: parts.allowInsecure,
-        pgHost: deps.env["PGHOST"],
         maxConnections: WORKER_CONNECTIONS,
       });
       // Its log and versions are kept in the store under the source's name, registered as a
@@ -519,31 +519,62 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       );
       return { ok: true, dryRun: true };
     }
-    const storeUrl = deps.env["DATABASE_URL"] ?? "";
+    const storeUrl = deps.env[STORE_VARIABLE] ?? "";
     const allowInsecure = options.allowInsecure === true;
-    // Before the store opens or anything connects: no worker password in the clear to another machine.
+    const project = projectRef(deps.projectDir);
+    // Before the store opens or anything connects: no worker password in the clear to another
+    // machine, by the store door's rule for the store and each source's engine for its own URL.
     if (storeUrl !== "") {
-      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
+      requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
     }
+    const tables = new Map<
+      string,
+      { readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector> }
+    >();
     for (const source of config.sources) {
-      requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
+      if (source.table === undefined) {
+        continue;
+      }
+      const url = sourceUrlOf(
+        source,
+        "the worker login's connection string (postgres://facetdb_worker:…@host/db)",
+      );
+      const engine = await engineFor(deps.engines, url, source.connector);
+      const target = engineTarget(config, { source, ...splitTable(source.table) }, project);
+      requireUsableUrl(engine, target, url, allowInsecure);
+      const storeShared = storeSharedFor(deps.env, source);
+      tables.set(source.name, {
+        open: (workerId, maxConnections) =>
+          openConnector(engine, target, url, {
+            clock: deps.clock,
+            allowInsecure,
+            storeShared,
+            workerId,
+            maxConnections,
+          }),
+      });
     }
     // One pool for the store, the outbox, and every table source on the store's own database (the
-    // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. Its borrowers close nothing.
+    // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. The composition root's
+    // connect lends it to the engine's connector of such a source (cli/pools.ts); the store's
+    // borrower closes nothing.
     const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
-    const borrowed = (): SqlClient => ({ ...storeClient, close: () => Promise.resolve() });
+    const borrowed = (): StoreClient => ({ ...storeClient, close: () => Promise.resolve() });
     try {
       const store = await deps.store({ allowInsecure, connect: borrowed });
       try {
         return await runWorkers(context, {
           config,
-          project: projectRef(deps.projectDir),
+          project,
           store,
           storeClient,
-          connect: (url, connectOptions) =>
-            url === storeUrl ? borrowed() : deps.connect(url, connectOptions),
-          databaseOf: workerUrlOf,
-          allowInsecure,
+          openTable: (source, open) => {
+            const table = tables.get(source.name);
+            if (table === undefined) {
+              throw new Error(`the source ${source.name} reads no table`);
+            }
+            return table.open(open.workerId, open.maxConnections);
+          },
           provider: deps.provider(config),
         });
       } finally {

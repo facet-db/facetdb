@@ -8,14 +8,14 @@ import {
 import { installOwnedColumns, triggerName, WORKER_ROLE } from "../install/index.ts";
 import { SIDE_TABLE_SCHEMA, sideTableName } from "../scan/index.ts";
 import type { SqlConnect, SqlQuery } from "../sql/index.ts";
-import { databaseLabel, plainMessage, SOURCE_URL, urlProblem } from "./urls.ts";
+import { databaseLabel, plainMessage, subjectOf, urlProblem } from "./urls.ts";
 
 /**
- * `facetdb doctor`'s checks of one table source, moved here from the
- * CLI's doctor.ts with the same names, details, fixes and statuses: the connection, the
- * login and the round trip (with the distance as a warning of its own), the pooler, the install
- * in the catalog, and the worker's heartbeat. Nothing is changed. Where the CLI names the variable
- * that holds the URL, these words say `SOURCE_URL`: the engine is not told the variable.
+ * `facetdb doctor`'s checks of one table source, moved here from the CLI's doctor.ts with the same
+ * names, details, fixes and statuses: the connection, the login and the round trip (with the
+ * distance as a warning of its own), the pooler, the install in the catalog, and the worker's
+ * heartbeat. Nothing is changed. Where the CLI named the variable that holds the URL, these words
+ * name the target's `urlVariable`, else `SOURCE_URL`.
  */
 
 /** The checks, in order, and what each looks at: what `doctor --dry-run` lists today. */
@@ -107,7 +107,8 @@ async function databaseCheck(
   deps: EngineDeps,
   pgHost: string | undefined,
 ): Promise<{ readonly check: DoctorCheck; readonly warning?: string }> {
-  const insecure = urlProblem(url, SOURCE_URL, deps.allowInsecure, pgHost);
+  const subject = subjectOf(target);
+  const insecure = urlProblem(url, subject, deps.allowInsecure, pgHost);
   if (insecure !== undefined) {
     return { check: fail("database", `"${target.source}": ${insecure.problem}`, insecure.fix) };
   }
@@ -124,7 +125,7 @@ async function databaseCheck(
         check: fail(
           "database",
           `"${target.source}" logs in as ${login} on ${databaseLabel(url)}, not as the worker login ${WORKER_ROLE}`,
-          `set ${SOURCE_URL} to ${WORKER_URL_SHAPE}; facetdb migrate creates that login with the password in it, and it is the only login the worker needs`,
+          `set ${subject} to ${WORKER_URL_SHAPE}; facetdb migrate creates that login with the password in it, and it is the only login the worker needs`,
         ),
       };
     }
@@ -145,7 +146,7 @@ async function databaseCheck(
       check: fail(
         "database",
         `"${target.source}" cannot connect to ${databaseLabel(url)}: ${plainMessage(error, [url])}`,
-        `check the host, port, user and password in ${SOURCE_URL}, and that the database accepts connections from this machine (a firewall or an allow-list)`,
+        `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`,
       ),
     };
   }
@@ -205,7 +206,8 @@ async function transactionPooler(connect: SqlConnect, url: string): Promise<stri
   }
 }
 
-const POOLER_FIX = `use the session pooler (port 5432) or a direct connection in ${SOURCE_URL}; the worker prepares each statement once per connection`;
+const poolerFix = (subject: string) =>
+  `use the session pooler (port 5432) or a direct connection in ${subject}; the worker prepares each statement once per connection`;
 
 async function poolerCheck(
   connect: SqlConnect,
@@ -213,6 +215,7 @@ async function poolerCheck(
   url: string,
 ): Promise<DoctorCheck> {
   const where = `"${target.source}" on ${databaseLabel(url)}`;
+  const fix = poolerFix(subjectOf(target));
   try {
     const why = await transactionPooler(connect, url);
     return why === undefined
@@ -223,13 +226,13 @@ async function poolerCheck(
       : fail(
           "pooler",
           `${where}: the database is behind a transaction-mode pooler (Supabase port 6543, PgBouncer transaction mode): ${why}`,
-          POOLER_FIX,
+          fix,
         );
   } catch (error) {
     return fail(
       "pooler",
       `${where}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
-      POOLER_FIX,
+      fix,
     );
   }
 }
@@ -331,9 +334,9 @@ function ageOf(milliseconds: number): string {
 }
 
 /**
- * The worker has reported within the last two minutes. Its heartbeat is in the
- * FacetDB store (`DATABASE_URL`): read here only when the store is this
- * source's database; otherwise the CLI's store door checks it.
+ * The worker has reported within the last two minutes. Its heartbeat is in the FacetDB store
+ * (`DATABASE_URL`): read here only when the store is this source's database; otherwise the CLI's
+ * store door checks it.
  */
 async function heartbeatCheck(
   connect: SqlConnect,

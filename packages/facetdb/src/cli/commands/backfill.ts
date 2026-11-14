@@ -4,12 +4,14 @@ import {
   createBackfill,
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
+import { engineFor, requireUsableUrl } from "../engines.ts";
 import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
+import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  engineTarget,
   loadProjectConfig,
-  requireSecureSource,
-  requireSecureUrl,
+  projectRef,
   singleTarget,
 } from "./database.ts";
 
@@ -124,12 +126,21 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       source.questions.map((question) => question.name),
     );
     const name = `${target.schema}.${target.table}`;
-    // Before anything connects, a dry run included (it reads the source): no password in the clear.
+    // Before anything connects, a dry run included (it reads the source): no password in the clear,
+    // by the source's engine for its connection string and by the store door for the store's.
     const allowInsecure = options.allowInsecure === true;
-    requireSecureSource(source, allowInsecure, deps.env["PGHOST"]);
-    const storeUrl = deps.env["DATABASE_URL"];
-    if (!options.dryRun && storeUrl !== undefined && storeUrl !== "") {
-      requireSecureUrl(storeUrl, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
+    if (source.database !== undefined && source.database !== "") {
+      const engine = await engineFor(deps.engines, source.database, source.connector);
+      requireUsableUrl(
+        engine,
+        engineTarget(config, target, projectRef(deps.projectDir)),
+        source.database,
+        allowInsecure,
+      );
+    }
+    const storeUrl = storeUrlOf(deps.env);
+    if (!options.dryRun && storeUrl !== undefined) {
+      requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
     }
     const setup = await deps.backfill(config, source, {
       dryRun: options.dryRun,

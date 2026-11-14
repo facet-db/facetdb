@@ -1,8 +1,17 @@
-import { type SqlConnect, sourceIdOf, uninstall } from "@facetdb/postgres";
-import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "@facetdb/postgres/testing";
+import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { runInProcess, runProgram } from "../program.ts";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  postgresEngines,
+  readingDatabaseUrl,
+  resetPgliteWorld,
+  type SqlConnect,
+  sourceIdOf,
+} from "../testing.ts";
+import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -29,6 +38,7 @@ const LISTINGS: SourceInput = {
   questions: { is_scam: noul("Is this listing a scam?") },
 };
 
+/** Every loader here reads it through `readingDatabaseUrl`: the store is the source's database. */
 const config: ProjectConfig = facetdb({ model: "jev-1.14.0", sources: [LISTINGS] });
 
 /** One engine for the file, emptied after every test: a boot per test cost 440 ms. */
@@ -65,7 +75,8 @@ function run(
     {
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(withConfig),
+      loadConfig: () => Promise.resolve(readingDatabaseUrl(withConfig)),
+      engines: postgresEngines(world.connect),
       connect: world.connect,
       ...(answers === undefined ? {} : { answers }),
     },
@@ -104,7 +115,8 @@ async function runSeeingPrompts(
       },
       projectDir: PROJECT_DIR,
       env: {},
-      loadConfig: () => Promise.resolve(withConfig),
+      loadConfig: () => Promise.resolve(readingDatabaseUrl(withConfig)),
+      engines: postgresEngines(world.connect),
       connect: world.connect,
       store: unused,
       provider: () => {
@@ -164,21 +176,36 @@ async function pendingDeliveries(n: number): Promise<void> {
   }
 }
 
-/** The notes the connector itself returns for this table, read without the CLI. */
+/** The notes the engine's plan carries for this table, read without the CLI. */
 async function connectorNotes(purge: boolean): Promise<readonly string[]> {
-  const result = await uninstall({
-    adminUrl: ADMIN_URL,
-    connect: world.connect,
-    source: { table: "listings", name: "listings", projectId: PROJECT },
-    purge,
-    dryRun: true,
-    print: () => undefined,
-    confirm: () => Promise.reject(new Error("a dry run asks nothing")),
-  });
-  if (!result.ok) {
-    throw new Error(result.reason);
+  const [entry] = postgresEngines(world.connect);
+  const [source] = config.sources;
+  if (entry === undefined || source === undefined) {
+    throw new Error("the test registers the Postgres engine and a source");
   }
-  return result.notes;
+  const engine = await entry.load();
+  const result = await engine.planUninstall(
+    {
+      project: { id: PROJECT, name: PROJECT },
+      source: "listings",
+      table: "listings",
+      storage: "inline",
+      onChange: "reset",
+      questionSet: questionSetOf(config, source),
+    },
+    ADMIN_URL,
+    {
+      clock: new FakeClock(0),
+      allowInsecure: false,
+      storeShared: true,
+      purge,
+      alsoUninstalling: [],
+    },
+  );
+  if (!result.ok) {
+    throw new Error(result.refusal.message);
+  }
+  return result.plan.notes;
 }
 
 async function schemaExists(): Promise<boolean> {
@@ -560,7 +587,8 @@ describe("a run of several tables (the reviewer's case)", () => {
       {
         projectDir: PROJECT_DIR,
         env: {},
-        loadConfig: () => Promise.resolve(twoTables),
+        loadConfig: () => Promise.resolve(readingDatabaseUrl(twoTables)),
+        engines: postgresEngines(connect),
         connect,
         answers: [PROJECT],
       },
@@ -603,7 +631,8 @@ describe("a run of several tables (the reviewer's case)", () => {
       {
         projectDir: PROJECT_DIR,
         env: {},
-        loadConfig: () => Promise.resolve(twoTables),
+        loadConfig: () => Promise.resolve(readingDatabaseUrl(twoTables)),
+        engines: postgresEngines(connect),
         connect,
         answers: [PROJECT],
       },
@@ -636,6 +665,157 @@ describe("a run of several tables (the reviewer's case)", () => {
   });
 });
 
+describe("with the store in its own database", () => {
+  const STORE_URL = "postgres://store-owner:s3cret-store-password@localhost:5432/facetdb";
+  /** The source on its own variable, as the loader makes of `database: process.env.LISTINGS_URL`. */
+  const ownVariable: ProjectConfig = {
+    ...config,
+    sources: config.sources.map((source) => ({ ...source, databaseEnv: "LISTINGS_URL" })),
+  };
+
+  function runWithStore(argv: readonly string[], answers?: readonly string[]) {
+    return runInProcess(
+      argv,
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(ownVariable),
+        engines: postgresEngines(world.connect),
+        connect: world.connect,
+        ...(answers === undefined ? {} : { answers }),
+      },
+      COMMANDS,
+    );
+  }
+
+  it("--purge prints the source's script and the store's under their headers, then purges the store after the source", async () => {
+    await registerSourceWithLog();
+    const dry = await runWithStore(["uninstall", "--purge", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(dry.code, dry.stderr).toBe(0);
+    const source = dry.stdout.indexOf(
+      "-- source listings: localhost:5432/app\n-- facetdb uninstall --purge: listings (public.listings)\nbegin;\n",
+    );
+    const store = dry.stdout.indexOf("-- store: localhost:5432/facetdb\nbegin;\n");
+    expect(source).toBe(0);
+    expect(store).toBeGreaterThan(source);
+    // The engine's script is the source's side alone; the log goes in the store's part.
+    expect(dry.stdout.slice(source, store)).not.toContain("delete from facetdb.decisions");
+    expect(dry.stdout.slice(store)).toContain("delete from facetdb.decisions");
+    expect(dry.stdout).toContain(
+      `This removes: ${REMOVES_TABLE}; the decision log of source listings (${LOG_SIZE});`,
+    );
+    expect(dry.stdout + dry.stderr).not.toContain("s3cret-store-password");
+    expect(await q(`select count(*)::int as n from facetdb.decisions`)).toEqual([{ n: 2 }]);
+
+    const real = await runWithStore(["uninstall", "--purge", "--admin-url", ADMIN_URL], [PROJECT]);
+    expect(real.code, real.stderr).toBe(0);
+    expect(real.stdout).toContain(
+      `Removed ${REMOVES_TABLE}; the decision log of source listings (${LOG_SIZE});`,
+    );
+    expect(
+      await q(`select count(*)::int as n from facetdb.decisions where source_id = $1`, [LOG_ID]),
+    ).toEqual([{ n: 0 }]);
+    expect(await q(`select count(*)::int as n from facetdb.question_set_versions`)).toEqual([
+      { n: 0 },
+    ]);
+    expect(
+      await q(
+        "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'listings' order by ordinal_position",
+      ),
+    ).toEqual([{ column_name: "id" }, { column_name: "title" }, { column_name: "description" }]);
+  });
+
+  it.each([
+    [
+      "the store unreachable",
+      "unexpected",
+      "connect ECONNREFUSED 10.0.0.5:5432",
+      (): Promise<unknown> => Promise.reject(new Error("connect ECONNREFUSED 10.0.0.5:5432")),
+    ],
+    [
+      "the store's guard refusing",
+      "uninstall-refused",
+      `the decision log of source "listings" is shared with the store source "listings" of project ${PROJECT}, which holds records and is live`,
+      // A store source of the same id starts writing the log between the show and the run.
+      async (): Promise<unknown> => {
+        await q(
+          `insert into facetdb.records (source_id, record_key, state, hash, status) values ($1, 'r1', '{}', 'h', 'pending')`,
+          [LOG_ID],
+        );
+        return undefined;
+      },
+    ],
+  ])(
+    "--purge says both halves when the store's purge fails after the source's run: %s",
+    async (_name, code, why, beforePurge) => {
+      await registerSourceWithLog();
+      // The second connection to the store is the run's purge (the first read the log to show it).
+      let storeConnections = 0;
+      const connect: SqlConnect = (url, options) => {
+        const inner = world.connect(url, options);
+        if (url !== STORE_URL) {
+          return inner;
+        }
+        storeConnections += 1;
+        if (storeConnections !== 2) {
+          return inner;
+        }
+        return {
+          ...inner,
+          transaction: async (work) => {
+            await beforePurge();
+            return inner.transaction(work);
+          },
+        };
+      };
+      const result = await runInProcess(
+        ["uninstall", "--purge", "--json", "--admin-url", ADMIN_URL],
+        {
+          projectDir: PROJECT_DIR,
+          env: { DATABASE_URL: STORE_URL },
+          loadConfig: () => Promise.resolve(ownVariable),
+          engines: postgresEngines(connect),
+          connect,
+          answers: [PROJECT],
+        },
+        COMMANDS,
+      );
+      expect(result.code).toBe(1);
+      const parsed = JSON.parse(result.stdout) as {
+        error: { code: string; message: string; fix: string };
+        details: unknown;
+      };
+      expect(parsed.error.code).toBe(code);
+      expect(parsed.error.message).toBe(
+        `the FacetDB install on public.listings was removed; the decision log of source listings in the FacetDB store on localhost:5432/facetdb was not purged: ${why}.`,
+      );
+      expect(parsed.error.fix).toBe(
+        "fix what the message says, then run facetdb uninstall --purge --source listings again: with the install gone, it purges the log alone",
+      );
+      expect(parsed.details).toEqual({ removed: ["public.listings"], notPurged: ["listings"] });
+      // Both halves as said: the source's side gone, the log still in the store.
+      expect(
+        await q(
+          "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'listings' and column_name = 'is_scam'",
+        ),
+      ).toEqual([]);
+      expect(
+        await q(`select count(*)::int as n from facetdb.decisions where source_id = $1`, [LOG_ID]),
+      ).toEqual([{ n: 2 }]);
+    },
+  );
+
+  it("without --purge keeps the log in the store, and says so", async () => {
+    await registerSourceWithLog();
+    const dry = await runWithStore(["uninstall", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).not.toContain("-- store:");
+    expect(dry.stdout).toContain(
+      "This keeps: the decision log of source listings in the FacetDB store (only --purge deletes a log);",
+    );
+  });
+});
+
 describe("what is left in place on purpose", () => {
   it("prints the connector's note and keeps Removed FacetDB from standing alone", async () => {
     const sideConfig: ProjectConfig = facetdb({
@@ -658,7 +838,8 @@ describe("what is left in place on purpose", () => {
         {
           projectDir: PROJECT_DIR,
           env: {},
-          loadConfig: () => Promise.resolve(sideConfig),
+          loadConfig: () => Promise.resolve(readingDatabaseUrl(sideConfig)),
+          engines: postgresEngines(world.connect),
           connect: world.connect,
           ...(answers === undefined ? {} : { answers }),
         },

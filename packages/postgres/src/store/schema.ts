@@ -1,10 +1,10 @@
 import { jobsTableSql, quoteIdent, type SqlClient, type SqlQuery } from "../sql/index.ts";
 
 /**
- * The store's own migrations. Each is a numbered list of statements written to be idempotent
- * (`if not exists`); `facetdb.store_migrations` records which numbers ran, so a restart runs only
- * what is new, and two processes starting at once take turns on an advisory lock. A migration is
- * only ever appended to the list, never edited once released.
+ * The store's own migrations. Each is a numbered list of statements written to be idempotent (`if
+ * not exists`); `facetdb.store_migrations` records which numbers ran, so a restart runs only what
+ * is new, and two processes starting at once take turns on an advisory lock. A migration is only
+ * ever appended to the list, never edited once released.
  */
 type Migration = { readonly version: number; readonly statements: readonly string[] };
 
@@ -143,9 +143,9 @@ const MIGRATIONS: readonly Migration[] = [
   {
     version: 2,
     statements: [
-      // The webhook outbox (retried with backoff for 24 hours). It lives in the store so
-      // `facetdb migrate` makes it with the admin credential: the worker login holds no CREATE
-      // on the schema (found on Supabase, when the worker made it).
+      // The webhook outbox (retried with backoff for 24 hours). It lives in the store so `facetdb
+      // migrate` makes it with the admin credential: the worker login holds no CREATE on the schema
+      // (found on Supabase, when the worker made it).
       `create table if not exists facetdb.webhook_outbox (
   id bigserial primary key,
   project_id text not null,
@@ -420,6 +420,27 @@ export async function migrateStore(client: SqlClient): Promise<readonly string[]
     }
     return notes;
   });
+}
+
+/**
+ * Where the store stands against this FacetDB, read and nothing else (`facetdb doctor`'s store
+ * check): absent before its first migration, else the newest version applied and whether every
+ * migration this FacetDB knows is. A newer store is reported, never refused here.
+ */
+export async function storeVersion(
+  query: SqlQuery,
+): Promise<
+  | { readonly kind: "absent" }
+  | { readonly kind: "found"; readonly newest: number; readonly current: boolean }
+> {
+  const present = await query(
+    "select to_regclass('facetdb.store_migrations') is not null as present",
+  );
+  if (present[0]?.["present"] !== true) {
+    return { kind: "absent" };
+  }
+  const applied = await appliedVersions(query);
+  return { kind: "found", newest: Math.max(0, ...applied), current: isCurrent(applied) };
 }
 
 function refuseNewer(applied: readonly number[]): void {

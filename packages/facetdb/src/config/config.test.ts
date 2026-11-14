@@ -225,6 +225,44 @@ describe("the example config", () => {
     expect(toProjectJson(reloaded)).toEqual(json);
   });
 
+  it("carries connector: the JSON export, the config file and the import keep it", async () => {
+    const config = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "orders",
+          database: CONNECTION,
+          connector: "polling",
+          table: "orders",
+          read: ["note"],
+          questions: { rush: noul("Rush?") },
+        },
+      ],
+    });
+    const source = config.sources[0];
+    if (source === undefined) throw new Error("fixture has a source");
+    const parsed = parseProjectConfig({
+      ...config,
+      sources: [{ ...source, databaseEnv: "DATABASE_URL" }],
+    });
+    if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
+    expect(parsed.config.sources[0]?.connector).toBe("polling");
+    const json = toProjectJson(parsed.config);
+    expect(json.sources[0]?.connector).toBe("polling");
+    expect(toProjectJson(fromProjectJson(json, env()))).toEqual(json);
+    const file = configFileSource(parsed.config);
+    expect(file).toContain('connector: "polling",');
+
+    const dir = await scratchDir();
+    await mkdir(join(dir, "node_modules"));
+    await symlink(packageDir, join(dir, "node_modules", "facetdb"));
+    await writeFile(join(dir, "facetdb.config.ts"), file);
+    const { config: reloaded } = await load(dir);
+    expect(reloaded.sources[0]?.connector).toBe("polling");
+    // Absent, the scheme picks the engine: nothing is written.
+    expect(toProjectJson(facetdb(valid())).sources[0]).not.toHaveProperty("connector");
+  });
+
   it("refuses to export a connection string it cannot name a variable for", () => {
     const config = facetdb({
       model: "jev-1.14.0",
@@ -573,6 +611,31 @@ describe("what the schema refuses", () => {
     expect(noTable).toMatchObject({ ok: false });
     if (!noTable.ok) {
       expect(noTable.issues[0]?.path).toBe("sources[0].table");
+    }
+  });
+
+  it("names connector when its value is not one it knows, and refuses it on an API source", () => {
+    const wrong = messagesOf(() =>
+      fromProjectJson({
+        ...toProjectJson(facetdb(valid({ api: false, table: "t" }))),
+        sources: [
+          {
+            ...toProjectJson(facetdb(valid())).sources[0],
+            api: false,
+            table: "t",
+            database: { env: "DATABASE_URL" },
+            connector: "trigger",
+          },
+        ],
+      }),
+    );
+    expect(wrong).toContain(
+      'sources[0].connector: connector must be "polling" (watch the table by scanning, for a host that forbids triggers), or left out so the connection string\'s scheme picks the database',
+    );
+    const onApi = parseProjectConfig(facetdb(valid({ connector: "polling" })));
+    expect(onApi).toMatchObject({ ok: false });
+    if (!onApi.ok) {
+      expect(onApi.issues.map((issue) => issue.path)).toEqual(["sources[0].connector"]);
     }
   });
 

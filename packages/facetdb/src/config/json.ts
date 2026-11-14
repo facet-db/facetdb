@@ -1,12 +1,19 @@
 import type { Question, ThresholdOverride } from "@facetdb/core";
-import type { ActionCall, OnCapReached, ProjectConfig, SourceConfig, StorageMode } from "./dsl.ts";
+import type {
+  ActionCall,
+  ConnectorChoice,
+  OnCapReached,
+  ProjectConfig,
+  SourceConfig,
+  StorageMode,
+} from "./dsl.ts";
 import { ConfigError, type ConfigIssue, parseProjectConfig } from "./schema.ts";
 
 /**
  * The project JSON: what the dashboard reads and exports, and what imports back without loss. It
- * differs from the config file in the ways a file can not be shipped around: a connection string
- * is never in it (a source names the environment variable it comes from), and an action is its
- * plugin name and arguments, not a call.
+ * differs from the config file in the ways a file can not be shipped around: a connection string is
+ * never in it (a source names the environment variable it comes from), and an action is its plugin
+ * name and arguments, not a call.
  */
 
 type QuestionJson = Omit<Question, "name">;
@@ -15,6 +22,7 @@ export type SourceJson = {
   readonly name: string;
   readonly api: boolean;
   readonly database?: { readonly env: string };
+  readonly connector?: ConnectorChoice;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -52,6 +60,7 @@ function sourceJson(source: SourceConfig): SourceJson {
     name: source.name,
     api: source.api,
     ...(source.databaseEnv === undefined ? {} : { database: { env: source.databaseEnv } }),
+    ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(source.where === undefined ? {} : { where: source.where }),
     read: source.read,
@@ -191,6 +200,7 @@ function sourceSource(source: SourceConfig): string {
     fields.push("api: true");
   } else {
     fields.push(`database: process.env.${source.databaseEnv ?? "DATABASE_URL"}`);
+    if (source.connector !== undefined) fields.push(`connector: ${text(source.connector)}`);
     fields.push(`table: ${text(source.table)}`);
   }
   if (source.where !== undefined) fields.push(`where: ${text(source.where)}`);

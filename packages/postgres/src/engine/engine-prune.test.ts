@@ -17,17 +17,20 @@ import {
 import { createPostgresEngine } from "./engine.ts";
 
 /**
- * The engine's prune plans on PGlite, as install/uninstall-prune.test.ts and
- * prune.test.ts read `PruneResult`: the dropped columns with the connector's reason, the read the
- * worker loses, another role's grant that stays, the column kept while its question stays, the
- * empty plan of a source not installed yet, and the script's own refusal when a revoke took nothing.
+ * The engine's prune plans on PGlite, as install/uninstall-prune.test.ts and prune.test.ts read
+ * `PruneResult`: the dropped columns with the connector's reason, the read the worker loses,
+ * another role's grant that stays, the column kept while its question stays, the empty plan of a
+ * source not installed yet, and the script's own refusal when a revoke took nothing.
  */
 
 useUninstallWorld();
 
 const ADMIN = "postgres://admin@localhost/app";
 const deps: EngineDeps = { clock: new FakeClock(0), allowInsecure: false, storeShared: true };
-const engine = createPostgresEngine({ connect: (url, options) => world.connect(url, options) });
+const engine = createPostgresEngine({
+  connect: (url, options) => world.connect(url, options),
+  pgHost: undefined,
+});
 const FIX =
   "change the table or the config as the message says, then run the command again; nothing was changed";
 const NOTHING: EnginePlan = {

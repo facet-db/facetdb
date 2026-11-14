@@ -20,10 +20,10 @@ import {
 import { createPostgresEngine } from "./engine.ts";
 
 /**
- * The engine's plans of a purge on PGlite, as install/uninstall-purge.test.ts reads them
- * through the plan's fields: which log goes and with what counts, which stays and why, the
- * log-only purge that asks for the source's name, the re-check that refuses inside the run, and a
- * separate store, whose log is the CLI's store door's (the plan holds the source's side alone).
+ * The engine's plans of a purge on PGlite, as install/uninstall-purge.test.ts reads them through
+ * the plan's fields: which log goes and with what counts, which stays and why, the log-only purge
+ * that asks for the source's name, the re-check that refuses inside the run, and a separate store,
+ * whose log is the CLI's store door's (the plan holds the source's side alone).
  */
 
 useUninstallWorld();
@@ -31,7 +31,10 @@ useUninstallWorld();
 const ADMIN = "postgres://admin@localhost/app";
 const shared: EngineDeps = { clock: new FakeClock(0), allowInsecure: false, storeShared: true };
 const separate: EngineDeps = { ...shared, storeShared: false };
-const engine = createPostgresEngine({ connect: (url, options) => world.connect(url, options) });
+const engine = createPostgresEngine({
+  connect: (url, options) => world.connect(url, options),
+  pgHost: undefined,
+});
 const FIX =
   "change the table or the config as the message says, then run the command again; nothing was changed";
 
@@ -365,9 +368,16 @@ describe("the log-only purge, after a plain uninstall", () => {
 });
 
 describe("with the store in another database", () => {
+  /** A source-only install, as `facetdb migrate` makes one with the store elsewhere. */
+  async function installSeparate(): Promise<void> {
+    const options = { ...separate, workerPassword: "a-long-random-password" };
+    const plan = planOf(await engine.planInstall(target(), ADMIN, options));
+    expect((await engine.run(target(), plan, ADMIN, options)).stopped).toBeUndefined();
+  }
+
   it("plans the source's side alone: no log, no store table, no word of either", async () => {
     await freshWorld();
-    await install();
+    await installSeparate();
     const sharedPlan = planOf(
       await engine.planUninstall(target(), ADMIN, { ...shared, purge: true, alsoUninstalling: [] }),
     );
@@ -427,5 +437,36 @@ describe("with the store in another database", () => {
         (object) => object.kind === "log" || object.kind === "store-table",
       ),
     ).toEqual([]);
+  });
+
+  it("refuses when a store an earlier DATABASE_URL left in this database would go with the sweep", async () => {
+    await freshWorld();
+    // The store in the source's database, as an earlier migrate installed it; DATABASE_URL now
+    // elsewhere.
+    await install();
+    expect(
+      await engine.planUninstall(target(), ADMIN, {
+        ...separate,
+        purge: false,
+        alsoUninstalling: [],
+      }),
+    ).toEqual({
+      ok: false,
+      refusal: {
+        code: "store-left-behind",
+        message:
+          "this database still holds a FacetDB store (facetdb.store_migrations and the tables beside it) from when DATABASE_URL named it, and with the store now elsewhere this uninstall would drop those tables without naming them; nothing was changed",
+        fix: "run facetdb uninstall with DATABASE_URL naming this database by the same host, port and database name as the source's connection string: it then removes the source's install and that store together, and names everything it drops. A pooler's host and the direct host (Supabase's) reach one database but read as two, so write both the same way; until they match, the uninstall stays refused rather than drop a store that may be another project's",
+      },
+    });
+    // With the store here again, the same uninstall names every one of those tables.
+    const plan = planOf(
+      await engine.planUninstall(target(), ADMIN, {
+        ...shared,
+        purge: false,
+        alsoUninstalling: [],
+      }),
+    );
+    expect(plan.removes.filter((object) => object.kind === "store-table")).not.toEqual([]);
   });
 });

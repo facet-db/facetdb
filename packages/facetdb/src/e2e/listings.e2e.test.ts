@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import type { OpenConnector } from "@facetdb/core";
 import {
   type Answer,
   type AnswerEntry,
@@ -13,10 +14,11 @@ import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { createStore, queueKeyPrefix, type Store, sourceIdOf } from "@facetdb/postgres";
 import { createPgliteWorld, type PgliteWorld, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { questionSetOf } from "../cli/commands/database.ts";
+import { engineTarget, projectRef, questionSetOf, splitTable } from "../cli/commands/database.ts";
 import { COMMANDS } from "../cli/commands/index.ts";
+import { engineFor, openConnector } from "../cli/engines.ts";
 import { runInProcess } from "../cli/program.ts";
-import { openTableConnector } from "../cli/table-connector.ts";
+import { postgresEngines } from "../cli/testing.ts";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 
 /**
@@ -135,6 +137,7 @@ function facetdb(argv: readonly string[]) {
       projectDir: PROJECT_DIR,
       env: { DATABASE_URL: process.env["DATABASE_URL"], TYPESAFE_API_KEY: "ts-e2e-not-used" },
       loadConfig: () => Promise.resolve(config),
+      engines: postgresEngines(world.connect),
       connect: world.connect,
       // The command closes the store it is given; the suite's own stays open through a wrapper.
       store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
@@ -252,22 +255,19 @@ async function catalog(): Promise<readonly unknown[]> {
   );
 }
 
-/** Opens the source's capture connector, as the worker does, for the writes core's functions make. */
+/** Opens the source's connector through its engine, as the worker does, for core's writes. */
 async function withConnector<Result>(
   config: ProjectConfig,
-  work: (connector: Awaited<ReturnType<typeof openTableConnector>>) => Promise<Result>,
+  work: (connector: OpenConnector) => Promise<Result>,
 ): Promise<Result> {
   const source = listingsSource(config);
-  const connector = await openTableConnector({
-    source,
-    url: source.database ?? "",
-    connect: world.connect,
-    questionSet: questionSetOf(config, source),
-    clock: wallClock,
-    workerId: "e2e-review",
-    allowInsecure: false,
-    pgHost: undefined,
-  });
+  const url = source.database ?? "";
+  const connector = await openConnector(
+    await engineFor(postgresEngines(world.connect), url),
+    engineTarget(config, { source, ...splitTable(source.table ?? "") }, projectRef(PROJECT_DIR)),
+    url,
+    { clock: wallClock, allowInsecure: false, storeShared: true, workerId: "e2e-review" },
+  );
   try {
     return await work(connector);
   } finally {
@@ -353,7 +353,8 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
 
     // The overhead FacetDB adds from the app's write to the answer columns, with a model that
     // answers at once, over the whole run: the worker's start and the queue wait of a 50-row burst
-    // included (measured 2026-11-01: about 6.5 ms per record on PGlite, median 230 ms, 95th 380 ms).
+    // included (measured 2026-11-01: about 6.5 ms per record on PGlite, median 230 ms, 95th 380
+    // ms).
     const overheads = KEYS.map((key) => {
       const written = rows.get(key)?.written_ms;
       const start = committed.get(key);

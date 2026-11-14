@@ -1,6 +1,7 @@
 export type {
   ActionCall,
   ChoiceOptions,
+  ConnectorChoice,
   JsonValue,
   NoulOptions,
   OnCapReached,

@@ -30,17 +30,20 @@ import {
 import { createPostgresEngine } from "./engine.ts";
 
 /**
- * The engine's uninstall plans on PGlite, scenario by scenario as install/uninstall.test.ts
- * and uninstall-kept.test.ts read them through `UninstallPlan`, on the same world: the plan's
- * script is today's (the old dry run's, string for string), its notes and the name typed back are
- * the old ones, and every field the CLI's words read is a remove or a keep with its words.
+ * The engine's uninstall plans on PGlite, scenario by scenario as install/uninstall.test.ts and
+ * uninstall-kept.test.ts read them through `UninstallPlan`, on the same world: the plan's script is
+ * today's (the old dry run's, string for string), its notes and the name typed back are the old
+ * ones, and every field the CLI's words read is a remove or a keep with its words.
  */
 
 useUninstallWorld();
 
 const ADMIN = "postgres://admin@localhost/app";
 const shared: EngineDeps = { clock: new FakeClock(0), allowInsecure: false, storeShared: true };
-const engine = createPostgresEngine({ connect: (url, options) => world.connect(url, options) });
+const engine = createPostgresEngine({
+  connect: (url, options) => world.connect(url, options),
+  pgHost: undefined,
+});
 
 const LISTINGS = "public.listings";
 const LOGINS: readonly KeptObject[] = ["facetdb_worker", "facetdb_enqueue"].map((name) => ({

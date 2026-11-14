@@ -1,15 +1,20 @@
-import type { Refusal } from "@facetdb/core";
+import type { EngineTarget, Refusal } from "@facetdb/core";
 import { AmbiguousHostError, PlaintextUrlError, requireTls } from "../store/index.ts";
 
 /**
- * The engine's side of "connections use TLS": every call refuses, before it
- * connects, a URL that would carry a password to another machine in the clear, by the store's own
- * rule (`requireTls`), in the words the CLI prints today (its database.ts). The engine is not told
- * which variable holds a source's URL, so it names it `SOURCE_URL`.
+ * The engine's side of "connections use TLS": every call refuses, before it connects, a URL that
+ * would carry a password to another machine in the clear, by the store's own rule (`requireTls`),
+ * in the words the CLI prints. The words name the source's connection string by the variable the
+ * target names (`urlVariable`), or as `SOURCE_URL` when it names none.
  */
 
-/** How the engine names a source's connection string in its words. */
+/** How the engine names a source's connection string in its words when no variable is known. */
 export const SOURCE_URL = "the source's connection string";
+
+/** The source's connection string as the words name it: its variable, else `SOURCE_URL`. */
+export function subjectOf(target: Pick<EngineTarget, "urlVariable">): string {
+  return target.urlVariable ?? SOURCE_URL;
+}
 
 /** What the TLS rule says of a URL: nothing, not a URL, an ambiguous host, or the host reached in the clear. */
 type TlsVerdict =
@@ -103,13 +108,14 @@ export function urlProblem(
       };
 }
 
-/** The worker URL's refusal, before `open` connects. */
+/** The worker URL's refusal, before `open` connects (and `checkUrl`'s), naming it as `subject`. */
 export function workerUrlRefusal(
   url: string,
   allowInsecure: boolean,
   pgHost: string | undefined,
+  subject: string,
 ): Refusal | undefined {
-  const refused = urlProblem(url, SOURCE_URL, allowInsecure, pgHost);
+  const refused = urlProblem(url, subject, allowInsecure, pgHost);
   return refused === undefined
     ? undefined
     : {

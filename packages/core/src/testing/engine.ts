@@ -1,19 +1,20 @@
-import type {
-  Capabilities,
-  DatabaseEngine,
-  DoctorCheck,
-  EngineDeps,
-  EnginePlan,
-  EngineTarget,
-  InstallOptions,
-  OpenConnector,
-  OpenOptions,
-  PlanResult,
-  PlanStatement,
-  Refusal,
-  RunOptions,
-  RunResult,
-  UninstallOptions,
+import {
+  type Capabilities,
+  type DatabaseEngine,
+  type DoctorCheck,
+  type EngineDeps,
+  type EnginePlan,
+  EngineRefusal,
+  type EngineTarget,
+  type InstallOptions,
+  type OpenConnector,
+  type OpenOptions,
+  type PlanResult,
+  type PlanStatement,
+  type Refusal,
+  type RunOptions,
+  type RunResult,
+  type UninstallOptions,
 } from "../contracts/index.ts";
 import { FakeConnector, type FakeDatabase } from "./connector.ts";
 
@@ -86,13 +87,16 @@ const PLAINTEXT_MODES: ReadonlySet<string> = new Set(["disable", "allow", "prefe
 
 /**
  * The refusal a real engine gives, before it connects, for a URL that would carry a password to
- * another machine in the clear, unless the operator allowed it. The rule
- * is the Postgres store's (`requireTls`): the last `sslmode` counts, `require`, `verify-ca` and
- * `verify-full` encrypt, `disable`, `allow` and `prefer` do not even beside `ssl=true`, and
- * otherwise `ssl=true` does. It leaves out the store's `PGHOST`, socket and several-host cases,
- * and takes `tls=true`, the other drivers' spelling, as `ssl=true`.
+ * another machine in the clear, unless the operator allowed it. The rule is the Postgres store's
+ * (`requireTls`): the last `sslmode` counts, `require`, `verify-ca` and `verify-full` encrypt,
+ * `disable`, `allow` and `prefer` do not even beside `ssl=true`, and otherwise `ssl=true` does. It
+ * leaves out the store's `PGHOST`, socket and several-host cases, and takes `tls=true`, the other
+ * drivers' spelling, as `ssl=true`.
  */
-function plaintextRefusal(url: string, deps: EngineDeps): Refusal | undefined {
+function plaintextRefusal(
+  url: string,
+  deps: Pick<EngineDeps, "allowInsecure">,
+): Refusal | undefined {
   if (deps.allowInsecure || !URL.canParse(url)) {
     return undefined;
   }
@@ -124,12 +128,13 @@ export class FakeOpenConnector extends FakeConnector implements OpenConnector {
 }
 
 /**
- * A database engine for the CLI's tests: its plans come from the test's fixtures, its
- * runs are recorded, and `open` hands out fake connectors over one `FakeDatabase`. A plan the test
- * gave no fixture for rejects, so a command that plans what the test did not expect fails loudly;
- * so does a fixture that plans the store while the store is not shared, which no engine may do.
- * Like a real engine, it refuses a plaintext URL to another host unless `allowInsecure`, a run
- * never keeps the worker password, and a run stops at a `secret` statement when given none.
+ * A database engine for the CLI's tests: its plans come from the test's fixtures, its runs are
+ * recorded, and `open` hands out fake connectors over one `FakeDatabase`. A plan the test gave no
+ * fixture for rejects, so a command that plans what the test did not expect fails loudly; so does a
+ * fixture that plans the store while the store is not shared, which no engine may do. Like a real
+ * engine, it refuses a plaintext URL to another host unless `allowInsecure` (`checkUrl` says so
+ * without connecting, `open` throws it as an `EngineRefusal`), a run never keeps the worker
+ * password, and a run stops at a `secret` statement when given none.
  */
 export class FakeEngine implements DatabaseEngine {
   readonly name: string;
@@ -240,10 +245,18 @@ export class FakeEngine implements DatabaseEngine {
     return { ran: executed, removed, notes };
   }
 
-  async open(_target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector> {
-    const insecure = plaintextRefusal(url, options);
+  checkUrl(
+    _target: EngineTarget,
+    url: string,
+    deps: Pick<EngineDeps, "allowInsecure">,
+  ): Refusal | undefined {
+    return plaintextRefusal(url, deps);
+  }
+
+  async open(target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector> {
+    const insecure = this.checkUrl(target, url, options);
     if (insecure !== undefined) {
-      throw new Error(insecure.message);
+      throw new EngineRefusal(insecure);
     }
     if (this.#database === undefined) {
       throw new Error(`the fake engine "${this.name}" has no database to open: pass one`);

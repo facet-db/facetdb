@@ -3,12 +3,12 @@
 # `down`), not with compose directly: it picks `podman compose` or `docker compose`, waits until
 # each engine is healthy and prints its URL variable. It runs with rootless Podman or with Docker
 # Compose (CI uses Docker Compose, before the database tests). The whole set needs about 6 GB of
-# memory (SQL Server 2 GB, Oracle Free about 2 GB): a laptop starts engines by name. Postgres is
-# not here: DATABASE_URL names the one you already run.
+# memory (SQL Server 2 GB, Oracle Free about 2 GB): a laptop starts engines by name. Postgres is not
+# here: DATABASE_URL names the one you already run.
 #
-# The passwords are test-only and written here: nothing of a customer ever
-# enters these containers, and every port binds to 127.0.0.1. Every image is pinned by tag and
-# digest (resolved 2026-11-03); to move one, resolve its tag's digest again and change both, e.g.
+# The passwords are test-only and written here: nothing of a customer ever enters these containers,
+# and every port binds to 127.0.0.1. Every image is pinned by tag and digest (resolved 2026-11-03);
+# to move one, resolve its tag's digest again and change both, e.g.
 #   skopeo inspect --format '{{.Digest}}' docker://docker.io/library/mysql:8.4
 # Healthchecks use the CMD-SHELL form only: podman-compose 1.0.6 (Ubuntu 24.04) joins the
 # arguments of the exec form into one word. The URLs live in scripts/test-databases.sh.
@@ -68,9 +68,9 @@ services:
   mongo:
     image: docker.io/library/mongo:7@sha256:8bb4442761a63a8dda452744082cdac9644b429807eb977b42324a63cef59ca4
     container_name: facetdb-mongo
-    # A one-node replica set (change streams need one), with no
-    # authentication (a replica set with it needs a key file), its cache capped at 256 MB (it may
-    # otherwise grow to half the host's memory).
+    # A one-node replica set (change streams need one), with no authentication (a replica set with
+    # it needs a key file), its cache capped at 256 MB (it may otherwise grow to half the host's
+    # memory).
     command: --replSet rs0 --bind_ip_all --wiredTigerCacheSizeGB 0.25
     ports:
       - "127.0.0.1:27017:27017"
@@ -107,8 +107,13 @@ services:
   cockroach:
     image: docker.io/cockroachdb/cockroach:latest-v24.3@sha256:c26f6eca2ce7ab783862cca4a88f6b8b0da006864e16109b1bb3e30d7670bab9
     container_name: facetdb-cockroach
-    # Insecure: no TLS and no passwords (the root user logs in without one).
-    command: start-single-node --insecure
+    # Insecure: no TLS and no passwords (the root user logs in without one). The binary runs
+    # directly: the image's entrypoint script (cockroach.sh) starts the node, then checks whether
+    # defaultdb exists and runs CREATE DATABASE defaultdb without IF NOT EXISTS; a node not yet
+    # answering reads as "missing", the create fails on the database every fresh cluster has, and
+    # set -e exits the container (the CI run of 2026-11-03). defaultdb exists on every fresh node.
+    entrypoint: ["/cockroach/cockroach"]
+    command: ["start-single-node", "--insecure"]
     ports:
       - "127.0.0.1:26257:26257"
     healthcheck:

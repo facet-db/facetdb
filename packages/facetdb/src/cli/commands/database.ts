@@ -1,24 +1,22 @@
 import { basename } from "node:path";
-import { parseQuestionSet, type QuestionSet } from "@facetdb/core";
-import {
-  AmbiguousHostError,
-  PlaintextUrlError,
-  type ProjectRef,
-  requireTls,
-  WORKER_ROLE,
-} from "@facetdb/postgres";
+import { type EngineTarget, parseQuestionSet, type QuestionSet } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
 /**
- * What `migrate` and `uninstall` share: the config, the sources that read a table, the project they
- * belong to, the admin connection string (asked for, used for this run, never stored), and the guard
- * that makes the SQL run exactly the SQL printed.
+ * What the commands that reach a source share: the config, the sources that read a table, the
+ * project they belong to, the engine target each one is (a command reaches a source's database
+ * through its engine and nothing else), and the admin connection string (asked for, used for this
+ * run, never stored).
  */
+
+/** A project as an install marks it: its id marks the table, uninstall asks its name back. */
+export type ProjectRef = EngineTarget["project"];
 
 /** A source that reads a table, with the table split into schema and name. */
 export type TableTarget = {
   readonly source: SourceConfig;
+  /** The schema the config names, `public` when it names none (the words print it). */
   readonly schema: string;
   readonly table: string;
 };
@@ -39,7 +37,7 @@ export async function loadProjectConfig(deps: CliDeps, path: string): Promise<Pr
 }
 
 /** `schema.table` names a schema; a bare name is in `public`. */
-function splitTable(table: string): { readonly schema: string; readonly table: string } {
+export function splitTable(table: string): { readonly schema: string; readonly table: string } {
   const dot = table.indexOf(".");
   return dot === -1
     ? { schema: "public", table }
@@ -127,6 +125,46 @@ export function questionSetOf(config: ProjectConfig, source: SourceConfig): Ques
   };
 }
 
+/** The environment variable a source's connection string was read from: what the words name. */
+export function variableOf(source: SourceConfig): string {
+  return source.databaseEnv ?? "DATABASE_URL";
+}
+
+/**
+ * A table source as its engine sees it (`EngineTarget`): the schema only when the config names one,
+ * so the engine's default applies to a bare name; the key from the engine's catalog; the variable
+ * its words name.
+ */
+export function engineTarget(
+  config: ProjectConfig,
+  target: TableTarget,
+  project: ProjectRef,
+): EngineTarget {
+  const named = (target.source.table ?? "").includes(".");
+  return {
+    project,
+    source: target.source.name,
+    table: target.table,
+    ...(named ? { schema: target.schema } : {}),
+    storage: target.source.storage,
+    onChange: target.source.onChange,
+    questionSet: questionSetOf(config, target.source),
+    urlVariable: variableOf(target.source),
+  };
+}
+
+/** The source's connection string, or the fix when the config left it unset. */
+export function sourceUrlOf(source: SourceConfig, what: string): string {
+  if (source.database === undefined || source.database === "") {
+    throw new CliError(
+      "database-url",
+      `the source "${source.name}" has no connection string`,
+      `set ${variableOf(source)} to ${what}`,
+    );
+  }
+  return source.database;
+}
+
 /**
  * Every saved version of a source's question set among `versions` (`explain` and `export` read the
  * history with the wording and thresholds of its own time). The store's rows are a boundary: a row
@@ -169,134 +207,12 @@ export async function savedQuestionSets(
 }
 
 /**
- * What the store's TLS rule (`requireTls`) says about a connection string: `undefined` when it may
- * be used, `"invalid"` when it is not a URL, `"ambiguous"` when its host cannot be read for sure
- * (more than one `@` before the path), else the host it would reach without TLS. `pgHost` is the
- * environment's `PGHOST`, where the driver goes for a URL that names no host.
+ * A failure's own words, ready for what is said after them once part of the run has committed (the
+ * store's half): without the period they end with, and without the "nothing was run" or "nothing
+ * was changed" that is no longer true of the run.
  */
-function tlsRefusal(
-  url: string,
-  allowInsecure: boolean | undefined,
-  pgHost: string | undefined,
-): "invalid" | "ambiguous" | { readonly host: string; readonly viaPgHost: boolean } | undefined {
-  try {
-    requireTls(url, allowInsecure ?? false, pgHost);
-    return undefined;
-  } catch (error) {
-    if (error instanceof AmbiguousHostError) {
-      return "ambiguous";
-    }
-    return error instanceof PlaintextUrlError
-      ? { host: error.host, viaPgHost: error.viaPgHost }
-      : "invalid";
-  }
-}
-
-/** Why an ambiguous URL is refused, and what to do about it. */
-const AMBIGUOUS =
-  "has more than one @ before the path, so its host cannot be read for sure (the driver and the check would read different hosts)";
-const ambiguousFix = (target: string) =>
-  `percent-encode every @ in the user and password of ${target} as %40`;
-
-/** Where a refused URL would go: its host, or `PGHOST`'s when the URL names none. */
-const reaches = (
-  subject: string,
-  refusal: { readonly host: string; readonly viaPgHost: boolean },
-) =>
-  refusal.viaPgHost
-    ? `${subject} names no host, so the driver reaches PGHOST (${refusal.host}) without TLS`
-    : `${subject} reaches ${refusal.host} without TLS`;
-
-/** What to do about a refused URL: the URL (or `PGHOST`) to change, or the flag for a trusted network. */
-const fixFor = (target: string, viaPgHost: boolean) =>
-  `add ?sslmode=require to ${target},${viaPgHost ? " point PGHOST at this machine or a socket directory," : ""} or pass --allow-insecure if that network is trusted`;
-
-/**
- * The words for a worker-side connection string (`variable` names where it came from) that the
- * store's rule refuses, with the fix, or `undefined` when the URL may be used. The password in it
- * is the worker's.
- */
-export function tlsProblem(
-  url: string,
-  variable: string,
-  allowInsecure: boolean | undefined,
-  pgHost: string | undefined,
-): { readonly problem: string; readonly fix: string } | undefined {
-  const refusal = tlsRefusal(url, allowInsecure, pgHost);
-  if (refusal === undefined) {
-    return undefined;
-  }
-  if (refusal === "ambiguous") {
-    return { problem: `${variable} ${AMBIGUOUS}`, fix: ambiguousFix(variable) };
-  }
-  return refusal === "invalid"
-    ? {
-        problem: `${variable} is not a connection string (postgres://user:password@host/database)`,
-        fix: fixFor(variable, false),
-      }
-    : {
-        problem: `${reaches(variable, refusal)}, so the password in it would travel in the clear`,
-        fix: fixFor(variable, refusal.viaPgHost),
-      };
-}
-
-/** Refuses, before any connection, a worker-side URL that would travel in the clear to another machine. */
-export function requireSecureUrl(
-  url: string,
-  variable: string,
-  allowInsecure: boolean | undefined,
-  pgHost: string | undefined,
-): void {
-  const refused = tlsProblem(url, variable, allowInsecure, pgHost);
-  if (refused !== undefined) {
-    throw new CliError(
-      "database-url-tls",
-      `${refused.problem}; no connection was made`,
-      refused.fix,
-    );
-  }
-}
-
-/** `requireSecureUrl` for the connection string a table source reads, when it has one. */
-export function requireSecureSource(
-  source: SourceConfig,
-  allowInsecure: boolean | undefined,
-  pgHost: string | undefined,
-): void {
-  if (source.database !== undefined && source.database !== "") {
-    requireSecureUrl(source.database, source.databaseEnv ?? "DATABASE_URL", allowInsecure, pgHost);
-  }
-}
-
-/** The admin password must not travel in the clear: refuses before any connection is made. */
-function requireSecureAdminUrl(
-  url: string,
-  allowInsecure: boolean | undefined,
-  pgHost: string | undefined,
-): void {
-  const refusal = tlsRefusal(url, allowInsecure, pgHost);
-  if (refusal === undefined) {
-    return;
-  }
-  if (refusal === "invalid") {
-    throw new CliError(
-      "admin-url",
-      "the admin connection string is not a connection string",
-      "pass postgres://user:password@host/database?sslmode=require as --admin-url",
-    );
-  }
-  if (refusal === "ambiguous") {
-    throw new CliError(
-      "admin-url",
-      `the admin connection string ${AMBIGUOUS}; no connection was made`,
-      ambiguousFix("the admin connection string"),
-    );
-  }
-  throw new CliError(
-    "admin-url-tls",
-    `${reaches("the admin connection string", refusal)}, so the admin password would travel in the clear; no connection was made`,
-    fixFor("the admin connection string", refusal.viaPgHost),
-  );
+export function withoutNothingDone(message: string): string {
+  return message.replace(/([;,]? nothing was (run|changed))?\.?$/, "");
 }
 
 /** The `--allow-insecure` option, in the same words on every command that connects. */
@@ -308,15 +224,11 @@ export const ALLOW_INSECURE_OPTION = {
 
 /**
  * The admin connection string: `--admin-url`, or asked for with the input hidden. It is handed to
- * the connector for this run and kept nowhere: not in a file, not in the output, not in an error.
- * A plaintext URL to a host other than this machine is refused here, before anything connects,
- * unless `--allow-insecure` says the network is trusted.
+ * the engine for this run and kept nowhere: not in a file, not in the output, not in an error. The
+ * engine refuses it before it connects when it would carry the admin password to another machine
+ * in the clear, unless `--allow-insecure` says the network is trusted.
  */
-export async function adminUrl(
-  deps: CliDeps,
-  given: string | undefined,
-  allowInsecure: boolean | undefined,
-): Promise<string> {
+export async function adminUrl(deps: CliDeps, given: string | undefined): Promise<string> {
   const url =
     given ??
     (await deps.io.prompt("Admin connection string (used for this run only, never stored): ", {
@@ -329,12 +241,17 @@ export async function adminUrl(
       "pass --admin-url, or type the connection string of a role that may alter the table when asked",
     );
   }
-  requireSecureAdminUrl(url.trim(), allowInsecure, deps.env["PGHOST"]);
   return url.trim();
 }
 
+/**
+ * The worker login every engine creates (`facetdb_worker` on Postgres, MySQL and MongoDB alike), as
+ * the words name it and the source's connection string logs in.
+ */
+export const WORKER_LOGIN = "facetdb_worker";
+
 /** `facetdb_worker`, or `facetdb_worker.<suffix>` with one dot and a suffix of letters, digits, `_`, `-`. */
-const WORKER_LOGIN = new RegExp(`^${WORKER_ROLE}(?:\\.([A-Za-z0-9_-]+))?$`);
+const WORKER_USER = new RegExp(`^${WORKER_LOGIN}(?:\\.([A-Za-z0-9_-]+))?$`);
 
 /**
  * The worker login a connection string names. A connection pooler routes by the user (Supabase's
@@ -351,43 +268,6 @@ export function workerLoginOf(url: string): { readonly suffix: string | undefine
   } catch {
     return undefined;
   }
-  const match = WORKER_LOGIN.exec(username);
+  const match = WORKER_USER.exec(username);
   return match === null ? undefined : { suffix: match[1] };
-}
-
-/** Where a connection string points, without its user or password: what a confirmation names. */
-export function databaseLabel(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const name = parsed.pathname.replace(/^\//, "");
-    return name === "" ? parsed.host : `${parsed.host}/${name}`;
-  } catch {
-    return "the database";
-  }
-}
-
-/**
- * The print callback of the run that executes: the connectors call it with the script they are
- * about to run, before anything runs. A script that differs from the one shown means the database
- * changed in between, so it throws, and the connector runs nothing.
- */
-export function sameAsShown(shown: string): (sql: string) => void {
-  return (sql) => {
-    if (sql !== shown) {
-      throw new CliError(
-        "database-changed",
-        "the database changed after the SQL was shown, so the SQL to run is no longer the SQL you saw; nothing was run",
-        "run the command again to see the SQL for the database as it is now",
-      );
-    }
-  };
-}
-
-/** The connector's own reason for refusing (it already says what to do), as an error to print. */
-export function refused(code: string, reason: string): CliError {
-  return new CliError(
-    code,
-    reason,
-    "change the table or the config as the message says, then run the command again; nothing was changed",
-  );
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   type Answer,
   checkStateSize,
@@ -13,8 +14,8 @@ import {
   shouldSkip,
   statusOf,
 } from "@facetdb/core";
-import { createScan } from "@facetdb/postgres";
-import type { SourceConfig } from "../../config/index.ts";
+import type { ProjectConfig } from "../../config/index.ts";
+import { engineFor, openConnector } from "../engines.ts";
 import {
   type CliDeps,
   CliError,
@@ -23,20 +24,24 @@ import {
   likelyYes,
   percent,
 } from "../program.ts";
+import { storeSharedFor } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  engineTarget,
   loadProjectConfig,
+  projectRef,
   questionSetOf,
-  requireSecureSource,
   singleTarget,
+  sourceUrlOf,
   type TableTarget,
 } from "./database.ts";
 
 /**
- * `facetdb preview`: reads the most recent rows of a source through `scan`, asks the model every
- * question of the set once per row, and prints what FacetDB would decide, in words, with the status
- * each row would get. It writes nothing: it holds no connector, so there is no `write`, no queue
- * and no decision log in reach.
+ * `facetdb preview`: reads the most recent rows of a source through its engine's connector (the
+ * first page of `scan`, newest first), asks the model every question of the set once per row, and
+ * prints what FacetDB would decide, in words, with the status each row would get. It writes
+ * nothing: it calls the connector's `scan` alone, never `write`, the queue or the decision log, and
+ * closes it before the model is asked.
  */
 
 type PreviewOptions = {
@@ -50,16 +55,6 @@ export const PREVIEW_DEFAULT_LIMIT = 20;
 const PREVIEW_MAX_LIMIT = 100;
 /** Requests in flight at once: a preview is a handful of rows, not a worker. */
 const PREVIEW_IN_FLIGHT = 4;
-
-const PRIMARY_KEY_QUERY = `select kcu.column_name as name
-  from information_schema.table_constraints tc
-  join information_schema.key_column_usage kcu
-    on kcu.constraint_name = tc.constraint_name
-   and kcu.constraint_schema = tc.constraint_schema
-   and kcu.table_schema = tc.table_schema
-   and kcu.table_name = tc.table_name
- where tc.table_schema = $1 and tc.table_name = $2 and tc.constraint_type = 'PRIMARY KEY'
- order by kcu.ordinal_position`;
 
 /** One row's preview: what the model said for each question and the status that would follow. */
 type PreviewedRow =
@@ -123,52 +118,38 @@ function decisionWords(decision: Decision): string {
   return decision.value;
 }
 
-async function primaryKey(deps: CliDeps, url: string, target: TableTarget): Promise<string> {
-  const client = deps.connect(url);
-  try {
-    const rows = await client.query(PRIMARY_KEY_QUERY, [target.schema, target.table]);
-    const names = rows.map((row) => String(row["name"]));
-    const [key] = names;
-    if (key === undefined || names.length > 1) {
-      throw new CliError(
-        "primary-key",
-        `${target.schema}.${target.table} needs a single-column primary key, and has ${names.length === 0 ? "none" : names.join(", ")}`,
-        "add a primary key (or a surrogate key) to the table; FacetDB keys its answers by it",
-      );
-    }
-    return key;
-  } finally {
-    await client.close();
-  }
-}
-
+/**
+ * The `limit` most recent rows: the first page of the engine connector's `scan`, newest first. The
+ * engine refuses a password in the clear to another machine before it connects.
+ */
 async function recentRows(
   deps: CliDeps,
+  config: ProjectConfig,
   target: TableTarget,
-  source: SourceConfig,
-  config: Parameters<typeof questionSetOf>[0],
   limit: number,
+  allowInsecure: boolean,
 ): Promise<readonly ReadRow[]> {
-  const url = source.database;
-  if (url === undefined) {
-    throw new CliError(
-      "database-url",
-      `the source "${source.name}" has no connection string`,
-      `set ${source.databaseEnv ?? "DATABASE_URL"} to the connection string of the database that holds ${target.table}`,
-    );
-  }
-  const key = await primaryKey(deps, url, target);
-  const client = deps.connect(url);
+  const { source } = target;
+  const url = sourceUrlOf(
+    source,
+    `the connection string of the database that holds ${target.table}`,
+  );
+  const engine = await engineFor(deps.engines, url, source.connector);
+  const connector = await openConnector(
+    engine,
+    engineTarget(config, target, projectRef(deps.projectDir)),
+    url,
+    {
+      clock: deps.clock,
+      allowInsecure,
+      storeShared: storeSharedFor(deps.env, source),
+      workerId: `preview-${randomUUID()}`,
+    },
+  );
   try {
-    const scan = createScan({
-      query: client.query,
-      source: { table: target.table, schema: target.schema, key },
-      questionSet: questionSetOf(config, source),
-      pageSize: limit,
-    });
-    return (await scan(null)).rows;
+    return (await connector.scan(null)).rows.slice(0, limit);
   } finally {
-    await client.close();
+    await connector.close();
   }
 }
 
@@ -215,9 +196,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       return { ok: true, dryRun: true, source: source.name, table: name, rows: limit };
     }
 
-    // Before the first connection: the worker's password does not cross a network in the clear.
-    requireSecureSource(source, options.allowInsecure, deps.env["PGHOST"]);
-    const rows = await recentRows(deps, target, source, config, limit);
+    const rows = await recentRows(deps, config, target, limit, options.allowInsecure === true);
     if (rows.length === 0) {
       print(`${name} has no rows yet, so there is nothing to preview.`);
       return { ok: true, source: source.name, table: name, rows: [] };

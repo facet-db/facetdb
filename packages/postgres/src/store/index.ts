@@ -2,6 +2,13 @@ export type { StoreConnector, StoreConnectorOptions, StoredRecord } from "./conn
 export type { Crypto } from "./crypto.ts";
 export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.ts";
 export {
+  type PurgedSource,
+  readStoreLog,
+  type StoreLog,
+  storePurgeRefusal,
+  storePurgeStatements,
+} from "./purge.ts";
+export {
   migrateStore,
   PROJECTS_TABLE_SQL,
   rekeyNotes,
@@ -13,6 +20,7 @@ export {
   STORE_VERSION_TABLE,
   StoreNotInstalledError,
   storeInstallStatements,
+  storeVersion,
 } from "./schema.ts";
 export type {
   ApiKeyOwner,

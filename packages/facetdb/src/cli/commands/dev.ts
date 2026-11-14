@@ -1,18 +1,25 @@
 import { join } from "node:path";
 import { createFakeProvider } from "@facetdb/model";
-import { createStore, migrate, pgliteClient, WORKER_ROLE } from "@facetdb/postgres";
 import type { SourceConfig } from "../../config/index.ts";
+import { embeddedParts } from "../embedded.ts";
+import { stoppedError } from "../engines.ts";
 import { defineCommand } from "../program.ts";
-import { splitTable } from "../table-connector.ts";
-import { loadProjectConfig, projectRef, questionSetOf } from "./database.ts";
+import {
+  engineTarget,
+  loadProjectConfig,
+  projectRef,
+  splitTable,
+  type TableTarget,
+} from "./database.ts";
 import { runWorkers, WORKER_OPTIONS, type WorkerOptions } from "./worker.ts";
 
 /**
- * `facetdb dev`, for offline development: the worker on an embedded Postgres (PGlite) kept under
- * `.facetdb/dev/`, answered by the scripted fake provider unless `--model-url` names a compatible
- * server (Ollama, Strands Decider). It opens the store there, installs every table source whose
- * table exists, and then runs as `facetdb worker` does. Nothing leaves the machine and no key is
- * needed; `--reset` starts from an empty database.
+ * `facetdb dev`: the worker on an embedded Postgres (PGlite) kept under `.facetdb/dev/`, answered
+ * by the scripted fake provider unless `--model-url` names a compatible server (Ollama, Strands
+ * Decider). It opens the store there (a PGlite store is dev's alone), installs every table source
+ * whose table exists through the Postgres engine over the same database, and then runs as `facetdb
+ * worker` does. Nothing leaves the machine and no key is needed; `--reset` starts from an empty
+ * database.
  */
 
 export const DEV_DIR = join(".facetdb", "dev");
@@ -26,7 +33,7 @@ const DEV_SECRET = "facetdb-dev-embedded-database-local-only";
 /** The worker login's password inside the embedded database, which no network reaches. */
 const DEV_WORKER_PASSWORD = "facetdb-dev-worker";
 
-/** What the connectors are told to connect to: PGlite ignores it, every client is the same database. */
+/** What the engine is told to connect to: its client ignores it, every client is the same database. */
 const DEV_URL = "pglite://facetdb-dev";
 
 /**
@@ -79,57 +86,54 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     );
     const embedded = await deps.embedded.open(dir);
     try {
-      const client = pgliteClient(embedded.pglite);
-      const connect = () => client;
-      const store = await createStore({
-        pglite: embedded.pglite,
+      const { store, client, engine } = await embeddedParts(embedded, {
         secret: deps.env["FACETDB_SECRET"] ?? DEV_SECRET,
         clock: deps.clock,
       });
       try {
         const project = projectRef(deps.projectDir);
-        const roleExists =
-          (
-            await client.query("select 1 from pg_catalog.pg_roles where rolname = $1", [
-              WORKER_ROLE,
-            ])
-          ).length > 0;
+        // The store and every source share the one embedded database; nothing crosses a network.
+        const engineDeps = { clock: deps.clock, allowInsecure: true, storeShared: true };
+        const targetOf = (table: TableTarget) => engineTarget(devConfig, table, project);
         const installed: SourceConfig[] = [];
         for (const source of config.sources) {
           if (source.api) {
             installed.push(source);
             continue;
           }
-          const target = splitTable(source.table ?? "");
-          const result = await migrate({
-            adminUrl: DEV_URL,
-            plan: {
-              source: { ...target, onChange: source.onChange, storage: source.storage },
-              questionSet: questionSetOf(config, source),
-              project,
-              ...(roleExists ? {} : { workerPassword: DEV_WORKER_PASSWORD }),
-            },
-            print: () => undefined,
-            connect,
-          });
-          if (result.ok) {
-            installed.push(source);
-            print(`Installed ${source.name} on ${target.schema}.${target.table} in ${DEV_DIR}/.`);
-          } else {
+          const table = { source, ...splitTable(source.table ?? "") };
+          // The engine sets the password only on a login it creates: an existing one keeps its own.
+          const options = { ...engineDeps, workerPassword: DEV_WORKER_PASSWORD };
+          const skipped = (reason: string) =>
             print(
-              `skipped ${source.name}: ${result.reason}. Create ${target.schema}.${target.table} in the dev database, then run facetdb dev again.`,
+              `skipped ${source.name}: ${reason}. Create ${table.schema}.${table.table} in the dev database, then run facetdb dev again.`,
             );
+          const planned = await engine.planInstall(targetOf(table), DEV_URL, options);
+          if (!planned.ok) {
+            skipped(planned.refusal.message);
+            continue;
           }
+          const ran = await engine.run(targetOf(table), planned.plan, DEV_URL, options);
+          if (ran.stopped !== undefined && "refusal" in ran.stopped) {
+            skipped(ran.stopped.refusal.message);
+            continue;
+          }
+          if (ran.stopped !== undefined) {
+            throw stoppedError(ran.stopped);
+          }
+          installed.push(source);
+          print(`Installed ${source.name} on ${table.schema}.${table.table} in ${DEV_DIR}/.`);
         }
         return await runWorkers(context, {
           config: { ...devConfig, sources: installed },
           project,
           store,
           storeClient: client,
-          connect,
-          databaseOf: () => DEV_URL,
-          // The dev database lives in this process: there is no network to protect.
-          allowInsecure: true,
+          openTable: (source, open) =>
+            engine.open(targetOf({ source, ...splitTable(source.table ?? "") }), DEV_URL, {
+              ...engineDeps,
+              ...open,
+            }),
           provider,
         });
       } finally {

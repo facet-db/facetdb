@@ -1,14 +1,15 @@
 // Through the package's own `./testing` export, as the CLI's tests import the fake.
 import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { describe, expect, expectTypeOf, it } from "vitest";
-import type {
-  DoctorCheck,
-  EnginePlan,
-  EngineTarget,
-  PlanResult,
-  RecordDecision,
-  Refusal,
-  RunResult,
+import {
+  type DoctorCheck,
+  type EnginePlan,
+  EngineRefusal,
+  type EngineTarget,
+  type PlanResult,
+  type RecordDecision,
+  type Refusal,
+  type RunResult,
 } from "./index.ts";
 
 /**
@@ -400,6 +401,14 @@ describe("the fake engine", () => {
     });
     expect(engine.runs.at(-1)?.statements).toEqual([]);
     await expect(engine.open(target, plaintext, shared)).rejects.toThrow("in the clear");
+    // `checkUrl` says the same without connecting, and `open` throws it as the one type the CLI
+    // catches across engines.
+    const checked = engine.checkUrl(target, plaintext, shared);
+    expect(checked).toEqual(expect.objectContaining({ code: "insecure-url" }));
+    const thrown = await engine.open(target, plaintext, shared).catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(EngineRefusal);
+    expect(thrown instanceof EngineRefusal && thrown.refusal).toEqual(checked);
+    expect(engine.checkUrl(target, plaintext, { allowInsecure: true })).toBeUndefined();
     expect((await engine.doctor(target, plaintext, shared))[0]?.status).toBe("fail");
 
     expect(

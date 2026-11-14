@@ -1,30 +1,43 @@
-import { HEARTBEAT_LOSS_MS, type Question } from "@facetdb/core";
-import {
-  FACETDB_SCHEMA,
-  installOwnedColumns,
-  SECRET_VARIABLE,
-  SIDE_TABLE_SCHEMA,
-  sideTableName,
-  triggerName,
-  WORKER_ROLE,
-} from "@facetdb/postgres";
+import type { DatabaseEngine, DoctorCheck, Question } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { type CliDeps, CliError, defineCommand } from "../program.ts";
+import { engineFor } from "../engines.ts";
+import {
+  type CliDeps,
+  CliError,
+  defineCommand,
+  type EngineEntry,
+  plainMessage,
+} from "../program.ts";
+import {
+  heartbeatCheck,
+  STORE_SECRET_VARIABLE,
+  sameDatabase,
+  secretCheck,
+  storeCheck,
+  storePoolerCheck,
+  storeUrlOf,
+  storeUrlProblem,
+  storeVariableMisuse,
+} from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
-  databaseLabel,
+  engineTarget,
   projectRef,
-  questionSetOf,
-  tlsProblem,
-  workerLoginOf,
+  splitTable,
+  variableOf,
+  WORKER_LOGIN,
 } from "./database.ts";
 
 /**
  * `facetdb doctor`: runs the checks in order, prints one line each with the fix, and exits 1 naming
- * the first failing check, 0 when all pass. Every check is a small function over
- * `DoctorEnvironment`, which is everything it may touch, so a test makes each one fail on its own.
- * A check that cannot run because an earlier one failed is skipped, not reported as a second
- * failure. Nothing here changes the database or the store.
+ * the first failing check, 0 when all pass. A source's database is checked by its engine
+ * (`DatabaseEngine.doctor`: the connection and login with the distance, the pooler, the install),
+ * the store by the store door. When the store is the one table source's own database, or
+ * `DATABASE_URL` names none, the report is today's eight lines; with the store in another database,
+ * or several table sources, the lines come in a `source <name>:` group per source and a `store:`
+ * group (the store reachable and current, its pooler, the worker's heartbeat, the secret). A check
+ * that cannot run because an earlier one failed is skipped, not reported as a second failure.
+ * Nothing here changes a database or the store.
  */
 
 type DoctorOptions = {
@@ -42,94 +55,85 @@ export type CheckResult = {
   readonly detail: string;
   /** What to do, for a failure. */
   readonly fix?: string;
-  /** A line of its own after this one, for what the check saw besides its verdict (the distance). */
-  readonly warning?: string;
 };
 
 export type CheckLine = CheckResult & {
   readonly id: string;
   readonly label: string;
+  /** The group it is printed under: `source <name>` or `store`; none in the eight-line report. */
+  readonly group?: string;
 };
 
-/** What a check may touch: the command's dependencies and options, and the config once it loaded. */
+/** What a check may touch: the command's dependencies and options. */
 export type DoctorEnvironment = {
   readonly deps: CliDeps;
   readonly options: DoctorOptions;
 };
 
-type Check = {
-  readonly id: string;
-  readonly label: string;
-  /** What `--dry-run` says this check would look at. */
-  readonly looksAt: string;
-  readonly run: (environment: DoctorEnvironment, config: ProjectConfig) => Promise<CheckResult>;
-};
-
-const ok = (detail: string, warning?: string): CheckResult => ({
-  status: "ok",
-  detail,
-  ...(warning === undefined ? {} : { warning }),
-});
+const ok = (detail: string): CheckResult => ({ status: "ok", detail });
 const fail = (detail: string, fix: string): CheckResult => ({ status: "fail", detail, fix });
 const skip = (detail: string): CheckResult => ({ status: "skip", detail });
 
-/** The sources that read a table: the ones with something in a database to check. */
-function tableSources(config: ProjectConfig): readonly SourceConfig[] {
-  return config.sources.filter((source) => source.table !== undefined);
+/** The words of the checks an engine names by id (`worker`, not "worker heartbeat"). */
+const LABELS: Readonly<Record<string, string>> = { worker: "worker heartbeat" };
+const labelOf = (name: string) => LABELS[name] ?? name;
+
+const CONFIG_CHECK = {
+  id: "config",
+  label: "config",
+  looksAt: "loads the config file and judges it with the schema",
+} as const;
+
+const MODEL_KEY = {
+  id: "model-key",
+  label: "model key",
+  looksAt: "checks that TYPESAFE_API_KEY is set, or that the config names a model server",
+} as const;
+
+const MODEL_REACHABLE = {
+  id: "model-reachable",
+  label: "model reachable",
+  looksAt: "asks the model one tiny question (skipped with --offline)",
+} as const;
+
+const SECRET = {
+  id: "secret",
+  label: STORE_SECRET_VARIABLE,
+  looksAt: `checks that ${STORE_SECRET_VARIABLE} is set`,
+} as const;
+
+/** The store group's own check: the store reachable and at this FacetDB's schema version. */
+const STORE_LABEL = "store";
+
+/** The worker's connection string, as the words show its shape (Postgres's, for now). */
+const WORKER_URL_SHAPE = `postgres://${WORKER_LOGIN}:<a long random password>@<host>/<database>`;
+
+function line(
+  entry: { readonly id: string; readonly label: string },
+  result: CheckResult,
+  group?: string,
+): CheckLine {
+  return {
+    id: entry.id,
+    label: entry.label,
+    status: result.status,
+    detail: result.detail,
+    ...(result.fix === undefined ? {} : { fix: result.fix }),
+    ...(group === undefined ? {} : { group }),
+  };
 }
 
-/** `schema.table` names a schema; a bare name is in `public`. */
-function splitTable(table: string): { readonly schema: string; readonly table: string } {
-  const dot = table.indexOf(".");
-  return dot === -1
-    ? { schema: "public", table }
-    : { schema: table.slice(0, dot), table: table.slice(dot + 1) };
-}
-
-/** The connection string of a source: written in its config, or in the variable the config read it from. */
-function connectionOf(
-  source: SourceConfig,
-  env: CliDeps["env"],
-): { readonly url: string | undefined; readonly variable: string } {
-  const variable = source.databaseEnv ?? "DATABASE_URL";
-  const url = source.database ?? env[variable];
-  return { url: url === "" ? undefined : url, variable };
-}
-
-/** An error's message with any secret it carries blanked out, so a check never prints a password. */
-function plainMessage(error: unknown, secrets: readonly (string | undefined)[]): string {
-  let message = error instanceof Error ? error.message : String(error);
-  for (const secret of secrets) {
-    if (secret === undefined || secret === "") {
-      continue;
-    }
-    message = message.replaceAll(secret, "***");
-    try {
-      const password = decodeURIComponent(new URL(secret).password);
-      if (password !== "") {
-        message = message.replaceAll(password, "***");
-      }
-    } catch {
-      // Not a URL: the whole value was already blanked.
-    }
-  }
-  return message;
-}
-
-const WORKER_URL_SHAPE = `postgres://${WORKER_ROLE}:<a long random password>@<host>/<database>`;
-
-/** Opens a source's connection, runs `work` and closes it, whatever happens. */
-async function withConnection<T>(
-  deps: CliDeps,
-  url: string,
-  work: (query: ReturnType<CliDeps["connect"]>["query"]) => Promise<T>,
-): Promise<T> {
-  const client = deps.connect(url);
-  try {
-    return await work(client.query);
-  } finally {
-    await client.close();
-  }
+/** A check's result from the engine or the store door, as a line; `scrub` blanks the CLI's secrets. */
+function fromCheck(check: DoctorCheck, scrub: (text: string) => string, group?: string): CheckLine {
+  return line(
+    { id: check.name, label: labelOf(check.name) },
+    {
+      status: check.status,
+      detail: scrub(check.detail),
+      ...(check.fix === undefined ? {} : { fix: scrub(check.fix) }),
+    },
+    group,
+  );
 }
 
 /** 1. The config file loads and passes the schema; the first check, run on its own before the others. */
@@ -166,408 +170,19 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
   }
 }
 
-/** How many `select 1` round trips measure the link; the median of them is what doctor reports. */
-const ROUND_TRIPS = 3;
-
-/** Above this many milliseconds a round trip is a warning: the 1 second target assumes a near database. */
-const FAR_MS = 100;
-
-/** The middle of three numbers, so a single slow or fast trip does not decide. */
-function median(a: number, b: number, c: number): number {
-  return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
-}
-
-/** Times three `select 1` round trips with the command's clock and returns the median, in ms. */
-async function roundTripMs(
-  clock: CliDeps["clock"],
-  query: ReturnType<CliDeps["connect"]>["query"],
-): Promise<number> {
-  const taken: number[] = [];
-  for (let trip = 0; trip < ROUND_TRIPS; trip += 1) {
-    const started = clock.now();
-    await query("select 1");
-    taken.push(clock.now() - started);
+/** A model key is set, or the config names a compatible server that needs none. */
+function modelKey({ deps }: DoctorEnvironment, config: ProjectConfig): CheckResult {
+  if (config.modelUrl !== undefined) {
+    return ok(`the model is served from ${config.modelUrl}, so no TypeSafe key is needed`);
   }
-  const [first = 0, second = 0, third = 0] = taken;
-  return Math.round(median(first, second, third));
+  const key = deps.env["TYPESAFE_API_KEY"];
+  return key === undefined || key === ""
+    ? fail(
+        "TYPESAFE_API_KEY is not set, so FacetDB has no key for the model",
+        "set TYPESAFE_API_KEY to your TypeSafe key, or set modelUrl in the config to a compatible server",
+      )
+    : ok("TYPESAFE_API_KEY is set");
 }
-
-/**
- * 2. Every table source answers a query when logged in as the worker, over a connection that is
- * encrypted when it leaves this machine, and the report says how far away it is.
- */
-const databaseReachable: Check = {
-  id: "database",
-  label: "database",
-  looksAt:
-    "connects to each table source with its own connection string, checks the login, and times three round trips",
-  run: async ({ deps, options }, config) => {
-    const sources = tableSources(config);
-    if (sources.length === 0) {
-      return ok("no source reads a table, so there is no database to reach");
-    }
-    const problems: string[] = [];
-    let fix = "";
-    const reached: string[] = [];
-    const pooled = new Set<string>();
-    let farthest = 0;
-    for (const source of sources) {
-      const { url, variable } = connectionOf(source, deps.env);
-      if (url === undefined) {
-        problems.push(`${variable} is not set, so "${source.name}" has no database to connect to`);
-        fix = `set ${variable} to ${WORKER_URL_SHAPE}`;
-        continue;
-      }
-      const insecure = tlsProblem(url, variable, options.allowInsecure, deps.env["PGHOST"]);
-      if (insecure !== undefined) {
-        problems.push(`"${source.name}": ${insecure.problem}`);
-        fix = insecure.fix;
-        continue;
-      }
-      try {
-        const { login, milliseconds } = await withConnection(deps, url, async (query) => {
-          const rows = await query("select current_user::text as name");
-          return {
-            login: String(rows[0]?.["name"]),
-            milliseconds: await roundTripMs(deps.clock, query),
-          };
-        });
-        if (login !== WORKER_ROLE) {
-          problems.push(
-            `"${source.name}" logs in as ${login} on ${databaseLabel(url)}, not as the worker login ${WORKER_ROLE}`,
-          );
-          fix = `set ${variable} to ${WORKER_URL_SHAPE}; facetdb migrate creates that login with the password in it, and it is the only login the worker needs`;
-        } else {
-          const suffix = workerLoginOf(url)?.suffix;
-          if (suffix !== undefined) {
-            pooled.add(`${WORKER_ROLE}.${suffix}`);
-          }
-          farthest = Math.max(farthest, milliseconds);
-          reached.push(`${source.name} on ${databaseLabel(url)} (round trip ${milliseconds} ms)`);
-        }
-      } catch (error) {
-        problems.push(
-          `"${source.name}" cannot connect to ${databaseLabel(url)}: ${plainMessage(error, [url])}`,
-        );
-        fix = `check the host, port, user and password in ${variable}, and that the database accepts connections from this machine (a firewall or an allow-list)`;
-      }
-    }
-    return problems.length === 0
-      ? ok(
-          `logged in as ${WORKER_ROLE}${pooled.size === 0 ? "" : ` (through a pooler as ${[...pooled].join(", ")})`}: ${reached.join(", ")}`,
-          farthest > FAR_MS
-            ? `the database is ${farthest} ms away; run the worker next to it, the 1 second target assumes a same-region link`
-            : undefined,
-        )
-      : fail(problems.join("; "), fix);
-  },
-};
-
-/** A statement with a parameter, so the driver prepares it under a name, as it does the worker's. */
-const POOLER_PROBE = "select pg_backend_pid() as pid, $1::int as run";
-
-/** The server's error code, read off the driver's error (a boundary). */
-function sqlState(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return undefined;
-  }
-  return typeof error.code === "string" ? error.code : undefined;
-}
-
-/**
- * Supabase serves transaction mode on port 6543: Supavisor on its pooler hosts
- * (`*.pooler.supabase.com`, session mode on 5432) and the dedicated PgBouncer beside the database
- * (`db.<project ref>.supabase.co`, the database itself on 5432).
- */
-function supabaseTransactionPort(url: string): boolean {
-  try {
-    const { port, hostname } = new URL(url);
-    return (
-      port === "6543" &&
-      (hostname.endsWith(".pooler.supabase.com") || /^db\.[^.]+\.supabase\.co$/.test(hostname))
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Why a connection cannot keep the worker's prepared statements, or undefined when it can. The
- * worker prepares every statement once per connection, so its connection must stay on one server
- * session. A transaction-mode pooler hands each transaction to any server connection: the second
- * run of a statement finds it gone (SQLSTATE 26000), or, when the driver prepared it again there
- * (postgres.js retries once), runs in another server process. Both runs go on one client connection
- * (`max: 1`), so two backend ids can only be the pooler's doing.
- */
-async function transactionPooler(deps: CliDeps, url: string): Promise<string | undefined> {
-  if (supabaseTransactionPort(url)) {
-    return "port 6543 of a Supabase host is its transaction-mode pooler";
-  }
-  const client = deps.connect(url, { max: 1 });
-  try {
-    const first = await client.query(POOLER_PROBE, [1]);
-    const second = await client.query(POOLER_PROBE, [2]);
-    return first[0]?.["pid"] === second[0]?.["pid"]
-      ? undefined
-      : "one prepared statement ran in two server sessions on one connection";
-  } catch (error) {
-    if (sqlState(error) === "26000") {
-      return "a prepared statement was gone on its second run (SQLSTATE 26000, prepared statement does not exist)";
-    }
-    throw error;
-  } finally {
-    await client.close();
-  }
-}
-
-/**
- * 3. Every connection the worker opens (each table source's and the store's) keeps a prepared
- * statement from one run to the next: a direct connection or a session pooler, never a
- * transaction-mode pooler.
- */
-const poolerSession: Check = {
-  id: "pooler",
-  label: "pooler",
-  looksAt:
-    "runs one prepared statement twice on each connection the worker opens, to find a transaction-mode pooler",
-  run: async ({ deps, options }, config) => {
-    const targets = new Map<string, { readonly name: string; readonly variable: string }>();
-    for (const source of tableSources(config)) {
-      const { url, variable } = connectionOf(source, deps.env);
-      if (url !== undefined) {
-        targets.set(url, { name: `"${source.name}"`, variable });
-      }
-    }
-    const storeUrl = deps.env["DATABASE_URL"];
-    // A plaintext store URL to another machine is the heartbeat check's failure: never sent here.
-    if (
-      storeUrl !== undefined &&
-      storeUrl !== "" &&
-      !targets.has(storeUrl) &&
-      tlsProblem(storeUrl, "DATABASE_URL", options.allowInsecure, deps.env["PGHOST"]) === undefined
-    ) {
-      targets.set(storeUrl, { name: "the store", variable: "DATABASE_URL" });
-    }
-    if (targets.size === 0) {
-      return ok("no connection to check");
-    }
-    const problems: string[] = [];
-    const variables = new Set<string>();
-    for (const [url, { name, variable }] of targets) {
-      try {
-        const why = await transactionPooler(deps, url);
-        if (why !== undefined) {
-          problems.push(
-            `${name} on ${databaseLabel(url)}: the database is behind a transaction-mode pooler (Supabase port 6543, PgBouncer transaction mode): ${why}`,
-          );
-          variables.add(variable);
-        }
-      } catch (error) {
-        problems.push(
-          `${name} on ${databaseLabel(url)}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
-        );
-        variables.add(variable);
-      }
-    }
-    return problems.length === 0
-      ? ok(
-          `prepared statements stay on one server session on ${[...targets.values()].map((target) => target.name).join(", ")} (a direct connection or a session pooler)`,
-        )
-      : fail(
-          problems.join("; "),
-          `use the session pooler (port 5432) or a direct connection in ${[...variables].join(" and ")}; the worker prepares each statement once per connection`,
-        );
-  },
-};
-
-const TABLE_FACTS = `select
-  to_regnamespace('facetdb') is not null as schema_present,
-  to_regclass('facetdb.jobs') is not null as jobs_present,
-  to_regclass(format('%I.%I', $1::text, $2::text)) is not null as table_present`;
-
-const TRIGGER_FACTS = `select t.tgenabled::text as enabled,
-  coalesce((select string_agg(a.attname::text, ',' order by a.attname)
-              from pg_catalog.pg_attribute a
-             where a.attrelid = t.tgrelid and a.attnum = any(t.tgattr)), '') as columns
-  from pg_catalog.pg_trigger t
- where t.tgrelid = to_regclass(format('%I.%I', $1::text, $2::text))
-   and t.tgname = $3 and not t.tgisinternal`;
-
-const COLUMNS_OF = `select a.attname::text as name
-  from pg_catalog.pg_attribute a
- where a.attrelid = to_regclass(format('%I.%I', $1::text, $2::text))
-   and a.attnum > 0 and not a.attisdropped`;
-
-const REINSTALL = "run facetdb migrate: it prints the SQL first and installs what is missing";
-
-/** What one source's installation is missing, as a list of plain sentences (empty when whole). */
-async function installProblems(
-  deps: CliDeps,
-  config: ProjectConfig,
-  source: SourceConfig,
-  url: string,
-): Promise<readonly string[]> {
-  if (source.table === undefined) {
-    return [];
-  }
-  const { schema, table } = splitTable(source.table);
-  const label = `${schema}.${table}`;
-  return withConnection(deps, url, async (query) => {
-    const facts = (await query(TABLE_FACTS, [schema, table]))[0];
-    const missing: string[] = [];
-    if (facts?.["schema_present"] !== true) {
-      missing.push(`the ${FACETDB_SCHEMA} schema does not exist`);
-    } else if (facts["jobs_present"] !== true) {
-      missing.push(`the jobs table ${FACETDB_SCHEMA}.jobs does not exist`);
-    }
-    if (facts?.["table_present"] !== true) {
-      missing.push(`the table ${label} does not exist`);
-      return missing;
-    }
-    const trigger = (await query(TRIGGER_FACTS, [schema, table, triggerName({ table })]))[0];
-    if (trigger === undefined) {
-      missing.push(`${label} has no trigger ${triggerName({ table })}, so changes are not queued`);
-    } else {
-      if (trigger["enabled"] === "D") {
-        missing.push(`the trigger ${triggerName({ table })} on ${label} is disabled`);
-      }
-      const expected = [...source.read].sort().join(",");
-      const watched = String(trigger["columns"]);
-      if (watched !== expected) {
-        missing.push(
-          `the trigger on ${label} watches ${watched === "" ? "no columns" : watched}, not the columns the questions read (${expected})`,
-        );
-      }
-    }
-    const [answerSchema, answerTable] =
-      source.storage === "side-table" ? [SIDE_TABLE_SCHEMA, sideTableName(table)] : [schema, table];
-    const present = new Set(
-      (await query(COLUMNS_OF, [answerSchema, answerTable])).map((row) => String(row["name"])),
-    );
-    const owned = installOwnedColumns(questionSetOf(config, source));
-    const absent = owned.filter((name) => !present.has(name));
-    if (absent.length > 0) {
-      missing.push(`${answerSchema}.${answerTable} lacks the answer columns ${absent.join(", ")}`);
-    }
-    return missing;
-  });
-}
-
-/** 4. The facetdb schema, the jobs table and the trigger exist, on the columns the questions read. */
-const installPresent: Check = {
-  id: "install",
-  label: "install",
-  looksAt:
-    "reads the catalog for the facetdb schema, the jobs table, the trigger and the answer columns",
-  run: async ({ deps }, config) => {
-    const problems: string[] = [];
-    for (const source of tableSources(config)) {
-      const { url } = connectionOf(source, deps.env);
-      if (url === undefined) {
-        continue;
-      }
-      try {
-        const found = await installProblems(deps, config, source, url);
-        problems.push(...found.map((problem) => `${source.name}: ${problem}`));
-      } catch (error) {
-        problems.push(
-          `${source.name}: the catalog could not be read as ${WORKER_ROLE}: ${plainMessage(error, [url])}`,
-        );
-      }
-    }
-    return problems.length === 0
-      ? ok(`${FACETDB_SCHEMA} schema, jobs table, trigger and answer columns are in place`)
-      : fail(problems.join("; "), REINSTALL);
-  },
-};
-
-const DATABASE_URL_FIX =
-  "set DATABASE_URL to the connection string of the database FacetDB keeps its store in";
-
-function ageOf(milliseconds: number): string {
-  const seconds = Math.max(0, Math.round(milliseconds / 1000));
-  if (seconds < 120) {
-    return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
-  }
-  const minutes = Math.round(seconds / 60);
-  return minutes < 120 ? `${minutes} minutes` : `${Math.round(minutes / 60)} hours`;
-}
-
-/** 5. The worker has reported within the last two minutes. */
-const workerHeartbeat: Check = {
-  id: "worker",
-  label: "worker heartbeat",
-  looksAt: "reads the worker's last heartbeat from the FacetDB store",
-  run: async ({ deps, options }) => {
-    // One plain select over its own connection: opening the store (`createStore`) would create its
-    // schema and salt in the database, which a check must never do and the worker login cannot.
-    const url = deps.env["DATABASE_URL"];
-    if (url === undefined || url === "") {
-      return fail("DATABASE_URL is not set, so there is no store to read", DATABASE_URL_FIX);
-    }
-    const insecure = tlsProblem(url, "DATABASE_URL", options.allowInsecure, deps.env["PGHOST"]);
-    if (insecure !== undefined) {
-      return fail(insecure.problem, insecure.fix);
-    }
-    let last: number | undefined;
-    try {
-      const rows = await withConnection(deps, url, (query) =>
-        query("select at::text as at from facetdb.heartbeats where project = $1", [
-          projectRef(deps.projectDir).id,
-        ]),
-      );
-      const at = rows[0]?.["at"];
-      last = at === undefined ? undefined : Number(at);
-    } catch (error) {
-      const message = plainMessage(error, [url, deps.env[SECRET_VARIABLE]]);
-      if (/permission denied/i.test(message)) {
-        return fail(
-          `the login in DATABASE_URL may not read the store's heartbeats: ${message}`,
-          `grant select on facetdb.heartbeats to the login in DATABASE_URL, or point DATABASE_URL at a login that can read it`,
-        );
-      }
-      if (/does not exist/i.test(message)) {
-        return fail(
-          `the store has no heartbeats table yet: ${message}`,
-          "run facetdb migrate with the admin credential: it installs the store's tables, and the worker only uses them",
-        );
-      }
-      return fail(`the store could not be read: ${message}`, DATABASE_URL_FIX);
-    }
-    if (last === undefined) {
-      return fail(
-        "the worker has never sent a heartbeat for this project",
-        "start it with facetdb worker, and leave it running",
-      );
-    }
-    const age = deps.clock.now() - last;
-    return age >= HEARTBEAT_LOSS_MS
-      ? fail(
-          `the last heartbeat was ${ageOf(age)} ago, and a worker counts as down after 2 minutes`,
-          "start the worker with facetdb worker, or restart it, and read its log for why it stopped",
-        )
-      : ok(`the last heartbeat was ${ageOf(age)} ago`);
-  },
-};
-
-/** 6a. A model key is set, or the config names a compatible server that needs none. */
-const modelKey: Check = {
-  id: "model-key",
-  label: "model key",
-  looksAt: "checks that TYPESAFE_API_KEY is set, or that the config names a model server",
-  run: async ({ deps }, config) => {
-    if (config.modelUrl !== undefined) {
-      return ok(`the model is served from ${config.modelUrl}, so no TypeSafe key is needed`);
-    }
-    const key = deps.env["TYPESAFE_API_KEY"];
-    return key === undefined || key === ""
-      ? fail(
-          "TYPESAFE_API_KEY is not set, so FacetDB has no key for the model",
-          "set TYPESAFE_API_KEY to your TypeSafe key, or set modelUrl in the config to a compatible server",
-        )
-      : ok("TYPESAFE_API_KEY is set");
-  },
-};
 
 /** The smallest question there is; the model answers it so doctor can say the provider is reachable. */
 const PING_QUESTION: Question = {
@@ -577,76 +192,252 @@ const PING_QUESTION: Question = {
   stakes: "low",
 };
 
-/** 6b. The provider answers one tiny question; `--offline` skips the network. */
-const modelReachable: Check = {
-  id: "model-reachable",
-  label: "model reachable",
-  looksAt: "asks the model one tiny question (skipped with --offline)",
-  run: async ({ deps, options }, config) => {
-    if (options.offline) {
-      return skip("skipped because of --offline");
-    }
-    try {
-      const response = await deps.provider(config).ask({
-        model: config.model,
-        state: { note: "This is a test from facetdb doctor." },
-        questions: [PING_QUESTION],
-      });
-      return ok(`${response.model} answered a test question`);
-    } catch (error) {
-      return fail(
-        `the model did not answer: ${plainMessage(error, [deps.env["TYPESAFE_API_KEY"]])}`,
-        config.modelUrl === undefined
-          ? "check TYPESAFE_API_KEY and this machine's network access to TypeSafe, or run facetdb doctor --offline to leave this check out"
-          : `check that ${config.modelUrl} is running and reachable from this machine, or run facetdb doctor --offline to leave this check out`,
-      );
-    }
-  },
-};
-
-/** 7. The store's secret is in the environment: it encrypts what the store keeps. */
-const storeSecret: Omit<Check, "run"> & {
-  readonly run: (environment: DoctorEnvironment) => Promise<CheckResult>;
-} = {
-  id: "secret",
-  label: SECRET_VARIABLE,
-  looksAt: `checks that ${SECRET_VARIABLE} is set`,
-  run: ({ deps }) => {
-    const secret = deps.env[SECRET_VARIABLE];
-    return Promise.resolve(
-      secret === undefined || secret === ""
-        ? fail(
-            `${SECRET_VARIABLE} is not set`,
-            `set ${SECRET_VARIABLE} to a long random string (openssl rand -hex 32) and keep it: it encrypts the credentials the store holds`,
-          )
-        : ok(`${SECRET_VARIABLE} is set`),
+/** The provider answers one tiny question; `--offline` skips the network. */
+async function modelReachable(
+  { deps, options }: DoctorEnvironment,
+  config: ProjectConfig,
+): Promise<CheckResult> {
+  if (options.offline) {
+    return skip("skipped because of --offline");
+  }
+  try {
+    const response = await deps.provider(config).ask({
+      model: config.model,
+      state: { note: "This is a test from facetdb doctor." },
+      questions: [PING_QUESTION],
+    });
+    return ok(`${response.model} answered a test question`);
+  } catch (error) {
+    return fail(
+      `the model did not answer: ${plainMessage(error, [deps.env["TYPESAFE_API_KEY"]])}`,
+      config.modelUrl === undefined
+        ? "check TYPESAFE_API_KEY and this machine's network access to TypeSafe, or run facetdb doctor --offline to leave this check out"
+        : `check that ${config.modelUrl} is running and reachable from this machine, or run facetdb doctor --offline to leave this check out`,
     );
-  },
-};
-
-/** The checks after the config, in the order they run; each names what must have passed before it. */
-export const CHECKS: readonly { readonly check: Check; readonly after?: string }[] = [
-  { check: databaseReachable },
-  { check: poolerSession, after: "database" },
-  { check: installPresent, after: "database" },
-  { check: workerHeartbeat },
-  { check: modelKey },
-  { check: modelReachable, after: "model-key" },
-];
-
-const CONFIG_CHECK = {
-  id: "config",
-  label: "config",
-  looksAt: "loads the config file and judges it with the schema",
-} as const;
-
-function line(entry: { id: string; label: string }, result: CheckResult): CheckLine {
-  const { warning: _warning, ...verdict } = result;
-  return { id: entry.id, label: entry.label, ...verdict };
+  }
 }
 
-/** The line that follows a check which saw something worth knowing: it never counts as a failure. */
-const WARNING_ENTRY = { id: "distance", label: "distance" } as const;
+/** The model's two checks, the second only once the first passed. */
+async function modelLines(
+  environment: DoctorEnvironment,
+  config: ProjectConfig,
+): Promise<readonly CheckLine[]> {
+  const key = line(MODEL_KEY, modelKey(environment, config));
+  const reachable =
+    key.status === "ok"
+      ? await modelReachable(environment, config)
+      : skip(`not checked: the ${MODEL_KEY.label} check did not pass`);
+  return [key, line(MODEL_REACHABLE, reachable)];
+}
+
+/** A table source, with the connection string it reads and whether the store is its database. */
+type TableSource = {
+  readonly source: SourceConfig;
+  readonly url: string | undefined;
+  readonly sharesStore: boolean;
+};
+
+/** The connection string of a source: written in its config, or in the variable it is read from. */
+function tableSourcesOf(config: ProjectConfig, env: CliDeps["env"]): readonly TableSource[] {
+  const store = storeUrlOf(env);
+  return config.sources
+    .filter((source) => source.table !== undefined)
+    .map((source) => {
+      const given = source.database ?? env[variableOf(source)];
+      const url = given === "" ? undefined : given;
+      return {
+        source,
+        url,
+        sharesStore: store !== undefined && url !== undefined && sameDatabase(store, url, env),
+      };
+    });
+}
+
+/**
+ * A table source's checks from its engine (database, distance, pooler, install), and the engine's
+ * heartbeat line apart: it is the report's only when the store is this source's database. Never
+ * throws: a source with no connection string, one that reads the store's variable for a database
+ * that is not a Postgres, one no engine reads, or one whose engine fails to load (a driver that is
+ * not installed) fails the database check, and the other sources and the store are still checked.
+ */
+async function sourceLines(
+  environment: DoctorEnvironment,
+  config: ProjectConfig,
+  table: TableSource,
+  scrub: (text: string) => string,
+  group?: string,
+): Promise<{ readonly lines: readonly CheckLine[]; readonly worker?: CheckLine }> {
+  const { deps, options } = environment;
+  const { source, url } = table;
+  const failed = (result: CheckResult) => ({
+    lines: [
+      line({ id: "database", label: "database" }, result, group),
+      ...["pooler", "install"].map((id) =>
+        line({ id, label: id }, skip("not checked: the database check did not pass"), group),
+      ),
+    ],
+  });
+  if (url === undefined) {
+    const variable = variableOf(source);
+    return failed(
+      fail(
+        `${variable} is not set, so "${source.name}" has no database to connect to`,
+        `set ${variable} to ${WORKER_URL_SHAPE}`,
+      ),
+    );
+  }
+  const misuse = storeVariableMisuse(source, url);
+  if (misuse !== undefined) {
+    return failed(fail(misuse.message, misuse.fix));
+  }
+  let engine: DatabaseEngine;
+  try {
+    engine = await engineFor(deps.engines, url, source.connector);
+  } catch (error) {
+    // A scheme no engine here reads, or polling before its engine: the database check's failure.
+    if (error instanceof CliError) {
+      return failed(fail(`"${source.name}": ${error.message}`, error.fix));
+    }
+    // The engine's module did not load (its driver missing or broken): this source's failure.
+    return failed(
+      fail(
+        `"${source.name}": the engine for its database could not be loaded: ${scrub(plainMessage(error, [url]))}`,
+        "reinstall facetdb with its dependencies (npm install facetdb), then run facetdb doctor again",
+      ),
+    );
+  }
+  const target = engineTarget(
+    config,
+    { source, ...splitTable(source.table ?? "") },
+    projectRef(deps.projectDir),
+  );
+  const checks = await engine.doctor(target, url, {
+    clock: deps.clock,
+    allowInsecure: options.allowInsecure === true,
+    storeShared: table.sharesStore,
+  });
+  const worker = checks.find((check) => check.name === "worker" && check.status !== "skip");
+  return {
+    lines: checks
+      .filter((check) => check.name !== "worker")
+      .map((check) => fromCheck(check, scrub, group)),
+    ...(worker === undefined ? {} : { worker: fromCheck(worker, scrub, group) }),
+  };
+}
+
+/** The lines when no source reads a table: nothing to reach or install, the store's pooler alone. */
+async function noTableLines(environment: DoctorEnvironment): Promise<readonly CheckLine[]> {
+  const { deps, options } = environment;
+  const store = storeUrlOf(deps.env);
+  // A store URL the TLS rule refuses is the heartbeat check's failure: never probed here.
+  const probed =
+    store === undefined ||
+    storeUrlProblem(store, options.allowInsecure, deps.env["PGHOST"]) !== undefined
+      ? undefined
+      : await storePoolerCheck(deps.connect, store);
+  return [
+    line(
+      { id: "database", label: "database" },
+      ok("no source reads a table, so there is no database to reach"),
+    ),
+    probed === undefined
+      ? line({ id: "pooler", label: "pooler" }, ok("no connection to check"))
+      : fromCheck(probed, (text) => text),
+    line(
+      { id: "install", label: "install" },
+      ok("facetdb schema, jobs table, trigger and answer columns are in place"),
+    ),
+  ];
+}
+
+/** The store group's lines: reachable and current, its pooler, the worker's heartbeat, the secret. */
+async function storeLines(
+  environment: DoctorEnvironment,
+  scrub: (text: string) => string,
+): Promise<readonly CheckLine[]> {
+  const { deps, options } = environment;
+  const group = "store";
+  const reached = fromCheck(
+    await storeCheck(deps.connect, deps.env, options.allowInsecure),
+    scrub,
+    group,
+  );
+  const store = storeUrlOf(deps.env);
+  const pooler =
+    reached.status === "ok" && store !== undefined
+      ? fromCheck(await storePoolerCheck(deps.connect, store), scrub, group)
+      : line(
+          { id: "pooler", label: "pooler" },
+          skip(`not checked: the ${STORE_LABEL} check did not pass`),
+          group,
+        );
+  return [
+    reached,
+    pooler,
+    fromCheck(await heartbeat(environment), scrub, group),
+    line(SECRET, secretCheck(deps.env), group),
+  ];
+}
+
+/** The worker's heartbeat, read from the store by the store door. */
+function heartbeat({ deps, options }: DoctorEnvironment): Promise<DoctorCheck> {
+  return heartbeatCheck(
+    deps.connect,
+    deps.env,
+    deps.clock,
+    projectRef(deps.projectDir).id,
+    options.allowInsecure,
+  );
+}
+
+/** Runs every check in order. A check never throws: what goes wrong inside one is that check's failure. */
+export async function runChecks(environment: DoctorEnvironment): Promise<readonly CheckLine[]> {
+  const { deps } = environment;
+  const loaded = await configLoads(environment);
+  const lines: CheckLine[] = [line(CONFIG_CHECK, loaded.result)];
+  const { config } = loaded;
+  if (config === undefined) {
+    const notChecked = skip("not checked: the config did not load");
+    for (const id of ["database", "pooler", "install", "worker"]) {
+      lines.push(line({ id, label: labelOf(id) }, notChecked));
+    }
+    lines.push(line(MODEL_KEY, notChecked), line(MODEL_REACHABLE, notChecked));
+    // The one check that needs no config: it reads the environment alone, so it always runs.
+    lines.push(line(SECRET, secretCheck(deps.env)));
+    return lines;
+  }
+  // What an engine says is scrubbed of the CLI's own secrets, which no engine is given.
+  const scrub = (text: string) =>
+    plainMessage(text, [deps.env[STORE_SECRET_VARIABLE], deps.env["TYPESAFE_API_KEY"]]);
+  const tables = tableSourcesOf(config, deps.env);
+  const [only] = tables;
+  const eightLines =
+    tables.length === 0 ||
+    (only !== undefined &&
+      tables.length === 1 &&
+      (storeUrlOf(deps.env) === undefined || only.sharesStore));
+  if (eightLines) {
+    if (only === undefined) {
+      lines.push(...(await noTableLines(environment)));
+      lines.push(fromCheck(await heartbeat(environment), scrub));
+    } else {
+      const checked = await sourceLines(environment, config, only, scrub);
+      lines.push(...checked.lines);
+      // The engine reads the heartbeat when the store is its database; the store door otherwise.
+      lines.push(checked.worker ?? fromCheck(await heartbeat(environment), scrub));
+    }
+    lines.push(...(await modelLines(environment, config)));
+    lines.push(line(SECRET, secretCheck(deps.env)));
+    return lines;
+  }
+  lines.push(...(await modelLines(environment, config)));
+  for (const table of tables) {
+    const group = `source ${table.source.name}`;
+    lines.push(...(await sourceLines(environment, config, table, scrub, group)).lines);
+  }
+  lines.push(...(await storeLines(environment, scrub)));
+  return lines;
+}
 
 const MARKS: Record<CheckStatus, string> = { ok: "ok  ", fail: "FAIL", skip: "skip", warn: "warn" };
 
@@ -655,29 +446,34 @@ function render(entry: CheckLine): string {
   return `${mark}  ${entry.label}: ${entry.detail}${entry.fix === undefined ? "" : ` Fix: ${entry.fix}.`}`;
 }
 
-/** Runs every check in order. A check never throws: what goes wrong inside one is that check's failure. */
-export async function runChecks(environment: DoctorEnvironment): Promise<readonly CheckLine[]> {
-  const lines: CheckLine[] = [];
-  const loaded = await configLoads(environment);
-  lines.push(line(CONFIG_CHECK, loaded.result));
-  const { config } = loaded;
-  for (const { check, after } of CHECKS) {
-    const earlier = after === undefined ? undefined : lines.find((entry) => entry.id === after);
-    if (config === undefined) {
-      lines.push(line(check, skip("not checked: the config did not load")));
-    } else if (earlier !== undefined && earlier.status !== "ok") {
-      lines.push(line(check, skip(`not checked: the ${earlier.label} check did not pass`)));
-    } else {
-      const result = await check.run(environment, config);
-      lines.push(line(check, result));
-      if (result.warning !== undefined) {
-        lines.push(line(WARNING_ENTRY, { status: "warn", detail: result.warning }));
+/**
+ * What `--dry-run` lists: the config, every registered engine's checks once, the model, the
+ * secret. It loads every registered engine to read its checks (a real run loads only the engines
+ * its sources use), and connects to nothing.
+ */
+async function planned(entries: readonly EngineEntry[]): Promise<
+  readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly looksAt: string;
+  }[]
+> {
+  const checks = new Map<string, string>();
+  for (const entry of entries) {
+    const engine = await entry.load();
+    for (const check of engine.checks) {
+      if (!checks.has(check.name)) {
+        checks.set(check.name, check.looksAt);
       }
     }
   }
-  // The one check that needs no config: it reads the environment alone, so it always runs.
-  lines.push(line(storeSecret, await storeSecret.run(environment)));
-  return lines;
+  return [
+    CONFIG_CHECK,
+    ...[...checks].map(([id, looksAt]) => ({ id, label: labelOf(id), looksAt })),
+    MODEL_KEY,
+    MODEL_REACHABLE,
+    SECRET,
+  ];
 }
 
 export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
@@ -695,15 +491,15 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
   run: async ({ options, deps, print }) => {
     const environment: DoctorEnvironment = { deps, options };
     if (options.dryRun) {
-      const planned = [CONFIG_CHECK, ...CHECKS.map(({ check }) => check), storeSecret];
-      for (const [index, entry] of planned.entries()) {
+      const entries = await planned(deps.engines);
+      for (const [index, entry] of entries.entries()) {
         print(`${index + 1}. ${entry.label}: ${entry.looksAt}`);
       }
       print("Dry run: nothing was checked.");
       return {
         ok: true,
         dryRun: true,
-        checks: planned.map((entry) => ({
+        checks: entries.map((entry) => ({
           id: entry.id,
           label: entry.label,
           looksAt: entry.looksAt,
@@ -711,7 +507,12 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
       };
     }
     const lines = await runChecks(environment);
+    let group: string | undefined;
     for (const entry of lines) {
+      if (entry.group !== undefined && entry.group !== group) {
+        print(`${entry.group}:`);
+      }
+      group = entry.group;
       print(render(entry));
     }
     const failing = lines.filter((entry) => entry.status === "fail");

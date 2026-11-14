@@ -58,8 +58,8 @@ export type EngineTarget = {
    */
   readonly schema?: string;
   /**
-   * The single-column primary key, when the caller knows it. Otherwise the engine reads it from
-   * the catalog, and every engine refuses a composite one.
+   * The single-column primary key, when the caller knows it. Otherwise the engine reads it from the
+   * catalog, and every engine refuses a composite one.
    */
   readonly key?: string;
   /** Where the answers live. */
@@ -72,6 +72,12 @@ export type EngineTarget = {
    * not decisions.
    */
   readonly questionSet: QuestionSet;
+  /**
+   * How the engine's words name the source's connection string: the environment variable the CLI
+   * read it from (`DATABASE_URL`, `LISTINGS_URL`), so a refusal or a doctor's fix says what to set
+   *. Absent where no variable holds it (Cloud, a test): "the source's connection string".
+   */
+  readonly urlVariable?: string;
 };
 
 /**
@@ -103,8 +109,8 @@ export type StatementPurpose =
 /** One statement of a plan, as printed and as run. */
 export type PlanStatement = {
   /**
-   * The database it serves: the source's own, or the FacetDB store (Postgres). `store` appears
-   * only in a plan made with `storeShared`, whose one script runs in that one database.
+   * The database it serves: the source's own, or the FacetDB store (Postgres). `store` appears only
+   * in a plan made with `storeShared`, whose one script runs in that one database.
    */
   readonly database: "source" | "store";
   readonly purpose: StatementPurpose;
@@ -159,8 +165,8 @@ export type ObjectKind =
   | "store-table";
 
 /**
- * A thing FacetDB put in a database, as a typed reference the CLI words and groups: what a
- * plan removes, and with a reason (`KeptObject`) what it keeps.
+ * A thing FacetDB put in a database, as a typed reference the CLI words and groups: what a plan
+ * removes, and with a reason (`KeptObject`) what it keeps.
  */
 export type EngineObject = {
   readonly kind: ObjectKind;
@@ -215,9 +221,8 @@ export type EnginePlan = {
   /** What the operator must be told besides the script, one sentence each. */
   readonly notes: readonly string[];
   /**
-   * The name typed back before the plan runs: the
-   * project's for an uninstall, the source's for a purge of a log its earlier uninstall left.
-   * Absent when a yes is enough (install, prune).
+   * The name typed back before the plan runs: the project's for an uninstall, the source's for a
+   * purge of a log its earlier uninstall left. Absent when a yes is enough (install, prune).
    */
   readonly confirm?: { readonly kind: "project" | "source"; readonly name: string };
 };
@@ -232,6 +237,21 @@ export type Refusal = {
   readonly message: string;
   readonly fix: string;
 };
+
+/**
+ * A refusal thrown where a call hands out something other than a plan: `open` throws it (a
+ * plaintext URL, a table without a single-column key), so the CLI catches this one type across
+ * engines and prints its code, message and fix as it prints a plan's refusal.
+ */
+export class EngineRefusal extends Error {
+  readonly refusal: Refusal;
+
+  constructor(refusal: Refusal) {
+    super(refusal.message);
+    this.name = "EngineRefusal";
+    this.refusal = refusal;
+  }
+}
 
 /** A plan, or a refusal instead of one: a refusal carries no statements, so nothing can run. */
 export type PlanResult =
@@ -302,7 +322,9 @@ export type EngineDeps = {
 export type InstallOptions = EngineDeps & {
   /**
    * The worker login's password, from the source's connection string. An engine sets it only on a
-   * login it creates: an existing one keeps its own, since other projects may share it.
+   * login it creates: an existing one keeps its own, since other projects may share it. An engine
+   * that must create the login and is given none refuses with the code `worker-login` before it
+   * plans a statement, so the CLI can say how to put the password in the connection string.
    */
   readonly workerPassword?: string;
 };
@@ -387,7 +409,21 @@ export type DatabaseEngine = {
    * plan read before it: on Postgres, the table's owner right after the claim.
    */
   run(target: EngineTarget, plan: EnginePlan, url: string, options: RunOptions): Promise<RunResult>;
-  /** The runtime connector for a source, under the worker login's `url`. */
+  /**
+   * What `open` and `doctor` refuse the worker login's `url` with before they connect (a URL that
+   * would carry a password to another machine in the clear, unless `allowInsecure`), worded with
+   * `target.urlVariable`, or undefined; nothing connects. The CLI asks it of every source before it
+   * opens anything, so one refused source opens nothing, the store included.
+   */
+  checkUrl(
+    target: EngineTarget,
+    url: string,
+    deps: Pick<EngineDeps, "allowInsecure">,
+  ): Refusal | undefined;
+  /**
+   * The runtime connector for a source, under the worker login's `url`. A refusal (the URL's,
+   * `checkUrl`'s, or a table without a single-column key) is thrown as an `EngineRefusal`.
+   */
   open(target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector>;
   /** doctor's checks of a source under the worker login's `url`, in order. Nothing is changed. */
   doctor(target: EngineTarget, url: string, deps: EngineDeps): Promise<readonly DoctorCheck[]>;

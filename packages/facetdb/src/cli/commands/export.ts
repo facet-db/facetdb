@@ -10,13 +10,12 @@ import {
   type QuestionSet,
   resolveThresholds,
 } from "@facetdb/core";
-import { sourceIdOf } from "@facetdb/postgres";
 import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
+import { requireUsableStoreUrl, storeSourceId } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
   loadProjectConfig,
   projectRef,
-  requireSecureUrl,
   savedQuestionSets,
 } from "./database.ts";
 
@@ -275,11 +274,11 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
     }
     // The store only: the log is never read from, nor needs, the source's own database.
     const allowInsecure = options.allowInsecure === true;
-    requireSecureUrl(url, "DATABASE_URL", allowInsecure, deps.env["PGHOST"]);
+    requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
 
     const store = await deps.store({ allowInsecure });
     // The log is kept under the project-scoped id, never the bare source name.
-    const sourceId = sourceIdOf(projectRef(deps.projectDir).id, source.name);
+    const sourceId = storeSourceId(projectRef(deps.projectDir).id, source.name);
     const log = store.log(sourceId);
     const versions = new Map<number, QuestionSet>();
     const asked = new Set<number>();

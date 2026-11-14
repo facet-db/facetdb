@@ -1,14 +1,17 @@
 import { FakeClock } from "@facetdb/core/testing";
-import { createStore, type SqlConnect, type Store, sourceIdOf } from "@facetdb/postgres";
-import {
-  createPgliteWorld,
-  type PgliteWorld,
-  resetPgliteWorld,
-  TEST_SECRET,
-} from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, score } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
+import {
+  createPgliteWorld,
+  createStore,
+  type PgliteWorld,
+  resetPgliteWorld,
+  type SqlConnect,
+  type Store,
+  sourceIdOf,
+  TEST_SECRET,
+} from "../testing.ts";
 import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 

@@ -5,8 +5,8 @@ import type { ActionCall, ProjectConfig, SourceConfig } from "./dsl.ts";
 /**
  * The config boundary: the one schema that judges a project, whether it came from
  * `facetdb.config.ts` or from the dashboard's JSON. It reuses core's question-set schema for the
- * questions, thresholds, `read`, `where` and `model` of each source, so the rules for those live
- * in one place, and only adds what a project file has on top: sources, actions and alerts.
+ * questions, thresholds, `read`, `where` and `model` of each source, so the rules for those live in
+ * one place, and only adds what a project file has on top: sources, actions and alerts.
  */
 
 export type ConfigIssue = {
@@ -230,6 +230,13 @@ const sourceSchema = strict({
   api: z.boolean().default(false),
   database: z.string().min(1).exactOptional(),
   databaseEnv: z.string().regex(ENV_NAME, `databaseEnv ${ENV_NAME_RULE}`).exactOptional(),
+  // The scheme picks the engine, this overrides it.
+  connector: z
+    .enum(["polling"], {
+      error:
+        'connector must be "polling" (watch the table by scanning, for a host that forbids triggers), or left out so the connection string\'s scheme picks the database',
+    })
+    .exactOptional(),
   table: z.string().min(1, "table must not be empty").exactOptional(),
   // The rest of the question-set fields are judged by core's schema, per source, below.
   where: z.unknown().optional(),
@@ -300,7 +307,7 @@ function issuesOf(error: z.ZodError, prefix: readonly PropertyKey[] = []): Confi
 function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   if (source.api) {
-    for (const field of ["table", "where", "database", "databaseEnv"] as const) {
+    for (const field of ["table", "where", "database", "databaseEnv", "connector"] as const) {
       if (source[field] !== undefined) {
         issues.push({
           path: `${at}.${field}`,
@@ -446,6 +453,7 @@ function sourceConfig(
     api: source.api,
     ...(source.database === undefined ? {} : { database: source.database }),
     ...(source.databaseEnv === undefined ? {} : { databaseEnv: source.databaseEnv }),
+    ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(questionSet.where === undefined ? {} : { where: questionSet.where }),
     read: questionSet.read,
