@@ -1,10 +1,10 @@
 import { z } from "zod";
 
 /**
- * The request and response of `POST /v1/systemone` as checked on 2026-10-28 against the API
- * reference. The request schema is strict: the payload carries no field the API reference does
- * not list. The response schema lists only the fields FacetDB reads; a field the API adds is
- * ignored, a field it drops or retypes is an error.
+ * The request and response of `POST /v1/systemone` as checked against the API reference. The
+ * request schema is strict: the payload carries no field the API reference does not list. The
+ * response schema lists only the fields FacetDB reads; a field the API adds is ignored, a field it
+ * drops or retypes is an error.
  */
 
 const probability = z.number().min(0).max(1);

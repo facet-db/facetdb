@@ -23,9 +23,9 @@ import { migrate } from "./migrate.ts";
 
 /**
  * The store's tables are made by `facetdb migrate` with the admin credential, so the worker login
- * creates nothing (found on Supabase, 2026-11-01). PGlite runs as a superuser and cannot show the
- * refusal a least-privilege login gets, so these tests prove the shape (the tables, the version
- * rows, no DDL at a current store) and `install.db.test.ts` proves the rights on a real Postgres.
+ * creates nothing (found on Supabase). PGlite runs as a superuser and cannot show the refusal a
+ * least-privilege login gets, so these tests prove the shape (the tables, the version rows, no DDL
+ * at a current store) and `install.db.test.ts` proves the rights on a real Postgres.
  */
 
 const listings: QuestionSet = {

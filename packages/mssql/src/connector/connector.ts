@@ -56,7 +56,7 @@ import { connectMssqlPool, DEFAULT_MAX_CONNECTIONS, type MssqlPoolConnect } from
  * the claim a locking read under READ_COMMITTED_SNAPSHOT too. The index stays: the watch and
  * doctor's counts read it alone, with no lookup.
  *
- * Times are the clock's, bound as text and converted with style 121 (`2026-11-04 09:00:00.000`): a
+ * Times are the clock's, bound as text and converted with style 121 (`yyyy-mm-dd hh:mi:ss.mmm`): a
  * fake clock decides whose lease ended and when a decision was written, as the contract suite needs
  * (`current().updatedAt` is the write's time on the worker's clock), where `sysutcdatetime()` would
  * be the server's. Workers on several hosts compare their own clocks against the 15-minute lease,

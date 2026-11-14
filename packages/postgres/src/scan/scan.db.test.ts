@@ -8,8 +8,7 @@ import { createScan } from "./scan.ts";
  * The scan on a real Postgres through postgres.js, the client production uses (the unit tests run
  * it on PGlite, whose parameter typing differs). The table that showed the bug: 2,000 rows inserted
  * by one statement, so every `created_at` is the same instant and the keyset cursor has to break
- * the tie on the key for every page after the first (2026-11-01: the Supabase backfill saw 500
- * rows).
+ * the tie on the key for every page after the first (the Supabase backfill saw 500 rows).
  */
 const listings: QuestionSet = {
   questions: [

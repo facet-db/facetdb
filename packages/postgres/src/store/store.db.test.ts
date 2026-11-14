@@ -175,7 +175,7 @@ describe("the decision log on a real Postgres", () => {
   it("reads back the answers it wrote as objects, not as a JSON string of them", async () => {
     // postgres.js learns that `$6::jsonb` is jsonb and ran JSON.stringify on the already
     // stringified answers, so the stored value was a JSON string and every read failed with
-    // "expected a JSON object" (seen on Supabase, 2026-11-01). PGlite never serialized.
+    // "expected a JSON object" (seen on Supabase). PGlite never serialized.
     const store = await newStore();
     const log = store.log("listings");
     const answers = {

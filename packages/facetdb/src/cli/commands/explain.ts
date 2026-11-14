@@ -90,7 +90,7 @@ type CurrentState = {
   readonly values: Readonly<Record<string, string>>;
 };
 
-/** `2026-10-28 14:02`, in UTC, so the same history reads the same on every machine. */
+/** `YYYY-MM-DD HH:MM`, in UTC, so the same history reads the same on every machine. */
 function when(at: Date): string {
   return at.toISOString().slice(0, 16).replace("T", " ");
 }

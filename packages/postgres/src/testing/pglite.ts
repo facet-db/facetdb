@@ -9,10 +9,10 @@ import { pgliteClient, type SqlClient, type SqlConnect, unlistenAll } from "../s
 /**
  * Fast PGlite instances for tests. A plain `new PGlite()` spends about 1.3 s in `initdb`, the
  * cluster initialisation; compiling the WebAssembly is 20 ms and loading a dumped data directory
- * 250 ms (measured 2026-11-01). So one empty cluster is initialised per machine and PGlite version,
- * its data directory dumped to a cache file, and every instance boots from that dump: five times
- * faster, and the 50-test store suite drops from 67 s to a fraction. The dump holds nothing but an
- * empty cluster, so every test still starts from scratch.
+ * 250 ms. So one empty cluster is initialised per machine and PGlite version, its data directory
+ * dumped to a cache file, and every instance boots from that dump: five times faster, and the
+ * 50-test store suite drops from 67 s to a fraction. The dump holds nothing but an empty cluster,
+ * so every test still starts from scratch.
  */
 
 const require = createRequire(import.meta.url);
@@ -51,7 +51,7 @@ async function templateDataDir(): Promise<Blob> {
 /**
  * Builds the template once, before the test workers start (vitest `globalSetup`): otherwise every
  * file's first test builds it, all at once on a cold checkout, and the slowest of them passes the
- * 5-second default timeout (seen on 2026-11-01).
+ * 5-second default timeout.
  */
 export async function warmPgliteTemplate(): Promise<void> {
   await templateDataDir();

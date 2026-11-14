@@ -41,7 +41,7 @@ import {
  * returning`, so the token is what tells a claim apart. Every queue statement carries `table_name =
  * ?`, the table as the config spells it, which is what the triggers write.
  *
- * Times are the clock's, written and compared as UTC text (`2026-11-04 09:00:00.000`, what a
+ * Times are the clock's, written and compared as UTC text (`YYYY-MM-DD hh:mm:ss.fff`, what a
  * `datetime(3)` prints): a fake clock decides whose lease ended, and the driver's timezone setting
  * plays no part, since the connector never asks it for a Date.
  *

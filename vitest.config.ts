@@ -9,7 +9,7 @@ export default defineConfig({
     projects: ["packages/*/vitest.config.ts"],
     // Four workers, not one per core: an uncapped run on a 16-core laptop spawned 16 node workers
     // (7 to 13 GB a run) and two overlapping runs took the desktop session down with the OOM
-    // killer (2026-11-01, twice). Each package config repeats the cap for single-package runs.
+    // killer, twice. Each package config repeats the cap for single-package runs.
     maxWorkers: 4,
   },
 });

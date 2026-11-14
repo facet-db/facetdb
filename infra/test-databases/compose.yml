@@ -7,7 +7,7 @@
 # here: DATABASE_URL names the one you already run.
 #
 # The passwords are test-only and written here: nothing of a customer ever enters these containers,
-# and every port binds to 127.0.0.1. Every image is pinned by tag and digest (resolved 2026-11-03);
+# and every port binds to 127.0.0.1. Every image is pinned by tag and digest;
 # to move one, resolve its tag's digest again and change both, e.g.
 #   skopeo inspect --format '{{.Digest}}' docker://docker.io/library/mysql:8.4
 # Healthchecks use the CMD-SHELL form only: podman-compose 1.0.6 (Ubuntu 24.04) joins the
@@ -88,7 +88,7 @@ services:
       start_period: 30s
 
   libsql:
-    # sqld. Its tags are libsql commits since v0.24.33; d6c75af was `latest` on 2026-11-03.
+    # sqld. Its tags are libsql commits since v0.24.33; d6c75af was `latest` when pinned.
     image: ghcr.io/tursodatabase/libsql-server:d6c75af@sha256:6dd3eb276d9d3604e4a48ac4a999a2e267814732d57d7e94c04ba71482333a67
     container_name: facetdb-libsql
     ports:
@@ -111,7 +111,7 @@ services:
     # directly: the image's entrypoint script (cockroach.sh) starts the node, then checks whether
     # defaultdb exists and runs CREATE DATABASE defaultdb without IF NOT EXISTS; a node not yet
     # answering reads as "missing", the create fails on the database every fresh cluster has, and
-    # set -e exits the container (the CI run of 2026-11-03). defaultdb exists on every fresh node.
+    # set -e exits the container (seen in CI). defaultdb exists on every fresh node.
     entrypoint: ["/cockroach/cockroach"]
     command: ["start-single-node", "--insecure"]
     ports:

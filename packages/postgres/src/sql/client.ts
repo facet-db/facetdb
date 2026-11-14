@@ -53,8 +53,8 @@ export const DEFAULT_MAX_CONNECTIONS = 10;
 /**
  * A string parameter goes to the server as the text it was given, whatever type the server infers
  * for it. postgres.js learns each parameter's type from the prepared statement and then runs its
- * own serializer on the value, and two of those rewrite a string (seen on Supabase, 2026-11-01;
- * PGlite applies no serializer, so no unit test saw either):
+ * own serializer on the value, and two of those rewrite a string (seen on Supabase; PGlite applies
+ * no serializer, so no unit test saw either):
  *  - timestamp and timestamptz (OIDs 1114, 1184) go through a JavaScript Date, which keeps
  *    milliseconds only: a keyset cursor carrying `…20:06:13.788622+00:00` compared as `…13.788`, the
  *    scan found no row equal to or older than it, and a 2,000-row table backfilled 500 rows;

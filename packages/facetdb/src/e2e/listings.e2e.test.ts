@@ -353,8 +353,7 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
 
     // The overhead FacetDB adds from the app's write to the answer columns, with a model that
     // answers at once, over the whole run: the worker's start and the queue wait of a 50-row burst
-    // included (measured 2026-11-01: about 6.5 ms per record on PGlite, median 230 ms, 95th 380
-    // ms).
+    // included (measured at about 6.5 ms per record on PGlite, median 230 ms, 95th 380 ms).
     const overheads = KEYS.map((key) => {
       const written = rows.get(key)?.written_ms;
       const start = committed.get(key);
