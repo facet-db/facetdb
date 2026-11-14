@@ -12,3 +12,8 @@ export const ENGINE_NAME = "mssql";
 export const URL_VARIABLES = ["MSSQL_URL"] as const;
 
 export type UrlVariable = (typeof URL_VARIABLES)[number];
+
+// The install, uninstall and prune plans, their script and their run.
+export * from "./install/index.ts";
+// The driver, for the composition root that wires it and the tests that fake it.
+export * from "./sql/index.ts";

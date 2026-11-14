@@ -1,5 +1,16 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+// The statement-recording fake driver the unit tests hand in through `MssqlConnect`.
+export {
+  type RecordedStatement,
+  type RecordingClient,
+  type RecordingScript,
+  recordingClient,
+  serverError,
+  serverErrors,
+  type TransactionEnd,
+} from "./recording-client.ts";
+
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {
   MSSQL_URL: "a SQL Server 2016 or later; scripts/test-databases.sh up mssql starts one",
