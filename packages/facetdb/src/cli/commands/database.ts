@@ -84,6 +84,17 @@ export function tableTargets(
       EXIT_USAGE,
     );
   }
+  // One run plans with one engine: a table watched by polling and one by its scheme's own engine
+  // are run apart, or the second would get the first's capture.
+  const connectors = new Set(targets.map((target) => target.source.connector ?? "scheme"));
+  if (connectors.size > 1) {
+    throw new CliError(
+      "several-connectors",
+      `the sources ${targets.map((target) => target.source.name).join(", ")} are watched in different ways (some with connector: "polling", some by their scheme's own engine), and one run plans with one engine`,
+      "run the command once per source with --source <name>",
+      EXIT_USAGE,
+    );
+  }
   return targets;
 }
 

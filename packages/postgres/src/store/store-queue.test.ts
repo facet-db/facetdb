@@ -9,8 +9,7 @@ import {
 } from "@facetdb/core";
 import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import { pgliteClient } from "../polling/index.ts";
-import { CLAIM_LEASE_MS } from "../sql/index.ts";
+import { CLAIM_LEASE_MS, pgliteClient } from "../sql/index.ts";
 import { createStore } from "./store.ts";
 import {
   closeAfterTest,

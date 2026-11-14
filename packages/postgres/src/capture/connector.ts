@@ -5,6 +5,7 @@ import {
   type Clock,
   type Connector,
   type CurrentDecision,
+  parseCurrent,
   type QuestionSet,
   REVIEWED_COLUMN,
   type ReadResult,
@@ -26,7 +27,6 @@ import {
   currentColumns,
   enqueueJobs,
   jobsQueries,
-  parseCurrent,
   quoteIdent,
   quoteTable,
   type SqlClient,
@@ -125,9 +125,9 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
   const isClosed = () => closed;
   let wake: (() => void) | undefined;
 
-  // Every state column is cast to text in SQL so the hash is over the database's own text.
-  // `where` is the source's own SQL filter from the config file, spliced as written (as the scan
-  // and the polling connector do): the config is the operator's code, not a user value.
+  // Every state column is cast to text in SQL so the hash is over the database's own text. `where`
+  // is the source's own SQL filter from the config file, spliced as written (as the scan and the
+  // polling connector do): the config is the operator's code, not a user value.
   const excluded =
     questionSet.where === undefined ? "false" : `not coalesce((${questionSet.where}), false)`;
   const rowColumns = [
@@ -312,11 +312,11 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
 
   /**
    * Where `write` stored it: the record's own row inline, its side row in side-table mode, which
-   * exists only once a decision was written. The worker login reads
-   * the key and FacetDB's columns there in both modes. Keys compare as text, as `explain` does, so
-   * a key the column's type cannot hold (`abc` on an integer key) is absent, not an error; the
-   * callers ask a few keys at a time (`explain`, a review card), so the index it skips on a
-   * non-text key costs one pass over the table.
+   * exists only once a decision was written. The worker login reads the key and FacetDB's columns
+   * there in both modes. Keys compare as text, as `explain` does, so a key the column's type cannot
+   * hold (`abc` on an integer key) is absent, not an error; the callers ask a few keys at a time
+   * (`explain`, a review card), so the index it skips on a non-text key costs one pass over the
+   * table.
    */
   async function current(
     keys: readonly RecordKey[],

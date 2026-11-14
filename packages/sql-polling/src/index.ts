@@ -1,7 +1,7 @@
 /**
  * @facetdb/sql-polling: the polling connector for any SQL database, a state hash read through the
- * standard driver behind a dialect: CockroachDB through postgres, Oracle through oracledb in thin
- * mode.
+ * standard driver behind a dialect: Postgres where triggers are forbidden (its dialect lives in
+ * `@facetdb/postgres`), CockroachDB through postgres, Oracle through oracledb in thin mode.
  */
 
 /**
@@ -17,3 +17,12 @@ export const ENGINE_NAME = "polling";
 export const URL_VARIABLES = ["COCKROACH_URL", "ORACLE_URL"] as const;
 
 export type UrlVariable = (typeof URL_VARIABLES)[number];
+
+// The connector the engine opens, moved from @facetdb/postgres.
+export * from "./connector/index.ts";
+// What a database must say to be polled: its SQL text and its catalog reads.
+export * from "./dialect/index.ts";
+// The engine the CLI calls for `connector: "polling"` and for the SQL databases polled by default.
+export * from "./engine/index.ts";
+// What a polling install adds and how a table is read: the marks, the columns, the statements.
+export * from "./install/index.ts";

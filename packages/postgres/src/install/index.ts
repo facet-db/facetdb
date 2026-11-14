@@ -1,4 +1,4 @@
-export type { InstalledTable, NotInstalled } from "./catalog.ts";
+export { type InstalledTable, type NotInstalled, SCRIPT_HEADER } from "./catalog.ts";
 export {
   draftInstall,
   type InstallDraft,
@@ -39,8 +39,10 @@ export {
   type RoleSuffix,
   renderSql,
   renderStatement,
+  SCHEMA_SETTING,
   type ScriptStatement,
   type StatementDatabase,
+  TABLE_SETTING,
   type TableSource,
   triggerName,
   WORKER_ROLE,

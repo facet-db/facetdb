@@ -1,15 +1,4 @@
-export {
-  createPollingConnector,
-  type PollingConnector,
-  type PollingConnectorOptions,
-} from "./connector.ts";
-export {
-  OWNED_MARK,
-  type PollingSource,
-  pollingInstallSql,
-  pollingOwnedColumns,
-  pollingOwnedColumnsQuery,
-  pollingUninstallSql,
-  STATE_HASH_COLUMN,
-} from "./install.ts";
-export { pgliteClient, unlistenAll } from "./pglite-client.ts";
+// The Postgres dialect of the polling connector, whose connector and engine are
+// `@facetdb/sql-polling`'s. Only the dialect is exported here, and it imports that package for its
+// types alone: loading this package never loads the polling engine.
+export { createPostgresDialect, type PostgresDialectOptions, postgresDialect } from "./dialect.ts";

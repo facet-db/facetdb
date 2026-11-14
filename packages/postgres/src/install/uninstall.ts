@@ -1,4 +1,4 @@
-import { OWNED_MARK } from "../polling/index.ts";
+import { OWNED_MARK, PROJECT_MARK_PREFIX, STATE_HASH_COLUMN } from "@facetdb/core";
 import { SIDE_MARK, SIDE_TABLE_SCHEMA, sideViewName } from "../scan/index.ts";
 import {
   connectPostgres,
@@ -158,8 +158,8 @@ export type TableRemoval = {
 };
 
 /**
- * What the script does beyond the printed SQL, as read from the database before it runs (the
- * script decides again at run time; these are for the words the CLI prints).
+ * What the script does beyond the printed SQL, as read from the database before it runs (the script
+ * decides again at run time; these are for the words the CLI prints).
  *
  * @deprecated as an export: the removes, keeps, notes and `confirm` of the `EnginePlan` that
  * `postgresEngine.planUninstall` returns; the engine module's header maps every field.
@@ -278,6 +278,29 @@ const PENDING_DELIVERY = "delivered_at is null and gave_up_at is null";
 /** A backfill cursor a run would resume from; a finished one restarts from the top anyway. */
 const UNFINISHED_CURSOR = "not done";
 
+/**
+ * The tables a polling install marked: no owner row names them, and their worker reads them through
+ * the same login and the same schema usage, so a schema that holds one keeps the worker's usage.
+ * All its text is constant, so the script's `do` block can hold it.
+ */
+const POLLED_TABLES = `select n.nspname::text as schema, c.relname::text as name
+  from pg_catalog.pg_attribute a
+  join pg_catalog.pg_class c on c.oid = a.attrelid
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+ where a.attname = ${quoteLiteral(STATE_HASH_COLUMN)} and a.attnum > 0 and not a.attisdropped
+   and c.relkind in ('r', 'p')
+   and (pg_catalog.col_description(a.attrelid, a.attnum) = ${quoteLiteral(OWNED_MARK)}
+        or starts_with(pg_catalog.col_description(a.attrelid, a.attnum), ${quoteLiteral(PROJECT_MARK_PREFIX)}))`;
+
+/** The schemas holding a polled table other than `except` (`schema.table`), as the forecasts read them. */
+async function polledSchemas(query: SqlQuery, except?: string): Promise<ReadonlySet<string>> {
+  return new Set(
+    (await query(POLLED_TABLES))
+      .filter((row) => `${String(row["schema"])}.${String(row["name"])}` !== except)
+      .map((row) => String(row["schema"])),
+  );
+}
+
 /** The uninstall script for one table, in the order it runs. */
 export function uninstallSql(
   source: UninstallTarget,
@@ -349,13 +372,15 @@ end $$`,
       "marker",
       `delete from facetdb.table_owners where table_schema = ${quoteLiteral(source.schema)} and table_name = ${quoteLiteral(source.table)}`,
     ),
-    // The worker's usage on the table's schema, when no other installed table is in it.
+    // The worker's usage on the table's schema, when no other installed table is in it: none with
+    // an owner row, and none a polling install marked, whose worker reads it too.
     plain(
       "grants",
       `do $$
 begin
   if ${workerExists} and ${sourceSchema} <> 'facetdb'
-     and not exists (select 1 from facetdb.table_owners where table_schema = ${sourceSchema}) then
+     and not exists (select 1 from facetdb.table_owners where table_schema = ${sourceSchema})
+     and not exists (select 1 from (${POLLED_TABLES}) polled where polled.schema = ${sourceSchema}) then
     execute format('revoke usage on schema %I from %I', ${sourceSchema}, ${worker});
   end if;
 end $$`,
@@ -1009,11 +1034,10 @@ async function resolveLogOnlyTarget(
 }
 
 /**
- * A log-only purge's checks when the FacetDB store is another database: only the
- * source's side is here, so only another installed table of the caller's project refuses it, in
- * the same words. The log is the one the worker writes under `sourceIdOf(project, name)`; the
- * CLI's store door finds and counts it in the store and deletes it after this run, so
- * its counts are not read here.
+ * A log-only purge's checks when the FacetDB store is another database: only the source's side is
+ * here, so only another installed table of the caller's project refuses it, in the same words. The
+ * log is the one the worker writes under `sourceIdOf(project, name)`; the CLI's store door finds
+ * and counts it in the store and deletes it after this run, so its counts are not read here.
  */
 async function sourceSideLogOnlyTarget(
   query: SqlQuery,
@@ -1278,6 +1302,7 @@ async function tableRemoval(
   const row = facts[0];
   const worker = row?.["worker"] === true;
   const policies = row?.["policies"];
+  const polled = await polledSchemas(query, `${installed.schema}.${installed.table}`);
   return {
     columns: installed.marked,
     sideTable:
@@ -1288,8 +1313,10 @@ async function tableRemoval(
     trigger: row?.["trigger"] === true ? triggerName(installed) : undefined,
     policies: Array.isArray(policies) ? policies.map(String) : [],
     workerGrants: worker,
-    // As the script's revoke: never on the `facetdb` schema, and not while another table is in it.
-    schemaUsage: worker && installed.schema !== "facetdb" && neighbours === 0,
+    // As the script's revoke: never on the `facetdb` schema, and not while another table is in it,
+    // a polled one included.
+    schemaUsage:
+      worker && installed.schema !== "facetdb" && neighbours === 0 && !polled.has(installed.schema),
   };
 }
 
@@ -1408,9 +1435,9 @@ const CONCURRENT_REASON =
   "another FacetDB command was running on this database at the same time; nothing was changed. Run it again.";
 
 /**
- * The driver's error (a boundary), as the reason nothing was changed: a re-check's
- * `object_in_use` with its own message, or a lost race with a concurrent command. The engine's
- * `run` reads an uninstall's errors through it too.
+ * The driver's error (a boundary), as the reason nothing was changed: a re-check's `object_in_use`
+ * with its own message, or a lost race with a concurrent command. The engine's `run` reads an
+ * uninstall's errors through it too.
  */
 export function uninstallRefusal(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error)) {
@@ -1477,9 +1504,9 @@ export type UninstallDraftOptions = {
   /** The install's own role names (`RoleSuffix`); tests only. */
   readonly roleSuffix?: RoleSuffix;
   /**
-   * Whether the FacetDB store's tables are this database's. When
-   * they are not, the decision log is the CLI's store door's: it is not looked up here, no note
-   * speaks of it, and a log-only purge makes only the checks on the source's side.
+   * Whether the FacetDB store's tables are this database's. When they are not, the decision log is
+   * the CLI's store door's: it is not looked up here, no note speaks of it, and a log-only purge
+   * makes only the checks on the source's side.
    */
   readonly store: boolean;
 };
@@ -1615,13 +1642,17 @@ export async function draftUninstall(
       : await otherSourceLogs(query, installed.project.id, purgedSourceId);
   const orphan = await orphanSideTable(query, installed);
   const removal = await tableRemoval(query, installed, workerRole(options.roleSuffix));
-  // The schemas whose usage the run takes from the worker: each run table's, once no table
-  // outside the run is left in it (the last script in that schema revokes it).
+  // The schemas whose usage the run takes from the worker: each run table's, once no table outside
+  // the run is left in it (the last script in that schema revokes it); a polled table keeps it as
+  // an installed one does.
   const runSchemas = [installed.schema, ...options.alsoUninstalling.map((other) => other.schema)];
+  const polled = removal.workerGrants ? await polledSchemas(query) : new Set<string>();
   const schemaUsageRevoked = removal.workerGrants
     ? [...new Set(runSchemas)].filter(
         (schema) =>
-          schema !== "facetdb" && !forecast.otherTables.some((other) => other.schema === schema),
+          schema !== "facetdb" &&
+          !polled.has(schema) &&
+          !forecast.otherTables.some((other) => other.schema === schema),
       )
     : [];
   const plan: UninstallPlan = {

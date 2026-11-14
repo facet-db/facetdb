@@ -8,6 +8,7 @@ import type { Clock, OpenConnector } from "@facetdb/core";
 import { selectProvider } from "@facetdb/model";
 import {
   connectPostgres,
+  createPostgresDialect,
   createPostgresEngine,
   createStore,
   SECRET_VARIABLE,
@@ -38,7 +39,8 @@ import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
  * connection strings the config reads (`DATABASE_URL`); an admin connection string is asked for per
  * run and never kept. The database engines a source's scheme picks from are built here: the
  * Postgres engine over the same driver and pools as the store, judged with the environment's
- * `PGHOST`; later tasks append theirs.
+ * `PGHOST`, and the polling engine `connector: "polling"` picks over the Postgres dialect, the same
+ * driver and the same `PGHOST`; later tasks append theirs.
  */
 
 const clock: Clock = {
@@ -144,6 +146,17 @@ export function processDeps(): CliDeps {
       lazyEngine("postgres", () =>
         Promise.resolve(createPostgresEngine({ connect, pgHost: env["PGHOST"] })),
       ),
+      // `connector: "polling"` on a Postgres host that forbids triggers: the polling engine over
+      // the Postgres dialect. The hourly-scan warning of a table with no column to poll by goes to
+      // stderr, beside the worker's own lines.
+      lazyEngine("polling", async () => {
+        const { pollingEngine } = await import("@facetdb/sql-polling");
+        return pollingEngine(createPostgresDialect({ pgHost: env["PGHOST"] }), connect, {
+          warn: (message) => {
+            process.stderr.write(`warning: ${message}\n`);
+          },
+        });
+      }),
     ],
     connect,
     store: (options) => {

@@ -9,7 +9,9 @@ import {
   plainMessage,
 } from "../program.ts";
 import {
+  enginePlansStore,
   heartbeatCheck,
+  pollingStoreClash,
   STORE_SECRET_VARIABLE,
   sameDatabase,
   secretCheck,
@@ -237,7 +239,11 @@ type TableSource = {
   readonly sharesStore: boolean;
 };
 
-/** The connection string of a source: written in its config, or in the variable it is read from. */
+/**
+ * The connection string of a source: written in its config, or in the variable it is read from. A
+ * polling source never shares the store (`enginePlansStore`): its engine checks no store, so the
+ * store's own group says how the store stands.
+ */
 function tableSourcesOf(config: ProjectConfig, env: CliDeps["env"]): readonly TableSource[] {
   const store = storeUrlOf(env);
   return config.sources
@@ -248,7 +254,11 @@ function tableSourcesOf(config: ProjectConfig, env: CliDeps["env"]): readonly Ta
       return {
         source,
         url,
-        sharesStore: store !== undefined && url !== undefined && sameDatabase(store, url, env),
+        sharesStore:
+          enginePlansStore(source) &&
+          store !== undefined &&
+          url !== undefined &&
+          sameDatabase(store, url, env),
       };
     });
 }
@@ -286,7 +296,7 @@ async function sourceLines(
       ),
     );
   }
-  const misuse = storeVariableMisuse(source, url);
+  const misuse = storeVariableMisuse(source, url) ?? pollingStoreClash(deps.env, source, url);
   if (misuse !== undefined) {
     return failed(fail(misuse.message, misuse.fix));
   }

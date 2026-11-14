@@ -2,6 +2,7 @@ import {
   type AnswerColumnKind,
   answerColumns,
   type OnChange,
+  OWNED_MARK,
   type PlanStatement,
   type QuestionSet,
   REVIEWED_COLUMN,
@@ -9,7 +10,6 @@ import {
   type StatementPurpose,
   UPDATED_AT_COLUMN,
 } from "@facetdb/core";
-import { OWNED_MARK } from "../polling/index.ts";
 import {
   CREATION_COLUMN,
   SIDE_TABLE_SCHEMA,
@@ -38,12 +38,12 @@ import {
 import { scramVerifier } from "./scram.ts";
 
 /**
- * The install SQL for a table source. One generator, one order of statements; `migrate` prints
- * what this returns and runs exactly that.
- * Every identifier from the config goes through `quoteIdent`; every value, and every name that a
- * `do` block needs, travels as a parameter (a `$$` body cannot quote a name safely, so names reach
- * it through `set_config` and `current_setting`, never through its text); the only literals left in
- * DDL are the trigger's two arguments, which go through `quoteLiteral` in a plain statement.
+ * The install SQL for a table source. One generator, one order of statements; `migrate` prints what
+ * this returns and runs exactly that. Every identifier from the config goes through `quoteIdent`;
+ * every value, and every name that a `do` block needs, travels as a parameter (a `$$` body cannot
+ * quote a name safely, so names reach it through `set_config` and `current_setting`, never through
+ * its text); the only literals left in DDL are the trigger's two arguments, which go through
+ * `quoteLiteral` in a plain statement.
  */
 
 /** The table a source watches and where its columns live (inline mode). */
@@ -417,7 +417,8 @@ export function installSql(
     // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
     // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
     ...storeInstallStatements().map(storeStatement),
-    // The project marker: which project installed on which table; `facetdb.projects` is the store's.
+    // The project marker: which project installed on which table; `facetdb.projects` is the
+    // store's.
     plain(
       "marker",
       `create table if not exists ${OWNERS_TABLE} (
@@ -556,8 +557,8 @@ end $$`,
     .map(quoteLiteral)
     .join(", ")})`,
     ),
-    // The worker login: created once; a password given later resets it. The password
-    // never appears in SQL text; without one, an existing role is left as it is.
+    // The worker login: created once; a password given later resets it. The password never appears
+    // in SQL text; without one, an existing role is left as it is.
     ...(options.workerPassword === undefined
       ? []
       : [
@@ -589,8 +590,8 @@ end $$`,
     ),
     // The least permission that works: read the key, the state columns and FacetDB's own columns
     // (an `update … where facetdb_reviewed = false` needs select on the column it tests); write
-    // only FacetDB's own columns; on the queue, select and delete, plus insert
-    // and update because claims are updates and a backfill enqueues (sql/jobs.ts).
+    // only FacetDB's own columns; on the queue, select and delete, plus insert and update because
+    // claims are updates and a backfill enqueues (sql/jobs.ts).
     plain("grants", `grant usage on schema ${quoteIdent(schema)} to ${worker}`),
     // Side-table mode: the worker reads the source's key and state and writes only the side table.
     plain(
@@ -667,9 +668,9 @@ end $$`,
         "store",
       ),
     ),
-    // A revoke takes back only grants made by the role running it (or the owner's, for the owner
-    // or a member of its role), and the driver drops the warning when it takes nothing: so the
-    // script checks, and stops with who must run it (as prune does).
+    // A revoke takes back only grants made by the role running it (or the owner's, for the owner or
+    // a member of its role), and the driver drops the warning when it takes nothing: so the script
+    // checks, and stops with who must run it (as prune does).
     plain(
       "grants",
       `do $$
@@ -714,9 +715,9 @@ end $$`,
 }
 
 /**
- * The script as `facetdb migrate` prints it before running anything: the statements in
- * order, each parameter shown as the literal it will be bound to, a redacted one as a placeholder.
- * A `$n` is replaced only in statements that have parameters, so a `$$` body is never touched.
+ * The script as `facetdb migrate` prints it before running anything: the statements in order, each
+ * parameter shown as the literal it will be bound to, a redacted one as a placeholder. A `$n` is
+ * replaced only in statements that have parameters, so a `$$` body is never touched.
  */
 export function renderSql(statements: readonly ScriptStatement[]): string {
   // One transaction, as `migrate` runs it: the script relies on `set local`, transaction-local
@@ -750,9 +751,10 @@ export function renderStatement(statement: ScriptStatement): string {
 
 /**
  * Which of the names FacetDB would own on the table already exist, split by the mark: `marked:
- * false` lists the application's own columns (install refuses when there is any); `marked:
- * true` lists FacetDB's from an earlier install (adopted, which keeps install idempotent). Values
- * are parameters; the table reaches `regclass` through `format('%I.%I')`.
+ * false` lists the application's own columns (install refuses when there is any); `marked: true`
+ * lists FacetDB's from an earlier install (adopted, which keeps install idempotent). The mark is
+ * matched exactly, never as a prefix: a polling install's `facetdb:<project>` is not it. Values are
+ * parameters; the table reaches `regclass` through `format('%I.%I')`.
  */
 export function ownedColumnsQuery(
   source: Pick<TableSource, "table" | "schema">,

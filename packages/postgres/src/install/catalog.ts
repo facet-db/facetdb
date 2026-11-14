@@ -1,4 +1,4 @@
-import { OWNED_MARK } from "../polling/index.ts";
+import { OWNED_MARK } from "@facetdb/core";
 import { SIDE_MARK, SIDE_TABLE_SCHEMA } from "../scan/index.ts";
 import { quoteLiteral, type SqlQuery, type SqlRow } from "../sql/index.ts";
 import { type InstallStatement, type ProjectRef, plain } from "./sql.ts";
@@ -36,6 +36,11 @@ const PRIMARY_KEY = `select a.attname as name, format_type(a.atttypid, a.atttypm
   join pg_catalog.pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
  where i.indrelid = format('%I.%I', $1::text, $2::text)::regclass and i.indisprimary`;
 
+/**
+ * The columns that carry exactly the bare mark: the trigger install's own. Never a prefix match: a
+ * polling install's `facetdb:<project>` on `facetdb_state_hash` is not this install's, and an
+ * uninstall here must never drop it.
+ */
 const MARKED_COLUMNS = `select a.attname as name
   from pg_catalog.pg_attribute a
  where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass

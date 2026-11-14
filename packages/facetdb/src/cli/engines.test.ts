@@ -2,12 +2,14 @@ import type { DatabaseEngine } from "@facetdb/core";
 import { FakeEngine } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { engineFor, isPostgresUrl, lazyEngine, readsUrl, schemeOf } from "./engines.ts";
+import { processDeps } from "./main.ts";
 import { CliError, type EngineEntry } from "./program.ts";
 
 /**
  * Which engine serves a source, with the fake engine: the scheme table, the `connector: "polling"`
  * override, the refusal of a scheme no engine reads, and an engine loaded only when a source of its
- * scheme asks for it.
+ * scheme asks for it; and the composition root's own registration, whose polling engine `connector:
+ * "polling"` resolves to.
  */
 
 /** An entry over a fake engine, counting its loads: the loader shape main.ts registers. */
@@ -106,11 +108,44 @@ describe("an engine is loaded on first use, for a source of its scheme only", ()
 });
 
 describe("the connector: override", () => {
-  it('refuses "polling" until its engine is registered', async () => {
-    const error = await refusal(engineFor(everyEngine, "postgres://db.example.com/app", "polling"));
+  it('refuses "polling" where no polling engine is registered, naming the engines that are', async () => {
+    const error = await refusal(
+      engineFor([postgres.entry], "postgres://db.example.com/app", "polling"),
+    );
     expect(error.code).toBe("connector-polling");
-    expect(error.message).toContain("polling is not in this build yet");
+    expect(error.message).toBe(
+      'the source asks for connector: "polling", and no polling engine is registered here; the engines registered here read postgres (postgres://, postgresql://)',
+    );
     expect(error.fix).toContain('remove connector: "polling"');
+  });
+
+  it('resolves "polling" on a postgres:// source to the polling engine over the Postgres dialect, as main.ts registers it', async () => {
+    const { engines } = processDeps();
+    const engine = await engineFor(
+      engines,
+      "postgres://facetdb_worker:pw@db.example.com/app",
+      "polling",
+    );
+    expect(engine.name).toBe("polling");
+    expect(engine.schemes).toEqual(["postgres", "postgresql"]);
+    expect(engine.capabilities).toMatchObject({ multipleWorkers: false, pushWakeup: false });
+    // Without the override the scheme's own engine reads the same URL: the trigger.
+    const trigger = await engineFor(engines, "postgres://facetdb_worker:pw@db.example.com/app");
+    expect(trigger.name).toBe("postgres");
+    // The polling engine judges the URL as the Postgres engine does, before anything connects.
+    const target = {
+      project: { id: "p", name: "p" },
+      source: "listings",
+      table: "listings",
+      storage: "inline",
+      onChange: "reset",
+      questionSet: { questions: [], read: [], model: "jev-1.14.0", thresholds: {} },
+      urlVariable: "LISTINGS_URL",
+    } as const;
+    const clear = "postgres://facetdb_worker:pw@db.example.com/app";
+    expect(engine.checkUrl(target, clear, { allowInsecure: false })).toEqual(
+      trigger.checkUrl(target, clear, { allowInsecure: false }),
+    );
   });
 
   it("picks the polling engine for a SQL scheme once one is registered", async () => {

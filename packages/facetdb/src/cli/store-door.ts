@@ -27,8 +27,8 @@ import { CliError, databaseLabel, plainMessage } from "./program.ts";
  * `DATABASE_URL` names, whatever engine a source has. A command reaches a source's database through
  * its engine and the store through here; the composition root opens the store's services
  * (`createStore`, main.ts). When the store is a source's own database (`storeShared`) the engine's
- * plans carry the store's statements, today's one script; otherwise migrate's store part,
- * uninstall's purge and doctor's store group are here.
+ * plans carry the store's statements, today's one script; otherwise, and always for a polling
+ * source, migrate's store part, uninstall's purge and doctor's store group are here.
  */
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -200,7 +200,14 @@ export function requireStoreUrl(env: Env, allowInsecure: boolean | undefined): s
 function addressOf(
   url: string,
   env: Env,
-): { readonly host: string; readonly port: string; readonly database: string } | undefined {
+):
+  | {
+      readonly host: string;
+      readonly port: string;
+      readonly database: string;
+      readonly user: string;
+    }
+  | undefined {
   if (!isPostgresUrl(url)) {
     return undefined;
   }
@@ -219,6 +226,7 @@ function addressOf(
     host: (given(parsed.hostname) ?? setting("PGHOST") ?? "localhost").toLowerCase(),
     port: given(parsed.port) ?? setting("PGPORT") ?? "5432",
     database: given(parsed.pathname.slice(1)) ?? setting("PGDATABASE") ?? user,
+    user,
   };
 }
 
@@ -238,6 +246,11 @@ export function sameDatabase(a: string, b: string, env: Env): boolean {
     left.port === right.port &&
     left.database === right.database
   );
+}
+
+/** Whether two connection strings reach one database as one login (the user as the driver reads it). */
+function sameLogin(a: string, b: string, env: Env): boolean {
+  return sameDatabase(a, b, env) && addressOf(a, env)?.user === addressOf(b, env)?.user;
 }
 
 /**
@@ -270,17 +283,66 @@ export function storeVariableMisuse(
 }
 
 /**
+ * A polling source whose connection string reaches the store's database as the store's own login
+ * (`DATABASE_URL`'s: the same database and the same user, whatever variable holds either), as the
+ * error to print; undefined for any other source. Its engine installs the table's columns and none
+ * of the store's tables, so the store door runs the store's part as `DATABASE_URL`'s login while
+ * the source's string must log in as the worker: one login cannot be both. The same database with
+ * the worker's own login on the source is the two-credential setup, and passes. A shared store for
+ * a polling source, in one plan, is a later task.
+ */
+export function pollingStoreClash(
+  env: Env,
+  source: SourceConfig,
+  url: string | undefined,
+): CliError | undefined {
+  const store = storeUrlOf(env);
+  if (
+    enginePlansStore(source) ||
+    url === undefined ||
+    store === undefined ||
+    !sameLogin(store, url, env)
+  ) {
+    return undefined;
+  }
+  const variable =
+    source.databaseEnv === undefined || source.databaseEnv === STORE_VARIABLE
+      ? ownVariable(source.name)
+      : source.databaseEnv;
+  return new CliError(
+    "store-polling",
+    `the source "${source.name}" has connector: "polling" and connects to the FacetDB store's database as the store's own login (the one in DATABASE_URL); the polling connector installs the table's columns and none of the store's tables, so the source and the store need two logins`,
+    `keep the two credentials apart: set ${variable} to the worker login's connection string, postgres://facetdb_worker:<a long random password>@<host>/<database>, read with database: process.env.${variable} in facetdb.config.ts, and keep the store owner's connection string in DATABASE_URL; the same database is fine`,
+  );
+}
+
+/**
+ * Whether a source's engine plans the store's part when the store is the source's own database:
+ * only the Postgres trigger engine's plans hold it (today's one script). The polling engine
+ * (`connector: "polling"`) serves every SQL database and plans the source's part alone, so for a
+ * polling source the store door runs the store's part wherever the store is.
+ */
+export function enginePlansStore(source: SourceConfig): boolean {
+  return source.connector !== "polling";
+}
+
+/**
  * Whether the store is this source's own database. A Postgres source whose connection string the
  * config reads from `DATABASE_URL` is, by definition: the loader read it there. Any other Postgres
  * source is compared with `DATABASE_URL` (`sameDatabase`), and without it has no store yet. A
  * source of another kind never shares the store, which is always a Postgres; one that reads
  * `DATABASE_URL` is refused in words (`storeVariableMisuse`), so no later engine shares by
- * accident.
+ * accident. Nor does a polling source (`enginePlansStore`): its engine never plans the store's
+ * part, so the store door runs it even when `DATABASE_URL` names the source's database.
  */
 export function storeSharedFor(env: Env, source: SourceConfig): boolean {
-  const misuse = storeVariableMisuse(source, source.database);
+  const misuse =
+    storeVariableMisuse(source, source.database) ?? pollingStoreClash(env, source, source.database);
   if (misuse !== undefined) {
     throw misuse;
+  }
+  if (!enginePlansStore(source)) {
+    return false;
   }
   if (source.database !== undefined && !isPostgresUrl(source.database)) {
     return false;
@@ -451,8 +513,8 @@ async function withConnection<T>(
 
 /**
  * doctor's store check: `DATABASE_URL` is set, a Postgres (never a PGlite store outside `facetdb
- * dev`, Q1b), reached with TLS, and at this FacetDB's schema version. It reads; nothing is created,
- * so a store that is behind says so instead of being migrated.
+ * dev`), reached with TLS, and at this FacetDB's schema version. It reads; nothing is created, so a
+ * store that is behind says so instead of being migrated.
  */
 export async function storeCheck(
   connect: SqlConnect,

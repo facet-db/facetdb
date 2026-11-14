@@ -422,7 +422,9 @@ export function runKept(keeps: readonly KeptObject[]): readonly string[] {
     ...others,
     ...(logins.length === 0
       ? []
-      : [`the ${logins.map((object) => object.name).join(" and ")} logins (${logins[0]?.reason})`]),
+      : [
+          `the ${logins.map((object) => object.name).join(" and ")} ${logins.length === 1 ? "login" : "logins"} (${logins[0]?.reason})`,
+        ]),
   ];
 }
 

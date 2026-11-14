@@ -1,11 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type QuestionSet, REVIEWED_COLUMN, UPDATED_AT_COLUMN } from "@facetdb/core";
+import {
+  type QuestionSet,
+  REVIEWED_COLUMN,
+  STATE_HASH_COLUMN,
+  UPDATED_AT_COLUMN,
+} from "@facetdb/core";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { facetdb, noul } from "../../config/index.ts";
-import { pollingInstallSql, STATE_HASH_COLUMN } from "../testing.ts";
+import { pollingInstallSql } from "../testing.ts";
 import { supportMessages } from "./fixtures/support-messages.ts";
 import {
   renderDeclaration,

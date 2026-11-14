@@ -4,8 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { pgliteClient, unlistenAll } from "../polling/index.ts";
-import type { SqlClient, SqlConnect } from "../sql/index.ts";
+import { pgliteClient, type SqlClient, type SqlConnect, unlistenAll } from "../sql/index.ts";
 
 /**
  * Fast PGlite instances for tests. A plain `new PGlite()` spends about 1.3 s in `initdb`, the
@@ -96,13 +95,12 @@ comment on schema public is 'standard public schema';
 `;
 
 /**
- * Returns an engine to the empty cluster it booted as, without a reboot (a boot is 440 ms, this
- * 3 ms empty and about 20 after an install). It ends a transaction a failed test left open
- * (first: an unlisten inside an aborted transaction throws), lets go of every listener the
- * `pgliteClient`s over it registered, discards the session (role, settings, prepared statements,
- * temporary tables, `LISTEN`s), then drops every user schema and role; sequences go with their
- * schemas, so a new `serial` starts at 1 again. A file boots one engine in `beforeAll` and resets
- * it `afterEach`.
+ * Returns an engine to the empty cluster it booted as, without a reboot (a boot is 440 ms, this 3
+ * ms empty and about 20 after an install). It ends a transaction a failed test left open (first: an
+ * unlisten inside an aborted transaction throws), lets go of every listener the `pgliteClient`s
+ * over it registered, discards the session (role, settings, prepared statements, temporary tables,
+ * `LISTEN`s), then drops every user schema and role; sequences go with their schemas, so a new
+ * `serial` starts at 1 again. A file boots one engine in `beforeAll` and resets it `afterEach`.
  *
  * Known limits (no FacetDB SQL meets them; a test that does cleans up after itself):
  * - default privileges shared between two roles (`alter default privileges for role a … to b`)

@@ -1,5 +1,27 @@
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 
+// The dialect conformance suite every dialect runs, the reference dialect it runs on here, and the
+// recording client both stand on.
+export {
+  conformanceScript,
+  type DialectConformance,
+  runDialectConformance,
+} from "./dialect-suite.ts";
+export {
+  PLAIN_COLUMNS,
+  PLAIN_KEY,
+  PLAIN_LOGIN,
+  PLAIN_MARKS,
+  plainDialect,
+} from "./plain-dialect.ts";
+export {
+  type RecordedStatement,
+  type RecordingClient,
+  type Responder,
+  recordingClient,
+  recordingConnect,
+} from "./recording-client.ts";
+
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {
   COCKROACH_URL: "a CockroachDB node; scripts/test-databases.sh up cockroach starts one",

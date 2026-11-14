@@ -1,0 +1,17 @@
+export type {
+  ColumnFacts,
+  ColumnKind,
+  LoginRule,
+  Ownership,
+  PollingClient,
+  PollingConnect,
+  PollingQuery,
+  PollingRow,
+  PoolerRule,
+  SecretStatement,
+  SqlDialect,
+  TableFacts,
+  TableRef,
+  TlsRule,
+  TlsVerdict,
+} from "./dialect.ts";

@@ -1,4 +1,9 @@
-import type { QuestionSet } from "@facetdb/core";
+import {
+  OWNED_MARK,
+  PROJECT_MARK_PREFIX,
+  type QuestionSet,
+  STATE_HASH_COLUMN,
+} from "@facetdb/core";
 import {
   BODY_TAG,
   SIDE_MARK,
@@ -26,9 +31,9 @@ import {
 
 /**
  * `migrate`: inspect the table, refuse what install must not touch, print the complete SQL, run it
- * in one transaction with the admin credential, and forget that credential. The command in `facetdb` wraps this; the connector's `install` calls it.
- * `draftInstall` is the first half, the inspection and the script, which the engine's
- * `planInstall` shares.
+ * in one transaction with the admin credential, and forget that credential. The command in
+ * `facetdb` wraps this; the connector's `install` calls it. `draftInstall` is the first half, the
+ * inspection and the script, which the engine's `planInstall` shares.
  */
 
 /**
@@ -134,6 +139,12 @@ type Inspection = {
   readonly markedTypes: ReadonlyMap<string, string>;
   readonly appOwned: readonly string[];
   readonly marked: readonly string[];
+  /**
+   * The mark a polling install left on `facetdb_state_hash`: `facetdb:<project>`, or the bare mark
+   * of a polling install from before it marked its project; undefined without one. Its answer and
+   * status columns carry the bare mark too, so this install must not adopt them.
+   */
+  readonly pollingMark: string | undefined;
   readonly owner: string | null;
   readonly worker: RoleFacts;
   readonly enqueuer: RoleFacts;
@@ -193,6 +204,12 @@ const READERS_QUERY = `select 1
   cross join lateral pg_catalog.aclexplode(c.relacl) a
  where n.nspname = $1 and c.relname = $2 and a.privilege_type = 'SELECT' and a.grantee <> c.relowner
  limit 1`;
+
+/** The comment of a column, when the table has it: a polling install's mark on its state hash. */
+const COLUMN_MARK_QUERY = `select pg_catalog.col_description(a.attrelid, a.attnum) as mark
+  from pg_catalog.pg_attribute a
+ where a.attrelid = format('%I.%I', $1::text, $2::text)::regclass
+   and a.attname = $3 and a.attnum > 0 and not a.attisdropped`;
 
 const OWNERS_EXISTS_QUERY = `select 1 from information_schema.tables where table_schema = 'facetdb' and table_name = 'table_owners'`;
 
@@ -276,6 +293,14 @@ async function inspect(
     primaryKey.length === 1 &&
     (await query(GENERATED_KEY_QUERY, [schema, source.table, primaryKey[0]]))[0]?.["generated"] ===
       "ALWAYS";
+  const stateHashMark = (
+    await query(COLUMN_MARK_QUERY, [schema, source.table, STATE_HASH_COLUMN])
+  )[0]?.["mark"];
+  const pollingMark =
+    typeof stateHashMark === "string" &&
+    (stateHashMark === OWNED_MARK || stateHashMark.startsWith(PROJECT_MARK_PREFIX))
+      ? stateHashMark
+      : undefined;
   let owner: string | null = null;
   let otherProjects: readonly string[] = [];
   if ((await query(OWNERS_EXISTS_QUERY)).length > 0) {
@@ -304,6 +329,7 @@ async function inspect(
     markedTypes,
     appOwned,
     marked,
+    pollingMark,
     owner,
     worker,
     enqueuer,
@@ -329,9 +355,9 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   if (source.key !== undefined && source.key !== inspection.primaryKey[0]) {
     return `${table}'s primary key is ${inspection.primaryKey[0]}, not ${source.key}; the config and the table disagree.`;
   }
-  // The trigger fires on updates of the state columns: a state column that is one of FacetDB's
-  // own (a question's column, or any facetdb_ column) would fire it on the worker's own write and
-  // queue the record again forever.
+  // The trigger fires on updates of the state columns: a state column that is one of FacetDB's own
+  // (a question's column, or any facetdb_ column) would fire it on the worker's own write and queue
+  // the record again forever.
   const owned = new Set(installOwnedColumns(plan.questionSet));
   const circular = plan.questionSet.read.filter((c) => owned.has(c) || c.startsWith("facetdb_"));
   if (circular.length > 0) {
@@ -339,6 +365,17 @@ function refusal(plan: MigratePlan, inspection: Inspection): string | null {
   }
   if (inspection.appOwned.length > 0) {
     return `${table} already has a column named ${inspection.appOwned.join(", ")} that is not FacetDB's; rename the question or the column.`;
+  }
+  // A polling install marks its answer and status columns as this install does: a trigger beside it
+  // would adopt them, and two workers would write one set of columns. Whose it is reads off
+  // facetdb_state_hash's mark, as an owner row says it of a trigger install.
+  if (inspection.pollingMark !== undefined) {
+    const polledBy = inspection.pollingMark.startsWith(PROJECT_MARK_PREFIX)
+      ? inspection.pollingMark.slice(PROJECT_MARK_PREFIX.length)
+      : undefined;
+    return polledBy !== undefined && polledBy !== project.id
+      ? anotherProject(table, polledBy)
+      : `${table} is installed in polling mode (connector: "polling"; facetdb_state_hash carries its mark), and a trigger install beside it would adopt its columns. Keep connector: "polling" for this source, or run facetdb uninstall with connector: "polling" first, then migrate without it.`;
   }
   const key = inspection.primaryKey[0] ?? "";
   if ([source.schema ?? "public", source.table, key].some((name) => name.includes(BODY_TAG))) {

@@ -9,8 +9,7 @@ import {
   type QuestionSetVersion,
   type UsageStore,
 } from "@facetdb/core";
-import { pgliteClient } from "../polling/index.ts";
-import { connectPostgres, type SqlClient, type SqlConnect } from "../sql/index.ts";
+import { connectPostgres, pgliteClient, type SqlClient, type SqlConnect } from "../sql/index.ts";
 import {
   createStoreConnector,
   type StoreConnector,
@@ -88,8 +87,8 @@ export type Store = {
   /** The decision log of one source. */
   log(sourceId: string): DecisionLog;
   /**
-   * The question-set versions of one source: `record` stores the set under the version it
-   * should run under, which is the previous one when its content is unchanged and the next otherwise.
+   * The question-set versions of one source: `record` stores the set under the version it should
+   * run under, which is the previous one when its content is unchanged and the next otherwise.
    */
   questionSets: {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
@@ -151,11 +150,11 @@ function onThisMachine(host: string): boolean {
 }
 
 /**
- * Connections use TLS. A URL that reaches another machine must ask for it
- * (`sslmode=require` or stronger, or `ssl=true`); a local one need not. `allowInsecure` is the one
- * explicit way out, for a database on a private network the operator trusts. A URL with no host
- * (`postgres:///db`) is resolved as the driver resolves it: `PGHOST` (`pgHost`, read from the
- * environment by the composition root), else localhost; a `PGHOST` starting with `/` is a socket.
+ * Connections use TLS. A URL that reaches another machine must ask for it (`sslmode=require` or
+ * stronger, or `ssl=true`); a local one need not. `allowInsecure` is the one explicit way out, for
+ * a database on a private network the operator trusts. A URL with no host (`postgres:///db`) is
+ * resolved as the driver resolves it: `PGHOST` (`pgHost`, read from the environment by the
+ * composition root), else localhost; a `PGHOST` starting with `/` is a socket.
  */
 export function requireTls(url: string, allowInsecure: boolean, pgHost: string | undefined): void {
   if (allowInsecure) {
@@ -195,9 +194,9 @@ export function requireTls(url: string, allowInsecure: boolean, pgHost: string |
 
 /**
  * The FacetDB store: Postgres in both editions, PGlite for `facetdb dev`. It refuses to start
- * without `FACETDB_SECRET`, without TLS to a remote host, or with a schema newer than this
- * FacetDB; it creates or updates its own tables, then derives the encryption key from the secret
- * and this install's salt.
+ * without `FACETDB_SECRET`, without TLS to a remote host, or with a schema newer than this FacetDB;
+ * it creates or updates its own tables, then derives the encryption key from the secret and this
+ * install's salt.
  */
 export async function createStore(options: StoreOptions): Promise<Store> {
   const secret = requireSecret(options.secret);

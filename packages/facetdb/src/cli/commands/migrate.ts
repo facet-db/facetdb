@@ -13,6 +13,7 @@ import {
   requireStoreUrl,
   runStoreMigration,
   type StoreMigration,
+  sameDatabase,
   showStoreMigration,
   storeSharedFor,
 } from "../store-door.ts";
@@ -339,8 +340,11 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       return summary(false);
     }
     if (!options.yes) {
+      // One database named once: a polling source's store part may run where its table is, told by
+      // where the two strings connect, never by how their labels read.
+      const oneDatabase = storeUrl !== undefined && sameDatabase(storeUrl, url, deps.env);
       const where =
-        store === undefined || store.current
+        store === undefined || store.current || oneDatabase
           ? databaseLabel(url)
           : `${store.label} and ${databaseLabel(url)}`;
       const answer = await deps.io.prompt(`Run the SQL above on ${where}? Type yes to continue: `);

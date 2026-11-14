@@ -1,4 +1,5 @@
-import { createPostgresEngine, type SqlConnect } from "@facetdb/postgres";
+import { createPostgresEngine, postgresDialect, type SqlConnect } from "@facetdb/postgres";
+import { pollingEngine } from "@facetdb/sql-polling";
 import type { ProjectConfig } from "../config/index.ts";
 import { lazyEngine } from "./engines.ts";
 import type { EngineEntry } from "./program.ts";
@@ -17,10 +18,8 @@ export {
   createStore,
   migrate,
   pgliteClient,
-  pollingInstallSql,
   type SqlClient,
   type SqlConnect,
-  STATE_HASH_COLUMN,
   type Store,
   sourceIdOf,
   WORKER_ROLE,
@@ -29,6 +28,7 @@ export {
   createPgliteWorld,
   freshPglite,
   type PgliteWorld,
+  pollingInstallSql,
   resetPglite,
   resetPgliteWorld,
   TEST_SECRET,
@@ -61,5 +61,19 @@ export function postgresEngines(connect: SqlConnect): readonly EngineEntry[] {
     lazyEngine("postgres", () =>
       Promise.resolve(createPostgresEngine({ connect, pgHost: undefined })),
     ),
+  ];
+}
+
+/**
+ * The same engines with the polling one beside them, over the Postgres dialect and the test's
+ * driver, as main.ts registers it for `connector: "polling"`; its warnings go to `warn`.
+ */
+export function pollingEngines(
+  connect: SqlConnect,
+  warn: (message: string) => void = () => undefined,
+): readonly EngineEntry[] {
+  return [
+    ...postgresEngines(connect),
+    lazyEngine("polling", () => Promise.resolve(pollingEngine(postgresDialect, connect, { warn }))),
   ];
 }

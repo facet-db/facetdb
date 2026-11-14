@@ -123,6 +123,9 @@ importers:
       '@facetdb/core':
         specifier: workspace:*
         version: link:../core
+      '@facetdb/sql-polling':
+        specifier: workspace:*
+        version: link:../sql-polling
       postgres:
         specifier: 3.4.9
         version: 3.4.9

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { pollingInstallSql } from "../polling/index.ts";
 import { sourceIdOf } from "../store/index.ts";
 import {
   APP_COLUMNS,
@@ -11,6 +10,7 @@ import {
   install,
   LOG_ID,
   logOf,
+  pollingInstallSql,
   project,
   q,
   recording,
@@ -25,9 +25,9 @@ import { type ProjectRef, renderSql } from "./sql.ts";
 import { uninstall } from "./uninstall.ts";
 
 /**
- * `uninstall --purge` on PGlite: which decision log a purge deletes, found by the source's
- * id, and never another's. These statements destroy data on purpose, so every test reads the
- * catalog before and after. The plain uninstall is uninstall.test.ts.
+ * `uninstall --purge` on PGlite: which decision log a purge deletes, found by the source's id, and
+ * never another's. These statements destroy data on purpose, so every test reads the catalog before
+ * and after. The plain uninstall is uninstall.test.ts.
  */
 
 useUninstallWorld();

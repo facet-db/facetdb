@@ -106,8 +106,10 @@ function doneWords(ran: readonly Shown[], keeps: readonly string[]): string {
     : `Removed FacetDB from ${ran.map((item) => label(item.target)).join(", ")}`;
   const last = ran.at(-1);
   const logins = last === undefined ? undefined : runKept(last.plan.keeps).at(-1);
+  // The polling engine keeps one login, the trigger engine two.
+  const one = last?.plan.keeps.filter((object) => object.kind === "login").length === 1;
   return keeps.length === 1 && keeps[0] === logins
-    ? `${done}; only ${logins} stay.`
+    ? `${done}; only ${logins} ${one ? "stays" : "stay"}.`
     : `${done}; kept: ${keeps.join("; ")}.`;
 }
 

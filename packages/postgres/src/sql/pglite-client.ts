@@ -1,10 +1,10 @@
 import type { PGlite } from "@electric-sql/pglite";
-import type { SqlClient, SqlRow } from "../sql/index.ts";
+import type { SqlClient, SqlRow } from "./client.ts";
 
 /**
  * Every `listen` still open on a PGlite, across every client made over it (a test's world and a
- * store each make their own), so the tests' reset can let go of them all between tests and
- * one engine serves a whole file without an earlier test's listener waking a later one.
+ * store each make their own), so the tests' reset can let go of them all between tests and one
+ * engine serves a whole file without an earlier test's listener waking a later one.
  */
 const listeners = new WeakMap<PGlite, Set<() => Promise<void>>>();
 

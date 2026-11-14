@@ -8,11 +8,32 @@ import type {
   StateValue,
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
+import {
+  createPollingConnector,
+  type PollingConnector,
+  type PollingTarget,
+} from "@facetdb/sql-polling";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { SqlClient } from "../sql/index.ts";
-import { freshPglite, resetPglite } from "../testing/index.ts";
-import { createPollingConnector, type PollingConnector, pollingInstallSql } from "./index.ts";
-import { pgliteClient } from "./pglite-client.ts";
+import { pgliteClient, type SqlClient } from "../sql/index.ts";
+import { freshPglite, pollingInstallSql, resetPglite } from "../testing/index.ts";
+import { postgresDialect } from "./index.ts";
+
+/**
+ * The polling connector of `@facetdb/sql-polling` over the Postgres dialect, on PGlite: every case
+ * it passed before the connector moved, unchanged but for how a connector is made, so the move
+ * changed no behavior Postgres shows.
+ */
+
+/** The project a connector's install marks the table for. */
+const PROJECT = { id: "proj_listings", name: "Listings" };
+
+/** The listings table as a connector watches it, under `questionSet`. */
+function listingsTarget(
+  questions: QuestionSet,
+  onChange: PollingTarget["onChange"] = "reset",
+): PollingTarget {
+  return { project: PROJECT, table: "listings", key: "id", onChange, questionSet: questions };
+}
 
 const questionSet: QuestionSet = {
   questions: [
@@ -77,17 +98,18 @@ class World {
   ): PollingConnector {
     const lastChangedColumn =
       extra.lastChangedColumn === undefined ? "updated_at" : (extra.lastChangedColumn ?? undefined);
-    const connector = createPollingConnector({
-      url: "pglite://memory",
-      source: { table: "listings", key: "id" },
-      questionSet: this.questionSet,
-      ...(lastChangedColumn === undefined ? {} : { lastChangedColumn }),
-      ...(extra.pageSize === undefined ? {} : { pageSize: extra.pageSize }),
-      intervalMs: extra.intervalMs ?? INTERVAL_MS,
-      clock: this.clock,
-      warn: (message) => this.warnings.push(message),
-      connect: () => pgliteClient(this.db),
-    });
+    const connector = createPollingConnector(
+      postgresDialect,
+      pgliteClient(this.db),
+      listingsTarget(this.questionSet),
+      {
+        ...(lastChangedColumn === undefined ? {} : { lastChangedColumn }),
+        ...(extra.pageSize === undefined ? {} : { pageSize: extra.pageSize }),
+        intervalMs: extra.intervalMs ?? INTERVAL_MS,
+        clock: this.clock,
+        warn: (message) => this.warnings.push(message),
+      },
+    );
     this.open.push(connector);
     return connector;
   }
@@ -334,14 +356,12 @@ describe("polling connector install", () => {
         { type: "noul", name: "title", instructions: "Is there a title?", stakes: "low" },
       ],
     };
-    const later = createPollingConnector({
-      url: "pglite://memory",
-      source: { table: "listings", key: "id" },
-      questionSet: wider,
-      clock: world.clock,
-      warn: () => undefined,
-      connect: () => pgliteClient(world.db),
-    });
+    const later = createPollingConnector(
+      postgresDialect,
+      pgliteClient(world.db),
+      listingsTarget(wider),
+      { clock: world.clock, warn: () => undefined },
+    );
 
     await later.uninstall();
 
@@ -368,14 +388,15 @@ describe("polling connector install", () => {
           }),
         ),
     };
-    const connector = createPollingConnector({
-      url: "pglite://memory",
-      source: { table: "listings", key: "id" },
-      questionSet,
-      clock: world.clock,
-      warn: () => undefined,
-      connect: () => failing,
-    });
+    const connector = createPollingConnector(
+      postgresDialect,
+      failing,
+      listingsTarget(questionSet),
+      {
+        clock: world.clock,
+        warn: () => undefined,
+      },
+    );
 
     await expect(connector.install()).rejects.toThrow("the connection dropped");
 
@@ -521,15 +542,12 @@ describe("polling connector watch", () => {
     expect(await world.statusOf("r1")).toBe("pending");
     await run.return?.();
 
-    const keep = createPollingConnector({
-      url: "pglite://memory",
-      source: { table: "listings", key: "id", onChange: "keep" },
-      questionSet,
-      lastChangedColumn: "updated_at",
-      clock: world.clock,
-      warn: () => undefined,
-      connect: () => pgliteClient(world.db),
-    });
+    const keep = createPollingConnector(
+      postgresDialect,
+      pgliteClient(world.db),
+      listingsTarget(questionSet, "keep"),
+      { lastChangedColumn: "updated_at", clock: world.clock, warn: () => undefined },
+    );
     await world.db.query("update listings set facetdb_status = 'done' where id = 'r1'");
     await world.edit("r1", states("three"));
     const keepRun = keep.watch()[Symbol.asyncIterator]();
@@ -544,14 +562,12 @@ describe("polling connector read, write and scan", () => {
   it("hashes the database's own text: numeric 12.50 stays 12.50, and a missing key is reported", async () => {
     const world = await newWorld();
     const priced: QuestionSet = { ...questionSet, read: ["title", "price"] };
-    const connector = createPollingConnector({
-      url: "pglite://memory",
-      source: { table: "listings", key: "id" },
-      questionSet: priced,
-      clock: world.clock,
-      warn: () => undefined,
-      connect: () => pgliteClient(world.db),
-    });
+    const connector = createPollingConnector(
+      postgresDialect,
+      pgliteClient(world.db),
+      listingsTarget(priced),
+      { clock: world.clock, warn: () => undefined },
+    );
     await connector.install();
     await world.db.exec("insert into listings (id, title, price) values ('p1', 'lamp', 12.50)");
     const { rows, missing } = await connector.read(["p1", "nope"]);

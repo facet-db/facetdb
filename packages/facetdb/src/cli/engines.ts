@@ -39,7 +39,11 @@ const DATABASES: readonly {
   { key: "oracle", name: "Oracle", schemes: ["oracle"], sql: true },
 ];
 
-/** The key `connector: "polling"` picks, once the polling connector registers it. */
+/**
+ * The key `connector: "polling"` picks: the polling engine of `@facetdb/sql-polling`, which main.ts
+ * registers over the Postgres dialect. The engine refuses, in its own words, a connection string
+ * its dialect does not read.
+ */
 const POLLING = "polling";
 
 /** The page that lists the databases FacetDB connects to and the scheme of each one's string. */
@@ -120,9 +124,9 @@ export function lazyEngine(key: string, load: () => Promise<DatabaseEngine>): En
 
 /**
  * The engine for a source's connection string, or the one its `connector:` override picks:
- * `"polling"` for a SQL scheme, from the polling engine once it is registered. Only that engine is
- * loaded. Refused before anything connects: an unknown scheme, a database whose engine is not
- * registered here, polling on a database that is not SQL, or polling before its engine exists.
+ * `"polling"` for a SQL scheme, from the polling engine. Only that engine is loaded. Refused before
+ * anything connects: an unknown scheme, a database whose engine is not registered here, polling on
+ * a database that is not SQL, or polling where no polling engine is registered.
  */
 export async function engineFor(
   entries: readonly EngineEntry[],
@@ -143,8 +147,8 @@ export async function engineFor(
     if (polling === undefined) {
       throw new CliError(
         "connector-polling",
-        'the source asks for connector: "polling", and polling is not in this build yet; this FacetDB watches a table with a trigger only',
-        'remove connector: "polling" from the source in facetdb.config.ts to watch the table with a trigger, or run a FacetDB that has the polling connector',
+        `the source asks for connector: "polling", and no polling engine is registered here; the engines registered here read ${registered(entries)}`,
+        'remove connector: "polling" from the source in facetdb.config.ts to watch the table with the engine of its scheme',
       );
     }
     return polling.load();

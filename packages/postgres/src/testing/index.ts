@@ -9,6 +9,8 @@ export {
   resetPglite,
   resetPgliteWorld,
 } from "./pglite.ts";
+// A polling install as it was before the install marked a table's project (the pinned fixture's).
+export { pollingInstallSql } from "./polling.ts";
 export { createScratchDatabase, type ScratchDatabase, serverUrl } from "./postgres.ts";
 // The world the uninstall and prune tests (install/) and the engine's tests (engine/) share.
 export {
@@ -43,8 +45,8 @@ export type { PGlite } from "@electric-sql/pglite";
 /**
  * The real FacetDB store over the test file's in-memory PGlite, for tests of packages that use the
  * store but do not depend on PGlite themselves (the check API). The file boots the engine once
- * (`freshPglite` in `beforeAll`) and resets it after each test; `close` lets go of the store
- * and leaves the engine to the file.
+ * (`freshPglite` in `beforeAll`) and resets it after each test; `close` lets go of the store and
+ * leaves the engine to the file.
  */
 export async function createMemoryStore(
   clock: Clock,

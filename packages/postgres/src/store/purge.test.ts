@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pgliteClient } from "../polling/index.ts";
+import { pgliteClient } from "../sql/index.ts";
 import { readStoreLog, storePurgeRefusal, storePurgeStatements } from "./purge.ts";
 import { SCHEMA_VERSION, storeVersion } from "./schema.ts";
 import { sourceIdOf } from "./source-id.ts";

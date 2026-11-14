@@ -17,6 +17,7 @@
   "dependencies": {
     "@electric-sql/pglite": "0.5.11",
     "@facetdb/core": "workspace:*",
+    "@facetdb/sql-polling": "workspace:*",
     "postgres": "3.4.9"
   }
 }

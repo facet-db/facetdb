@@ -1,7 +1,8 @@
 /**
  * @facetdb/postgres: the Postgres connector (trigger and jobs table, LISTEN/NOTIFY, skip locked),
- * the polling connector and the FacetDB store. Everything FacetDB adds to a customer's database
- * lives in this schema or under this prefix, so `facetdb uninstall` can find all of it.
+ * the Postgres dialect of the polling connector (`@facetdb/sql-polling`) and the FacetDB
+ * store. Everything FacetDB adds to a customer's database lives in this schema or under this
+ * prefix, so `facetdb uninstall` can find all of it.
  */
 export const FACETDB_SCHEMA = "facetdb";
 export const FACETDB_PREFIX = "facetdb_";
@@ -16,10 +17,12 @@ export * from "./scan/index.ts";
 export {
   connectPostgres,
   DEFAULT_MAX_CONNECTIONS,
+  pgliteClient,
   type SqlClient,
   type SqlConnect,
   type SqlConnectOptions,
   type SqlQuery,
   type SqlRow,
+  unlistenAll,
 } from "./sql/index.ts";
 export * from "./store/index.ts";
