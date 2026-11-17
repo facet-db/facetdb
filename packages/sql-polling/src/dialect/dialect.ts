@@ -219,6 +219,13 @@ export type SqlDialect = {
   quoteLiteral(text: string): string;
   /** A column read as the database's own text: the key, every state field (the hash is over it). */
   keyAsText(column: string): string;
+  /**
+   * A state field of the catalog's `type` read as text, where `keyAsText` cannot read every type
+   * whole (Oracle's `to_char` of a CLOB stops past 4000 bytes, so a CLOB is selected as it is and
+   * the driver hands it over as text). Absent: `keyAsText`, whatever the type. The connector calls
+   * it for the state fields whose types it was given (`PollingConnectorOptions.columns`).
+   */
+  stateAsText?(column: string, type: string): string;
   /** `in (…)` over `count` placeholders from the first: a statement's only list, its binds first. */
   inList(count: number): string;
   /**
@@ -231,11 +238,24 @@ export type SqlDialect = {
   readonly types: Readonly<Record<ColumnKind, string>>;
   /** The literal false, for `facetdb_reviewed`'s default. */
   readonly falseValue: string;
+  /**
+   * How a boolean travels where SQL has none (Oracle's `number(1)`, for 19c, which has no SQL
+   * boolean): what a boolean binds as when `write` stores a noul answer or `facetdb_reviewed`, and
+   * what a boolean column or the `excluded` expression reads back as from the driver. Absent where
+   * the driver hands booleans over both ways (Postgres), and then the connector binds and reads
+   * JavaScript booleans as they are.
+   */
+  readonly booleans?: {
+    /** The bind parameter of a boolean: Oracle's 1 or 0. */
+    bind(value: boolean): unknown;
+    /** A boolean as the driver returned it, read back; anything else is a boundary error. */
+    read(value: unknown): boolean;
+  };
   /** The time a bind parameter holds as milliseconds since the epoch: what `write` stamps. */
   timeFromMs(placeholder: string): string;
   /** A time column as milliseconds since the epoch, as text: what `current` reads back. */
   msOfTime(column: string): string;
-  /** The value that says a row is outside the source's `where` filter, selected per row. */
+  /** The value that says a row is outside the source's `where` filter, selected per row (a boolean, read through `booleans` where the dialect has them). */
   excluded(where: string | undefined): string;
 
   /**

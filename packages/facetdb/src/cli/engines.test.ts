@@ -215,6 +215,38 @@ describe("the scheme table", () => {
     expect(readsUrl([counted.entry], "mysql://db.example.com/app")).toBe(false);
     expect(counted.loads.count).toBe(0);
   });
+
+  it.each([
+    "oracle://facetdb_worker:pw@127.0.0.1:1521/FREEPDB1",
+    "oracle://facetdb_worker:pw@db.example.com:2484/ORCLPDB1?protocol=tcps",
+  ])("%s is read by the Oracle polling engine main.ts registers", async (url) => {
+    const oracleTarget: Parameters<DatabaseEngine["checkUrl"]>[0] = {
+      project: { id: "proj_listings", name: "Listings" },
+      source: "listings",
+      table: "LISTINGS",
+      schema: "APP",
+      storage: "inline",
+      onChange: "reset",
+      questionSet: { questions: [], read: ["TITLE"], model: "jev-1.14.0", thresholds: {} },
+      urlVariable: "LISTINGS_URL",
+    };
+    const { engines } = processDeps();
+    expect(readsUrl(engines, url)).toBe(true);
+    const engine = await engineFor(engines, url);
+    expect(engine.name).toBe("polling");
+    expect(engine.schemes).toEqual(["oracle"]);
+    expect(engine.capabilities).toMatchObject({
+      multipleWorkers: false,
+      pushWakeup: false,
+      sideTable: false,
+    });
+    expect(engine.checkUrl(oracleTarget, url, { allowInsecure: false })).toBeUndefined();
+    expect(
+      engine.checkUrl(oracleTarget, "oracle://u:p@db.example.com:1521/ORCLPDB1", {
+        allowInsecure: false,
+      }),
+    ).toMatchObject({ code: "database-url-tls" });
+  });
 });
 
 describe("an engine is loaded on first use, for a source of its scheme only", () => {

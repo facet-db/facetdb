@@ -204,6 +204,17 @@ export function processDeps(): CliDeps {
         const { createLibsqlEngine } = await import("@facetdb/sqlite/libsql");
         return createLibsqlEngine({ env });
       }),
+      // Oracle Database (oracle:) through oracledb in thin mode: the polling engine over the Oracle
+      // dialect, a subpath of @facetdb/sql-polling so oracledb loads only for a source of this
+      // scheme. The hourly-scan warning goes to stderr, beside the worker's own lines.
+      lazyEngine("oracle", async () => {
+        const { createOracleEngine } = await import("@facetdb/sql-polling/oracle");
+        return createOracleEngine({
+          warn: (message) => {
+            process.stderr.write(`warning: ${message}\n`);
+          },
+        });
+      }),
     ],
     connect,
     store: (options) => {

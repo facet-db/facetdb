@@ -100,7 +100,7 @@ export function urlProblem(
     return {
       code: "polling-scheme",
       problem: `${subject} is a ${scheme}: connection string, and this polling engine reads ${dialect.name} (${schemesOf(dialect)})`,
-      fix: `set ${subject} to a ${dialect.name} connection string (${dialect.tls.shape}), or leave connector: "polling" out so its scheme picks the engine`,
+      fix: `set ${subject} to a ${dialect.name} connection string (${dialect.tls.shape}), or leave connector: "polling" out so its scheme picks the engine (it is for a Postgres host that forbids triggers; the Oracle and CockroachDB engines poll already)`,
     };
   }
   const verdict = dialect.tls.verdict(url, allowInsecure);

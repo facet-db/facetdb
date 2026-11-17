@@ -891,10 +891,10 @@ select count(*) as written from @written;`,
      * One statement per key (never a multi-row insert: it would wait on a job row an open
      * application transaction holds while holding the rows it inserted), each a plain insert the
      * queue's `ignore_dup_key` turns into nothing for a key queued already, which keeps its claim.
-     * Not the trigger's clear-then-insert, which the Context of the task names: the contract's rule
-     * is "a key already queued stays one entry", and only a change of the record's state (the
-     * trigger) takes a claim away; a backfill that cleared a claim would hand the worker a key
-     * another holds, and the model would be asked twice at one state.
+     * Not the trigger's clear-then-insert: the contract's rule is "a key already queued stays one
+     * entry", and only a change of the record's state (the trigger) takes a claim away; a backfill
+     * that cleared a claim would hand the worker a key another holds, and the model would be asked
+     * twice at one state.
      */
     async enqueue(keys) {
       for (const one of new Set(keys)) {

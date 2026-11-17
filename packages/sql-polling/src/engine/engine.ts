@@ -268,6 +268,8 @@ export function pollingEngine(
           { ...target, key },
           {
             ...(column === undefined ? {} : { lastChangedColumn: column }),
+            // Each state field read by its type where the dialect needs it (an Oracle CLOB, whole).
+            columns: found.facts.columns,
             clock: openOptions.clock,
             warn: options.warn,
           },

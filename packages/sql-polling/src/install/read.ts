@@ -20,7 +20,7 @@ import { isOwnedMark, markedProject, ownedColumnNames } from "./columns.ts";
  * read again after the worker's first poll), and the application must set it on every insert and
  * every update: one set on insert only stops change detection silently, which nothing in the
  * catalog can tell (the migrate note says so). A config field that names the column, or forces the
- * hourly scan, is a later task's.
+ * hourly scan, is not there yet.
  */
 export const LAST_CHANGED_NAMES: readonly string[] = [
   "updated_at",
@@ -69,9 +69,9 @@ export function tableOf(
   return { schema: target.schema ?? dialect.defaultSchema, name: target.table };
 }
 
-/** `schema.table`, as the words name it. */
+/** `schema.table`, as the words name it; the table alone where the dialect has no default schema (Oracle). */
 export function labelOf(table: TableRef): string {
-  return `${table.schema}.${table.name}`;
+  return table.schema === "" ? table.name : `${table.schema}.${table.name}`;
 }
 
 /** The column FacetDB can poll by among the table's: the first name of `LAST_CHANGED_NAMES` that fits. */

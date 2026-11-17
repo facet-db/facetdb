@@ -20,7 +20,13 @@ import {
   UPDATED_AT_COLUMN,
   type WriteResult,
 } from "@facetdb/core";
-import type { PollingClient, PollingQuery, PollingRow, SqlDialect } from "../dialect/index.ts";
+import type {
+  ColumnFacts,
+  PollingClient,
+  PollingQuery,
+  PollingRow,
+  SqlDialect,
+} from "../dialect/index.ts";
 import {
   columnStatements,
   labelOf,
@@ -29,7 +35,7 @@ import {
   tableOf,
   uninstallStatements,
 } from "../install/index.ts";
-import { currentColumns } from "./current.ts";
+import { booleanBind, booleanRead, currentColumns, currentRow } from "./current.ts";
 
 /**
  * The table a polling connector watches: the source's table and question set (core's
@@ -55,6 +61,12 @@ export type PollingConnectorOptions = {
   readonly fullScanIntervalMs?: number;
   /** Rows per database page, for polls and for `scan`. Defaults to 500. */
   readonly pageSize?: number;
+  /**
+   * The table's columns as the catalog read them (the engine's `open` passes them), so a state
+   * field is read by its type where the dialect needs one (`SqlDialect.stateAsText`: Oracle's CLOB,
+   * read whole); without them every state field is read through `keyAsText`.
+   */
+  readonly columns?: readonly Pick<ColumnFacts, "name" | "type">[];
   readonly clock: Clock;
   /** Where the no-column warning goes; the composition root passes its logger. */
   readonly warn: (message: string) => void;
@@ -132,10 +144,18 @@ export function createPollingConnector(
   let closing = false;
   const isClosing = () => closing;
 
-  // Every column is read as the database's own text, so the hash is over that text.
+  // Every column is read as the database's own text, so the hash is over that text; a state field
+  // by its type where the dialect reads some types otherwise (an Oracle CLOB, whole).
+  const typeOf = new Map((options.columns ?? []).map((column) => [column.name, column.type]));
+  const stateText = (field: string): string => {
+    const type = typeOf.get(field);
+    return type === undefined || dialect.stateAsText === undefined
+      ? dialect.keyAsText(field)
+      : dialect.stateAsText(field, type);
+  };
   const rowColumns = [
     `${dialect.keyAsText(target.key)} as k`,
-    ...fields.map((field, index) => `${dialect.keyAsText(field)} as s${index}`),
+    ...fields.map((field, index) => `${stateText(field)} as s${index}`),
     `${dialect.quoteIdent(STATE_HASH_COLUMN)} as h`,
     `${dialect.excluded(questionSet.where)} as x`,
     ...(lastChangedColumn === undefined ? [] : [`${dialect.keyAsText(lastChangedColumn)} as c`]),
@@ -151,7 +171,7 @@ export function createPollingConnector(
       key: requireText(row["k"], target.key),
       state,
       hash: stateHash(fields, state),
-      excluded: row["x"] === true,
+      excluded: booleanRead(dialect, row["x"]),
       stored: textOrNull(row["h"], STATE_HASH_COLUMN),
       changed: lastChangedColumn === undefined ? null : textOrNull(row["c"], lastChangedColumn),
     };
@@ -323,7 +343,8 @@ export function createPollingConnector(
           const decided = answer.kind === "decided";
           switch (column.role) {
             case "value":
-              set(column.name, decided ? answer.value : null);
+              // A noul's answer is a boolean, bound as the dialect stores one (Oracle: 1 or 0).
+              set(column.name, decided ? booleanBind(dialect, answer.value) : null);
               break;
             case "probability":
             case "confidence":
@@ -345,7 +366,7 @@ export function createPollingConnector(
       );
       if (decision.reviewed === true) {
         // Once a person decided any question the flag stays true; a write without it leaves it be.
-        set(REVIEWED_COLUMN, true);
+        set(REVIEWED_COLUMN, booleanBind(dialect, true));
       }
       set(STATE_HASH_COLUMN, expectedHash);
       await query(
@@ -377,7 +398,10 @@ export function createPollingConnector(
         chunk,
       );
       for (const row of rows) {
-        const decision = parseCurrent(row, questionSet.questions);
+        const decision = parseCurrent(
+          currentRow(dialect, row, questionSet.questions),
+          questionSet.questions,
+        );
         if (decision !== undefined) {
           found.set(requireText(row["k"], target.key), decision);
         }

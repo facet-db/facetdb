@@ -244,14 +244,22 @@ async function plans(dialect: SqlDialect): Promise<readonly (readonly [string, E
   ];
 }
 
-/** A row of the connector's state select, as the driver hands it back. */
-function stateRow(key: string, state: readonly [string, string], changed?: string): PollingRow {
+/**
+ * A row of the connector's state select, as the driver hands it back: `x` (inside the source's
+ * filter) as the dialect stores a boolean, where it has no SQL boolean (Oracle's 0).
+ */
+function stateRow(
+  dialect: SqlDialect,
+  key: string,
+  state: readonly [string, string],
+  changed?: string,
+): PollingRow {
   return {
     k: key,
     s0: state[0],
     s1: state[1],
     h: null,
-    x: false,
+    x: dialect.booleans === undefined ? false : dialect.booleans.bind(false),
     ...(changed === undefined ? {} : { c: changed }),
   };
 }
@@ -261,6 +269,8 @@ async function connectorStatements(
   dialect: SqlDialect,
 ): Promise<readonly (readonly [string, readonly RecordedStatement[]])[]> {
   const target = { ...targetOf(LISTINGS), key: "id" };
+  const row = (key: string, state: readonly [string, string], changed?: string) =>
+    stateRow(dialect, key, state, changed);
   const open = (lastChangedColumn?: string) => {
     const client = recordingClient();
     const connector = createPollingConnector(dialect, client, target, {
@@ -286,15 +296,11 @@ async function connectorStatements(
 
   const polled = open("updated_at");
   const watch = polled.connector.watch()[Symbol.asyncIterator]();
-  polled.client.answer(
-    [stateRow("1", ["a", "b"], first), stateRow("2", ["c", "d"], first)],
-    [],
-    [],
-  );
+  polled.client.answer([row("1", ["a", "b"], first), row("2", ["c", "d"], first)], [], []);
   await take("watch: the first poll by updated_at, over two pages", polled.client, () =>
     watch.next(),
   );
-  polled.client.answer([stateRow("3", ["e", "f"], later)], []);
+  polled.client.answer([row("3", ["e", "f"], later)], []);
   await take("watch: the next poll, from the last updated_at seen", polled.client, () =>
     watch.next(),
   );
@@ -302,7 +308,7 @@ async function connectorStatements(
 
   const scanned = open();
   const hourly = scanned.connector.watch()[Symbol.asyncIterator]();
-  scanned.client.answer([stateRow("1", ["a", "b"]), stateRow("2", ["c", "d"])], [], []);
+  scanned.client.answer([row("1", ["a", "b"]), row("2", ["c", "d"])], [], []);
   await take("watch: the hourly full scan, without a last-changed column", scanned.client, () =>
     hourly.next(),
   );
@@ -311,7 +317,7 @@ async function connectorStatements(
   const { client, connector } = open("updated_at");
   await take("read", client, () => connector.read(["1", "2"]));
   const hash = stateHash(LISTINGS.read, { title: "a", description: "b" });
-  client.answer([stateRow("1", ["a", "b"], first)]);
+  client.answer([row("1", ["a", "b"], first)]);
   await take("write: the hash checked under a row lock, then the decision", client, () =>
     connector.write(
       "1",
@@ -400,17 +406,25 @@ export function runDialectConformance({ dialect, fixture }: DialectConformance):
 
     it("quotes a table name from the config as one identifier (or one literal), whatever it holds", async () => {
       const hostile = 'x"; drop table users; --';
-      const plan = planned(
-        await engineFor(dialect, FRESH).planInstall(
-          targetOf(LISTINGS, hostile),
-          adminUrl(dialect),
-          {
-            ...DEPS,
-            workerPassword: "a-long-random-password",
-          },
-        ),
+      const planning = engineFor(dialect, FRESH).planInstall(
+        targetOf(LISTINGS, hostile),
+        adminUrl(dialect),
+        {
+          ...DEPS,
+          workerPassword: "a-long-random-password",
+        },
       );
-      const quoted = dialect.quoteTable(tableOf(dialect, { table: hostile }).schema, hostile);
+      const { schema } = tableOf(dialect, { table: hostile });
+      let quoted: string;
+      try {
+        quoted = dialect.quoteTable(schema, hostile);
+      } catch (refused) {
+        // A database whose names cannot hold a double quote (Oracle) has no such table: the name
+        // is refused before any SQL is written, in the same words as quoting it.
+        await expect(planning).rejects.toThrow((refused as Error).message);
+        return;
+      }
+      const plan = planned(await planning);
       const script = render(dialect, plan);
       expect(script).toContain(quoted);
       // Outside its quoted forms (a dialect may also write the name as a literal: its marks' rows).

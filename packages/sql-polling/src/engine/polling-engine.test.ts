@@ -445,7 +445,7 @@ describe("the polling engine's open, checkUrl and doctor", () => {
       code: "polling-scheme",
       message:
         "TICKETS_URL is a mysql: connection string, and this polling engine reads Plain SQL (plain://); no connection was made",
-      fix: 'set TICKETS_URL to a Plain SQL connection string (plain://user:password@host/database), or leave connector: "polling" out so its scheme picks the engine',
+      fix: 'set TICKETS_URL to a Plain SQL connection string (plain://user:password@host/database), or leave connector: "polling" out so its scheme picks the engine (it is for a Postgres host that forbids triggers; the Oracle and CockroachDB engines poll already)',
     });
     expect(engine.checkUrl(target(), WORKER_URL, { allowInsecure: false })).toBeUndefined();
   });

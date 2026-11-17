@@ -289,7 +289,7 @@ export function storeVariableMisuse(
  * of the store's tables, so the store door runs the store's part as `DATABASE_URL`'s login while
  * the source's string must log in as the worker: one login cannot be both. The same database with
  * the worker's own login on the source is the two-credential setup, and passes. A shared store for
- * a polling source, in one plan, is a later task.
+ * a polling source, in one plan, is not supported yet.
  */
 export function pollingStoreClash(
   env: Env,
