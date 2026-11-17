@@ -181,7 +181,7 @@ describe("a state column as text", () => {
 });
 
 describe("the mssql connector", () => {
-  it("declares inline columns, several workers, no push wake-up and no side table yet", async () => {
+  it("declares inline columns, a side table, several workers and no push wake-up", async () => {
     const made = new Made();
     const connector = await made.connector();
     expect(connector.capabilities).toBe(MSSQL_CAPABILITIES);
@@ -189,7 +189,7 @@ describe("the mssql connector", () => {
       inlineColumns: true,
       pushWakeup: false,
       transactions: true,
-      sideTable: false,
+      sideTable: true,
       multipleWorkers: true,
     });
   });

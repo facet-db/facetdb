@@ -19,12 +19,15 @@ import {
   ROLES_QUERY,
   SERVER_QUERY,
   SHARED_SCHEMA,
+  SIDE_FACTS_QUERY,
+  SIDE_RIGHTS,
   tableNames,
   triggerText,
+  viewText,
   WORKER_QUERY,
   WORKER_USER,
 } from "../install/index.ts";
-import type { MssqlRow } from "../sql/index.ts";
+import { type MssqlRow, qualifiedName } from "../sql/index.ts";
 import type { RecordingScript } from "./recording-client.ts";
 
 /**
@@ -88,6 +91,8 @@ export type WorldServer = {
   readonly majorVersion: number | null;
   readonly containment: number;
   readonly ownerLogin: string | null;
+  /** `ProductBuild`; 4305 (SQL Server 2022 CU, Service Pack 1 of 2016 and later) when absent. */
+  readonly build?: number | null;
 };
 
 /** The database every world is. */
@@ -128,6 +133,8 @@ export type WorldTable = {
   readonly key: readonly string[];
   /** Who owns it (`type` as `sys.database_principals` spells it): dbo, a SQL user, when absent. */
   readonly owner?: { readonly name: string; readonly type: string; readonly dbOwner: boolean };
+  /** A memory-optimized table (`TableIsMemoryOptimized`); disk-based when absent. */
+  readonly memoryOptimized?: boolean;
 };
 
 export type WorldObject = {
@@ -138,6 +145,8 @@ export type WorldObject = {
   readonly parent?: string;
   readonly definition?: string;
   readonly disabled?: boolean;
+  /** Carries FacetDB's own extended property (the side table and the view install makes). */
+  readonly marked?: boolean;
 };
 
 export type WorldGrant = {
@@ -280,6 +289,9 @@ export function installedWorld(
     permission,
     ...(column === undefined ? {} : { column }),
   });
+  // Side-table mode: the table as it was, FacetDB's columns in the side table, the view.
+  const side = target.storage === "side-table";
+  const ownedOnTable = side ? [] : owned;
   return {
     ...world,
     tables: {
@@ -288,9 +300,17 @@ export function installedWorld(
         ...table,
         columns: [
           ...table.columns,
-          ...owned.map((column) => typed(column.name, column.type, { marked: true })),
+          ...ownedOnTable.map((column) => typed(column.name, column.type, { marked: true })),
         ],
       },
+      ...(side
+        ? {
+            [names.sideLabel]: {
+              columns: [key, ...owned.map((column) => typed(column.name, column.type))],
+              key: [keyName],
+            },
+          }
+        : {}),
       [`${SHARED_SCHEMA}.${JOBS_TABLE}`]: {
         columns: QUEUE_COLUMNS,
         key: ["table_name", "record_key"],
@@ -308,8 +328,27 @@ export function installedWorld(
           catalogColumn(key),
           target.questionSet.read,
           target.onChange,
+          target.storage,
         ),
       },
+      ...(side
+        ? [
+            { schema: names.schema, name: names.sideTable, type: "U", marked: true },
+            {
+              schema: names.schema,
+              name: names.view,
+              type: "V",
+              marked: true,
+              // As SQL Server keeps it: `create or alter view` reads back as `create   view`.
+              definition: viewText(
+                names,
+                keyName,
+                table.columns.map((column) => column.name),
+                owned.map((column) => column.name),
+              ).replace(/^create or alter view/, "create   view"),
+            },
+          ]
+        : []),
       ...(has(JOBS_TABLE) ? [] : [{ schema: SHARED_SCHEMA, name: JOBS_TABLE, type: "U" }]),
       ...(has(MARKER_TABLE) ? [] : [{ schema: SHARED_SCHEMA, name: MARKER_TABLE, type: "U" }]),
     ],
@@ -329,13 +368,14 @@ export function installedWorld(
         ...new Set([
           keyName,
           ...target.questionSet.read,
-          ...owned.map((column) => column.name),
+          ...ownedOnTable.map((column) => column.name),
           ...(table.columns.some((column) => column.name === CREATION_COLUMN)
             ? [CREATION_COLUMN]
             : []),
         ]),
       ].map((column) => on(names.schema, names.table, "SELECT", column)),
-      ...owned.map((column) => on(names.schema, names.table, "UPDATE", column.name)),
+      ...ownedOnTable.map((column) => on(names.schema, names.table, "UPDATE", column.name)),
+      ...(side ? SIDE_RIGHTS.map((right) => on(names.schema, names.sideTable, right)) : []),
       ...(has(JOBS_TABLE)
         ? []
         : ["SELECT", "INSERT", "UPDATE", "DELETE"].map((right) =>
@@ -365,7 +405,7 @@ function columnRow(column: WorldColumn): MssqlRow {
 export function answer(world: World): NonNullable<RecordingScript["answer"]> {
   const markerText = markerQuery(tableNames({ table: "" }));
   return (text, params) => {
-    const [p1, p2, p3, p4, p5, p6] = params.map(String);
+    const [p1, p2, p3, p4, p5, p6, p7] = params.map(String);
     switch (text) {
       case SERVER_QUERY:
         return [
@@ -393,7 +433,7 @@ export function answer(world: World): NonNullable<RecordingScript["answer"]> {
         return world.objects
           .filter(
             (object) =>
-              (object.schema === p1 && object.name === p2) ||
+              (object.schema === p1 && [p2, p6, p7].includes(object.name)) ||
               (object.schema === p3 && (object.name === p4 || object.name === p5)),
           )
           .map((object) => ({
@@ -404,7 +444,20 @@ export function answer(world: World): NonNullable<RecordingScript["answer"]> {
             parent_table: object.parent ?? null,
             definition: object.definition ?? null,
             disabled: object.disabled ?? false,
+            marked: object.marked ?? false,
           }));
+      case SIDE_FACTS_QUERY: {
+        const found = Object.entries(world.tables).find(([label]) => {
+          const [schema = "", ...table] = label.split(".");
+          return qualifiedName(schema, table.join(".")) === p1;
+        });
+        return [
+          {
+            build: world.server.build === undefined ? 4305 : world.server.build,
+            memory_optimized: found?.[1].memoryOptimized ?? false,
+          },
+        ];
+      }
       case WORKER_QUERY: {
         const { user, login } = world.worker;
         const given = world.worker.userLogin;
@@ -419,7 +472,7 @@ export function answer(world: World): NonNullable<RecordingScript["answer"]> {
         return world.grants
           .filter(
             (grant) =>
-              (grant.schema === p2 && grant.object === p3) ||
+              (grant.schema === p2 && (grant.object === p3 || grant.object === p7)) ||
               (grant.schema === p4 && (grant.object === p5 || grant.object === p6)),
           )
           .map((grant) => ({

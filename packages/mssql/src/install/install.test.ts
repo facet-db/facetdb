@@ -236,9 +236,13 @@ describe("the listings example", () => {
   it("returns at once from a statement that changed no row, before any write, so an empty firing never fires it again", async () => {
     const trigger = textOf(await fixturePlan(), "create trigger");
     const body = trigger.slice(trigger.indexOf("\nbegin\n") + "\nbegin\n".length).split("\n");
-    // The first statement after set nocount on (and its comment) is the early return.
-    expect(body.slice(0, 3)).toEqual([
+    // The first statement after the two settings (set nocount on, the trigger's own read committed)
+    // and their comments is the early return.
+    expect(body.slice(0, 6)).toEqual([
       "  set nocount on;",
+      "  -- FacetDB's reads here run at read committed whatever the application's level; SQL Server gives",
+      "  -- the application its own level back when the trigger returns.",
+      "  set transaction isolation level read committed;",
       "  -- A statement that changed no row has nothing to queue: its firing ends here, before any write.",
       "  if not exists (select 1 from inserted) return;",
     ]);
@@ -257,6 +261,9 @@ after insert, update
 as
 begin
   set nocount on;
+  -- FacetDB's reads here run at read committed whatever the application's level; SQL Server gives
+  -- the application its own level back when the trigger returns.
+  set transaction isolation level read committed;
   -- A statement that changed no row has nothing to queue: its firing ends here, before any write.
   if not exists (select 1 from inserted) return;
   -- An update that sets a state column, or an insert (which sets every column): the worker's own
@@ -730,15 +737,6 @@ describe("refusals", () => {
       "mssql://admin:pw@db.example.com/app?encrypt=false",
     );
     expect(trusted.result.ok).toBe(true);
-  });
-
-  it("refuses side-table mode, which SQL Server does not have yet, before connecting", async () => {
-    const { refusal, connected } = await refused(freshWorld(), {
-      ...LISTINGS,
-      storage: "side-table",
-    });
-    expect(refusal.code).toBe("side-table");
-    expect(connected).toBe(0);
   });
 
   it("refuses a table whose name leaves no room for FacetDB's names, before connecting", async () => {

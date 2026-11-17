@@ -93,6 +93,15 @@ export type CatalogObject = {
   /** A trigger's text as it was created. */
   readonly definition: string | null;
   readonly disabled: boolean;
+  /** Whether it carries FacetDB's own extended property (the side table and the view do). */
+  readonly marked: boolean;
+};
+
+/** What side-table mode reads of the server and the table besides (`SIDE_FACTS_QUERY`). */
+export type SideFacts = {
+  /** `ProductBuild`: 4001 and up on SQL Server 2016 is Service Pack 1 or later. */
+  readonly build: number | null;
+  readonly memoryOptimized: boolean;
 };
 
 /** A row of the marker: who installed on which table. */
@@ -180,18 +189,34 @@ export const OWNER_QUERY = `select dp.name as owner_name, dp.type as owner_type,
  where s.name = @p1 and o.name = @p2 and o.type = 'U'`;
 
 /**
- * The objects under FacetDB's names: `@p1` the table's schema and `@p2` its trigger's name; `@p3`
- * the shared schema with `@p4` the queue and `@p5` the marker.
+ * The objects under FacetDB's names: `@p1` the table's schema with `@p2` its trigger's name, `@p6`
+ * its side table's and `@p7` its view's (side-table mode); `@p3` the shared schema with `@p4` the
+ * queue and `@p5` the marker. `marked` is the object's own `facetdb` extended property, which the
+ * side table and the view carry, so a later install adopts them and uninstall drops them, and an
+ * object of those names without it is the application's.
  */
 export const OBJECTS_QUERY = `select s.name as object_schema, o.name as name, rtrim(o.type) as type,
        object_schema_name(o.parent_object_id) as parent_schema,
        object_name(o.parent_object_id) as parent_table,
        object_definition(o.object_id) as definition,
-       cast(coalesce(objectproperty(o.object_id, 'ExecIsTriggerDisabled'), 0) as bit) as disabled
+       cast(coalesce(objectproperty(o.object_id, 'ExecIsTriggerDisabled'), 0) as bit) as disabled,
+       cast(case when exists (select 1 from sys.extended_properties p
+                               where p.class = 1 and p.major_id = o.object_id
+                                 and p.minor_id = 0 and p.name = ${quoteString(COLUMN_MARK)})
+            then 1 else 0 end as bit) as marked
   from sys.objects o
   join sys.schemas s on s.schema_id = o.schema_id
- where (s.name = @p1 and o.name = @p2) or (s.name = @p3 and o.name in (@p4, @p5))
+ where (s.name = @p1 and o.name in (@p2, @p6, @p7)) or (s.name = @p3 and o.name in (@p4, @p5))
  order by s.name, o.name`;
+
+/**
+ * What side-table mode needs of the server and the table beyond the rest, `@p1` the table as
+ * `[schema].[table]`: the build (`create or alter view` came with SQL Server 2016 Service Pack 1,
+ * build 13.0.4001), and whether the table is memory-optimized (no foreign key joins one to a
+ * disk-based table, and it takes only natively compiled triggers).
+ */
+export const SIDE_FACTS_QUERY = `select cast(serverproperty('ProductBuild') as int) as build,
+       cast(coalesce(objectproperty(object_id(@p1), 'TableIsMemoryOptimized'), 0) as bit) as memory_optimized`;
 
 /**
  * The worker on a server with logins, `@p1` its name: its user here, a login of that name, and the
@@ -215,9 +240,9 @@ export const ROLES_QUERY = `select r.name as name
  order by r.name`;
 
 /**
- * The worker's rights on the table, the queue and the marker: `@p1` the worker, `@p2` the table's
- * schema, `@p3` the table, `@p4` the shared schema, `@p5` the queue, `@p6` the marker. A right on a
- * column has its name; one on the whole object has none.
+ * The worker's rights on the table, its side table, the queue and the marker: `@p1` the worker,
+ * `@p2` the table's schema, `@p3` the table, `@p7` the side table, `@p4` the shared schema, `@p5`
+ * the queue, `@p6` the marker. A right on a column has its name; one on the whole object has none.
  */
 export const GRANTS_QUERY = `select s.name as schema_name, o.name as object_name, c.name as column_name, p.permission_name as permission
   from sys.database_permissions p
@@ -226,7 +251,7 @@ export const GRANTS_QUERY = `select s.name as schema_name, o.name as object_name
   left join sys.columns c on c.object_id = p.major_id and c.column_id = p.minor_id
  where p.class = 1 and p.state in ('G', 'W')
    and p.grantee_principal_id = database_principal_id(@p1)
-   and ((s.name = @p2 and o.name = @p3) or (s.name = @p4 and o.name in (@p5, @p6)))
+   and ((s.name = @p2 and o.name in (@p3, @p7)) or (s.name = @p4 and o.name in (@p5, @p6)))
  order by s.name, o.name, c.column_id, p.permission_name`;
 
 /**
@@ -356,6 +381,8 @@ export async function readObjects(
       SHARED_SCHEMA,
       JOBS_TABLE,
       MARKER_TABLE,
+      names.sideTable,
+      names.view,
     ])
   ).map((row) => ({
     schema: text(row, "object_schema"),
@@ -365,7 +392,43 @@ export async function readObjects(
     parentTable: textOrNull(row, "parent_table"),
     definition: textOrNull(row, "definition"),
     disabled: flag(row, "disabled"),
+    marked: flag(row, "marked"),
   }));
+}
+
+/** The object of that name in the table's schema: its side table or its view, when it is there. */
+export function ownObject(
+  objects: readonly CatalogObject[],
+  names: TableNames,
+  name: string,
+): CatalogObject | undefined {
+  return objects.find((object) => object.schema === names.schema && object.name === name);
+}
+
+/** The side table install made (a table carrying FacetDB's mark), when it is there. */
+export function sideTableOf(
+  objects: readonly CatalogObject[],
+  names: TableNames,
+): CatalogObject | undefined {
+  const found = ownObject(objects, names, names.sideTable);
+  return found?.type === "U" && found.marked ? found : undefined;
+}
+
+/** The view install made (a view carrying FacetDB's mark), when it is there. */
+export function viewOf(
+  objects: readonly CatalogObject[],
+  names: TableNames,
+): CatalogObject | undefined {
+  const found = ownObject(objects, names, names.view);
+  return found?.type === "V" && found.marked ? found : undefined;
+}
+
+export async function readSideFacts(query: MssqlQuery, names: TableNames): Promise<SideFacts> {
+  const [row] = await query(SIDE_FACTS_QUERY, [names.relation]);
+  if (row === undefined) {
+    throw new Error(`the catalog gave no answer about ${names.label}'s server and storage`);
+  }
+  return { build: wholeOrNull(row, "build"), memoryOptimized: flag(row, "memory_optimized") };
 }
 
 /** The shared object of that name in `dbo`: the queue or the marker, when it is there. */
@@ -423,6 +486,7 @@ export async function readGrants(
       SHARED_SCHEMA,
       JOBS_TABLE,
       MARKER_TABLE,
+      names.sideTable,
     ])
   ).map((row) => {
     const column = textOrNull(row, "column_name");

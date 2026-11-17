@@ -19,6 +19,8 @@ import {
   readQueued,
   readQueueUsers,
   sharedObject,
+  sideTableOf,
+  viewOf,
   type WorkerGrant,
   withAdmin,
 } from "./catalog.ts";
@@ -39,11 +41,13 @@ import { dequeueStatement, queueCleanupStatement } from "./queue.ts";
  * trigger first, so nothing is queued while the rest goes; the worker's reads of the table's own
  * columns (its rights on FacetDB's columns go with them); FacetDB's marked columns and never
  * another, without `cascade`, so an index or view of the application's on one of them fails the
- * drop and rolls the whole script back with SQL Server's message naming it; the table's jobs, and
- * the database's queue once no FacetDB trigger writes to it and it holds no job; the table's row of
- * the marker, and the marker table once no table of the database is installed. The worker stays:
- * every project in the database may share it. The project's name is typed back before anything
- * runs.
+ * drop and rolls the whole script back with SQL Server's message naming it; in side-table mode the
+ * view and then the side table, each only when it carries FacetDB's mark, whatever the config's
+ * storage says now, since a source switched to inline still leaves the side table install made; the
+ * table's jobs, and the database's queue once no FacetDB trigger writes to it and it holds no job;
+ * the table's row of the marker, and the marker table once no table of the database is installed.
+ * The worker stays: every project in the database may share it. The project's name is typed back
+ * before anything runs.
  *
  * The decision log is the FacetDB store's: `--purge` deletes it through the CLI's store door after
  * this run. A table uninstalled earlier still has its log there, and its purge is a plan with one
@@ -137,6 +141,9 @@ type Installed = {
   readonly others: readonly string[];
   readonly columns: readonly CatalogColumn[];
   readonly trigger: CatalogObject | undefined;
+  /** Side-table mode's view and side table, each when it is there and FacetDB's. */
+  readonly view: CatalogObject | undefined;
+  readonly side: CatalogObject | undefined;
   readonly grants: readonly WorkerGrant[];
   readonly queue: QueueFacts | undefined;
 };
@@ -157,6 +164,15 @@ function uninstallStatements(names: TableNames, installed: Installed): readonly 
             `if database_principal_id(${quoteString(WORKER_USER)}) is not null\n  revoke select (${reads.map(quoteName).join(", ")}) on ${names.relation} from ${quoteName(WORKER_USER)}`,
           ),
         ]),
+    // Side-table mode: the view first (it reads the side table), then the side table, its answers,
+    // its foreign key and the worker's rights on it with it. Each only when it carries FacetDB's
+    // mark, so an object of the application's under either name is never dropped.
+    ...(installed.view === undefined
+      ? []
+      : [sourceStatement("columns", `drop view if exists ${names.viewRelation}`)]),
+    ...(installed.side === undefined
+      ? []
+      : [sourceStatement("columns", `drop table if exists ${names.sideRelation}`)]),
     ...installed.columns
       .filter((column) => column.marked)
       .map((column) =>
@@ -198,6 +214,8 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
     )
       ? [own("grant", WORKER_USER)]
       : []),
+    ...(installed.view === undefined ? [] : [own("view", names.view)]),
+    ...(installed.side === undefined ? [] : [own("side-table", names.sideTable)]),
     ...installed.columns
       .filter((column) => column.marked)
       .map((column) => own("column", column.name)),
@@ -330,7 +348,12 @@ export async function planUninstall(
     const trigger = ownTrigger(names, objects);
     if (row === undefined || marker === undefined) {
       // Nothing of an install left on the table: with --purge, only its log goes (the store's).
-      if (options.purge && trigger === undefined && !columns.some((column) => column.marked)) {
+      const left =
+        trigger !== undefined ||
+        columns.some((column) => column.marked) ||
+        sideTableOf(objects, names) !== undefined ||
+        viewOf(objects, names) !== undefined;
+      if (options.purge && !left) {
         return logOnlyPurge(target, names, marker);
       }
       return {
@@ -375,6 +398,8 @@ export async function planUninstall(
           .filter((label) => !runLabels.has(label)),
         columns,
         trigger,
+        view: viewOf(objects, names),
+        side: sideTableOf(objects, names),
         grants: await readGrants(query, names),
         queue,
       }),

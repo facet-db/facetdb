@@ -17,6 +17,7 @@ import {
   readServer,
   type ServerFacts,
   SHARED_SCHEMA,
+  SIDE_RIGHTS,
   sameTrigger,
   type TableNames,
   tableNames,
@@ -281,7 +282,9 @@ function missingRights(
         grant.permission === permission &&
         (grant.column === undefined || grant.column === column),
     );
-  const owned = ownedColumns(target.questionSet).map((column) => column.name);
+  // In side-table mode FacetDB's columns are the side table's, whole.
+  const sideMode = target.storage === "side-table";
+  const owned = sideMode ? [] : ownedColumns(target.questionSet).map((column) => column.name);
   const created = columns.some((column) => column.name === CREATION_COLUMN);
   const readable = [
     ...new Set([key, ...target.questionSet.read, ...owned, ...(created ? [CREATION_COLUMN] : [])]),
@@ -293,6 +296,9 @@ function missingRights(
     ...owned
       .filter((column) => !holds(names.table, names.schema, "UPDATE", column))
       .map((column) => `update on ${column}`),
+    ...(sideMode ? SIDE_RIGHTS : [])
+      .filter((permission) => !holds(names.sideTable, names.schema, permission))
+      .map((permission) => `${permission.toLowerCase()} on ${names.sideTable}`),
     ...["SELECT", "INSERT", "UPDATE", "DELETE"]
       .filter((permission) => !holds(JOBS_TABLE, SHARED_SCHEMA, permission))
       .map((permission) => `${permission.toLowerCase()} on ${JOBS_TABLE}`),
@@ -380,7 +386,15 @@ export async function doctorChecks(
     }
     const owned = ownedColumns(target.questionSet);
     const byName = new Map(columns.map((column) => [column.name, column]));
-    const missing = owned.filter((column) => !byName.has(column.name)).map(({ name }) => name);
+    // Where FacetDB's columns are: on the table, or in the side table.
+    const sideMode = target.storage === "side-table";
+    const answersAt = sideMode ? names.sideLabel : names.label;
+    const stored = sideMode
+      ? new Set(
+          (await readColumns(query, names.schema, names.sideTable)).map((column) => column.name),
+        )
+      : new Set(byName.keys());
+    const missing = owned.filter((column) => !stored.has(column.name)).map(({ name }) => name);
     const queue = objects.some(
       (object) => object.schema === SHARED_SCHEMA && object.name === JOBS_TABLE,
     );
@@ -393,7 +407,11 @@ export async function doctorChecks(
           ]
         : []),
       ...(columns.length > 0 && missing.length > 0
-        ? [`${names.label} lacks ${missing.join(", ")}`]
+        ? [
+            sideMode && stored.size === 0
+              ? `${answersAt} is missing, or the worker has no right on it`
+              : `${answersAt} lacks ${missing.join(", ")}`,
+          ]
         : []),
       ...(queue ? [] : [`${SHARED_SCHEMA}.${JOBS_TABLE} is missing`]),
       ...(marker === undefined
@@ -427,7 +445,7 @@ export async function doctorChecks(
     checks.push(
       ok(
         "install",
-        `${owned.length} FacetDB columns on ${names.label}, the jobs table and the marker row of project ${target.project.id} are there`,
+        `${owned.length} FacetDB columns on ${answersAt}, the jobs table and the marker row of project ${target.project.id} are there`,
       ),
     );
 
@@ -455,7 +473,7 @@ export async function doctorChecks(
       key !== undefined &&
       !sameTrigger(
         trigger.definition,
-        triggerText(names, key, target.questionSet.read, target.onChange),
+        triggerText(names, key, target.questionSet.read, target.onChange, target.storage),
       )
     ) {
       checks.push(
@@ -493,7 +511,9 @@ export async function doctorChecks(
         : lacking.length === 0
           ? ok(
               "grants",
-              `${WORKER_USER} selects the key, the ${target.questionSet.read.length} state columns and FacetDB's columns of ${names.label}, updates FacetDB's columns only, and has its rights on ${JOBS_TABLE} and ${MARKER_TABLE}`,
+              sideMode
+                ? `${WORKER_USER} selects the key and the ${target.questionSet.read.length} state columns of ${names.label} and writes nothing there, selects, inserts and updates ${names.sideTable}, and has its rights on ${JOBS_TABLE} and ${MARKER_TABLE}`
+                : `${WORKER_USER} selects the key, the ${target.questionSet.read.length} state columns and FacetDB's columns of ${names.label}, updates FacetDB's columns only, and has its rights on ${JOBS_TABLE} and ${MARKER_TABLE}`,
             )
           : fail(
               "grants",

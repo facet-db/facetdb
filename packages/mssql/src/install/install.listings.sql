@@ -143,6 +143,9 @@ after insert, update
 as
 begin
   set nocount on;
+  -- FacetDB's reads here run at read committed whatever the application's level; SQL Server gives
+  -- the application its own level back when the trigger returns.
+  set transaction isolation level read committed;
   -- A statement that changed no row has nothing to queue: its firing ends here, before any write.
   if not exists (select 1 from inserted) return;
   -- An update that sets a state column, or an insert (which sets every column): the worker's own

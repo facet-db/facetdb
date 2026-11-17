@@ -15,6 +15,7 @@ import {
   type CatalogObject,
   columnType,
   type MarkerRow,
+  ownObject,
   readColumns,
   readGrants,
   readKey,
@@ -22,10 +23,14 @@ import {
   readObjects,
   readOwner,
   readServer,
+  readSideFacts,
   readWorker,
   type ServerFacts,
+  type SideFacts,
   sharedObject,
+  sideTableOf,
   type TableOwner,
+  viewOf,
   type WorkerFacts,
   type WorkerGrant,
   withAdmin,
@@ -54,7 +59,19 @@ import {
   WORKER_USER,
 } from "./objects.ts";
 import { keyTextLength, queueStatement } from "./queue.ts";
-import { sameTrigger, triggerText } from "./trigger.ts";
+import {
+  answerColumnsOf,
+  CONSTRAINT_SUFFIX_LENGTH,
+  foreignKeyNote,
+  sameView,
+  sideColumnStatement,
+  sideConstraints,
+  sideTableStatement,
+  viewMarkStatement,
+  viewNote,
+  viewText,
+} from "./side-table.ts";
+import { type Storage, sameTrigger, triggerText } from "./trigger.ts";
 
 /**
  * `planInstall` on SQL Server 2016 and later and Azure SQL: inspect the database with the admin
@@ -68,6 +85,11 @@ import { sameTrigger, triggerText } from "./trigger.ts";
  * containment it is a server login with a user in this database. Its password is in no plan: the
  * `secret` statement reads it from `@p1`, which `run` binds. DDL takes no parameter, so that
  * statement writes the password into the text it executes, on the server, and never in a script.
+ *
+ * `storage` picks where the answers go: the table's own columns, or the side table and its view
+ * (`side-table.ts`), the table untouched. The two branches meet the capture in one place, the
+ * trigger's status statements (`trigger.ts`, `pendingText`); everything else of the capture, the
+ * queue, the marker and the worker is the same in both.
  */
 
 /**
@@ -82,6 +104,16 @@ const LOCK_TIMEOUT_MS = 10_000;
  * `claimKey`), update to claim them and delete to ack them, as on every other engine.
  */
 const QUEUE_RIGHTS = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
+
+/**
+ * The worker's rights on a side table, every column of which is FacetDB's: select for `current` and
+ * the guard's read, insert for a record's first answer, update for the next ones. No delete: a side
+ * row goes with its record (the foreign key's cascade) or with the uninstall, never by the worker's
+ * hand, and least privilege grants nothing unused. No right on the view either: the view shares its
+ * owner with the table, so select on it would read every column of the table through ownership
+ * chaining, where the worker reads the key and the state columns alone.
+ */
+export const SIDE_RIGHTS = ["SELECT", "INSERT", "UPDATE"] as const;
 
 /**
  * The principals a trigger can run as (`sys.database_principals.type`): a SQL user, a Windows user,
@@ -115,7 +147,15 @@ type InstallCatalog =
       readonly marker: readonly MarkerRow[] | undefined;
       readonly worker: WorkerFacts;
       readonly grants: readonly WorkerGrant[];
+      /** Side-table mode alone: the side table's columns (none before the install) and the facts. */
+      readonly side: SideCatalog | undefined;
     };
+
+/** What side-table mode reads besides. */
+type SideCatalog = {
+  readonly columns: readonly CatalogColumn[];
+  readonly facts: SideFacts;
+};
 
 /** The catalog of a table that is there. */
 type TableCatalog = Extract<InstallCatalog, { readonly table: true }>;
@@ -127,11 +167,16 @@ export function containedUsers(server: ServerFacts): boolean {
 
 /** What the target itself makes impossible, before anything connects. */
 function targetRefusal(target: EngineTarget, names: TableNames): Refusal | undefined {
-  if (target.storage === "side-table") {
+  // The side table's constraints are the longest names: `facetdb_<table>_answers_pkey`.
+  const sideRoom = NAME_LIMIT - CONSTRAINT_SUFFIX_LENGTH;
+  if (
+    target.storage === "side-table" &&
+    (names.sideTable.length > sideRoom || names.view.length > NAME_LIMIT)
+  ) {
     return {
-      code: "side-table",
-      message: `side-table mode is not available on SQL Server yet, so ${names.label} cannot keep its answers in a table of their own`,
-      fix: 'remove storage: "side-table" from the source in facetdb.config.ts: the answers then go in columns on the table',
+      code: "name-length",
+      message: `${names.label}: side-table mode names its answers table ${names.sideTable}, its keys ${sideConstraints(names).primaryKey} and ${sideConstraints(names).foreignKey}, and its view ${names.view}, and SQL Server keeps names of at most ${NAME_LIMIT} characters`,
+      fix: `rename the table so that ${names.sideTable} is at most ${sideRoom} characters, or keep storage "inline"`,
     };
   }
   if (names.trigger.length > NAME_LIMIT || names.relation.length > QUEUE_NAME_LENGTH) {
@@ -183,6 +228,61 @@ function takenName(
   return marker !== undefined && marker.type !== "U"
     ? { name: `${SHARED_SCHEMA}.${MARKER_TABLE}`, role: "marker table" }
     : undefined;
+}
+
+/**
+ * Side-table mode's names held by something FacetDB did not make: an object under the side table's
+ * name that is not a table carrying FacetDB's mark, or under the view's that is not a marked view.
+ * Install never replaces what it did not make.
+ */
+function takenSide(
+  names: TableNames,
+  catalog: TableCatalog,
+): { readonly name: string; readonly role: string } | undefined {
+  const side = ownObject(catalog.objects, names, names.sideTable);
+  if (side !== undefined && sideTableOf(catalog.objects, names) === undefined) {
+    return { name: names.sideLabel, role: `answers table for ${names.label}` };
+  }
+  const view = ownObject(catalog.objects, names, names.view);
+  return view !== undefined && viewOf(catalog.objects, names) === undefined
+    ? { name: names.viewLabel, role: `view of ${names.label} with its answers` }
+    : undefined;
+}
+
+/** SQL Server 2016's build of Service Pack 1, the first with `create or alter view`. */
+const CREATE_OR_ALTER_BUILD = 4001;
+
+/**
+ * What side-table mode needs of the server and the table that inline mode does not: `create or
+ * alter view` (SQL Server 2016 SP1; Azure SQL has it, and every later version), and a disk-based
+ * table, since SQL Server takes no foreign key between a memory-optimized table and a disk-based one.
+ */
+function sideRefusal(
+  names: TableNames,
+  server: ServerFacts,
+  facts: SideFacts,
+): Refusal | undefined {
+  const azure =
+    server.edition === AZURE_SQL_DATABASE || server.edition === AZURE_SQL_MANAGED_INSTANCE;
+  if (
+    !azure &&
+    server.majorVersion === 13 &&
+    (facts.build === null || facts.build < CREATE_OR_ALTER_BUILD)
+  ) {
+    return {
+      code: "server-version",
+      message: `this server is SQL Server 2016 before Service Pack 1 (build 13.0.${facts.build ?? "unknown"}); side-table mode makes its view ${names.viewLabel} with create or alter view, which came with Service Pack 1 (build 13.0.4001)`,
+      fix: 'install SQL Server 2016 Service Pack 1 or a later update on the server, or keep storage "inline" for the source in facetdb.config.ts',
+    };
+  }
+  if (facts.memoryOptimized) {
+    return {
+      code: "memory-optimized",
+      message: `${names.label} is a memory-optimized table: SQL Server takes no foreign key between it and the disk-based table ${names.sideLabel} that keeps its answers, and a memory-optimized table takes only natively compiled triggers, so FacetDB could not watch it in either mode`,
+      fix: "point the source at a disk-based table (a view of a memory-optimized table cannot carry a trigger either)",
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -282,6 +382,13 @@ function check(
       "give the table a single-column key of one of those types (an int, a bigint or a uniqueidentifier), then run facetdb migrate again",
     );
   }
+  const { side } = catalog;
+  if (side !== undefined) {
+    const refusal = sideRefusal(names, server, side.facts);
+    if (refusal !== undefined) {
+      return { refusal };
+    }
+  }
   // Another project's install first: its columns would read as a question's type changed here.
   const claim = catalog.marker?.find(
     (row) => row.schema === names.schema && row.table === names.table,
@@ -322,16 +429,40 @@ function check(
       "list the columns it is computed from in the source's read list instead",
     );
   }
-  const foreign = owned.filter((column) => byName.get(column.name)?.marked === false);
+  // One storage per table: the other mode's answers would be two copies, and in side-table mode an
+  // inline install's columns would be two columns of one name in the view.
+  const inline = columns.filter((column) => column.marked).map((column) => column.name);
+  if (side !== undefined && inline.length > 0) {
+    return refuse(
+      "storage-mode",
+      `${label} carries FacetDB columns from an inline install (${inline.join(", ")}); side-table mode would keep a second copy of its answers in ${names.sideLabel} and show both in ${names.viewLabel}`,
+      'uninstall the inline install first (facetdb uninstall), or keep storage "inline" for the source in facetdb.config.ts',
+    );
+  }
+  if (side === undefined && sideTableOf(catalog.objects, names) !== undefined) {
+    return refuse(
+      "storage-mode",
+      `${label} is installed in side-table mode (its answers are in ${names.sideLabel}); installing inline would keep a second copy of them on the table`,
+      'uninstall first (facetdb uninstall), or keep storage "side-table" for the source in facetdb.config.ts',
+    );
+  }
+  // Inline, an unmarked column of a question's name is the application's; in side-table mode any
+  // column of the table with that name would be a second column of the name in the view.
+  const foreign = owned.filter((column) =>
+    side === undefined ? byName.get(column.name)?.marked === false : byName.has(column.name),
+  );
   if (foreign.length > 0) {
     return refuse(
       "column-collision",
-      `${label} already has a column named ${foreign.map((column) => column.name).join(", ")} that is not FacetDB's`,
+      `${label} already has a column named ${foreign.map((column) => column.name).join(", ")} that is not FacetDB's${side === undefined ? "" : `, and ${names.viewLabel} shows the table's columns beside FacetDB's`}`,
       "rename the question in facetdb.config.ts, or rename the column",
     );
   }
+  // Where FacetDB's columns are: on the table, or in the side table.
+  const stored =
+    side === undefined ? byName : new Map(side.columns.map((column) => [column.name, column]));
   const drifted = owned.flatMap((column) => {
-    const found = byName.get(column.name);
+    const found = stored.get(column.name);
     return found === undefined || columnType(found) === column.type
       ? []
       : [`${column.name} is ${columnType(found)} and the question now needs ${column.type}`];
@@ -339,11 +470,12 @@ function check(
   if (drifted.length > 0) {
     return refuse(
       "column-type",
-      `${label}: ${drifted.join("; ")}; a question's type cannot change in place`,
+      `${side === undefined ? label : names.sideLabel}: ${drifted.join("; ")}; a question's type cannot change in place`,
       "remove the question and run facetdb migrate --prune (it drops its columns), then add it back",
     );
   }
-  const taken = takenName(names, catalog);
+  const taken =
+    takenName(names, catalog) ?? (side === undefined ? undefined : takenSide(names, catalog));
   if (taken !== undefined) {
     return refuse(
       "name-taken",
@@ -426,7 +558,7 @@ function captureStatements(
   key: CatalogColumn,
   trigger: CatalogObject | undefined,
 ): readonly PlanStatement[] {
-  const wanted = triggerText(names, key, target.questionSet.read, target.onChange);
+  const wanted = triggerText(names, key, target.questionSet.read, target.onChange, target.storage);
   const current =
     trigger !== undefined &&
     trigger.definition !== null &&
@@ -563,12 +695,20 @@ function grantStatements(
 ): readonly PlanStatement[] {
   const { grants } = catalog;
   const table = { schema: names.schema, object: names.table };
-  const owned = ownedColumns(target.questionSet).map((column) => column.name);
+  // In side-table mode FacetDB's columns are not on the table: the worker reads the key, the state
+  // and the creation marker there, and writes nothing.
+  const sideMode = target.storage === "side-table";
+  const owned = sideMode ? [] : ownedColumns(target.questionSet).map((column) => column.name);
   const created = catalog.columns.some((column) => column.name === CREATION_COLUMN);
   const readable = [
     ...new Set([key, ...target.questionSet.read, ...owned, ...(created ? [CREATION_COLUMN] : [])]),
   ].filter((column) => !holds(grants, table, "SELECT", column));
   const writable = owned.filter((column) => !holds(grants, table, "UPDATE", column));
+  const side = sideMode
+    ? SIDE_RIGHTS.filter(
+        (right) => !holds(grants, { schema: names.schema, object: names.sideTable }, right),
+      )
+    : [];
   const queue = QUEUE_RIGHTS.filter(
     (right) => !holds(grants, { schema: SHARED_SCHEMA, object: JOBS_TABLE }, right),
   );
@@ -590,6 +730,14 @@ function grantStatements(
           sourceStatement(
             "grants",
             `grant update (${list(writable)})\n  on ${names.relation} to ${worker}`,
+          ),
+        ]),
+    ...(side.length === 0
+      ? []
+      : [
+          sourceStatement(
+            "grants",
+            `grant ${side.map((right) => right.toLowerCase()).join(", ")} on ${names.sideRelation} to ${worker}`,
           ),
         ]),
     ...(queue.length === 0
@@ -633,8 +781,10 @@ function installPlan(
   catalog: TableCatalog,
   key: CatalogColumn,
 ): EnginePlan {
-  const present = new Set(catalog.columns.map((column) => column.name));
-  const added = ownedColumns(target.questionSet).filter((column) => !present.has(column.name));
+  const storage =
+    catalog.side === undefined
+      ? inlineStorage(target, names, catalog)
+      : sideStorage(target, names, catalog, catalog.side, key);
   const trigger = catalog.objects.find(
     (object) => object.schema === names.schema && object.name === names.trigger,
   );
@@ -644,7 +794,7 @@ function installPlan(
     catalog.marker?.some((row) => row.schema === names.schema && row.table === names.table) ===
     true;
   const changes = [
-    ...added.map((column) => columnStatement(names, column)),
+    ...storage.statements,
     ...(sharedObject(catalog.objects, JOBS_TABLE) === undefined ? [queueStatement(names)] : []),
     ...capture,
     ...login.statements,
@@ -666,9 +816,74 @@ function installPlan(
     keeps: [],
     notes: [
       ...(trigger === undefined && capture.length > 0 ? [triggerNote(names)] : []),
+      ...storage.notes,
+      ...login.notes,
+    ],
+  };
+}
+
+/** Where the answers go, as statements and what the operator is told of them. */
+type StoragePlan = {
+  readonly statements: readonly PlanStatement[];
+  readonly notes: readonly string[];
+};
+
+/** Inline: the columns the table lacks, each marked. */
+function inlineStorage(
+  target: EngineTarget,
+  names: TableNames,
+  catalog: TableCatalog,
+): StoragePlan {
+  const present = new Set(catalog.columns.map((column) => column.name));
+  const added = ownedColumns(target.questionSet).filter((column) => !present.has(column.name));
+  return {
+    statements: added.map((column) => columnStatement(names, column)),
+    notes: [
       ...(added.length === 0 ? [] : [columnsNote(names, added.length)]),
       ...(added.some((column) => column.name === STATUS_COLUMN) ? [pendingNote(names)] : []),
-      ...login.notes,
+    ],
+  };
+}
+
+/**
+ * Side-table mode: the side table when the database has none, else the columns it lacks; the view
+ * when it is missing or no longer lists the table's columns and the side table's (the application
+ * added a column, a question added one), and its mark when it is new. The table itself is not
+ * touched.
+ */
+function sideStorage(
+  target: EngineTarget,
+  names: TableNames,
+  catalog: TableCatalog,
+  side: SideCatalog,
+  key: CatalogColumn,
+): StoragePlan {
+  const owned = ownedColumns(target.questionSet);
+  const made = sideTableOf(catalog.objects, names) !== undefined;
+  const present = answerColumnsOf(side.columns, key.name).map((column) => column.name);
+  const added = made ? owned.filter((column) => !present.includes(column.name)) : owned;
+  const view = viewOf(catalog.objects, names);
+  const wanted = viewText(
+    names,
+    key.name,
+    catalog.columns.map((column) => column.name),
+    [...(made ? present : []), ...added.map((column) => column.name)],
+  );
+  const current =
+    view?.definition !== null &&
+    view?.definition !== undefined &&
+    sameView(view.definition, wanted);
+  return {
+    statements: [
+      ...(made
+        ? added.map((column) => sideColumnStatement(names, column))
+        : [sideTableStatement(names, key, owned)]),
+      ...(current ? [] : [sourceStatement("columns", wanted)]),
+      ...(view === undefined ? [viewMarkStatement(names)] : []),
+    ],
+    notes: [
+      ...(made ? [] : [foreignKeyNote(names)]),
+      ...(view === undefined ? [viewNote(names)] : []),
     ],
   };
 }
@@ -678,6 +893,7 @@ async function inspect(
   connect: MssqlConnect,
   url: string,
   names: TableNames,
+  storage: Storage,
 ): Promise<InstallCatalog> {
   return withAdmin(connect, url, async (query): Promise<InstallCatalog> => {
     const server = await readServer(query);
@@ -697,6 +913,13 @@ async function inspect(
       marker: await readMarker(query, names, objects),
       worker: await readWorker(query, server),
       grants: await readGrants(query, names),
+      side:
+        storage === "side-table"
+          ? {
+              columns: await readColumns(query, names.schema, names.sideTable),
+              facts: await readSideFacts(query, names),
+            }
+          : undefined,
     };
   });
 }
@@ -716,7 +939,7 @@ export async function planInstall(
   if (impossible !== undefined) {
     return { ok: false, refusal: impossible };
   }
-  const checked = check(target, names, await inspect(connect, url, names), options);
+  const checked = check(target, names, await inspect(connect, url, names, target.storage), options);
   return "refusal" in checked
     ? { ok: false, refusal: checked.refusal }
     : { ok: true, plan: installPlan(target, names, checked.catalog, checked.key) };

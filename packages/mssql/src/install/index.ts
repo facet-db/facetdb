@@ -22,11 +22,15 @@ export {
   readServer,
   SERVER_QUERY,
   type ServerFacts,
+  SIDE_FACTS_QUERY,
+  type SideFacts,
   sharedObject,
+  sideTableOf,
+  viewOf,
   WORKER_QUERY,
   type WorkerGrant,
 } from "./catalog.ts";
-export { containedUsers, LOGIN_NOTE, planInstall, REMAP_NOTE } from "./install.ts";
+export { containedUsers, LOGIN_NOTE, planInstall, REMAP_NOTE, SIDE_RIGHTS } from "./install.ts";
 export { createInstaller, type MssqlInstaller } from "./installer.ts";
 export { anotherProject, markerQuery, SCRIPT_ERROR, SCRIPT_PREFIX } from "./marker.ts";
 export {
@@ -41,9 +45,11 @@ export {
   QUEUE_KEY_LENGTH,
   QUEUE_NAME_LENGTH,
   SHARED_SCHEMA,
+  sideTableName,
   type TableNames,
   tableNames,
   triggerName,
+  viewName,
   WORKER_USER,
 } from "./objects.ts";
 export {
@@ -56,5 +62,6 @@ export {
 export { keyText, keyTextLength } from "./queue.ts";
 export { ONE_TRANSACTION, render } from "./render.ts";
 export { runPlan } from "./run.ts";
-export { sameTrigger, triggerText } from "./trigger.ts";
+export { answerColumnsOf, sameView, sideKeyType, viewText } from "./side-table.ts";
+export { type Storage, sameTrigger, triggerText } from "./trigger.ts";
 export { planUninstall, ranNote, WORKER_KEPT } from "./uninstall.ts";

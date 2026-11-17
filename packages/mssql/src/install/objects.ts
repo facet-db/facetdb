@@ -14,10 +14,11 @@ import { qualifiedName } from "../sql/index.ts";
 /**
  * What FacetDB adds to a SQL Server or Azure SQL database, by name and type. Everything carries the
  * `facetdb_` prefix, so `facetdb uninstall` finds all of it: the answer and status columns on the
- * table, each marked as FacetDB's; the table's trigger `facetdb_<table>` beside it; and once per
- * database, in `dbo` (the schema every database has), the queue `facetdb_jobs` every watched table
- * shares and the project marker `facetdb_table_owners`; and the worker user `facetdb_worker`, the
- * one credential FacetDB keeps.
+ * table, each marked as FacetDB's, or in side-table mode the side table `facetdb_<table>_answers`
+ * and, the one name without the prefix, the view `<table>_with_answers`, each marked whole; the
+ * table's trigger `facetdb_<table>` beside it; and once per database, in `dbo` (the schema every
+ * database has), the queue `facetdb_jobs` every watched table shares and the project marker
+ * `facetdb_table_owners`; and the worker user `facetdb_worker`, the one credential FacetDB keeps.
  */
 
 /** The schema of a table the config names without one (`EngineTarget.schema`). */
@@ -75,6 +76,21 @@ export function triggerName(table: string): string {
   return `facetdb_${table}`;
 }
 
+/**
+ * Side-table mode's table, in the source table's schema beside its trigger:
+ * `facetdb_<table>_answers`, under the prefix every FacetDB object has, where Postgres has
+ * `facetdb.<table>_answers` in a schema of its own. Two tables of one name in two schemas keep two
+ * side tables, as they keep two triggers.
+ */
+export function sideTableName(table: string): string {
+  return `facetdb_${table}_answers`;
+}
+
+/** Side-table mode's view, beside the source table: `<table>_with_answers`. */
+export function viewName(table: string): string {
+  return `${table}_with_answers`;
+}
+
 /** A source table and the names of what FacetDB adds for it. */
 export type TableNames = {
   readonly schema: string;
@@ -91,6 +107,18 @@ export type TableNames = {
   readonly jobsRelation: string;
   /** `[dbo].[facetdb_table_owners]` */
   readonly markerRelation: string;
+  /** `facetdb_listings_answers`, bare, in the table's schema (side-table mode). */
+  readonly sideTable: string;
+  /** `dbo.facetdb_listings_answers`, as the words name it. */
+  readonly sideLabel: string;
+  /** `[dbo].[facetdb_listings_answers]` */
+  readonly sideRelation: string;
+  /** `listings_with_answers`, bare, in the table's schema (side-table mode). */
+  readonly view: string;
+  /** `dbo.listings_with_answers`, as the words name it. */
+  readonly viewLabel: string;
+  /** `[dbo].[listings_with_answers]` */
+  readonly viewRelation: string;
 };
 
 export function tableNames(target: Pick<EngineTarget, "schema" | "table">): TableNames {
@@ -105,6 +133,12 @@ export function tableNames(target: Pick<EngineTarget, "schema" | "table">): Tabl
     triggerRelation: qualifiedName(schema, triggerName(table)),
     jobsRelation: qualifiedName(SHARED_SCHEMA, JOBS_TABLE),
     markerRelation: qualifiedName(SHARED_SCHEMA, MARKER_TABLE),
+    sideTable: sideTableName(table),
+    sideLabel: `${schema}.${sideTableName(table)}`,
+    sideRelation: qualifiedName(schema, sideTableName(table)),
+    view: viewName(table),
+    viewLabel: `${schema}.${viewName(table)}`,
+    viewRelation: qualifiedName(schema, viewName(table)),
   };
 }
 

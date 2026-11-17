@@ -65,6 +65,10 @@ import { connectMssqlPool, DEFAULT_MAX_CONNECTIONS, type MssqlPoolConnect } from
  * `write` holds no lock across a round trip: the row is updated in one statement only where its
  * state still equals, as bytes of its text, the state whose hash the model was sent, and only
  * FacetDB's columns are set.
+ *
+ * In side-table mode the answers are in the table's `facetdb_<table>_answers`: `read`, `scan` and
+ * the guard read the state from the table, as inline, while `write` and `current` go to the side
+ * row. Nothing of the queue changes.
  */
 
 /** The jobs table is polled every second. */
@@ -76,12 +80,12 @@ export const POLL_MS = 1_000;
  */
 export const CLAIM_LEASE_MS = 15 * 60_000;
 
-/** What SQL Server can do: inline columns, several workers; no side tables yet. */
+/** What SQL Server can do: inline columns, a side table, several workers. */
 export const MSSQL_CAPABILITIES: Capabilities = {
   inlineColumns: true,
   pushWakeup: false,
   transactions: true,
-  sideTable: false,
+  sideTable: true,
   multipleWorkers: true,
 };
 
@@ -373,6 +377,11 @@ export async function createMssqlConnector(
   const { questionSet } = target;
   const fields = questionSet.read;
   const table = names.relation;
+  /** Where a decision is stored: the table itself, or its side table. */
+  const sideMode = target.storage === "side-table";
+  const side = names.sideRelation;
+  /** The side table's key: the table's key column, by name, in its type. */
+  const sideKey = quoteName(facts.key.name);
   const jobs = names.jobsRelation;
   /** The table as the trigger writes it into the queue's `table_name`: `[dbo].[listings]`. */
   const queued = names.relation;
@@ -587,6 +596,41 @@ export async function createMssqlConnector(
   }
 
   /**
+   * Side-table mode's write, one batch and one transaction, so no lock outlives the round trip: the
+   * guard reads the table's row under an update lock (`updlock`, `rowlock`; a locking read under
+   * READ_COMMITTED_SNAPSHOT too, `readcommittedlock`), held to the commit, then the side row is
+   * updated, or inserted for a record's first answer. Inline the guard and the write are one
+   * statement on one row; here they are two rows, and the lock makes them one step: an application
+   * write to the row waits for this commit, then its trigger puts the side row back to pending
+   * (`onChange: reset`) and clears the claim, where without the lock a change committed between the
+   * guard and the write would read as answered at its new state until it was asked again. The
+   * worker's select on the state columns is the only right the lock needs (proven on SQL Server
+   * 2022). Every writer of a side row locks its table row first (the trigger inside the
+   * application's statement, a delete's cascade), so the update-then-insert never meets another
+   * insert of the same key, and the order (table row, then side row) is the application's own, so
+   * the two never wait on each other in a cycle; a cycle through an application transaction at
+   * repeatable read ends this statement, the session's `deadlock_priority low` (client.ts). The
+   * side table has no trigger; the count goes through `@written` as inline.
+   */
+  function sideWrite(
+    set: string,
+    values: readonly (readonly [string, string])[],
+    keyed: string,
+    unchanged: string,
+  ): string {
+    return `declare @written table ([n] int);
+begin transaction;
+if exists (select 1 from ${table} t with (readcommittedlock, updlock, rowlock) where ${unchanged})
+begin
+  update a set ${set} output 1 into @written ([n]) from ${side} a where a.${sideKey} = ${keyed};
+  if @@rowcount = 0
+    insert into ${side} (${[sideKey, ...values.map(([column]) => quoteName(column))].join(", ")}) output 1 into @written ([n]) values (${[keyed, ...values.map(([, value]) => value)].join(", ")});
+end
+commit transaction;
+select count(*) as written from @written;`;
+  }
+
+  /**
    * The row is updated only where its state still equals the state whose hash was sent. The state
    * the last `read` returned for the key serves when its hash is the expected one; otherwise the
    * state is read and hashed first, and a hash already moved writes nothing. Either way the check
@@ -598,6 +642,9 @@ export async function createMssqlConnector(
    * table with an enabled trigger (error 334), so the rows the update matched are counted through a
    * table variable; the driver's row count would add the rows any other trigger of the application
    * touched, a trigger without `set nocount on` among them.
+   *
+   * In side-table mode the same guard reads the table's row, and the decision goes to its side row
+   * (`sideWrite`).
    */
   async function write(
     recordKey: RecordKey,
@@ -625,13 +672,11 @@ export async function createMssqlConnector(
       params.push(value);
       return `@p${params.length}`;
     };
-    const set = assignments
-      .map(([column, value]) =>
-        column === UPDATED_AT_COLUMN
-          ? `${quoteName(column)} = ${timeOf(bind(value))}`
-          : `${quoteName(column)} = ${bind(value)}`,
-      )
-      .join(", ");
+    const values = assignments.map(
+      ([column, value]) =>
+        [column, column === UPDATED_AT_COLUMN ? timeOf(bind(value)) : bind(value)] as const,
+    );
+    const set = values.map(([column, value]) => `${quoteName(column)} = ${value}`).join(", ");
     const key = bind(recordKey);
     const guard = fields
       .map((field, index) => {
@@ -642,9 +687,13 @@ export async function createMssqlConnector(
           : `convert(varbinary(max), ${expression}) = convert(varbinary(max), ${bind(value)})`;
       })
       .join(" and ");
+    const keyed = `try_convert(${columnType(facts.key)}, ${key})`;
+    const unchanged = `${keyColumn} = ${keyed} and ${keyExpr} = ${key}${guard === "" ? "" : ` and ${guard}`}`;
     const rows = await pool.query(
-      `declare @written table ([n] int);
-update t set ${set} output 1 into @written ([n]) from ${table} t where ${keyColumn} = try_convert(${columnType(facts.key)}, ${key}) and ${keyExpr} = ${key}${guard === "" ? "" : ` and ${guard}`};
+      sideMode
+        ? sideWrite(set, values, keyed, unchanged)
+        : `declare @written table ([n] int);
+update t set ${set} output 1 into @written ([n]) from ${table} t where ${unchanged};
 select count(*) as written from @written;`,
       params,
     );
@@ -682,17 +731,21 @@ select count(*) as written from @written;`,
    * FacetDB's columns as `parseCurrent` reads them: a `real` in its default style, six digits, the
    * digits a `real` holds (0.93 is stored as 0.930000007 and reads back 0.93); a NULL status as
    * pending, since the install's columns are nullable with no default (a row the trigger never
-   * saw).
+   * saw). In side-table mode they are the side row's (alias `a`), and a record without one is
+   * absent, as the contract says of a side table: the trigger makes a side row, pending, at the
+   * record's first change since the install.
    */
+  const at = sideMode ? "a" : "t";
   const currentSelect = [
-    `${keyExpr} as k`,
+    `${keyText(at, facts.key)} as k`,
     ...currentColumns.map(
-      ({ alias, column }) => `convert(nvarchar(max), t.${quoteName(column)}) as ${alias}`,
+      ({ alias, column }) => `convert(nvarchar(max), ${at}.${quoteName(column)}) as ${alias}`,
     ),
-    `coalesce(t.${quoteName(STATUS_COLUMN)}, ${quoteString("pending")}) as cs`,
-    `convert(nvarchar(30), t.${quoteName(UPDATED_AT_COLUMN)}, 121) as cu`,
-    `t.${quoteName(REVIEWED_COLUMN)} as cr`,
+    `coalesce(${at}.${quoteName(STATUS_COLUMN)}, ${quoteString("pending")}) as cs`,
+    `convert(nvarchar(30), ${at}.${quoteName(UPDATED_AT_COLUMN)}, 121) as cu`,
+    `${at}.${quoteName(REVIEWED_COLUMN)} as cr`,
   ].join(", ");
+  const currentFrom = sideMode ? `${side} a where a.${sideKey}` : `${table} t where ${keyColumn}`;
 
   async function current(
     keys: readonly RecordKey[],
@@ -701,7 +754,7 @@ select count(*) as written from @written;`,
     const found = new Map<RecordKey, CurrentDecision>();
     for (const part of chunks([...wanted], IN_LIST)) {
       const result = await pool.query(
-        `select ${currentSelect} from ${table} t where ${keyColumn} in (${part.map((_, index) => keyAs(index + 1)).join(", ")})`,
+        `select ${currentSelect} from ${currentFrom} in (${part.map((_, index) => keyAs(index + 1)).join(", ")})`,
         part,
       );
       for (const row of result) {

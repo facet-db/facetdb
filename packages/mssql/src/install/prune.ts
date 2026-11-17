@@ -9,7 +9,16 @@ import {
   type QuestionSet,
 } from "@facetdb/core";
 import { adminUrlRefusal, type MssqlConnect, quoteName } from "../sql/index.ts";
-import { readColumns, readGrants, readKey, readMarker, readObjects, withAdmin } from "./catalog.ts";
+import {
+  readColumns,
+  readGrants,
+  readKey,
+  readMarker,
+  readObjects,
+  sideTableOf,
+  viewOf,
+  withAdmin,
+} from "./catalog.ts";
 import {
   CREATION_COLUMN,
   ownedColumns,
@@ -18,6 +27,7 @@ import {
   tableNames,
   WORKER_USER,
 } from "./objects.ts";
+import { answerColumnsOf, viewText } from "./side-table.ts";
 
 /**
  * `facetdb migrate --prune` on SQL Server: a question removed from the set keeps its columns until
@@ -25,7 +35,8 @@ import {
  * of questions the set no longer has, and nothing else: never a status column, never a column
  * FacetDB did not mark, never a choice's `_probabilities` column while its question is still asked
  * (`storeProbabilities` went off, not the question). It also takes back the worker's read of a
- * state column `read` no longer lists. A source not installed yet has nothing to prune: an empty
+ * state column `read` no longer lists. In side-table mode the columns are the side table's, and the
+ * view is made again without them first. A source not installed yet has nothing to prune: an empty
  * plan, not a refusal.
  */
 
@@ -100,8 +111,21 @@ export function droppedColumns(
     }));
 }
 
+/**
+ * Where FacetDB's columns are: on the table (inline), or in its side table, whose every column but
+ * the key is FacetDB's. In side-table mode the view names each column, so it is made again without
+ * the dropped ones before they go (a view of SQL Server is not bound to its columns, and would fail
+ * every read after the drop): `view` makes it from the columns that stay.
+ */
+type PruneAt = {
+  readonly relation: string;
+  readonly label: string;
+  readonly view?: (stay: readonly string[]) => string;
+};
+
 function prunePlan(
   names: TableNames,
+  at: PruneAt,
   key: string,
   questionSet: QuestionSet,
   marked: readonly string[],
@@ -109,6 +133,7 @@ function prunePlan(
 ): EnginePlan {
   const dropped = droppedColumns(marked, questionSet);
   const kept = keptColumns(marked, questionSet);
+  const gone = new Set(dropped.map(({ column }) => column));
   // The worker keeps reading the key, the state, FacetDB's columns and the creation marker; a
   // marked column it reads goes with its right when it is dropped.
   const stays = new Set([
@@ -121,7 +146,7 @@ function prunePlan(
   ]);
   const revoked = selectable.filter((column) => !stays.has(column));
   if (dropped.length === 0 && revoked.length === 0) {
-    return { ...NOTHING, keeps: keptObjects(names, kept) };
+    return { ...NOTHING, keeps: keptObjects(at, kept) };
   }
   return {
     statements: [
@@ -132,10 +157,13 @@ function prunePlan(
           `revoke select (${quoteName(column)}) on ${names.relation} from ${quoteName(WORKER_USER)}`,
         ),
       ),
+      ...(at.view === undefined || dropped.length === 0
+        ? []
+        : [sourceStatement("columns", at.view(marked.filter((column) => !gone.has(column))))]),
       ...dropped.map(({ column }) =>
         sourceStatement(
           "columns",
-          `alter table ${names.relation} drop column if exists ${quoteName(column)}`,
+          `alter table ${at.relation} drop column if exists ${quoteName(column)}`,
         ),
       ),
     ],
@@ -145,7 +173,7 @@ function prunePlan(
         ({ column, reason }): EngineObject => ({
           kind: "column",
           name: column,
-          of: names.label,
+          of: at.label,
           scope: "source",
           reason,
         }),
@@ -160,16 +188,16 @@ function prunePlan(
         }),
       ),
     ],
-    keeps: keptObjects(names, kept),
+    keeps: keptObjects(at, kept),
     notes: [],
   };
 }
 
-function keptObjects(names: TableNames, kept: readonly string[]): readonly KeptObject[] {
+function keptObjects(at: PruneAt, kept: readonly string[]): readonly KeptObject[] {
   return kept.map((name) => ({
     kind: "column",
     name,
-    of: names.label,
+    of: at.label,
     scope: "source",
     reason: KEPT_REASON,
   }));
@@ -191,7 +219,8 @@ export async function planPrune(
     if (columns.length === 0) {
       return { ok: true, plan: NOTHING };
     }
-    const marker = await readMarker(query, names, await readObjects(query, names));
+    const objects = await readObjects(query, names);
+    const marker = await readMarker(query, names, objects);
     const row = marker?.find((one) => one.schema === names.schema && one.table === names.table);
     if (row === undefined) {
       return { ok: true, plan: NOTHING };
@@ -228,14 +257,43 @@ export async function planPrune(
         )
         .flatMap((grant) => (grant.column === undefined ? [] : [grant.column])),
     );
+    const selectable = columns.filter((column) => reads.has(column.name)).map(({ name }) => name);
+    // The mode is what install left, not what the config says now (a marked side table is
+    // side-table mode), so a prune never looks for columns where none were put.
+    if (sideTableOf(objects, names) !== undefined) {
+      const view = viewOf(objects, names);
+      const tableColumns = columns.map((column) => column.name);
+      const side = answerColumnsOf(
+        await readColumns(query, names.schema, names.sideTable),
+        keyName,
+      ).map((column) => column.name);
+      return {
+        ok: true,
+        plan: prunePlan(
+          names,
+          {
+            relation: names.sideRelation,
+            label: names.sideLabel,
+            ...(view === undefined
+              ? {}
+              : { view: (stay) => viewText(names, keyName, tableColumns, stay) }),
+          },
+          keyName,
+          target.questionSet,
+          side,
+          selectable,
+        ),
+      };
+    }
     return {
       ok: true,
       plan: prunePlan(
         names,
+        { relation: names.relation, label: names.label },
         keyName,
         target.questionSet,
         columns.filter((column) => column.marked).map((column) => column.name),
-        columns.filter((column) => reads.has(column.name)).map((column) => column.name),
+        selectable,
       ),
     };
   });
