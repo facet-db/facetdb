@@ -255,6 +255,15 @@ export function pollingEngine(
             fix: "run facetdb migrate first; a table needs a primary key (or a surrogate key), FacetDB keys its answers by it",
           });
         }
+        // The mark is in the catalog read already: a table another project installed (or claimed
+        // while this one's install ran, where the dialect locks nothing) is never this worker's.
+        if (found.project !== undefined && found.project !== target.project.id) {
+          throw new EngineRefusal({
+            code: "another-project",
+            message: anotherProject(labelOf(found.table), found.project),
+            fix: "point this source at its own table, or run the worker of the project that installed it",
+          });
+        }
         const column = found.lastChanged.column;
         // A column the application added after the install: the worker's first poll would fail on
         // it, so it is refused now, with the command that grants the read.

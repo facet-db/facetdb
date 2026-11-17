@@ -22,6 +22,15 @@ export type UrlVariable = (typeof URL_VARIABLES)[number];
 export * from "./connector/index.ts";
 // What a database must say to be polled: its SQL text and its catalog reads.
 export * from "./dialect/index.ts";
+// CockroachDB through the Postgres wire: its dialect, its connect, and the engine that tells it
+// from Postgres.
+export {
+  cockroachDialect,
+  connectCockroach,
+  isCockroachVersion,
+  type PostgresWireOptions,
+  postgresWireEngine,
+} from "./dialects/cockroach.ts";
 // The engine the CLI calls for `connector: "polling"` and for the SQL databases polled by default.
 export * from "./engine/index.ts";
 // What a polling install adds and how a table is read: the marks, the columns, the statements.

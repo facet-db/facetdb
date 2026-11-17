@@ -247,6 +247,61 @@ describe("the scheme table", () => {
       }),
     ).toMatchObject({ code: "database-url-tls" });
   });
+
+  describe("cockroachdb:// is read by the CockroachDB polling dialect main.ts registers", () => {
+    const listingsTarget = {
+      project: { id: "p", name: "p" },
+      source: "listings",
+      table: "listings",
+      storage: "inline",
+      onChange: "reset",
+      questionSet: { questions: [], read: [], model: "jev-1.14.0", thresholds: {} },
+      urlVariable: "LISTINGS_URL",
+    } as const;
+
+    it.each([
+      "cockroachdb://root@127.0.0.1:26257/defaultdb",
+      "cockroachdb://u:p@db.example.com:26257/app?sslmode=verify-full",
+    ])("%s", async (url) => {
+      const { engines } = processDeps();
+      expect(readsUrl(engines, url)).toBe(true);
+      const engine = await engineFor(engines, url);
+      expect(engine.name).toBe("polling");
+      expect(engine.schemes).toEqual(["cockroachdb"]);
+      expect(engine.capabilities).toMatchObject({
+        multipleWorkers: false,
+        pushWakeup: false,
+        sideTable: false,
+      });
+      expect(engine.checkUrl(listingsTarget, url, { allowInsecure: false })).toBeUndefined();
+    });
+
+    it("refuses a plaintext URL to another machine before connecting, unless --allow-insecure says the network is trusted", async () => {
+      const { engines } = processDeps();
+      const url = "cockroachdb://facetdb_worker:pw@db.example.com:26257/app";
+      const engine = await engineFor(engines, url);
+      expect(engine.checkUrl(listingsTarget, url, { allowInsecure: false })).toEqual({
+        code: "database-url-tls",
+        message:
+          "LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear; no connection was made",
+        fix: "add ?sslmode=verify-full to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
+      });
+      expect(engine.checkUrl(listingsTarget, url, { allowInsecure: true })).toBeUndefined();
+    });
+
+    it('dispatches a postgres:// source with connector: "polling" by version(), and doctor lists the line that says which it found', async () => {
+      const { engines } = processDeps();
+      const engine = await engineFor(engines, "postgres://u:p@db.example.com/app", "polling");
+      expect(engine.checks[0]?.name).toBe("dialect");
+      expect(engine.checks.map((check) => check.name)).toEqual([
+        "dialect",
+        "database",
+        "pooler",
+        "install",
+        "worker",
+      ]);
+    });
+  });
 });
 
 describe("an engine is loaded on first use, for a source of its scheme only", () => {

@@ -511,7 +511,7 @@ describe("what the purge's checks say, through the CLI", () => {
   });
 });
 
-describe("a run of several tables (the reviewer's case)", () => {
+describe("a run of several tables", () => {
   const twoTables: ProjectConfig = facetdb({
     model: "jev-1.14.0",
     sources: [

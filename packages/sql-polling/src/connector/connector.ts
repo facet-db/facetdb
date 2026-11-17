@@ -28,9 +28,8 @@ import type {
   SqlDialect,
 } from "../dialect/index.ts";
 import {
-  columnStatements,
+  installStatements,
   labelOf,
-  markStatements,
   readTable,
   tableOf,
   uninstallStatements,
@@ -434,7 +433,8 @@ export function createPollingConnector(
     // Install and uninstall each run as one transaction where the dialect's DDL is transactional (a
     // failure midway leaves the table exactly as it was, never FacetDB columns without their mark,
     // which every later install would refuse as the application's); elsewhere each column is marked
-    // as it is added. `facetdb migrate` runs the engine's plan instead, with the worker login too.
+    // as it is added, in one all-or-nothing group with it where the dialect has those (CockroachDB).
+    // `facetdb migrate` runs the engine's plan instead, with the worker login too.
     install() {
       return inTransaction(async (query) => {
         const found = await readTable(dialect, query, target);
@@ -458,11 +458,18 @@ export function createPollingConnector(
           );
         }
         const present = new Set(found.facts.columns.map((column) => column.name));
-        for (const statement of [
-          ...columnStatements(dialect, ref, questionSet, present),
-          ...markStatements(dialect, ref, target.project.id),
-        ]) {
-          await query(statement.text);
+        for (const statement of installStatements(
+          dialect,
+          ref,
+          questionSet,
+          present,
+          target.project.id,
+        )) {
+          // A group of the dialect's runs all or nothing in the client's own transaction.
+          const inner = dialect.atomic?.inner(statement.text);
+          await (inner === undefined
+            ? query(statement.text)
+            : client.transaction((grouped) => grouped(inner)));
         }
       });
     },

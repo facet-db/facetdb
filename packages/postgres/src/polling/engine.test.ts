@@ -670,7 +670,7 @@ describe("the polling engine's open and doctor on Postgres, as the worker login"
   });
 });
 
-describe("the trigger engine beside a polling install in the same database (the review's finding)", () => {
+describe("the trigger engine beside a polling install in the same database", () => {
   const trigger = () => createPostgresEngine({ connect: world.connect, pgHost: undefined });
 
   async function triggerRefusal(overrides: Partial<EngineTarget> = {}) {

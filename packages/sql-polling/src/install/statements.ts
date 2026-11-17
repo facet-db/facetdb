@@ -78,6 +78,54 @@ export function columnStatements(
   ];
 }
 
+/**
+ * Everything an install puts on the table: the columns, each marked, and the table's project mark.
+ * A dialect with transactional DDL or a lock gets `columnStatements` then `markStatements`. One
+ * with `atomic` groups (CockroachDB: no lock, DDL committing statement by statement) claims the
+ * table first: `facetdb_state_hash` added with the project's mark in one group that fails when the
+ * column exists (or the mark alone on a table that has it), then each other column in a group
+ * with its own mark, so neither a second project's install nor a run stopped half-way can leave a
+ * table carrying FacetDB columns that no mark explains.
+ */
+export function installStatements(
+  dialect: SqlDialect,
+  table: TableRef,
+  questionSet: QuestionSet,
+  present: ReadonlySet<string>,
+  projectId: string,
+): readonly Statement[] {
+  const { atomic } = dialect;
+  if (atomic === undefined || dialect.transactionalDdl || dialect.lock !== undefined) {
+    return [
+      ...columnStatements(dialect, table, questionSet, present),
+      ...markStatements(dialect, table, projectId),
+    ];
+  }
+  const columns = ownedColumns(dialect, questionSet);
+  const claimMark = markColumn(dialect, table, STATE_HASH_COLUMN, projectMark(projectId));
+  const hash = columns.find(([name]) => name === STATE_HASH_COLUMN);
+  const claim =
+    present.has(STATE_HASH_COLUMN) || hash === undefined
+      ? claimMark
+      : [atomic.group([atomic.addStrict(table, hash[0], hash[1]), ...claimMark])];
+  return [
+    ...claim.map(of("marker")),
+    ...columns
+      .filter(([name]) => name !== STATE_HASH_COLUMN)
+      .flatMap(([name, definition]) =>
+        present.has(name)
+          ? markColumn(dialect, table, name, OWNED_MARK)
+          : [
+              atomic.group([
+                ...dialect.addColumns(table, [[name, definition]]),
+                ...markColumn(dialect, table, name, OWNED_MARK),
+              ]),
+            ],
+      )
+      .map(of("columns")),
+  ];
+}
+
 /** The table's mark: the project that installed it, on `facetdb_state_hash`. */
 export function markStatements(
   dialect: SqlDialect,

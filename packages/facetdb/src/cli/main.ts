@@ -148,11 +148,14 @@ export function processDeps(): CliDeps {
         Promise.resolve(createPostgresEngine({ connect, pgHost: env["PGHOST"] })),
       ),
       // `connector: "polling"` on a Postgres host that forbids triggers: the polling engine over
-      // the Postgres dialect. The hourly-scan warning of a table with no column to poll by goes to
-      // stderr, beside the worker's own lines.
+      // the Postgres dialect, or over the CockroachDB one when the server's version() says
+      // CockroachDB (both speak the Postgres wire; doctor says which it found). The hourly-scan
+      // warning of a table with no column to poll by goes to stderr, beside the worker's own lines.
       lazyEngine("polling", async () => {
-        const { pollingEngine } = await import("@facetdb/sql-polling");
-        return pollingEngine(createPostgresDialect({ pgHost: env["PGHOST"] }), connect, {
+        const { postgresWireEngine } = await import("@facetdb/sql-polling");
+        return postgresWireEngine({
+          postgres: createPostgresDialect({ pgHost: env["PGHOST"] }),
+          connect,
           warn: (message) => {
             process.stderr.write(`warning: ${message}\n`);
           },
@@ -210,6 +213,19 @@ export function processDeps(): CliDeps {
       lazyEngine("oracle", async () => {
         const { createOracleEngine } = await import("@facetdb/sql-polling/oracle");
         return createOracleEngine({
+          warn: (message) => {
+            process.stderr.write(`warning: ${message}\n`);
+          },
+        });
+      }),
+      // CockroachDB (cockroachdb:) through the Postgres wire with the polling dialect of
+      // @facetdb/sql-polling: postgres.js with TLS from the URL's sslmode, polling every
+      // 10 seconds by a last-changed column; its hourly-scan warning goes to stderr.
+      lazyEngine("cockroachdb", async () => {
+        const { cockroachDialect, connectCockroach, pollingEngine } = await import(
+          "@facetdb/sql-polling"
+        );
+        return pollingEngine(cockroachDialect, connectCockroach, {
           warn: (message) => {
             process.stderr.write(`warning: ${message}\n`);
           },

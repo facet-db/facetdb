@@ -24,6 +24,7 @@ export {
 export {
   columnStatements,
   grantStatements,
+  installStatements,
   loginStatements,
   markStatements,
   pruneStatements,

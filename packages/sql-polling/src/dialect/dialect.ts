@@ -155,6 +155,12 @@ export type LoginRule = {
   /** The worker's rights: read `select`, write `update`, on `table`, and what else it needs there. */
   grants(table: TableRef, select: readonly string[], update: readonly string[]): readonly string[];
   /**
+   * The install plan's note where `grants` reaches wider than the columns it was given, because the
+   * database grants a table whole (CockroachDB has no column-level grants), naming the table as the
+   * words show it (`public.listings`). Absent where the grants name the columns.
+   */
+  grantsNote?(table: string): string;
+  /**
    * Whether `grants` also gives the worker the use of the table's schema (Postgres's `usage`).
    * Uninstall leaves it, and says so: another FacetDB table in that schema may still need it.
    */
@@ -208,6 +214,26 @@ export type SqlDialect = {
    * each statement, so no lock outlives one.
    */
   lock?(table: TableRef): string;
+  /**
+   * Where DDL commits statement by statement and nothing locks a table, but a transaction can still
+   * hold a few DDL statements all or nothing (CockroachDB): an install then claims the table first,
+   * adding `facetdb_state_hash` with the project's mark in one group that fails when the column is
+   * already there (another run's claim won the race; `run` reads the mark right after the claim,
+   * and after a claim that failed, and stops with the ownership refusal), and adds each other
+   * column together with its mark, so a run stopped anywhere leaves either nothing or a marked
+   * column, never one the next plan would refuse as the application's.
+   */
+  readonly atomic?: {
+    /** One printed statement that runs `statements` in one transaction: `begin; …; commit`. */
+    group(statements: readonly string[]): string;
+    /**
+     * What `run` sends, as one statement, inside the client's own transaction for a text `group`
+     * printed (so the driver rolls a failure back); undefined for any other text.
+     */
+    inner(text: string): string | undefined;
+    /** The statement adding `name` that fails when the column exists: the claim a second run loses. */
+    addStrict(table: TableRef, name: string, definition: string): string;
+  };
 
   /** The `index`-th bind placeholder, from 1: `$1`, `:1`. */
   placeholder(index: number): string;

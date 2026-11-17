@@ -23,9 +23,12 @@ import { adminUrlRefusal, plainMessage } from "./urls.ts";
  * The run reads the table's mark again ("the engine checks again, inside the run, what the plan
  * read before it"): right after the plan's lock statement, as the trigger engine checks right after
  * its claim, so another install of the table has either committed its mark (and stops this run) or
- * waits for this one; before anything where the dialect locks nothing. An empty plan that asks for
- * the source's name back (a log-only purge) reads the table too: an install made since it was
- * planned makes the log live again, and the store's purge must not follow.
+ * waits for this one; before anything where the dialect locks nothing, and, where it groups DDL
+ * instead (`SqlDialect.atomic`), again right after the claim that opens its install. A dialect's
+ * group runs inside the client's own transaction, so the driver rolls a failure back and no
+ * connection is left in an aborted transaction. An empty plan that asks for the source's name back
+ * (a log-only purge) reads the table too: an install made since it was planned makes the log live
+ * again, and the store's purge must not follow.
  */
 
 /** What a run says when it reaches the plan's `secret` statement without a password. */
@@ -114,6 +117,10 @@ export async function runPlan(
   const done: PlanStatement[] = [];
   const lock = dialect.lock?.(tableOf(dialect, target));
   const locks = lock !== undefined && plan.statements.some((statement) => statement.text === lock);
+  // Where nothing locks the table and the dialect groups DDL (CockroachDB), the install's first
+  // statement claims it: the mark is read again right after the claim, and after a claim that
+  // failed (another run added facetdb_state_hash first), so the loser stops with the refusal.
+  const claims = !locks && dialect.atomic !== undefined;
   let at = 0;
   let client: PollingClient | undefined;
   const work = async (query: PollingQuery): Promise<void> => {
@@ -122,18 +129,29 @@ export async function runPlan(
     }
     for (const [index, statement] of plan.statements.entries()) {
       at = index;
-      if (statement.secret === true) {
-        if (workerPassword === undefined || dialect.login === undefined) {
-          throw new Stop(NO_PASSWORD);
+      const claim = claims && statement.purpose === "marker";
+      try {
+        if (statement.secret === true) {
+          if (workerPassword === undefined || dialect.login === undefined) {
+            throw new Stop(NO_PASSWORD);
+          }
+          const secret = dialect.login.secret(workerPassword);
+          secrets.push(...secret.params);
+          await query(secret.text, secret.params);
+        } else {
+          const inner = dialect.atomic?.inner(statement.text);
+          await (inner === undefined || client === undefined
+            ? query(statement.text)
+            : client.transaction((grouped) => grouped(inner)));
         }
-        const secret = dialect.login.secret(workerPassword);
-        secrets.push(...secret.params);
-        await query(secret.text, secret.params);
-      } else {
-        await query(statement.text);
+      } catch (error) {
+        if (claim && !(error instanceof Stop)) {
+          await checkMark(dialect, query, target);
+        }
+        throw error;
       }
       done.push(statement);
-      if (locks && statement.text === lock) {
+      if ((locks && statement.text === lock) || claim) {
         // The table is this run's until it commits: a mark read now is one another run committed.
         await checkMark(dialect, query, target);
       }

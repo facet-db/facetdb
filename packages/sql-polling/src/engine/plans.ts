@@ -10,15 +10,14 @@ import type {
 import { POLL_INTERVAL_MS } from "../connector/index.ts";
 import type { LoginRule, SqlDialect } from "../dialect/index.ts";
 import {
-  columnStatements,
   droppedColumns,
   grantStatements,
+  installStatements,
   KEPT_REASON,
   keptColumns,
   type LastChanged,
   labelOf,
   loginStatements,
-  markStatements,
   ownedColumnNames,
   type PollingTable,
   pruneStatements,
@@ -193,8 +192,7 @@ export function installPlan(
   return {
     statements: sourceStatements(
       withHeader(dialect, table, [
-        ...columnStatements(dialect, table, target.questionSet, present),
-        ...markStatements(dialect, table, target.project.id),
+        ...installStatements(dialect, table, target.questionSet, present, target.project.id),
         ...(login === undefined || login.exists ? [] : loginStatements(login.rule)),
         ...(login === undefined
           ? []
@@ -210,6 +208,7 @@ export function installPlan(
         : []),
       ...(kept === undefined ? [] : [kept]),
       ...(scan === undefined ? [] : [`${scan.detail}; ${scan.fix}`]),
+      ...(login?.rule.grantsNote === undefined ? [] : [login.rule.grantsNote(label)]),
     ],
   };
 }
