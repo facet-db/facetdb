@@ -55,10 +55,14 @@ const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
 /** A file path with no scheme names a SQLite database by its extension. */
 const SQLITE_FILE = /\.(db|sqlite|sqlite3)$/i;
 
+/** A Turso database's host: `<database>-<organization>.turso.io`, with a region part or without. */
+const TURSO_HOST = /(^|\.)turso\.io$/;
+
 /**
  * The scheme a connection string is read by: its own, lowercased; `sqlite` for a bare file path
- * ending in `.db`, `.sqlite` or `.sqlite3`; `libsql` for an `https` URL with `libsql` in its host
- * (a libSQL server over HTTP). Undefined when it names none.
+ * ending in `.db`, `.sqlite` or `.sqlite3`; `libsql` for an `https` or `http` URL whose host is
+ * Turso's (`turso.io`) or has `libsql` in it (a libSQL server over HTTP, whose engine refuses
+ * `http` to another machine without `--allow-insecure`). Undefined when it names none.
  */
 export function schemeOf(url: string): string | undefined {
   const text = url.trim();
@@ -66,14 +70,14 @@ export function schemeOf(url: string): string | undefined {
   if (scheme === undefined) {
     return SQLITE_FILE.test(text) ? "sqlite" : undefined;
   }
-  if (scheme === "https") {
+  if (scheme === "https" || scheme === "http") {
     let host = "";
     try {
       host = new URL(text).hostname.toLowerCase();
     } catch {
-      // Not a URL past its scheme: an https string that names no host is no libSQL server.
+      // Not a URL past its scheme: a string that names no host is no libSQL server.
     }
-    return host.includes("libsql") ? "libsql" : scheme;
+    return host.includes("libsql") || TURSO_HOST.test(host) ? "libsql" : scheme;
   }
   return scheme;
 }

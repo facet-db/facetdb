@@ -85,7 +85,7 @@ describe("planUninstall", () => {
     expect(db.prepare("pragma journal_mode").get()).toEqual({ journal_mode: "wal" });
   });
 
-  // The review's probes P3 and P3b: a column of FacetDB's name that the application made is its own.
+  // A column of FacetDB's name that the application made is its own.
   it.each([
     [
       "rebuilt the SQLite way",
@@ -161,7 +161,7 @@ describe("planUninstall", () => {
     expect(shell.isTransaction).toBe(true);
     shell.exec("rollback");
     expect(snapshot(file)).toEqual(before);
-    // The other table's trigger still finds the queue (probe P6: it failed with "no such table").
+    // The other table's trigger still finds the queue (it failed with "no such table").
     shell.exec("insert into orders (title, description) values ('lamp', 'old')");
     expect(jobs(shell)).toEqual([
       { table_name: "orders", record_key: "1", claimed_by: null, claimed_at: null },

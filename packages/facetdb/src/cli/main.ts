@@ -196,6 +196,14 @@ export function processDeps(): CliDeps {
           },
         });
       }),
+      // libSQL servers, Turso and sqld (libsql:, and https: or http: with turso.io or libsql in the
+      // host), through @libsql/client over HTTP: the SQLite connector and one worker, the auth
+      // token read from this environment only (<the source's variable>_AUTH_TOKEN, else
+      // LIBSQL_AUTH_TOKEN). Its own entry point, so a SQLite file never loads the driver.
+      lazyEngine("libsql", async () => {
+        const { createLibsqlEngine } = await import("@facetdb/sqlite/libsql");
+        return createLibsqlEngine({ env });
+      }),
     ],
     connect,
     store: (options) => {

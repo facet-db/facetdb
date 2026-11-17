@@ -17,3 +17,5 @@ export * from "./connector/index.ts";
 export * from "./engine/index.ts";
 // The install, uninstall and prune plans, their script and their run on a file.
 export * from "./install/index.ts";
+// The libSQL engine is not re-exported here: it lives at @facetdb/sqlite/libsql, so importing this
+// barrel for a SQLite file never loads @libsql/client.

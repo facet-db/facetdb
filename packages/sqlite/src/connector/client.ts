@@ -20,6 +20,11 @@ export type SqliteChanges = { readonly changes: number };
 export type SqliteStatements = {
   run(sql: string, params?: readonly SqliteParam[]): Promise<SqliteChanges>;
   all(sql: string, params?: readonly SqliteParam[]): Promise<readonly SqliteRow[]>;
+  /**
+   * Runs a plan's statement as it was printed, with no parameters: one statement, or the few a
+   * guarded drop holds (`unless` lines), so the text runs whole, string for string.
+   */
+  exec(sql: string): Promise<void>;
 };
 
 export type SqliteClient = SqliteStatements & {
@@ -34,7 +39,10 @@ export type SqliteClient = SqliteStatements & {
   close(): Promise<void>;
 };
 
-/** Opens the client of a SQLite database at `path`; the engine and the tests pass their own. */
+/**
+ * Opens the client of a SQLite database at `path` (a file's path; a libSQL server's URL for the
+ * libSQL engine); the engines and the tests pass their own.
+ */
 export type OpenSqlite = (path: string) => SqliteClient;
 
 /** FacetDB opens an existing SQLite file and never creates one (`run` says the same). */
@@ -69,6 +77,10 @@ export function nodeSqliteClient(db: DatabaseSync): SqliteClient {
       return Promise.resolve({ changes: Number(result.changes) });
     },
     all: (sql, params = []) => Promise.resolve(statementOf(sql).all(...params)),
+    exec: (sql) => {
+      db.exec(sql);
+      return Promise.resolve();
+    },
   };
   let tail: Promise<unknown> = Promise.resolve();
   const inTurn = <T>(work: () => Promise<T>): Promise<T> => {
@@ -79,6 +91,7 @@ export function nodeSqliteClient(db: DatabaseSync): SqliteClient {
   return {
     run: (sql, params) => inTurn(() => direct.run(sql, params)),
     all: (sql, params) => inTurn(() => direct.all(sql, params)),
+    exec: (sql) => inTurn(() => direct.exec(sql)),
     transaction: (work) =>
       inTurn(async () => {
         db.exec("begin immediate");
@@ -100,6 +113,45 @@ export function nodeSqliteClient(db: DatabaseSync): SqliteClient {
         }
         return Promise.resolve();
       }),
+  };
+}
+
+/**
+ * One client per database for every connector a process opens on it, by `keyOf(path)` (a file's
+ * absolute path, a libSQL server's URL): the last connector that closes its client closes the
+ * database's. Two handles of one process on one SQLite file would wait on each other's write lock
+ * inside one thread; on a libSQL server they would queue their transactions on the server instead
+ * of in the process.
+ */
+export function sharedClients(open: OpenSqlite, keyOf: (path: string) => string): OpenSqlite {
+  const shared = new Map<string, { readonly client: SqliteClient; users: number }>();
+  return (path) => {
+    const at = keyOf(path);
+    let entry = shared.get(at);
+    if (entry === undefined) {
+      entry = { client: open(path), users: 0 };
+      shared.set(at, entry);
+    }
+    entry.users += 1;
+    const held = entry;
+    let closed = false;
+    return {
+      run: (sql, params) => held.client.run(sql, params),
+      all: (sql, params) => held.client.all(sql, params),
+      exec: (sql) => held.client.exec(sql),
+      transaction: (work) => held.client.transaction(work),
+      close: async () => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        held.users -= 1;
+        if (held.users === 0) {
+          shared.delete(at);
+          await held.client.close();
+        }
+      },
+    };
   };
 }
 

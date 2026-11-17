@@ -36,13 +36,16 @@ const ROWID = "rowid";
 /** The schema SQLite gives the file FacetDB opens: a table is named bare, or `main.<table>`. */
 const MAIN = "main";
 
-/** For SQLite: the notes every install plan carries. */
-const NO_USERS =
+/**
+ * For SQLite: the notes every install plan carries. Exported for the libSQL engine, which says what
+ * a server does instead of these three.
+ */
+export const NO_USERS =
   "SQLite has no users: whoever can open the file can read and change it, so the file's path and its permissions are the credential; this install creates no login and grants nothing.";
 
-const ONE_WORKER = "One worker may run on this file at a time.";
+export const ONE_WORKER = "One worker may run on this file at a time.";
 
-const WAL_NOTE =
+export const WAL_NOTE =
   "The file is put in WAL mode before the transaction opens (SQLite cannot change the journal mode inside one) and stays in it: the mode is persistent, and it lets the application and the worker read and write without blocking each other.";
 
 /** The refusal for columns of FacetDB's names that FacetDB did not add: they are the application's. */
@@ -158,8 +161,8 @@ export async function planInstall(target: EngineTarget, query: SqliteQuery): Pro
     const column = table.columns.find((one) => sameName(one.name, name));
     return column === undefined ? [] : [{ name, definition, column }];
   });
-  // A column of FacetDB's name without FacetDB's mark is the application's, whatever its type
-  //: adopting it would hand the app's values to the worker, and uninstall would drop it.
+  // A column of FacetDB's name without FacetDB's mark is the application's, whatever its type:
+  // adopting it would hand the app's values to the worker, and uninstall would drop it.
   const collisions = present.filter(({ column }) => !marked.includes(column.name));
   if (collisions.length > 0) {
     return refuse(

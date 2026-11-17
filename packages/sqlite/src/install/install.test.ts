@@ -282,7 +282,7 @@ describe("run", () => {
     ).not.toContainEqual(expect.objectContaining({ purpose: "columns" }));
   });
 
-  // The review's probes: a column of FacetDB's name that the application made is the application's.
+  // A column of FacetDB's name that the application made is the application's.
   const rebuilt = {
     "rebuilt the SQLite way (a new table, the rows copied, the old one dropped, the new one renamed)": `
       create table new_listings (id integer primary key, title text, description text, price real, is_scam integer, note text not null default '');

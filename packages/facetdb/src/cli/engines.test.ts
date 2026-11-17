@@ -1,6 +1,13 @@
 import type { DatabaseEngine } from "@facetdb/core";
 import { FakeEngine } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
+import {
+  configFileSource,
+  facetdb,
+  noul,
+  parseProjectConfig,
+  toProjectJson,
+} from "../config/index.ts";
 import { engineFor, isPostgresUrl, lazyEngine, readsUrl, schemeOf } from "./engines.ts";
 import { processDeps } from "./main.ts";
 import { CliError, type EngineEntry } from "./program.ts";
@@ -79,9 +86,13 @@ describe("the scheme table", () => {
     expect(await engineFor(everyEngine, url)).toBe(expected.engine);
   });
 
-  it("reads a scheme in any case, and an https URL without libsql in its host as https", () => {
+  it("reads a scheme in any case, and an http(s) URL whose host is neither Turso's nor libsql's as itself", () => {
     expect(schemeOf("POSTGRES://db.example.com/app")).toBe("postgres");
     expect(schemeOf("https://api.example.com/app")).toBe("https");
+    expect(schemeOf("http://127.0.0.1:8080")).toBe("http");
+    expect(schemeOf("https://notturso.io.example.com")).toBe("https");
+    expect(schemeOf("https://app-org.turso.io")).toBe("libsql");
+    expect(schemeOf("http://sqld.libsql.internal:8080")).toBe("libsql");
     expect(schemeOf("data/app.csv")).toBeUndefined();
     expect(isPostgresUrl("postgresql://db.example.com/app")).toBe(true);
     expect(isPostgresUrl("mysql://db.example.com/app")).toBe(false);
@@ -146,6 +157,56 @@ describe("the scheme table", () => {
       pushWakeup: true,
       sideTable: false,
     });
+  });
+
+  it.each([
+    "libsql://listings-acme.turso.io",
+    "https://listings-acme.aws-us-east-1.turso.io",
+    "http://libsql:8080",
+    "libsql://127.0.0.1:8080?tls=0",
+  ])("%s is read by the libSQL engine main.ts registers", async (url) => {
+    const { engines } = processDeps();
+    expect(readsUrl(engines, url)).toBe(true);
+    const engine = await engineFor(engines, url);
+    expect(engine.name).toBe("libsql");
+    expect(engine.schemes).toEqual(["libsql", "https", "http"]);
+    expect(engine.capabilities).toMatchObject({
+      multipleWorkers: false,
+      pushWakeup: false,
+      sideTable: false,
+    });
+  });
+
+  it("a libSQL source's JSON export and config file name its variable, never its URL or token", () => {
+    const config = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: "libsql://listings-acme.turso.io",
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+    const [source] = config.sources;
+    if (source === undefined) throw new Error("fixture has a source");
+    const parsed = parseProjectConfig({
+      ...config,
+      sources: [{ ...source, databaseEnv: "LISTINGS_URL" }],
+    });
+    if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
+    // The engine reads the token from LISTINGS_URL_AUTH_TOKEN when it connects; the config holds
+    // no token to export.
+    const json = JSON.stringify(toProjectJson(parsed.config));
+    expect(json).toContain('"database":{"env":"LISTINGS_URL"}');
+    const file = configFileSource(parsed.config);
+    expect(file).toContain("database: process.env.LISTINGS_URL");
+    for (const text of [json, file]) {
+      expect(text).not.toContain("turso.io");
+      expect(text).not.toContain("AUTH_TOKEN");
+    }
   });
 
   it("says which schemes an engine is registered for without loading any", () => {

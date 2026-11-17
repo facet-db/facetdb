@@ -13,7 +13,7 @@ import {
   type OpenSqlite,
   openNodeSqlite,
   SQLITE_CAPABILITIES,
-  type SqliteClient,
+  sharedClients,
 } from "../connector/index.ts";
 import {
   BUSY_TIMEOUT_MS,
@@ -91,53 +91,30 @@ async function planning(
   }
 }
 
-/** `uninstall --purge` of a table FacetDB is no longer installed on: the store's part alone. */
-function logOnlyPurge(target: EngineTarget, reason: string): EnginePlan {
+/**
+ * `uninstall --purge` of a table FacetDB is no longer installed on: the store's part alone. `where`
+ * names the database in the note: the SQLite file, or a libSQL server's database.
+ */
+export function logOnlyPurge(
+  target: EngineTarget,
+  reason: string,
+  where = "the SQLite file",
+): EnginePlan {
   return {
     statements: [],
     transactional: true,
     removes: [],
     keeps: [],
     notes: [
-      `${reason.replace(/\.$/, "")}: nothing is removed from the SQLite file, and only the decision log of source ${target.source} in the FacetDB store is deleted.`,
+      `${reason.replace(/\.$/, "")}: nothing is removed from ${where}, and only the decision log of source ${target.source} in the FacetDB store is deleted.`,
     ],
     confirm: { kind: "source", name: target.source },
   };
 }
 
 export function createSqliteEngine(options: SqliteEngineOptions = {}): DatabaseEngine {
-  const openFile = options.open ?? openNodeSqlite;
-  /** The handle of each file a connector holds open, by absolute path, and how many hold it. */
-  const shared = new Map<string, { readonly client: SqliteClient; users: number }>();
-
-  /** The file's shared client: the last connector that closes it closes the handle. */
-  const share: OpenSqlite = (path) => {
-    const at = resolve(path);
-    let entry = shared.get(at);
-    if (entry === undefined) {
-      entry = { client: openFile(path), users: 0 };
-      shared.set(at, entry);
-    }
-    entry.users += 1;
-    const held = entry;
-    let closed = false;
-    return {
-      run: (sql, params) => held.client.run(sql, params),
-      all: (sql, params) => held.client.all(sql, params),
-      transaction: (work) => held.client.transaction(work),
-      close: async () => {
-        if (closed) {
-          return;
-        }
-        closed = true;
-        held.users -= 1;
-        if (held.users === 0) {
-          shared.delete(at);
-          await held.client.close();
-        }
-      },
-    };
-  };
+  /** The file's shared client, by absolute path: the last connector that closes it closes the handle. */
+  const share = sharedClients(options.open ?? openNodeSqlite, (path) => resolve(path));
 
   return {
     name: ENGINE_NAME,

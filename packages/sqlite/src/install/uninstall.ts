@@ -50,8 +50,11 @@ import {
 
 export type SqliteUninstallOptions = Pick<UninstallOptions, "alsoUninstalling">;
 
-/** Why the file stays in WAL mode after an uninstall. */
-const WAL_KEPT =
+/**
+ * Why the file stays in WAL mode after an uninstall; a libSQL server's plan leaves it out: install
+ * set no journal mode there.
+ */
+export const WAL_KEPT =
   "The file stays in WAL mode: install set it and the mode is persistent; pragma journal_mode = delete switches it back once no other connection has the file open.";
 
 /** How the statements marked `unless this finds a row` run, and how to run the script by hand. */

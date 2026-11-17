@@ -8,6 +8,7 @@ export {
   type SqliteClient,
   type SqliteParam,
   type SqliteStatements,
+  sharedClients,
 } from "./client.ts";
 export {
   CLAIM_LEASE_MS,

@@ -8,7 +8,7 @@ import type {
   Refusal,
   RunResult,
 } from "@facetdb/core";
-import { OWNER_QUERY, textOf } from "./catalog.ts";
+import { OWNER_QUERY, type SqliteRow, type SqliteValue, textOf } from "./catalog.ts";
 import { anotherProject, REFUSED_AFTER_WAL_FIX, refusal } from "./plan.ts";
 import { beforeTransaction, GUARDED_SCRIPT, guardOf, OWNERS_TABLE } from "./sql.ts";
 
@@ -175,24 +175,117 @@ export function run(
     if (db?.isTransaction === true) {
       db.exec("rollback");
     }
-    // A transaction rolls back whole: only what ran before it opened stays, the journal mode.
-    const kept = plan.transactional ? ran.slice(0, leading) : ran;
-    return {
-      ran: kept,
-      stopped:
-        error instanceof Stop
-          ? {
-              at,
-              refusal:
-                kept.length === 0
-                  ? error.refusal
-                  : { ...error.refusal, fix: REFUSED_AFTER_WAL_FIX },
-            }
-          : { at, error: error instanceof Error ? error.message : String(error) },
-      removed: [],
-      notes: [],
-    };
+    return stoppedRun(plan, ran, leading, at, error);
   } finally {
     db?.close();
+  }
+}
+
+/** A run that stopped at `at`: what stays of it, and why it stopped. */
+function stoppedRun(
+  plan: EnginePlan,
+  ran: readonly PlanStatement[],
+  leading: number,
+  at: number,
+  error: unknown,
+): RunResult {
+  // A transaction rolls back whole: only what ran before it opened stays, the journal mode.
+  const kept = plan.transactional ? ran.slice(0, leading) : ran;
+  return {
+    ran: kept,
+    stopped:
+      error instanceof Stop
+        ? {
+            at,
+            refusal:
+              kept.length === 0 ? error.refusal : { ...error.refusal, fix: REFUSED_AFTER_WAL_FIX },
+          }
+        : { at, error: error instanceof Error ? error.message : String(error) },
+    removed: [],
+    notes: [],
+  };
+}
+
+/** The statements `runThrough` runs, alone or inside its transaction. */
+export type RunStatements = {
+  all(sql: string, params?: readonly SqliteValue[]): Promise<readonly SqliteRow[]>;
+  exec(sql: string): Promise<void>;
+};
+
+/**
+ * What `runThrough` runs a plan on: a client whose transaction is `begin immediate` … `commit`,
+ * rolled back when its work throws (the connector's `SqliteClient` is one).
+ */
+export type RunClient = RunStatements & {
+  transaction<T>(work: (tx: RunStatements) => Promise<T>): Promise<T>;
+};
+
+/**
+ * `run` through a client instead of a file (libSQL's client, over the network): the same order, the
+ * same guards, the same owner check inside the transaction, the same result. `where` names the
+ * database in the words. A libSQL server's plan has no journal mode (the server owns it, so the
+ * plan leaves the pragma out), and a plan that holds one checks its answer as `run` does.
+ */
+export async function runThrough(
+  target: EngineTarget,
+  plan: EnginePlan,
+  client: RunClient,
+  where: string,
+): Promise<RunResult> {
+  if (plan.statements.length === 0) {
+    return { ran: [], removed: [], notes: plan.notes };
+  }
+  const leading = opening(plan);
+  const ran: PlanStatement[] = [];
+  let at = 0;
+  try {
+    for (const statement of plan.statements.slice(0, leading)) {
+      const [row] = await client.all(statement.text);
+      const mode = row === undefined ? "an unknown" : textOf(row, "journal_mode");
+      if (mode !== "wal") {
+        return {
+          ran,
+          stopped: { at, refusal: journalModeRefusal(where, mode) },
+          removed: [],
+          notes: [],
+        };
+      }
+      ran.push(statement);
+      at += 1;
+    }
+    const body = async (tx: RunStatements): Promise<boolean> => {
+      const marker = await tx.all("select 1 from sqlite_master where type = 'table' and name = ?", [
+        OWNERS_TABLE,
+      ]);
+      const [row] = marker.length === 0 ? [] : await tx.all(OWNER_QUERY, [target.table]);
+      const owner = row === undefined ? undefined : textOf(row, "project_id");
+      if (owner !== undefined && owner !== target.project.id) {
+        throw new Stop(refusal("another-project", anotherProject(target.table, owner)));
+      }
+      for (const statement of plan.statements.slice(leading)) {
+        const guard = guardOf(statement);
+        if (guard === undefined || (await tx.all(guard)).length === 0) {
+          await tx.exec(statement.text);
+          ran.push(statement);
+        }
+        at += 1;
+      }
+      // Whether this run was its uninstall's last, read inside the transaction, as `run` reads it.
+      for (const object of plan.removes.filter((one) => one.scope === "run")) {
+        const left = await tx.all("select 1 from sqlite_master where name = ?", [object.name]);
+        if (left.length > 0) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const last = plan.transactional ? await client.transaction(body) : await body(client);
+    return {
+      ran,
+      removed: last ? plan.removes : plan.removes.filter((object) => object.scope === "source"),
+      notes: plan.notes,
+    };
+  } catch (error) {
+    return stoppedRun(plan, ran, leading, at, error);
   }
 }

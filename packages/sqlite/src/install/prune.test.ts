@@ -112,7 +112,7 @@ describe("planPrune", () => {
     expect(jobs(db)).toHaveLength(1);
   });
 
-  // The review's probe P9, and its rebuild form: the application's own column of a removed question's name.
+  // The application's own column of a removed question's name, and its rebuild form.
   it.each([
     [
       "dropped and added again",

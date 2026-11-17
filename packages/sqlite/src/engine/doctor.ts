@@ -8,6 +8,7 @@ import {
   JOBS_TABLE,
   OWNERS_TABLE,
   readTable,
+  type SqliteQuery,
   sqliteQuery,
   textOf,
   triggerNames,
@@ -88,13 +89,8 @@ function fileCheck(path: string, subject: string): DoctorCheck {
   return ok("file", `${path} exists, and it and its directory are writable`);
 }
 
-/** The checks after the file's, on a read-only handle. */
-function fileChecks(
-  db: DatabaseSync,
-  target: EngineTarget,
-  path: string,
-  now: number,
-): readonly DoctorCheck[] {
+/** The journal mode and the SQLite version of the file, on a read-only handle. */
+function fileChecks(db: DatabaseSync, path: string): readonly DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const mode = textOf(db.prepare("pragma journal_mode").get() ?? {}, "journal_mode");
   checks.push(
@@ -107,35 +103,70 @@ function fileChecks(
         ),
   );
   const version = textOf(db.prepare("select sqlite_version() as v").get() ?? {}, "v");
-  checks.push(
-    atLeast(version, MINIMUM_SQLITE)
-      ? ok("sqlite", `SQLite ${version}`)
-      : fail(
-          "sqlite",
-          `SQLite ${version} is older than ${MINIMUM_SQLITE.join(".")}, which brought drop column and returning`,
-          "run FacetDB on Node 24 or later, whose SQLite is new enough",
-        ),
-  );
+  checks.push(sqliteCheck(version, "run FacetDB on Node 24 or later, whose SQLite is new enough"));
+  return checks;
+}
+
+/** The SQLite under the database is new enough for `drop column` and `returning`. */
+export function sqliteCheck(version: string, fix: string): DoctorCheck {
+  return atLeast(version, MINIMUM_SQLITE)
+    ? ok("sqlite", `SQLite ${version}`)
+    : fail(
+        "sqlite",
+        `SQLite ${version} is older than ${MINIMUM_SQLITE.join(".")}, which brought drop column and returning`,
+        fix,
+      );
+}
+
+/**
+ * The `install` and `lock` checks, read through `query`: the table, the jobs table, the project's
+ * marker row and the two triggers, then which worker holds the one worker's lock. `where` names the
+ * database in the words (the file's path, a libSQL server's host). Shared by the SQLite engine and
+ * the libSQL one: the lock is a row of `facetdb_table_owners`, so it reads the same in a file and
+ * on a server.
+ */
+export async function installChecks(
+  query: SqliteQuery,
+  target: EngineTarget,
+  where: string,
+  now: number,
+): Promise<readonly DoctorCheck[]> {
+  // The table's spelling is the database's; the read refuses nothing here, it only checks there is one.
+  const found = await readTable(query, target.table);
+  if (found.kind !== "table") {
+    return [
+      fail(
+        "install",
+        `${target.table} is not a table of ${where}`,
+        "point the source at the table, and run facetdb migrate on it",
+      ),
+      skip("lock", "there is no table to hold a lock on"),
+    ];
+  }
+  const checks: DoctorCheck[] = [];
   const tables = new Set(
-    db
-      .prepare("select name from sqlite_master where type = 'table' and name in (?, ?)")
-      .all(JOBS_TABLE, OWNERS_TABLE)
-      .map((row) => textOf(row, "name")),
+    (
+      await query("select name from sqlite_master where type = 'table' and name in (?, ?)", [
+        JOBS_TABLE,
+        OWNERS_TABLE,
+      ])
+    ).map((row) => textOf(row, "name")),
   );
-  const owner = tables.has(OWNERS_TABLE)
-    ? db
-        .prepare(
-          `select table_name, project_id, worker_id, heartbeat_at from ${quoteIdent(OWNERS_TABLE)} where table_name = ? collate nocase`,
-        )
-        .get(target.table)
-    : undefined;
+  const [owner] = tables.has(OWNERS_TABLE)
+    ? await query(
+        `select table_name, project_id, worker_id, heartbeat_at from ${quoteIdent(OWNERS_TABLE)} where table_name = ? collate nocase`,
+        [target.table],
+      )
+    : [];
   const table = owner === undefined ? target.table : textOf(owner, "table_name");
   const names = triggerNames(table);
   const triggers = new Set(
-    db
-      .prepare("select name from sqlite_master where type = 'trigger' and name in (?, ?)")
-      .all(names.insert, names.update)
-      .map((row) => textOf(row, "name")),
+    (
+      await query("select name from sqlite_master where type = 'trigger' and name in (?, ?)", [
+        names.insert,
+        names.update,
+      ])
+    ).map((row) => textOf(row, "name")),
   );
   const missing = [
     ...(tables.has(JOBS_TABLE) ? [] : [JOBS_TABLE]),
@@ -168,15 +199,13 @@ function fileChecks(
   checks.push(
     ok("install", `the jobs table, the marker of ${table} and its two triggers are there`),
   );
-  // The lock is the file's: a worker on any of its tables holds it (the connector refuses a second
-  // one while any row's lock is fresh), so the latest renewal of every row is what counts.
-  const holder = db
-    .prepare(
-      `select table_name, worker_id, heartbeat_at from ${quoteIdent(OWNERS_TABLE)}
-        where worker_id is not null and heartbeat_at is not null
-        order by heartbeat_at desc limit 1`,
-    )
-    .get();
+  // The lock is the database's: a worker on any of its tables holds it (the connector refuses a
+  // second one while any row's lock is fresh), so the latest renewal of every row is what counts.
+  const [holder] = await query(
+    `select table_name, worker_id, heartbeat_at from ${quoteIdent(OWNERS_TABLE)}
+      where worker_id is not null and heartbeat_at is not null
+      order by heartbeat_at desc limit 1`,
+  );
   if (holder === undefined) {
     checks.push(ok("lock", "no worker holds the lock; the next facetdb worker takes it"));
     return checks;
@@ -210,23 +239,11 @@ export async function doctorChecks(
   }
   const db = new DatabaseSync(path, { readOnly: true, timeout: BUSY_TIMEOUT_MS });
   try {
-    // The table's spelling is the file's; the read refuses nothing here, it only checks there is one.
-    const found = await readTable(sqliteQuery(db), target.table);
-    if (found.kind !== "table") {
-      return [
-        file,
-        ...fileChecks(db, target, path, deps.clock.now()).filter(
-          (check) => check.name !== "install" && check.name !== "lock",
-        ),
-        fail(
-          "install",
-          `${target.table} is not a table of ${path}`,
-          "point the source at the table, and run facetdb migrate on it",
-        ),
-        skip("lock", "there is no table to hold a lock on"),
-      ];
-    }
-    return [file, ...fileChecks(db, target, path, deps.clock.now())];
+    return [
+      file,
+      ...fileChecks(db, path),
+      ...(await installChecks(sqliteQuery(db), target, path, deps.clock.now())),
+    ];
   } finally {
     db.close();
   }

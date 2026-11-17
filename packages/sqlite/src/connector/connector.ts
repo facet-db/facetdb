@@ -92,6 +92,11 @@ export type SqliteConnectorDeps = {
   readonly workerId?: string;
   /** Opens the file; node:sqlite by default (a missing file is refused, never created). */
   readonly open?: OpenSqlite;
+  /**
+   * How the connector's words name the database: the file's path by default; a libSQL server's
+   * database by its host, never its URL, which the words never echo.
+   */
+  readonly label?: string;
   /** The poll of `watch`; 1 second by default. */
   readonly pollMs?: number;
   /** Rows per `scan` page; 500 by default, a test pages smaller to cross page boundaries. */
@@ -282,6 +287,7 @@ export async function createSqliteConnector(
   if (!Number.isInteger(pageSize) || pageSize < 1) {
     throw new Error(`a page holds at least one row, not ${pageSize}`);
   }
+  const where = deps.label ?? path;
   const client: SqliteClient = (deps.open ?? openNodeSqlite)(path);
   let facts: TableFacts;
   let key: Key;
@@ -346,7 +352,7 @@ export async function createSqliteConnector(
     if (owner === undefined) {
       throw new EngineRefusal({
         code: "not-installed",
-        message: `FacetDB is not installed on ${name} in ${path} (${OWNERS_TABLE} has no row for it)`,
+        message: `FacetDB is not installed on ${name} in ${where} (${OWNERS_TABLE} has no row for it)`,
         fix: "run facetdb migrate first",
       });
     }
@@ -354,7 +360,7 @@ export async function createSqliteConnector(
     if (projectId !== target.project.id) {
       throw new EngineRefusal({
         code: "another-project",
-        message: `${name} in ${path} belongs to another project (${projectId}); one table belongs to one project`,
+        message: `${name} in ${where} belongs to another project (${projectId}); one table belongs to one project`,
         fix: "run this worker from that project's directory, or point the source at another table",
       });
     }
@@ -368,8 +374,8 @@ export async function createSqliteConnector(
       const at = textOf(holder, "heartbeat_at");
       throw new EngineRefusal({
         code: "one-worker",
-        message: `SQLite allows one worker; another started at ${at} or before (${textOf(holder, "worker_id")}), and its lock on ${textOf(holder, "table_name")} in ${path} was renewed then, under 2 minutes ago`,
-        fix: "stop the other facetdb worker on this file first: a worker that stops lets go of its lock, and a lock not renewed for 2 minutes is taken over by the next worker",
+        message: `SQLite allows one worker; another started at ${at} or before (${textOf(holder, "worker_id")}), and its lock on ${textOf(holder, "table_name")} in ${where} was renewed then, under 2 minutes ago`,
+        fix: "stop the other facetdb worker on this database first: a worker that stops lets go of its lock, and a lock not renewed for 2 minutes is taken over by the next worker",
       });
     }
     await tx.run(`update ${owners} set worker_id = ?, heartbeat_at = ? where table_name = ?`, [

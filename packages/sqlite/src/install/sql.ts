@@ -212,10 +212,10 @@ export type CaptureTable = {
 /**
  * What both triggers do, inside the application's own transaction: on `reset`, the record goes back
  * to pending (only when it is not pending already, so nothing is written needlessly, as Postgres's
- * side-table trigger does); then its key is queued once. A key queued already stays one row
- *, and a change while a worker holds the job clears the claim, as on Postgres: that worker's
- * ack deletes only its own claim, so the job stays for the new state to be asked. The status update
- * sets no state column, so it fires neither trigger again (no `recursive_triggers` needed either way).
+ * side-table trigger does); then its key is queued once. A key queued already stays one row, and a
+ * change while a worker holds the job clears the claim, as on Postgres: that worker's ack deletes
+ * only its own claim, so the job stays for the new state to be asked. The status update sets no
+ * state column, so it fires neither trigger again (no `recursive_triggers` needed either way).
  */
 function enqueueBody(capture: CaptureTable): string {
   const table = quoteIdent(capture.table);
@@ -313,7 +313,7 @@ export function guardOf(planned: PlanStatement): string | undefined {
  * table when its query finds a row, and the table's check fails with its own name as the message,
  * SQLite's one conditional error in plain SQL. A script run with `sqlite3 -bail` stops there,
  * before the drop, and nothing of its transaction is committed. The table is temporary: nothing of
- * it is written to the file, and it goes with the connection.
+ * it is written to the file, and it goes with the connection (on a libSQL server: `guardsInMain`).
  */
 const GUARD_TABLE = "facetdb_guard";
 
@@ -325,19 +325,54 @@ export const GUARDED_SCRIPT = `-- Run by hand, run this script with sqlite3 -bai
 -- FacetDB's shared tables, a guard below fails, and the script must stop there and roll back.
 `;
 
-function guardTableStatement(): PlanStatement {
+/**
+ * Where the guard table lives: `temp` on a file; `main` on a libSQL server, which refuses temporary
+ * tables (sqld answers "unsupported statement"), so the script makes it inside its one transaction
+ * and drops it as its last statement (`guardsInMain`): a run that stops rolls it back with the
+ * rest, and a run that finishes leaves nothing of it.
+ */
+type GuardSchema = "temp" | "main";
+
+function guardTableStatement(schema: GuardSchema = "temp"): PlanStatement {
   return statement(
     "cleanup",
-    `create temp table if not exists ${quoteIdent(GUARD_TABLE)} (${quoteIdent("ok")} integer constraint ${quoteIdent(GUARD_FAILED)} check (${quoteIdent("ok")}))`,
+    `create ${schema === "temp" ? "temp " : ""}table if not exists ${quoteIdent(GUARD_TABLE)} (${quoteIdent("ok")} integer constraint ${quoteIdent(GUARD_FAILED)} check (${quoteIdent("ok")}))`,
   );
 }
 
 /** A drop that waits on `guard`: printed for `run` on its first line, enforced for a hand on its second. */
-function unless(guard: string, drop: string): PlanStatement {
+function unless(guard: string, drop: string, schema: GuardSchema = "temp"): PlanStatement {
   return statement(
     "cleanup",
-    `${UNLESS}${guard}\ninsert into temp.${quoteIdent(GUARD_TABLE)} (${quoteIdent("ok")}) select 0 where exists (${guard});\n${drop}`,
+    `${UNLESS}${guard}\ninsert into ${schema === "temp" ? "temp." : ""}${quoteIdent(GUARD_TABLE)} (${quoteIdent("ok")}) select 0 where exists (${guard});\n${drop}`,
   );
+}
+
+/**
+ * A plan's guards for a libSQL server: the guard table in `main` instead of `temp`, the guarded
+ * drops inserting into it there, and the table dropped after the plan's last statement. Every other
+ * statement is unchanged; a plan without a guard is returned as it is.
+ */
+export function guardsInMain(statements: readonly PlanStatement[]): readonly PlanStatement[] {
+  const temporary = guardTableStatement("temp").text;
+  if (!statements.some((one) => one.text === temporary)) {
+    return statements;
+  }
+  return [
+    ...statements.map((one) => {
+      if (one.text === temporary) {
+        return guardTableStatement("main");
+      }
+      const guard = guardOf(one);
+      if (guard === undefined) {
+        return one;
+      }
+      // `unless` wrote three parts: the guard's line, the insert's line, then the drop.
+      const drop = one.text.split("\n").slice(2).join("\n");
+      return unless(guard, drop, "main");
+    }),
+    statement("cleanup", `drop table if exists ${quoteIdent(GUARD_TABLE)}`),
+  ];
 }
 
 /** The table (`tbl_name`) of each FacetDB trigger in the file that still writes to the queue. */
