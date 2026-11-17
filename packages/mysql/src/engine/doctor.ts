@@ -6,7 +6,11 @@ import {
   ownedColumns,
   readColumns,
   readFacetdbTables,
+  readTableType,
   readWorkerRights,
+  SIDE_TABLE_PRIVILEGES,
+  sideTableName,
+  sideViewName,
   WORKER_ACCOUNT,
   WORKER_USER,
   type WorkerRights,
@@ -214,7 +218,13 @@ async function installChecks(
   rights: WorkerRights,
 ): Promise<readonly [install: DoctorCheck, queue: DoctorCheck]> {
   const label = `${schema}.${target.table}`;
-  const columns = await readColumns(query, schema, target.table);
+  // FacetDB's columns are the table's inline, the side table's in side-table mode, whose view the
+  // worker login sees too.
+  const side = target.storage === "side-table";
+  const holder = side ? sideTableName(target.table) : target.table;
+  const holderLabel = `${schema}.${holder}`;
+  const viewLabel = `${schema}.${sideViewName(target.table)}`;
+  const columns = await readColumns(query, schema, holder);
   const owned = ownedColumns(target.questionSet);
   const byName = new Map(columns.map((column) => [column.name, column]));
   const missing = owned.filter((column) => !byName.has(column.name)).map((column) => column.name);
@@ -222,12 +232,17 @@ async function installChecks(
     .filter((column) => byName.get(column.name)?.comment === "")
     .map((column) => column.name);
   const tables = await readFacetdbTables(query, schema);
+  const viewMissing =
+    side && (await readTableType(query, schema, sideViewName(target.table))) === undefined;
   const problems = [
-    ...(columns.length === 0 ? [`the worker login sees no column of ${label}`] : []),
-    ...(columns.length > 0 && missing.length > 0 ? [`${label} lacks ${missing.join(", ")}`] : []),
+    ...(columns.length === 0 ? [`the worker login sees no column of ${holderLabel}`] : []),
+    ...(columns.length > 0 && missing.length > 0
+      ? [`${holderLabel} lacks ${missing.join(", ")}`]
+      : []),
+    ...(viewMissing ? [`${viewLabel} is missing`] : []),
     ...(unmarked.length > 0
       ? [
-          `${unmarked.join(", ")} of ${label} ${unmarked.length === 1 ? "is" : "are"} not marked ${OWNED_MARK}`,
+          `${unmarked.join(", ")} of ${holderLabel} ${unmarked.length === 1 ? "is" : "are"} not marked ${OWNED_MARK}`,
         ]
       : []),
     ...(tables.jobs ? [] : [`${schema}.${JOBS_TABLE} is missing`]),
@@ -266,7 +281,7 @@ async function installChecks(
   }
   const install = ok(
     "install",
-    `${owned.length} marked columns on ${label}, the jobs table and the marker row of project ${target.project.id} are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
+    `${owned.length} marked columns on ${holderLabel}${side ? `, the view ${viewLabel}` : ""}, the jobs table and the marker row of project ${target.project.id} are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
   );
   if (!rights.tables.some((held) => held.table === JOBS_TABLE && held.privilege === "SELECT")) {
     return [install, skip("queue", "the worker login may not read the jobs table")];
@@ -301,14 +316,27 @@ function grantsCheck(
       : rights.columns.some(
           (held) => held.table === table && held.column === column && held.privilege === privilege,
         );
-  const select = [key, ...target.questionSet.read.filter((column) => column !== key), ...owned];
+  const side = target.storage === "side-table";
+  const sideName = sideTableName(target.table);
+  const viewName = sideViewName(target.table);
+  // In side-table mode the worker reads the key and the state of the table and writes the side
+  // table only; inline it reads and updates FacetDB's columns of the table too.
+  const select = [
+    key,
+    ...target.questionSet.read.filter((column) => column !== key),
+    ...(side ? [] : owned),
+  ];
   const missing = [
     ...select
       .filter((column) => !holds(target.table, "SELECT", column))
       .map((column) => `select on ${column}`),
-    ...owned
+    ...(side ? [] : owned)
       .filter((column) => !holds(target.table, "UPDATE", column))
       .map((column) => `update on ${column}`),
+    ...(side ? SIDE_TABLE_PRIVILEGES : [])
+      .filter((privilege) => !holds(sideName, privilege.toUpperCase()))
+      .map((privilege) => `${privilege} on ${sideName}`),
+    ...(side && !holds(viewName, "SELECT") ? [`select on ${viewName}`] : []),
     ...["SELECT", "INSERT", "UPDATE", "DELETE"]
       .filter((privilege) => !holds(JOBS_TABLE, privilege))
       .map((privilege) => `${privilege.toLowerCase()} on ${JOBS_TABLE}`),
@@ -317,7 +345,9 @@ function grantsCheck(
   return missing.length === 0
     ? ok(
         "grants",
-        `${WORKER_ACCOUNT} selects the key, the ${target.questionSet.read.length} state columns and FacetDB's columns of ${schema}.${target.table}, updates FacetDB's columns only, and has its rights on ${JOBS_TABLE} and ${OWNERS_TABLE}`,
+        side
+          ? `${WORKER_ACCOUNT} selects the key and the ${target.questionSet.read.length} state columns of ${schema}.${target.table} and writes none of it, writes the rows of ${sideName}, selects ${viewName}, and has its rights on ${JOBS_TABLE} and ${OWNERS_TABLE}`
+          : `${WORKER_ACCOUNT} selects the key, the ${target.questionSet.read.length} state columns and FacetDB's columns of ${schema}.${target.table}, updates FacetDB's columns only, and has its rights on ${JOBS_TABLE} and ${OWNERS_TABLE}`,
       )
     : fail(
         "grants",

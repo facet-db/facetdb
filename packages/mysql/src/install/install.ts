@@ -32,11 +32,33 @@ import {
   noDatabaseRefusal,
   notATableRefusal,
   queueKeyRefusal,
-  sideTableRefusal,
+  sideNameTooLongRefusal,
   triggerNameRefusal,
   workerHostRefusal,
   workerLoginRefusal,
 } from "./refusals.ts";
+import {
+  type Account,
+  createSideTableStatement,
+  createViewStatement,
+  foreignKeyAllowed,
+  foreignKeyNote,
+  heldBy,
+  noForeignKeyNote,
+  readerGrantStatement,
+  readersNote,
+  readersOf,
+  readSideCatalog,
+  SIDE_TABLE_NAME_LIMIT,
+  SIDE_TABLE_PRIVILEGES,
+  type SideCatalog,
+  sideRefusal,
+  sideTableName,
+  sideTriggerDefinitions,
+  sideViewName,
+  viewCurrent,
+  viewNote,
+} from "./side-table.ts";
 import {
   addColumnsStatement,
   type CaptureSource,
@@ -187,8 +209,8 @@ function tableRefusal(target: EngineTarget, catalog: Catalog, label: string): Re
   if (catalog.tableType !== "BASE TABLE") {
     return notATableRefusal(label, catalog.tableType);
   }
-  if (target.storage === "side-table") {
-    return sideTableRefusal(label);
+  if (target.storage === "side-table" && target.table.length > SIDE_TABLE_NAME_LIMIT) {
+    return sideNameTooLongRefusal(target.table, SIDE_TABLE_NAME_LIMIT);
   }
   if (target.table.length > NAME_LIMIT - "facetdb__ins".length) {
     return nameTooLongRefusal(target.table);
@@ -271,13 +293,16 @@ function stateRefusal(
   return undefined;
 }
 
-/** Install's own columns against the table's: adopt FacetDB's, refuse the application's. */
+/**
+ * Install's own columns against a table's (the application's table inline, the side table in
+ * side-table mode): adopt FacetDB's, refuse the application's.
+ */
 function columnsRefusal(
-  catalog: Catalog,
+  tableColumns: readonly CatalogColumn[],
   label: string,
   owned: readonly OwnedColumn[],
 ): Refusal | undefined {
-  const byName = new Map(catalog.columns.map((column) => [column.name, column]));
+  const byName = new Map(tableColumns.map((column) => [column.name, column]));
   const existing = owned.flatMap((column) => {
     const found = byName.get(column.name);
     return found === undefined ? [] : [{ column, found }];
@@ -344,6 +369,7 @@ function installRefusal(
   catalog: Catalog,
   rights: WorkerRights,
   loginExists: boolean,
+  side: SideCatalog | undefined,
 ): Refusal | Keyed {
   const { schema } = catalog;
   const label = `${schema}.${target.table}`;
@@ -381,7 +407,13 @@ function installRefusal(
   if (state !== undefined) {
     return state;
   }
-  const columns = columnsRefusal(catalog, label, owned);
+  // Inline, FacetDB's columns are the table's; in side-table mode they are the side table's, and
+  // the table must have none of them, nor a column of their names (the view lists both).
+  const columns =
+    side === undefined
+      ? columnsRefusal(catalog.columns, label, owned)
+      : (sideRefusal(catalog.columns, side, schema, target.table, keyed.key.name, owned) ??
+        columnsRefusal(side.side.columns, `${schema}.${sideTableName(target.table)}`, owned));
   if (columns !== undefined) {
     return columns;
   }
@@ -501,6 +533,168 @@ function installPlan(
   };
 }
 
+/**
+ * The grants side-table mode still needs: the worker reads the key and the state of the table and
+ * nothing else of it, holds the four row rights on the side table (`write` inserts a first answer's
+ * row and updates it), select on the view, and its rights on the two shared tables; every account
+ * that reads the table gets select on the view and the side table, which an invoker's view needs.
+ */
+function sideGrantStatements(
+  catalog: Catalog,
+  side: SideCatalog,
+  table: string,
+  key: string,
+  read: readonly string[],
+  rights: WorkerRights,
+): { readonly worker: readonly PlanStatement[]; readonly readers: readonly PlanStatement[] } {
+  const { schema } = catalog;
+  const sideName = sideTableName(table);
+  const viewName = sideViewName(table);
+  const select = [key, ...read.filter((column) => column !== key)].filter(
+    (column) => !holds(rights, table, "select", column),
+  );
+  const sideRights = SIDE_TABLE_PRIVILEGES.filter(
+    (privilege) => !holds(rights, sideName, privilege),
+  );
+  const jobs = JOBS_PRIVILEGES.filter((privilege) => !holds(rights, JOBS_TABLE, privilege));
+  const owners = OWNERS_PRIVILEGES.filter((privilege) => !holds(rights, OWNERS_TABLE, privilege));
+  const readers = readersOf(side, table);
+  const lacking = (name: string): readonly Account[] =>
+    readers.filter((account) => !heldBy(side.grants, account, name, "select"));
+  const sideReaders = lacking(sideName);
+  const viewReaders = lacking(viewName);
+  return {
+    worker: [
+      ...(select.length === 0 ? [] : [columnGrantStatement("select", schema, table, select)]),
+      ...(sideRights.length === 0 ? [] : [tableGrantStatement(sideRights, schema, sideName)]),
+      ...(holds(rights, viewName, "select")
+        ? []
+        : [tableGrantStatement(["select"], schema, viewName)]),
+      ...(jobs.length === 0 ? [] : [tableGrantStatement(jobs, schema, JOBS_TABLE)]),
+      ...(owners.length === 0 ? [] : [tableGrantStatement(owners, schema, OWNERS_TABLE)]),
+    ],
+    readers: [
+      ...(sideReaders.length === 0 ? [] : [readerGrantStatement(schema, sideName, sideReaders)]),
+      ...(viewReaders.length === 0 ? [] : [readerGrantStatement(schema, viewName, viewReaders)]),
+    ],
+  };
+}
+
+/**
+ * Side-table mode's plan, in inline mode's order and by its rule (only what is missing, so the plan
+ * of an installed table is empty): the marker and its guard, the side table (created, or given a
+ * new question's columns), the view when it is not the one the plan makes, the queue, the login,
+ * the grants, then the triggers. The table itself gains no column; every statement on it is a
+ * trigger's.
+ */
+function sideInstallPlan(
+  target: EngineTarget,
+  catalog: Catalog,
+  side: SideCatalog,
+  key: CatalogColumn,
+  loginExists: boolean,
+  rights: WorkerRights,
+): { readonly plan: EnginePlan; readonly createsTriggers: boolean } {
+  const { schema } = catalog;
+  const { table } = target;
+  const label = `${schema}.${table}`;
+  const owned = ownedColumns(target.questionSet);
+  const sideName = sideTableName(table);
+  const present = new Set(side.side.columns.map((column) => column.name));
+  const missing = owned.filter((column) => !present.has(column.name));
+  const creates = side.side.type === undefined;
+  const foreignKey = foreignKeyAllowed(side);
+  const view = !viewCurrent(side, table, catalog.columns, owned);
+  const capture: CaptureSource = {
+    schema,
+    table,
+    key: key.name,
+    state: target.questionSet.read,
+    onChange: target.onChange,
+  };
+  const definitions = sideTriggerDefinitions(capture, owned);
+  const triggers = definitions.filter(
+    (definition) => !triggerInstalled(catalog.triggers, table, definition),
+  );
+  // FacetDB's triggers this mode does not define: inline mode's `_new`, left by an earlier install.
+  const names = triggerNames(table);
+  const defined = new Set(definitions.map((definition) => definition.name));
+  const stale = [names.pending, names.insert, names.update].filter(
+    (name) =>
+      !defined.has(name) &&
+      catalog.triggers.some((trigger) => trigger.name === name && trigger.table === table),
+  );
+  const grants = sideGrantStatements(
+    catalog,
+    side,
+    table,
+    key.name,
+    target.questionSet.read,
+    loginExists ? rights : NO_RIGHTS,
+  );
+  const work: readonly PlanStatement[] = [
+    ...(creates
+      ? [createSideTableStatement(schema, table, key, owned, foreignKey)]
+      : missing.length === 0
+        ? []
+        : [addColumnsStatement(schema, sideName, missing)]),
+    ...(view
+      ? [
+          createViewStatement(
+            schema,
+            table,
+            key.name,
+            owned.map((column) => column.name),
+          ),
+        ]
+      : []),
+    ...(catalog.jobs.present ? [] : [jobsTableStatement(schema)]),
+    ...(loginExists ? [] : [WORKER_LOGIN_STATEMENT]),
+    ...grants.worker,
+    ...grants.readers,
+    ...stale.map((name) => dropTrigger(schema, name)),
+    ...triggers.flatMap((definition) => [
+      dropTrigger(schema, definition.name),
+      sourceStatement("capture", createTrigger(capture, definition)),
+    ]),
+  ];
+  const claimed = catalog.owners.some((owner) => owner.table === table);
+  if (work.length === 0 && claimed) {
+    return { plan: NOTHING, createsTriggers: false };
+  }
+  const claim: Claim = { schema, table, projectId: target.project.id, source: target.source };
+  const readersGranted = grants.readers.length > 0;
+  return {
+    plan: {
+      statements: [
+        SETTINGS,
+        ...(catalog.ownersPresent ? [] : [ownersTableStatement(schema)]),
+        ...(claimed ? [] : [claimStatement(claim)]),
+        ownerGuardStatement(claim),
+        ...work,
+      ],
+      transactional: false,
+      removes: [],
+      keeps: [],
+      notes: [
+        INSTALL_RERUN_NOTE,
+        ...(catalog.jobs.present ? [] : [QUEUE_NOTE]),
+        ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label)]),
+        ...(creates
+          ? [
+              foreignKey
+                ? foreignKeyNote(label, schema, table)
+                : noForeignKeyNote(label, schema, table),
+            ]
+          : []),
+        ...(view ? [viewNote(label, schema, table)] : []),
+        ...(view || readersGranted ? [readersNote(label, schema, table)] : []),
+      ],
+    },
+    createsTriggers: triggers.length > 0,
+  };
+}
+
 export async function planInstall(
   connect: MysqlConnect,
   target: EngineTarget,
@@ -530,11 +724,18 @@ export async function planInstall(
     }
     const catalog = await readCatalog(query, schema, target.table);
     const rights = loginExists ? await readWorkerRights(query, schema) : NO_RIGHTS;
-    const checked = installRefusal(target, session, catalog, rights, loginExists);
+    const side =
+      target.storage === "side-table"
+        ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
+        : undefined;
+    const checked = installRefusal(target, session, catalog, rights, loginExists, side);
     if (!("key" in checked)) {
       return { ok: false, refusal: checked };
     }
-    const planned = installPlan(target, catalog, checked.key, loginExists, rights);
+    const planned =
+      side === undefined
+        ? installPlan(target, catalog, checked.key, loginExists, rights)
+        : sideInstallPlan(target, catalog, side, checked.key, loginExists, rights);
     if (planned.createsTriggers) {
       const allowed = await readTriggerRights(query);
       if (allowed.binaryLogging && !allowed.trustCreators && !allowed.superUser) {

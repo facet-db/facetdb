@@ -155,7 +155,7 @@ export type TriggerDefinition = {
  * Postgres's `on conflict … do update` does, so that worker's `ack` (by its claim token) leaves the
  * job for the new state to be asked; `insert ignore` would let the ack delete it.
  */
-function enqueue(source: CaptureSource, indent: string): string {
+export function enqueue(source: CaptureSource, indent: string): string {
   const columns = ["table_name", "record_key"].map(quoteIdent).join(", ");
   const key = `cast(new.${quoteIdent(source.key)} as char character set utf8mb4)`;
   return `${indent}insert into ${quoteTable(source.schema, JOBS_TABLE)} (${columns}) values (${quoteLiteral(source.table)}, ${key})
@@ -168,7 +168,7 @@ ${indent}  on duplicate key update ${["claimed_at", "claimed_by", "claim_token"]
  * column's collation out of it: under the usual `_ai_ci` collations `'Scam' <=> 'scam'` is true, and
  * a change the state hash sees would not queue the record.
  */
-function stateChanged(source: CaptureSource): string {
+export function stateChanged(source: CaptureSource): string {
   return source.state
     .map(
       (column) =>

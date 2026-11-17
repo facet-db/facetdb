@@ -17,6 +17,7 @@ import {
 } from "../sql/index.ts";
 import {
   droppedColumnsNote,
+  isMariaDb,
   readCatalog,
   readSession,
   readViews,
@@ -25,6 +26,13 @@ import {
   workerExists,
 } from "./catalog.ts";
 import { noDatabaseRefusal, pruneRefused } from "./refusals.ts";
+import {
+  createViewStatement,
+  readSideCatalog,
+  sideTableIsOurs,
+  sideTableName,
+  viewIsOurs,
+} from "./side-table.ts";
 import {
   OWNED_MARK,
   ownedColumns,
@@ -39,7 +47,9 @@ import {
  * until the operator asks for them to go, so nothing is destroyed silently. This drops the marked
  * columns of questions the set no longer has, never a status column and never a `_probabilities`
  * column of a question still asked, and takes back the worker's read of a state column `read` no
- * longer lists. A source not installed yet has nothing to prune: an empty plan, not a refusal.
+ * longer lists. In side-table mode the columns are the side table's, and the view that reads them
+ * is made again without them first. A source not installed yet has nothing to prune: an empty plan,
+ * not a refusal.
  */
 
 /** The plan's note for a run that stops part way. */
@@ -117,7 +127,8 @@ export async function planPrune(
     return { ok: false, refusal: insecure };
   }
   return withClient(connect, url, async (query): Promise<PlanResult> => {
-    const schema = target.schema ?? (await readSession(query)).database;
+    const session = await readSession(query);
+    const schema = target.schema ?? session.database;
     if (schema === undefined) {
       return { ok: false, refusal: noDatabaseRefusal(target) };
     }
@@ -146,7 +157,17 @@ export async function planPrune(
       };
     }
     const { questionSet } = target;
-    const marked = catalog.columns
+    // Where FacetDB's columns are: the table inline, the side table in side-table mode, whose view
+    // reads them by name.
+    const side =
+      target.storage === "side-table"
+        ? await readSideCatalog(query, schema, table, isMariaDb(session))
+        : undefined;
+    const holder = side === undefined ? table : sideTableName(table);
+    const holderLabel = `${schema}.${holder}`;
+    const holderColumns =
+      side === undefined ? catalog.columns : sideTableIsOurs(side) ? side.side.columns : [];
+    const marked = holderColumns
       .filter((column) => column.comment === OWNED_MARK && column.name !== key)
       .map((column) => column.name);
     const dropped = droppedColumns(questionSet, marked);
@@ -189,7 +210,7 @@ export async function planPrune(
             (name): KeptObject => ({
               kind: "column",
               name,
-              of: label,
+              of: holderLabel,
               scope: "source",
               reason: KEPT_REASON,
             }),
@@ -197,16 +218,33 @@ export async function planPrune(
         },
       };
     }
+    // Inline, the application's views may read a dropped column, and the note names them. The
+    // side table is read by FacetDB's own view, made again first without the columns that go, from
+    // what stays on the side table (the install that follows the prune adds a new question's).
     const viewsNote =
-      dropped.length === 0
+      dropped.length === 0 || side !== undefined
         ? undefined
         : droppedColumnsNote(label, await readViews(query, schema, table));
+    const remade =
+      side !== undefined &&
+      viewIsOurs(side) &&
+      side.view.columns.some((column) => droppedNames.has(column))
+        ? [
+            createViewStatement(
+              schema,
+              table,
+              key,
+              marked.filter((column) => !droppedNames.has(column)),
+            ),
+          ]
+        : [];
     return {
       ok: true,
       plan: {
         statements: [
           SETTINGS,
           ...(revoke === undefined ? [] : [revoke]),
+          ...remade,
           // In one statement: MySQL and MariaDB drop a column a view reads without a word, and the
           // view fails with error 1356 afterwards, which the note says.
           ...(dropped.length === 0
@@ -214,7 +252,7 @@ export async function planPrune(
             : [
                 sourceStatement(
                   "columns",
-                  `alter table ${quoteTable(schema, table)}\n${dropped.map(({ column }) => `  drop column ${quoteIdent(column)}`).join(",\n")}`,
+                  `alter table ${quoteTable(schema, holder)}\n${dropped.map(({ column }) => `  drop column ${quoteIdent(column)}`).join(",\n")}`,
                 ),
               ]),
         ],
@@ -224,7 +262,7 @@ export async function planPrune(
             ({ column, reason }): EngineObject => ({
               kind: "column",
               name: column,
-              of: label,
+              of: holderLabel,
               scope: "source",
               reason,
             }),
@@ -243,7 +281,7 @@ export async function planPrune(
           (name): KeptObject => ({
             kind: "column",
             name,
-            of: label,
+            of: holderLabel,
             scope: "source",
             reason: KEPT_REASON,
           }),

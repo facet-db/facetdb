@@ -5,6 +5,7 @@ export {
   MARIADB_SQL_MODE,
   type ScriptedColumn,
   type ScriptedDatabase,
+  type ScriptedGrant,
   type ScriptedRights,
   type ScriptedTable,
   type ScriptedTrigger,
@@ -15,12 +16,14 @@ export {
   ENGINE_DEPS,
   freshListings,
   installedListings,
+  installedSideListings,
   LISTINGS_JOBS,
   LISTINGS_PROJECT,
   LISTINGS_QUESTIONS,
   LISTINGS_TABLE,
   LISTINGS_TRIGGERS,
   listingsTarget,
+  sideListingsTarget,
 } from "./listings.ts";
 export {
   type Answer,

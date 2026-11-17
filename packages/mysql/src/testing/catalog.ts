@@ -27,6 +27,23 @@ export type ScriptedTable = {
   readonly type?: string;
   readonly columns: readonly ScriptedColumn[];
   readonly primaryKey?: readonly string[];
+  /** `engine`: `InnoDB` for a base table when absent, none for a view. */
+  readonly engine?: string;
+  /** `create_options` (`partitioned`); empty when absent. */
+  readonly createOptions?: string;
+  /** `table_comment`: FacetDB marks its side table `facetdb`; empty when absent. */
+  readonly comment?: string;
+  /** A view's `information_schema.views` row: its security and the text the server keeps. */
+  readonly view?: { readonly security: string; readonly definition: string };
+};
+
+/** A row of `mysql.tables_priv`: an account's table-level rights on a table of the schema. */
+export type ScriptedGrant = {
+  readonly user: string;
+  readonly host: string;
+  readonly table: string;
+  /** As the SET column prints them: `Select`, `Insert`. */
+  readonly privileges: readonly string[];
 };
 
 export type ScriptedTrigger = {
@@ -87,6 +104,10 @@ export type ScriptedDatabase = {
    * `unlisted` for a server without that view (MariaDB). None, listed, when absent.
    */
   readonly views?: readonly { readonly view: string; readonly table: string }[] | "unlisted";
+  /** Every account's table-level rights in the schema (`mysql.tables_priv`); none when absent. */
+  readonly grants?: readonly ScriptedGrant[];
+  /** MariaDB's roles (`mysql.user` where `is_role = 'Y'`), read on a MariaDB `version` only. */
+  readonly roles?: readonly string[];
 };
 
 /** MySQL 8.0's default `sql_mode`. */
@@ -181,7 +202,43 @@ export function scriptedDatabase(database: ScriptedDatabase): Answer {
           .map((name): MysqlRow => ({ name }));
       }
       const table = tableNamed(params[1]);
-      return table === undefined ? [] : [{ type: table.type ?? "BASE TABLE" }];
+      if (table === undefined) {
+        return [];
+      }
+      const type = table.type ?? "BASE TABLE";
+      return [
+        {
+          type,
+          engine: type === "BASE TABLE" ? (table.engine ?? "InnoDB") : null,
+          create_options: type === "BASE TABLE" ? (table.createOptions ?? "") : null,
+          table_comment: table.comment ?? (type === "VIEW" ? "VIEW" : ""),
+        },
+      ];
+    }
+    if (text.includes("from information_schema.views")) {
+      const view = inSchema(params) ? tableNamed(params[1])?.view : undefined;
+      return view === undefined
+        ? []
+        : [{ security_type: view.security, definition: view.definition }];
+    }
+    if (text.includes("from mysql.tables_priv")) {
+      const [db, ...named] = params;
+      return db !== schema
+        ? []
+        : [...(database.grants ?? [])]
+            .filter((grant) => named.includes(grant.table))
+            // As the query orders them: by table, user and host.
+            .sort((a, b) =>
+              `${a.table}\n${a.user}\n${a.host}` < `${b.table}\n${b.user}\n${b.host}` ? -1 : 1,
+            )
+            .map(
+              (grant): MysqlRow => ({
+                user_name: grant.user,
+                host_name: grant.host,
+                table_name: grant.table,
+                privileges: grant.privileges.join(","),
+              }),
+            );
     }
     if (text.includes("from information_schema.columns")) {
       const table = inSchema(params) ? tableNamed(params[1]) : undefined;
@@ -214,6 +271,9 @@ export function scriptedDatabase(database: ScriptedDatabase): Answer {
             }),
           )
         : [];
+    }
+    if (text.includes("from mysql.user") && text.includes("is_role")) {
+      return (database.roles ?? []).map((user): MysqlRow => ({ user_name: user }));
     }
     if (text.includes("from mysql.user")) {
       return [...(database.worker === undefined ? [] : ["%"]), ...(database.otherWorkerHosts ?? [])]

@@ -1,6 +1,14 @@
 import type { EngineDeps, EngineTarget, QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
-import { ownedColumns, triggerDefinitions, triggerNames } from "../install/index.ts";
+import {
+  ownedColumns,
+  sideTableName,
+  sideTriggerDefinitions,
+  sideViewName,
+  storedViewDefinition,
+  triggerDefinitions,
+  triggerNames,
+} from "../install/index.ts";
 import type { ScriptedColumn, ScriptedDatabase, ScriptedTable } from "./catalog.ts";
 
 /**
@@ -141,3 +149,119 @@ export function installedListings(target: EngineTarget = listingsTarget()): Scri
 
 /** The names of the listings table's two triggers. */
 export const LISTINGS_TRIGGERS = triggerNames("listings");
+
+/** The listings example in side-table mode. */
+export function sideListingsTarget(overrides: Partial<EngineTarget> = {}): EngineTarget {
+  return listingsTarget({ storage: "side-table", ...overrides });
+}
+
+/**
+ * The database as a side-table install of `target` leaves it: the listings table as it was,
+ * `facetdb_listings_answers` with FacetDB's marked columns, the invoker's view over both, the
+ * queue, the marker's row, the two triggers as side-table mode defines them, and the worker login
+ * with exactly the rights install gives it (also as `mysql.tables_priv` lists them, with `readers`'
+ * select on the table, the side table and the view).
+ */
+export function installedSideListings(
+  target: EngineTarget = sideListingsTarget(),
+  readers: readonly string[] = [],
+): ScriptedDatabase {
+  const owned = ownedColumns(target.questionSet);
+  const side = sideTableName(target.table);
+  const view = sideViewName(target.table);
+  const source = { ...LISTINGS_TABLE, name: target.table };
+  const triggers = sideTriggerDefinitions(
+    {
+      schema: "app",
+      table: target.table,
+      key: "id",
+      state: target.questionSet.read,
+      onChange: target.onChange,
+    },
+    owned,
+  );
+  const viewColumns: readonly ScriptedColumn[] = [
+    ...source.columns.map(({ name, type }) => ({ name, type })),
+    ...owned.map((column) => ({ name: column.name, type: printedType(column.definition) })),
+  ];
+  const sidePrivileges = ["SELECT", "INSERT", "UPDATE", "DELETE"];
+  return {
+    schema: "app",
+    database: "app",
+    tables: [
+      source,
+      {
+        name: side,
+        comment: "facetdb",
+        columns: [
+          { name: "id", type: "int" },
+          ...owned.map((column) => ({
+            name: column.name,
+            type: printedType(column.definition),
+            comment: "facetdb",
+          })),
+        ],
+        primaryKey: ["id"],
+      },
+      {
+        name: view,
+        type: "VIEW",
+        columns: viewColumns,
+        // As MySQL 8 keeps the text (the db suite proves MariaDB's reads the same once normalized).
+        view: {
+          security: "INVOKER",
+          definition: storedViewDefinition(
+            "app",
+            target.table,
+            "id",
+            source.columns.map((column) => column.name),
+            owned.map((column) => column.name),
+          ),
+        },
+      },
+      LISTINGS_JOBS,
+    ],
+    owners: [{ table: target.table, projectId: target.project.id, source: target.source }],
+    triggers: triggers.map((trigger) => ({
+      name: trigger.name,
+      table: target.table,
+      timing: trigger.timing.toUpperCase(),
+      event: trigger.event.toUpperCase(),
+      body: trigger.body,
+    })),
+    worker: {
+      global: ["USAGE"],
+      columns: ["id", ...target.questionSet.read].map((column) => ({
+        table: target.table,
+        column,
+        privilege: "SELECT",
+      })),
+      tables: [
+        ...sidePrivileges.map((privilege) => ({ table: side, privilege })),
+        { table: view, privilege: "SELECT" },
+        ...["SELECT", "INSERT", "UPDATE", "DELETE"].map((privilege) => ({
+          table: "facetdb_jobs",
+          privilege,
+        })),
+        { table: "facetdb_table_owners", privilege: "SELECT" },
+      ],
+    },
+    grants: [
+      {
+        user: "facetdb_worker",
+        host: "%",
+        table: side,
+        privileges: ["Select", "Insert", "Update", "Delete"],
+      },
+      { user: "facetdb_worker", host: "%", table: view, privileges: ["Select"] },
+      ...readers.flatMap((user) =>
+        [target.table, side, view].map((table) => ({
+          user,
+          host: "%",
+          table,
+          privileges: ["Select"],
+        })),
+      ),
+    ],
+  };
+}

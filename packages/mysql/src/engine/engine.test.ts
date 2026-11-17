@@ -13,6 +13,7 @@ import {
   fakeServer,
   freshListings,
   installedListings,
+  installedSideListings,
   listingsTarget,
   recordingDriver,
   type ScriptedDatabase,
@@ -231,6 +232,67 @@ describe("doctor", () => {
     expect(driver.opened).toBe(1);
     expect(driver.closed).toBe(1);
     expect(driver.sent.every((sent) => /^(select|show)/.test(sent.text))).toBe(true);
+  });
+
+  it("checks the side table, the view and the worker's side-table rights in side-table mode", async () => {
+    const clock = new FakeClock(START);
+    const side = target({ storage: "side-table" });
+    const driver = doctorDriver(
+      installedSideListings(side),
+      { tls: "TLS_AES_256_GCM_SHA384" },
+      clock,
+    );
+    const checks = await createMysqlEngine({ connect: driver.connect }).doctor(
+      side,
+      WORKER_URL,
+      deps(clock),
+    );
+    expect(checks.find((check) => check.name === "install")).toEqual({
+      name: "install",
+      status: "ok",
+      detail:
+        "5 marked columns on app.facetdb_listings_answers, the view app.listings_with_answers, the jobs table and the marker row of project proj_listings are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed",
+    });
+    expect(checks.find((check) => check.name === "grants")).toEqual({
+      name: "grants",
+      status: "ok",
+      detail:
+        "'facetdb_worker'@'%' selects the key and the 2 state columns of app.listings and writes none of it, writes the rows of facetdb_listings_answers, selects listings_with_answers, and has its rights on facetdb_jobs and facetdb_table_owners",
+    });
+
+    // Without the view, and without the worker's delete on the side table, both say so.
+    const installed = installedSideListings(side);
+    const broken = doctorDriver(
+      {
+        ...installed,
+        tables: installed.tables.filter((table) => table.name !== "listings_with_answers"),
+        worker: {
+          ...installed.worker,
+          tables: (installed.worker?.tables ?? []).filter(
+            (held) =>
+              !(held.table === "facetdb_listings_answers" && held.privilege === "DELETE") &&
+              held.table !== "listings_with_answers",
+          ),
+        },
+      },
+      {},
+      clock,
+    );
+    const failed = await createMysqlEngine({ connect: broken.connect }).doctor(
+      side,
+      WORKER_URL,
+      deps(clock),
+    );
+    expect(failed.find((check) => check.name === "install")).toMatchObject({
+      status: "fail",
+      detail: "FacetDB is not installed on app.listings: app.listings_with_answers is missing",
+      fix: "run facetdb migrate",
+    });
+    expect(failed.find((check) => check.name === "grants")).toMatchObject({
+      status: "fail",
+      detail:
+        "'facetdb_worker'@'%' lacks delete on facetdb_listings_answers, select on listings_with_answers",
+    });
   });
 
   it("warns of a far database and of plain TCP, and reads a MariaDB's version", async () => {

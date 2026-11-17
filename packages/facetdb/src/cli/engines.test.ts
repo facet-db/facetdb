@@ -121,7 +121,7 @@ describe("the scheme table", () => {
       expect(engine.capabilities).toMatchObject({
         multipleWorkers: true,
         pushWakeup: false,
-        sideTable: false,
+        sideTable: true,
       });
     },
   );

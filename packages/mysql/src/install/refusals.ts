@@ -124,11 +124,15 @@ export function notATableRefusal(label: string, type: string): Refusal {
   };
 }
 
-export function sideTableRefusal(label: string): Refusal {
+/**
+ * Side-table mode names its table `facetdb_<table>_answers`, 16 characters more than the table's
+ * own name, within MySQL's 64.
+ */
+export function sideNameTooLongRefusal(table: string, most: number): Refusal {
   return {
-    code: "side-table",
-    message: `${label}: side-table mode is not available on MySQL and MariaDB yet`,
-    fix: 'set storage "inline" for this source',
+    code: "name-too-long",
+    message: `the table name ${table} has ${table.length} characters; side-table mode keeps the answers in facetdb_<table>_answers, and MySQL allows ${NAME_LIMIT} characters in a name, so a table name can have ${most} at most`,
+    fix: `rename the table to ${most} characters or fewer, or set storage "inline" for this source, then run facetdb migrate again`,
   };
 }
 

@@ -21,7 +21,7 @@ import {
   UPDATED_AT_COLUMN,
   type WriteResult,
 } from "@facetdb/core";
-import { JOBS_TABLE, readPrimaryKey, readTableType } from "../install/index.ts";
+import { JOBS_TABLE, readPrimaryKey, readTableType, sideTableName } from "../install/index.ts";
 import { type MysqlRow, quoteIdent, quoteTable } from "../sql/index.ts";
 import {
   connectMysqlPool,
@@ -61,6 +61,25 @@ import {
  * skips a locked row whose committed version no longer matches rather than wait for it, and locks
  * no gaps. The same connection setup drops `NO_BACKSLASH_ESCAPES` from the worker's own sessions,
  * the mode install refuses, since mysql2 escapes with backslashes.
+ *
+ * In side-table mode the record's answers are its row of `facetdb_<table>_answers`: `read`, `scan`
+ * and the queue are the table's as inline, while `write` and `current` go to the side table, and
+ * the worker holds no right to write the table at all. The hash check cannot be a guard on the row
+ * the write updates, since the state is on another table, nor a locking read of the record: MySQL 8
+ * refuses `select … for update` to an account with select alone (error 1142), and a locked read of
+ * the record taken while holding the side row would close a cycle with an application transaction,
+ * which holds the record and waits for the side row in its trigger. So the write locks the side row
+ * first (creating it from the record when it has none), then reads the record's state as committed
+ * and writes only when its hash is the one sent, in one short transaction. Every state change
+ * upserts that same side row in its trigger, inside the application's transaction, so a change
+ * either committed before the lock (and the read sees it) or waits on the lock until the write
+ * committed (and then sets the row back to pending under `reset`, and queues the record again). The
+ * write's one lock on the customer's row is the shared lock the foreign key's check takes when the
+ * upsert creates a side row. Every lock involved is an InnoDB row lock (install refuses a table of
+ * another engine, whose table locks InnoDB's deadlock detection cannot see), so a cycle with an
+ * unusual application transaction (one in repeatable read whose trigger holds a gap lock of the
+ * side table) is broken by InnoDB at once, rolling back the lighter side, most often the worker's,
+ * whose write then fails with error 1213 and writes nothing.
  */
 
 /** The jobs table is polled every second. */
@@ -72,12 +91,12 @@ export const POLL_MS = 1_000;
  */
 export const CLAIM_LEASE_MS = 15 * 60_000;
 
-/** What MySQL and MariaDB can do: inline columns, several workers; no side tables yet. */
+/** What MySQL and MariaDB can do: inline columns, a side table, several workers. */
 export const MYSQL_CAPABILITIES: Capabilities = {
   inlineColumns: true,
   pushWakeup: false,
   transactions: true,
-  sideTable: false,
+  sideTable: true,
   multipleWorkers: true,
 };
 
@@ -104,6 +123,9 @@ const STATE_CACHE = 1_000;
 
 /** MySQL's `ER_DUP_ENTRY`: the row `claimKey` would insert is queued already. */
 const DUPLICATE_ENTRY = 1062;
+
+/** `ER_NO_REFERENCED_ROW_2`: a side row's record was deleted while the write waited for it. */
+const NO_PARENT = 1452;
 
 /**
  * A `for update nowait` that could not lock a row, or a cycle InnoDB broke: MySQL's
@@ -312,6 +334,9 @@ export async function createMysqlConnector(
     }
     schema = named;
     keyName = await keyOf(schema);
+    if (target.storage === "side-table") {
+      await sideTableOf(schema);
+    }
   } catch (error) {
     await pool.close();
     throw error;
@@ -353,6 +378,21 @@ export async function createMysqlConnector(
     return only;
   }
 
+  /**
+   * In side-table mode, the side table the worker writes: refused at open rather than at the first
+   * write, in words that say what to run. The worker sees it only when install granted it.
+   */
+  async function sideTableOf(inSchema: string): Promise<void> {
+    const side = sideTableName(target.table);
+    if ((await readTableType(rows, inSchema, side)) === undefined) {
+      throw new EngineRefusal({
+        code: "no-side-table",
+        message: `${inSchema}.${side}, where side-table mode keeps the answers of ${inSchema}.${target.table}, does not exist, or the worker login has no right on it`,
+        fix: "run facetdb migrate with storage side-table for this source first",
+      });
+    }
+  }
+
   const { questionSet } = target;
   const fields = questionSet.read;
   /** The table as the config spells it: what the triggers write into `table_name`. */
@@ -360,8 +400,12 @@ export async function createMysqlConnector(
   const table = quoteTable(schema, name);
   const jobs = quoteTable(schema, JOBS_TABLE);
   const keyColumn = quoteIdent(keyName);
+  const sideMode = target.storage === "side-table";
+  /** Where a decision is written and `current` reads it: the table inline, the side table else. */
+  const answers = sideMode ? quoteTable(schema, sideTableName(name)) : table;
   /** A value as its utf8mb4 text, the form `stateHash` and the key compare in. */
-  const asText = (column: string) => `cast(${quoteIdent(column)} as char character set utf8mb4)`;
+  const asText = (column: string, alias?: string) =>
+    `cast(${alias === undefined ? "" : `${alias}.`}${quoteIdent(column)} as char character set utf8mb4)`;
   // `where` is the source's own SQL filter from the config file, spliced as written (as on
   // Postgres): the config is the operator's code, not a user value.
   const excluded =
@@ -591,6 +635,9 @@ export async function createMysqlConnector(
     expectedHash: string,
   ): Promise<WriteResult> {
     const assignments = assignmentsFor(decision);
+    if (sideMode) {
+      return writeSide(recordKey, assignments, expectedHash);
+    }
     const remembered = lastRead.get(recordKey);
     const sent =
       remembered !== undefined && remembered.hash === expectedHash
@@ -610,6 +657,53 @@ export async function createMysqlConnector(
       ],
     );
     return { written: affectedRows > 0 };
+  }
+
+  /**
+   * Side-table mode's write (the header says why it takes this shape): one transaction of three
+   * statements. The upsert locks the record's side row, inserting it from the record when it has
+   * none (no record, no row, and no lock: the read below then finds nothing); its update assigns the
+   * status to itself, which changes nothing and holds the row. Inserting a side row runs the foreign
+   * key's check, which takes a shared lock on the customer's row until the commit; updating one that
+   * exists takes nothing there. The state is then read as committed now (`read committed` takes a
+   * fresh snapshot per statement, and the plain select adds no lock), and the side row is written
+   * only when its hash is the one the model was sent. A stale answer leaves the row as it was:
+   * pending with no answer when the upsert made it, which is what the view shows for a record
+   * without one. A record deleted while the upsert waited fails the foreign key's check (error 1452,
+   * `NO_PARENT`): the record is gone, so nothing is written, as when the read finds no row.
+   */
+  async function writeSide(
+    recordKey: RecordKey,
+    assignments: readonly (readonly [string, unknown])[],
+    expectedHash: string,
+  ): Promise<WriteResult> {
+    const status = quoteIdent(STATUS_COLUMN);
+    return pool.transaction(async (tx): Promise<WriteResult> => {
+      try {
+        await tx(
+          `insert into ${answers} (${keyColumn}) select ${keyColumn} from ${table} where ${keyColumn} = ? on duplicate key update ${status} = ${status}`,
+          [recordKey],
+        );
+      } catch (error) {
+        if (errorNumber(error) === NO_PARENT) {
+          return { written: false };
+        }
+        throw error;
+      }
+      const now = (
+        await tx(`select ${rowColumns} from ${table} where ${keyColumn} = ?`, [recordKey])
+      ).rows
+        .map(parseRow)
+        .find((one) => one.key === recordKey);
+      if (now === undefined || now.hash !== expectedHash) {
+        return { written: false };
+      }
+      const { affectedRows } = await tx(
+        `update ${answers} set ${assignments.map(([column]) => `${quoteIdent(column)} = ?`).join(", ")} where ${keyColumn} = ?`,
+        [...assignments.map(([, value]) => value), recordKey],
+      );
+      return { written: affectedRows > 0 };
+    });
   }
 
   /** The aliases `parseCurrent` reads, each of FacetDB's answer columns as text, a noul converted. */
@@ -634,13 +728,20 @@ export async function createMysqlConnector(
           ];
     }),
   );
+  // Inline the columns are the table's own; in side-table mode they are read through the alias `a`
+  // of the side table, joined to the table so that a deleted record's leftover side row (one no
+  // foreign key took with it) names no record, as the view shows it.
+  const side = sideMode ? "a" : undefined;
   const currentSelect = [
-    `${asText(keyName)} as k`,
-    ...currentColumns.map(({ alias, column }) => `${asText(column)} as ${alias}`),
-    `${quoteIdent(STATUS_COLUMN)} as cs`,
-    `${asText(UPDATED_AT_COLUMN)} as cu`,
-    `${quoteIdent(REVIEWED_COLUMN)} as cr`,
+    `${asText(keyName, side)} as k`,
+    ...currentColumns.map(({ alias, column }) => `${asText(column, side)} as ${alias}`),
+    `${side === undefined ? "" : `${side}.`}${quoteIdent(STATUS_COLUMN)} as cs`,
+    `${asText(UPDATED_AT_COLUMN, side)} as cu`,
+    `${side === undefined ? "" : `${side}.`}${quoteIdent(REVIEWED_COLUMN)} as cr`,
   ].join(", ");
+  const currentFrom = sideMode
+    ? `from ${answers} a join ${table} t on t.${keyColumn} = a.${keyColumn} where a.${keyColumn} in (?)`
+    : `from ${table} where ${keyColumn} in (?)`;
 
   async function current(
     keys: readonly RecordKey[],
@@ -648,9 +749,7 @@ export async function createMysqlConnector(
     const wanted = new Set(keys);
     const found = new Map<RecordKey, CurrentDecision>();
     for (const part of chunks([...wanted], IN_LIST)) {
-      const result = await rows(`select ${currentSelect} from ${table} where ${keyColumn} in (?)`, [
-        part,
-      ]);
+      const result = await rows(`select ${currentSelect} ${currentFrom}`, [part]);
       for (const row of result) {
         const recordKey = textOf(row, "k");
         // A key of another form the column's type matched ('042' for 42) names no record.

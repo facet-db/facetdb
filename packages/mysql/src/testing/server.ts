@@ -47,6 +47,12 @@ export type FakeServerOptions = {
   readonly installed?: boolean;
   /** The source's `onChange`: under `reset` the update trigger sets a changed row pending. */
   readonly onChange?: "keep" | "reset";
+  /**
+   * Whether side-table mode's `facetdb_<table>_answers` is there for the worker: the catalog lists
+   * it, so the connector opens in that mode. Its statements are not simulated; a test scripts their
+   * failures with `failWhen`.
+   */
+  readonly sideTable?: boolean;
 };
 
 export type FakeServer = {
@@ -70,6 +76,8 @@ export type FakeServer = {
   readonly locked: Set<string>;
   /** An error the next statement throws instead of answering (a lost connection), then cleared. */
   failNext: Error | undefined;
+  /** An error each statement it returns one for throws instead of answering (a server's refusal). */
+  failWhen: ((text: string) => Error | undefined) | undefined;
 };
 
 /** The columns of the queue that the trigger's upsert clears. */
@@ -171,7 +179,10 @@ export function fakeServer(options: FakeServerOptions): FakeServer {
       return some([{ name: options.database ?? null }]);
     }
     if (text.includes("from information_schema.tables")) {
-      return installed && params[1] === options.table ? some([{ type: "BASE TABLE" }]) : none;
+      const listed =
+        params[1] === options.table ||
+        (options.sideTable === true && params[1] === `facetdb_${options.table}_answers`);
+      return installed && listed ? some([{ type: "BASE TABLE" }]) : none;
     }
     if (text.includes("from information_schema.key_column_usage")) {
       return installed && params[1] === options.table ? some([{ name: key }]) : none;
@@ -368,6 +379,10 @@ export function fakeServer(options: FakeServerOptions): FakeServer {
       server.failNext = undefined;
       throw failure;
     }
+    const refused = server.failWhen?.(text);
+    if (refused !== undefined) {
+      throw refused;
+    }
     return answer(text, params ?? []);
   };
   const connect: MysqlPoolConnect = (_url, poolOptions) => {
@@ -405,6 +420,7 @@ export function fakeServer(options: FakeServerOptions): FakeServer {
     rows,
     locked,
     failNext: undefined,
+    failWhen: undefined,
     edit(recordKey, state, createdAt) {
       const row = rows.get(recordKey);
       if (row === undefined) {

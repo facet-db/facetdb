@@ -28,6 +28,16 @@ export {
 export { KEPT_REASON, PRUNE_RERUN_NOTE } from "./prune.ts";
 export { REFUSED_FIX } from "./refusals.ts";
 export {
+  normalizedDefinition,
+  SIDE_TABLE_NAME_LIMIT,
+  SIDE_TABLE_PRIVILEGES,
+  sideKeyConstraint,
+  sideTableName,
+  sideTriggerDefinitions,
+  sideViewName,
+  storedViewDefinition,
+} from "./side-table.ts";
+export {
   type CaptureSource,
   JOBS_TABLE,
   OWNED_MARK,

@@ -169,7 +169,7 @@ describe("times", () => {
 });
 
 describe("the mysql connector", () => {
-  it("declares inline columns, several workers, no push wake-up and no side table yet", async () => {
+  it("declares inline columns, a side table, several workers and no push wake-up", async () => {
     const made = new World();
     const connector = await made.connector("w1");
     expect(connector.capabilities).toBe(MYSQL_CAPABILITIES);
@@ -177,7 +177,7 @@ describe("the mysql connector", () => {
       inlineColumns: true,
       pushWakeup: false,
       transactions: true,
-      sideTable: false,
+      sideTable: true,
       multipleWorkers: true,
     });
   });

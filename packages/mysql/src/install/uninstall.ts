@@ -18,6 +18,7 @@ import {
 import {
   type Catalog,
   droppedColumnsNote,
+  isMariaDb,
   NO_RIGHTS,
   otherQueueTables,
   readCatalog,
@@ -29,6 +30,16 @@ import {
   workerExists,
 } from "./catalog.ts";
 import { noDatabaseRefusal, uninstallRefused } from "./refusals.ts";
+import {
+  accountSql,
+  readSideCatalog,
+  revokeAllStatements,
+  type SideCatalog,
+  sideTableIsOurs,
+  sideTableName,
+  sideViewName,
+  viewIsOurs,
+} from "./side-table.ts";
 import {
   deleteJobsStatement,
   dropTrigger,
@@ -45,7 +56,8 @@ import {
 /**
  * `planUninstall` on MySQL and MariaDB: what install added to the table goes, in an order that
  * keeps a stopped run finishable: the triggers first, so nothing is queued while the rest goes; the
- * worker's rights on the table; FacetDB's marked columns; the table's jobs in the queue the
+ * worker's rights on the table; FacetDB's marked columns; in side-table mode every right on the
+ * view and the side table, then the view and the side table; the table's jobs in the queue the
  * database's tables share; the table's marker row; then, once no table uses them, the queue and the
  * marker table. The worker login stays: other projects on the server may share it. The decision log
  * is the store's, so `purge` adds nothing here (the CLI's store door deletes it); the operator
@@ -179,11 +191,74 @@ type Context = {
   readonly inRun: ReadonlySet<string>;
   /** `readViews`: undefined where the server cannot list them. */
   readonly views: readonly string[] | undefined;
+  /** The side table and its view, in side-table mode. */
+  readonly side: SideCatalog | undefined;
 };
+
+/**
+ * Side-table mode's own objects: every account's rights on the view and the side table (the
+ * worker's, and the readers' the install gave), taken back before the drops, since MySQL keeps a
+ * dropped table's grants and would hand them to a later table of the same name; then the view and
+ * the side table, each only when it is FacetDB's. The application's table and its own grants are
+ * not touched. The side table goes with every answer in it: the decision log in the store keeps the
+ * history.
+ */
+function sideObjects(
+  schema: string,
+  table: string,
+  side: SideCatalog | undefined,
+): { readonly statements: readonly PlanStatement[]; readonly removes: readonly EngineObject[] } {
+  if (side === undefined) {
+    return { statements: [], removes: [] };
+  }
+  const label = `${schema}.${table}`;
+  const sideName = sideTableName(table);
+  const viewName = sideViewName(table);
+  const view = viewIsOurs(side);
+  const ours = sideTableIsOurs(side);
+  const revokes = [
+    ...(view ? revokeAllStatements(schema, viewName, side.grants) : []),
+    ...(ours ? revokeAllStatements(schema, sideName, side.grants) : []),
+  ];
+  return {
+    statements: [
+      ...revokes.flatMap(({ statements }) => statements),
+      ...(view
+        ? [sourceStatement("columns", `drop view if exists ${quoteTable(schema, viewName)}`)]
+        : []),
+      ...(ours
+        ? [sourceStatement("columns", `drop table if exists ${quoteTable(schema, sideName)}`)]
+        : []),
+    ],
+    removes: [
+      ...revokes.map(
+        ({ account, table: on }): EngineObject => ({
+          kind: "grant",
+          name: accountSql(account),
+          of: `${schema}.${on}`,
+          scope: "source",
+        }),
+      ),
+      ...(view
+        ? [{ kind: "view", name: `${schema}.${viewName}`, of: label, scope: "source" } as const]
+        : []),
+      ...(ours
+        ? [
+            {
+              kind: "side-table",
+              name: `${schema}.${sideName}`,
+              of: label,
+              scope: "source",
+            } as const,
+          ]
+        : []),
+    ],
+  };
+}
 
 /** The plan once the table is known to be the project's, or to have nothing of FacetDB's left. */
 function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context): EnginePlan {
-  const { rights, claimed, inRun, views } = context;
+  const { rights, claimed, inRun, views, side } = context;
   const { schema } = catalog;
   const { table } = target;
   const label = `${schema}.${table}`;
@@ -204,6 +279,7 @@ function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context)
     rights.columns.some((held) => held.table === table) ||
     rights.tables.some((held) => held.table === table);
   const shared = sharedObjects(catalog, table, rights, inRun);
+  const sideOwn = sideObjects(schema, table, side);
   const viewsNote = marked.length === 0 ? undefined : droppedColumnsNote(label, views);
   const own = (kind: EngineObject["kind"], name: string): EngineObject => ({
     kind,
@@ -226,6 +302,7 @@ function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context)
               `alter table ${quoteTable(schema, table)}\n${marked.map((name) => `  drop column ${quoteIdent(name)}`).join(",\n")}`,
             ),
           ]),
+      ...sideOwn.statements,
       // Its queued jobs: the table's part of the queue the database's tables share.
       ...(claimed && catalog.jobs.present ? [deleteJobsStatement(schema, table)] : []),
       ...(claimed ? [deleteOwnerStatement(schema, table)] : []),
@@ -236,6 +313,7 @@ function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context)
       ...triggers.map((name) => own("trigger", name)),
       ...(revoke === undefined ? [] : [own("grant", WORKER_ACCOUNT)]),
       ...marked.map((name) => own("column", name)),
+      ...sideOwn.removes,
       ...(claimed && catalog.jobs.present ? [own("jobs-table", `${schema}.${JOBS_TABLE}`)] : []),
       ...(claimed ? [own("marker", `${schema}.${OWNERS_TABLE}`)] : []),
       ...shared.removes,
@@ -263,7 +341,8 @@ export async function planUninstall(
     return { ok: false, refusal: insecure };
   }
   return withClient(connect, url, async (query): Promise<PlanResult> => {
-    const { database } = await readSession(query);
+    const session = await readSession(query);
+    const { database } = session;
     const schema = target.schema ?? database;
     if (schema === undefined) {
       return { ok: false, refusal: noDatabaseRefusal(target) };
@@ -288,6 +367,10 @@ export async function planUninstall(
     const rights = (await workerExists(query)) ? await readWorkerRights(query, schema) : NO_RIGHTS;
     const marked = catalog.columns.some((column) => column.comment === OWNED_MARK);
     const views = marked ? await readViews(query, schema, target.table) : [];
+    const side =
+      target.storage === "side-table"
+        ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
+        : undefined;
     if (owner === undefined) {
       // A run stopped after the table's row went leaves only the shared tables: the same plan
       // finishes them. Anything else without a row is no install of this project's to undo.
@@ -298,11 +381,19 @@ export async function planUninstall(
         !marked &&
         !catalog.triggers.some(
           (trigger) => trigger.table === target.table && trigger.name.startsWith("facetdb_"),
-        );
+        ) &&
+        // The side table and the view go before the row: one still there is no stopped run's.
+        (side === undefined || (!sideTableIsOurs(side) && !viewIsOurs(side)));
       return leftover
         ? {
             ok: true,
-            plan: uninstallPlan(target, catalog, { rights, claimed: false, inRun, views }),
+            plan: uninstallPlan(target, catalog, {
+              rights,
+              claimed: false,
+              inRun,
+              views,
+              side: undefined,
+            }),
           }
         : {
             ok: false,
@@ -313,7 +404,7 @@ export async function planUninstall(
     }
     return {
       ok: true,
-      plan: uninstallPlan(target, catalog, { rights, claimed: true, inRun, views }),
+      plan: uninstallPlan(target, catalog, { rights, claimed: true, inRun, views, side }),
     };
   });
 }

@@ -719,14 +719,6 @@ describe("planInstall refuses, says why and what to do, and changes nothing", ()
     readOnly(view.driver);
   });
 
-  it("refuses side-table mode, which is not there yet", async () => {
-    const side = await planned(freshListings(), listingsTarget({ storage: "side-table" }));
-    expect(refusalOf(side)).toMatchObject({
-      code: "side-table",
-      fix: 'set storage "inline" for this source',
-    });
-  });
-
   it("refuses a table name too long for the trigger names", async () => {
     const long = "l".repeat(53);
     const table = { ...LISTINGS_TABLE, name: long };
