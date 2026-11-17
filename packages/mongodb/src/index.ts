@@ -3,6 +3,19 @@
  * on a replica set. The pinned driver talks to 4.4 and later only (`SERVER_FLOOR`).
  */
 
+/**
+ * The variable naming the test server its `*.db.test.ts` run on (`scripts/test-databases.sh`
+ * prints it).
+ */
+export const URL_VARIABLES = ["MONGODB_URL"] as const;
+
+export type UrlVariable = (typeof URL_VARIABLES)[number];
+
+// The runtime connector under the worker login: the change stream and the queue.
+export * from "./connector/index.ts";
+// The engine the CLI registers for mongodb: and mongodb+srv:.
+export * from "./engine/index.ts";
+// The install, uninstall and prune plans, their mongosh script and their run.
 export {
   type AdminClient,
   type AdminConnect,
@@ -21,14 +34,3 @@ export {
   SUBDOCUMENT,
   WORKER_USER,
 } from "./install/index.ts";
-
-/** How the CLI names this engine (`DatabaseEngine.name`). */
-export const ENGINE_NAME = "mongodb";
-
-/**
- * The variable naming the test server its `*.db.test.ts` run on (`scripts/test-databases.sh`
- * prints it).
- */
-export const URL_VARIABLES = ["MONGODB_URL"] as const;
-
-export type UrlVariable = (typeof URL_VARIABLES)[number];

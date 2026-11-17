@@ -179,6 +179,23 @@ export function processDeps(): CliDeps {
         const { createMssqlEngine } = await import("@facetdb/mssql");
         return createMssqlEngine();
       }),
+      // MongoDB 4.4 and later and Atlas (mongodb:, mongodb+srv:) through the mongodb driver: change
+      // streams on a replica set, the resume token kept in the store's cursors, which this root
+      // owns: a connector opens the store only once its `watch` runs, through the same pools (the
+      // worker's store pool is borrowed), and closes it with itself. A lost token's warning goes to
+      // stderr, beside the worker's own lines.
+      lazyEngine("mongodb", async () => {
+        const { createMongoEngine } = await import("@facetdb/mongodb");
+        return createMongoEngine({
+          cursors: async ({ allowInsecure }) => {
+            const store = await deps.store({ allowInsecure });
+            return { cursors: store.cursors, close: () => store.close() };
+          },
+          warn: (message) => {
+            process.stderr.write(`warning: ${message}\n`);
+          },
+        });
+      }),
     ],
     connect,
     store: (options) => {

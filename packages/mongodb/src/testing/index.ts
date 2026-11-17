@@ -10,6 +10,7 @@ export {
   type FakeRoleRef,
   FakeServerError,
 } from "./fake-mongo.ts";
+export { type FakeWorkerCall, FakeWorkerMongo, type FeedStep } from "./fake-worker.ts";
 
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {

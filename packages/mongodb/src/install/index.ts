@@ -8,7 +8,9 @@ export {
   type ServerDocument,
   serverCode,
 } from "./admin.ts";
-export { planInstall, sourceDatabase } from "./install.ts";
+export { type HeldPrivilege, refusedHere } from "./catalog.ts";
+export { belowFloor, planInstall, sourceDatabase } from "./install.ts";
+export { covers, rightsInWords } from "./login.ts";
 export {
   type CommandDocument,
   type CommandValue,

@@ -131,6 +131,23 @@ describe("the scheme table", () => {
     },
   );
 
+  it.each([
+    "mongodb://u:p@127.0.0.1:27017/app",
+    "mongodb+srv://u:p@cluster0.example.net/app",
+    "mongodb://u:p@a.example.com:27017,b.example.com:27017/app?replicaSet=rs0",
+  ])("%s is read by the MongoDB engine main.ts registers", async (url) => {
+    const { engines } = processDeps();
+    expect(readsUrl(engines, url)).toBe(true);
+    const engine = await engineFor(engines, url);
+    expect(engine.name).toBe("mongodb");
+    expect(engine.schemes).toEqual(["mongodb", "mongodb+srv"]);
+    expect(engine.capabilities).toMatchObject({
+      multipleWorkers: true,
+      pushWakeup: true,
+      sideTable: false,
+    });
+  });
+
   it("says which schemes an engine is registered for without loading any", () => {
     const counted = entry("postgres", ["postgres", "postgresql"]);
     expect(readsUrl([counted.entry], "postgres://db.example.com/app")).toBe(true);
