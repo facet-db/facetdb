@@ -29,6 +29,7 @@ import {
   createCredentialStore,
 } from "./secrets.ts";
 import { sourceIdOf } from "./source-id.ts";
+import { createUsersStore, type UsersStore } from "./users.ts";
 
 export type StoreOptions = {
   /**
@@ -49,6 +50,8 @@ export type StoreOptions = {
    * composition root sets it only from an explicit flag of the operator's.
    */
   readonly allowInsecure?: boolean;
+  /** Hears of a stored row the store cannot trust (a reviewer account's unreadable hash), once each. */
+  readonly warn?: (message: string) => void;
 } & (
   | {
       readonly url: string;
@@ -72,6 +75,8 @@ export type Store = {
   readonly apiKeys: ApiKeyStore;
   /** The review queue of every source: the worker keeps it, the review screens read it. */
   readonly reviews: ReviewQueue;
+  /** The open-source studio's reviewer accounts (`facetdb users`; the worker login only reads them). */
+  readonly users: UsersStore;
   /** Registers a project; registering it again changes nothing. */
   ensureProject(project: { readonly id: string; readonly name: string }): Promise<void>;
   /**
@@ -229,6 +234,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
       credentials: createCredentialStore(client, crypto),
       apiKeys: createApiKeyStore(client),
       reviews: createReviewQueue(client),
+      users: createUsersStore(client, options.warn),
 
       async ensureProject(project) {
         await client.query(

@@ -165,6 +165,7 @@ describe("the facetdb program", () => {
       "worker",
       "dev",
       "types",
+      "users",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

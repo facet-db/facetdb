@@ -40,3 +40,12 @@ export type {
 export { sourceIdOf } from "./source-id.ts";
 export type { SourceKind, Store, StoreOptions } from "./store.ts";
 export { AmbiguousHostError, createStore, PlaintextUrlError, requireTls } from "./store.ts";
+export {
+  createUsersStore,
+  hashPassword,
+  isUserName,
+  type ReviewerAccount,
+  USER_NAME_RULE,
+  UsersNotWritableError,
+  type UsersStore,
+} from "./users.ts";

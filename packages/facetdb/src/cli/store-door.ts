@@ -26,6 +26,15 @@ import type { SourceConfig } from "../config/index.ts";
 import { isPostgresUrl, schemeOf } from "./engines.ts";
 import { CliError, databaseLabel, plainMessage } from "./program.ts";
 
+// The reviewer accounts' rules: a command checks a name and hashes a password before it opens the
+// store, so a bad invocation is refused before any connection.
+export {
+  hashPassword,
+  isUserName,
+  USER_NAME_RULE,
+  UsersNotWritableError,
+} from "@facetdb/postgres";
+
 /**
  * The store door: everything the CLI does with the FacetDB store, which is always the Postgres that
  * `DATABASE_URL` names, whatever engine a source has. A command reaches a source's database through
