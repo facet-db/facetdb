@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { accessSync, constants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { accessSync, constants, existsSync } from "node:fs";
+import {
+  access,
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  open,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import type { Clock, OpenConnector } from "@facetdb/core";
@@ -11,7 +22,6 @@ import {
   createPostgresDialect,
   createPostgresEngine,
   createStore,
-  SECRET_VARIABLE,
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
@@ -20,6 +30,7 @@ import { COMMANDS } from "./commands/index.ts";
 import { diskEmbedded } from "./embedded.ts";
 import { engineFor, lazyEngine, openConnector } from "./engines.ts";
 import { diskExamples } from "./examples.ts";
+import { type OutputWriters, quietOnClosedPipe, runEnding } from "./pipe.ts";
 import { pipedAnswers } from "./piped.ts";
 import { sharePools } from "./pools.ts";
 import {
@@ -31,7 +42,8 @@ import {
   type Workspace,
 } from "./program.ts";
 import { serveHttp } from "./serve.ts";
-import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
+import { requireStoreSecret, requireStoreUrl, storeSharedFor } from "./store-door.ts";
+import { quietTypelessPackageWarning } from "./warnings.ts";
 
 /**
  * The composition root of the `facetdb` process: the only place that touches the process's
@@ -82,10 +94,35 @@ async function prompt(question: string, options?: { readonly secret?: boolean })
   }
 }
 
-/** The project directory on the real disk, and the `claude` command looked up on the real PATH. */
-function diskWorkspace(
+/** A filesystem error's code (`EEXIST`, `EPERM`), or undefined. */
+function codeOf(error: unknown): unknown {
+  return (error as { readonly code?: unknown } | undefined)?.code;
+}
+
+/** What `link` fails with on a filesystem that has no hard links (FAT, some network mounts). */
+const NO_HARD_LINKS: ReadonlySet<unknown> = new Set(["EPERM", "ENOTSUP", "EXDEV"]);
+
+/** A file's permission bits, or undefined when there is no file. */
+async function modeOf(file: string): Promise<number | undefined> {
+  try {
+    return (await stat(file)).mode & 0o7777;
+  } catch (error) {
+    if (codeOf(error) === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/**
+ * The project directory on the real disk, and the `claude` command looked up on the real PATH.
+ * `files.link` is the disk's own unless a test hands in one that refuses, as a filesystem without
+ * hard links does.
+ */
+export function diskWorkspace(
   projectDir: string,
   env: Readonly<Record<string, string | undefined>>,
+  files: { readonly link: (existing: string, made: string) => Promise<void> } = { link },
 ): Workspace {
   return {
     exists: async (path) => {
@@ -101,6 +138,53 @@ function diskWorkspace(
       await mkdir(dirname(file), { recursive: true });
       // "wx" fails when the file exists, so a race cannot replace what init was told to keep.
       await writeFile(file, text, { flag: overwrite ? "w" : "wx" });
+    },
+    writeParts: async (path, parts, { overwrite }) => {
+      const file = resolve(projectDir, path);
+      await mkdir(dirname(file), { recursive: true });
+      // Beside the file, so the last step is a rename or a link within one directory.
+      const partial = join(dirname(file), `.${basename(file)}.${randomUUID()}.partial`);
+      try {
+        const handle = await open(partial, "wx");
+        try {
+          for await (const part of parts) {
+            await handle.writeFile(part);
+          }
+        } finally {
+          await handle.close();
+        }
+        if (overwrite) {
+          // The replaced file's mode carries over (a 0600 export stays 0600), then a rename
+          // replaces it whole: a reader sees the old one or the new one.
+          const mode = await modeOf(file);
+          if (mode !== undefined) {
+            await chmod(partial, mode);
+          }
+          await rename(partial, file);
+          return "written";
+        }
+        // A link fails when the name is taken, so a file that appeared meanwhile is never replaced.
+        // A filesystem without hard links gets an exclusive copy instead, which fails the same way.
+        try {
+          try {
+            await files.link(partial, file);
+          } catch (error) {
+            if (!NO_HARD_LINKS.has(codeOf(error))) {
+              throw error;
+            }
+            await copyFile(partial, file, constants.COPYFILE_EXCL);
+          }
+        } catch (error) {
+          if (codeOf(error) === "EEXIST") {
+            return "exists";
+          }
+          throw error;
+        }
+        return "written";
+      } finally {
+        // Gone already after a rename; after a link, or a failure, the temporary name goes.
+        await rm(partial, { force: true });
+      }
     },
     hasClaudeCommand: () =>
       (env["PATH"] ?? "")
@@ -144,28 +228,95 @@ function pipedIo(): Pick<CliIo, "prompt" | "answerable"> {
   };
 }
 
-function processIo(): CliIo {
+function processIo(output: OutputWriters): CliIo {
   return {
-    stdout: (text) => {
-      process.stdout.write(text);
-    },
-    stderr: (text) => {
-      process.stderr.write(text);
-    },
+    stdout: output.stdout,
+    stderr: output.stderr,
     ...(process.stdin.isTTY === true
       ? { prompt, answerable: () => Promise.resolve(true) }
       : pipedIo()),
   };
 }
 
-export function processDeps(): CliDeps {
+/** The process's streams written as they are, for a caller that installed no closed-pipe guard. */
+const DIRECT_OUTPUT: OutputWriters = {
+  stdout: (text) => {
+    process.stdout.write(text);
+  },
+  stderr: (text) => {
+    process.stderr.write(text);
+  },
+};
+
+/** The config file a project directory holds, by the name every command defaults to. */
+const PROJECT_CONFIG = "facetdb.config.ts";
+
+/**
+ * The project directory. `pnpm facetdb` runs the script in the directory of the package.json that
+ * defines it, a parent of the caller's, and says where it was called from in `INIT_CWD`; so the
+ * nearest directory holding `facetdb.config.ts` from `INIT_CWD` up to and including the working
+ * directory, and when none holds one, `INIT_CWD` itself. `pnpm run worker` from a subfolder of the
+ * user's own project finds the config at its root, as before; `pnpm facetdb init` where no config
+ * is yet writes one where the user stood. A script that changes directory deeper (`cd db && facetdb
+ * migrate`) still carries the outer `INIT_CWD`, which is then outside the working directory and
+ * ignored.
+ */
+export function projectDirOf(
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
+  hasConfig: (directory: string) => boolean,
+): string {
+  const called = env["INIT_CWD"];
+  if (called === undefined || called === "") {
+    return cwd;
+  }
+  const inside = relative(cwd, resolve(called));
+  // `..` exactly as the first step leaves the working directory; `..foo` is a name inside it.
+  if (inside.split(sep)[0] === ".." || isAbsolute(inside)) {
+    return cwd;
+  }
+  const root = resolve(cwd);
+  // Every directory from INIT_CWD up to the working directory (depth 0); `inside` is empty when
+  // INIT_CWD is the working directory.
+  const steps = inside === "" ? [] : inside.split(sep);
+  for (let depth = steps.length; depth >= 0; depth -= 1) {
+    const directory = join(root, ...steps.slice(0, depth));
+    if (hasConfig(directory)) {
+      return directory;
+    }
+  }
+  return resolve(called);
+}
+
+/** Aborts on SIGINT and SIGTERM, once each: Ctrl+C, or the service manager's stop. */
+function onStopSignals(abort: () => void): void {
+  process.once("SIGINT", abort);
+  process.once("SIGTERM", abort);
+}
+
+/** A stop signal on the process's own stop signals alone, for a caller with no closed-pipe guard. */
+function signalStop(): AbortSignal {
+  const stop = new AbortController();
+  onStopSignals(() => stop.abort());
+  return stop.signal;
+}
+
+export function processDeps(
+  run: { readonly output: OutputWriters; readonly stopSignal: () => AbortSignal } = {
+    output: DIRECT_OUTPUT,
+    stopSignal: signalStop,
+  },
+): CliDeps {
+  const { output } = run;
   const env = process.env;
-  const projectDir = process.cwd();
+  const projectDir = projectDirOf(env, process.cwd(), (directory) =>
+    existsSync(join(directory, PROJECT_CONFIG)),
+  );
   // One driver for the store and the Postgres engine, its pools shared by URL: the worker's store
   // pool is lent to the engine's connector of a table on the store's own database (cli/pools.ts).
   const connect = sharePools(connectPostgres);
   const deps: CliDeps = {
-    io: processIo(),
+    io: processIo(output),
     workspace: diskWorkspace(projectDir, env),
     clock,
     projectDir,
@@ -279,15 +430,18 @@ export function processDeps(): CliDeps {
     connect,
     store: (options) => {
       let url: string;
+      let secret: string;
       try {
         url = requireStoreUrl(env, options?.allowInsecure);
+        // An unset FACETDB_SECRET is refused in words with its fix, before anything connects.
+        secret = requireStoreSecret(env);
       } catch (error) {
         return Promise.reject(error);
       }
       return createStore({
         url,
         pgHost: env["PGHOST"],
-        secret: env[SECRET_VARIABLE],
+        secret,
         clock,
         connect: options?.connect ?? connect,
         ...(options?.allowInsecure === true ? { allowInsecure: true } : {}),
@@ -295,13 +449,7 @@ export function processDeps(): CliDeps {
     },
     provider: (config) => provider(config, env),
     serve: serveHttp,
-    stopSignal: () => {
-      const stop = new AbortController();
-      const abort = () => stop.abort();
-      process.once("SIGINT", abort);
-      process.once("SIGTERM", abort);
-      return stop.signal;
-    },
+    stopSignal: run.stopSignal,
     webhookFetch: (url, init) => globalThis.fetch(url, init),
     // Unref'd by the platform: a pending timeout keeps no idle process alive.
     abortAfter: (ms) => AbortSignal.timeout(ms),
@@ -386,13 +534,26 @@ async function sourceConnector(
 }
 
 async function main(): Promise<void> {
-  const deps = processDeps();
+  // Installed once, before anything is loaded: the config file's typeless-package warning never
+  // reaches Node's printer, which prints every other warning as it always does (cli/warnings.ts).
+  quietTypelessPackageWarning(process);
+  // A reader that has gone (`facetdb worker | head -1`) ends the run quietly with 0: the worker
+  // first stops as on Ctrl+C, releasing what it holds; any other command at once (cli/pipe.ts).
+  const ending = runEnding({
+    exit: () => {
+      process.exit(0);
+    },
+    listen: onStopSignals,
+  });
+  const output = quietOnClosedPipe({ stdout: process.stdout, stderr: process.stderr }, ending.end);
+  const deps = processDeps({ output, stopSignal: ending.stopSignal });
   try {
-    process.exitCode = await runProgram(process.argv.slice(2), deps, COMMANDS);
+    const code = await runProgram(process.argv.slice(2), deps, COMMANDS);
+    process.exitCode = ending.pipeClosed() ? 0 : code;
   } catch (error) {
     // The program reports every command's errors itself; this is a failure of the program.
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(
+    output.stderr(
       formatError(
         new CliError(
           "unexpected",

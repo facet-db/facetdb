@@ -425,6 +425,15 @@ export type DatabaseEngine = {
    */
   label(target: EngineTarget): string;
   /**
+   * The user and password a connection string logs in with, read as this engine's driver reads it,
+   * each decoded and empty when the string has none; undefined when the driver would not take the
+   * string. For an engine whose usual strings the WHATWG URL parser cannot read: MongoDB's, whose
+   * replica set string names several hosts (`mongodb://a:27017,b:27017/app`), which `new URL`
+   * refuses. Without it the CLI reads the string with `new URL`, as it does for Postgres; a libpq
+   * several-host string (`postgresql://h1,h2/db`) is not read yet. Nothing connects.
+   */
+  login?(url: string): { readonly user: string; readonly password: string } | undefined;
+  /**
    * The install for a source, from the database as the admin `url` shows it now: the answer
    * columns, the queue, the change capture, the worker login and its grants. Idempotent: on an
    * installed source it changes nothing.

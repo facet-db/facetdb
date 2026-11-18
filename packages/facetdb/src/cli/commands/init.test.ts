@@ -68,6 +68,7 @@ function workspaceOf(root: string, claudeOnPath: boolean): Workspace {
       await mkdir(dirname(join(root, path)), { recursive: true });
       await writeFile(join(root, path), text, { flag: overwrite ? "w" : "wx" });
     },
+    writeParts: () => Promise.reject(new Error("init writes no file in parts")),
     hasClaudeCommand: () => claudeOnPath,
   };
 }

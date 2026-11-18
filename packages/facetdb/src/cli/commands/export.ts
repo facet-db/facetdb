@@ -24,8 +24,9 @@ import {
 /**
  * `facetdb export --source <name>`: a source's whole decision log as JSONL or CSV, oldest first, so
  * the promise that the answers are yours is kept by a command and not by a mirror. It reads the
- * FacetDB store only, a page at a time, never the source's own database; nothing is written but the
- * file `--out` names.
+ * FacetDB store only, a page at a time, never the source's own database, and writes each page as it
+ * is read; nothing is written but the file `--out` names, which it never replaces without
+ * `--force`. A dry run counts the log in one query.
  */
 
 const FORMATS = ["jsonl", "csv"] as const;
@@ -38,6 +39,7 @@ type ExportOptions = {
   readonly source?: string;
   readonly format: string;
   readonly out?: string;
+  readonly force?: boolean;
   readonly allowInsecure?: boolean;
 };
 
@@ -208,6 +210,15 @@ function csvOf(entry: LogEntry, versions: Versions, shown: KeyShown): string[] {
   });
 }
 
+/** `--out` names a file that exists, and `--force` was not given: export never replaces it. */
+function outExists(out: string): CliError {
+  return new CliError(
+    "export-out-exists",
+    `${out} already exists, and export does not replace a file unless told to; nothing was written`,
+    `pass --force to replace ${out}, or name another file with --out`,
+  );
+}
+
 function plural(count: number, one: string, many: string): string {
   return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 }
@@ -228,6 +239,7 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
       defaultValue: "jsonl",
     },
     { flags: "--out <file>", description: "write to this file instead of the terminal" },
+    { flags: "--force", description: "replace the file --out names when it already exists" },
     ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
@@ -259,8 +271,9 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
         EXIT_USAGE,
       );
     }
-    // --json is the result on stdout; the rows would be mixed into it, so they need a file.
-    if (options.json && options.out === undefined) {
+    // --json is the result on stdout; the rows would be mixed into it, so they need a file. A dry
+    // run writes no rows, so it needs none.
+    if (options.json && options.out === undefined && !options.dryRun) {
       throw new CliError(
         "usage",
         "--json prints the count of exported rows, and the rows themselves would share its output",
@@ -268,15 +281,26 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
         EXIT_USAGE,
       );
     }
+    // A file is replaced only when asked, as init does; a dry run says so too, since the real run
+    // would stop here.
+    if (
+      options.out !== undefined &&
+      options.force !== true &&
+      (await deps.workspace.exists(options.out))
+    ) {
+      throw outExists(options.out);
+    }
 
-    const url = deps.env["DATABASE_URL"];
-    if (url === undefined || url === "") {
+    const storeUrl = deps.env["DATABASE_URL"];
+    if (storeUrl === undefined || storeUrl === "") {
       throw new CliError(
         "database-url",
         "DATABASE_URL is not set, so FacetDB has no store to read the log from",
         "set DATABASE_URL to the connection string of the database FacetDB keeps its store in",
       );
     }
+    // Read again inside the pages below, past the narrowing above.
+    const url: string = storeUrl;
     // The store only: the log is never read from, nor needs, the source's own database.
     const allowInsecure = options.allowInsecure === true;
     requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
@@ -297,63 +321,75 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
     // The log is kept under the project-scoped id, never the bare source name.
     const sourceId = storeSourceId(projectRef(deps.projectDir).id, source.name);
     const log = store.log(sourceId);
+    const where = options.out ?? "the terminal";
+    if (options.dryRun) {
+      // One count, never a read of the rows.
+      let rows: number;
+      try {
+        rows = await log.count();
+      } finally {
+        await store.close();
+      }
+      print(
+        `Dry run: would write ${plural(rows, "log row", "log rows")} of "${source.name}" as ${format} to ${where}. Nothing is written by export, with or without --dry-run, except the file --out names.`,
+      );
+      return { ok: true, dryRun: true, source: source.name, format, rows };
+    }
+
     const versions = new Map<number, QuestionSet>();
     const asked = new Set<number>();
     let rows = 0;
-    const chunks: string[] = [];
-    // Rows go to the terminal as each page arrives; a file is written once, when the log is read.
-    const emit = (text: string) => {
-      if (options.out === undefined) {
-        deps.io.stdout(text);
-      } else {
-        chunks.push(text);
-      }
-    };
-    try {
-      if (format === "csv" && !options.dryRun) {
-        emit(csvLine(CSV_COLUMNS));
-      }
+    /** The export's text, one page of the log at a time, the CSV header with the first. */
+    async function* pages(): AsyncGenerator<string> {
+      let pending = format === "csv" ? csvLine(CSV_COLUMNS) : "";
       let after: number | undefined;
       do {
         const page = await log.page(after, EXPORT_PAGE_SIZE);
         rows += page.entries.length;
-        if (!options.dryRun) {
-          // Each version is read from the store once, however many pages mention it.
-          const missing = [
-            ...new Set(page.entries.map((entry) => entry.version).filter((v) => !asked.has(v))),
-          ];
-          for (const [version, set] of await savedQuestionSets(deps, url, sourceId, missing)) {
-            versions.set(version, set);
-          }
-          for (const version of missing) {
-            asked.add(version);
-          }
-          for (const entry of page.entries) {
-            if (format === "csv") {
-              for (const line of csvOf(entry, versions, shown)) {
-                emit(line);
-              }
-            } else {
-              emit(`${jsonOf(entry, versions, shown)}\n`);
-            }
-          }
+        // Each version is read from the store once, however many pages mention it.
+        const missing = [
+          ...new Set(page.entries.map((entry) => entry.version).filter((v) => !asked.has(v))),
+        ];
+        for (const [version, set] of await savedQuestionSets(deps, url, sourceId, missing)) {
+          versions.set(version, set);
         }
+        for (const version of missing) {
+          asked.add(version);
+        }
+        const lines = page.entries.flatMap((entry) =>
+          format === "csv"
+            ? csvOf(entry, versions, shown)
+            : [`${jsonOf(entry, versions, shown)}\n`],
+        );
+        yield `${pending}${lines.join("")}`;
+        pending = "";
         after = page.next;
       } while (after !== undefined);
+    }
+    // Each page goes out as it is read, so the log is never held whole in memory: to the terminal,
+    // or into a temporary file beside --out that takes its name once the last page is in, so a
+    // failure leaves --out as it was. Two exports to one name at once: without --force the second
+    // to finish is refused in the same words as above; with it, the last one wins.
+    try {
+      if (options.out === undefined) {
+        for await (const text of pages()) {
+          if (text !== "") {
+            deps.io.stdout(text);
+          }
+        }
+      } else if (
+        (await deps.workspace.writeParts(options.out, pages(), {
+          overwrite: options.force === true,
+        })) === "exists"
+      ) {
+        throw outExists(options.out);
+      }
     } finally {
       await store.close();
     }
 
     const counted = plural(rows, "log row", "log rows");
-    const where = options.out ?? "the terminal";
-    if (options.dryRun) {
-      print(
-        `Dry run: would write ${counted} of "${source.name}" as ${format} to ${where}. Nothing is written by export, with or without --dry-run, except the file --out names.`,
-      );
-      return { ok: true, dryRun: true, source: source.name, format, rows };
-    }
     if (options.out !== undefined) {
-      await deps.workspace.write(options.out, chunks.join(""), { overwrite: true });
       print(`Wrote ${counted} of "${source.name}" as ${format} to ${options.out}.`);
     } else if (rows === 0) {
       // Not on stdout: that is the data. A pipe still gets what it asked for, and this says why it is empty.

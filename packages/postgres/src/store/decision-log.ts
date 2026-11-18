@@ -15,9 +15,9 @@ const COLUMNS = `record_key, kind, version::text as version, state_hash, model, 
   usage::text as usage, question, value::text as value, reviewer, note, ${toMs("at", "at_ms")}`;
 
 /**
- * `facetdb.decisions` as core's `DecisionLog` for one source: one row per model call holding
- * every answer, one row per human decision. Rows are only ever inserted; a correction is a new row,
- * and "latest" is the highest id, which is the order the log was appended in.
+ * `facetdb.decisions` as core's `DecisionLog` for one source: one row per model call holding every
+ * answer, one row per human decision. Rows are only ever inserted; a correction is a new row, and
+ * "latest" is the highest id, which is the order the log was appended in.
  */
 export function createDecisionLog(client: SqlClient, sourceId: string): DecisionLog {
   async function entries(whereRest: string, params: readonly unknown[]): Promise<LogEntry[]> {
@@ -79,8 +79,8 @@ export function createDecisionLog(client: SqlClient, sourceId: string): Decision
       if (keys.length === 0) {
         return latest;
       }
-      // One statement for a whole page: on a far database every round trip costs about
-      // 200 ms, so a lookup per record set the backfill's time instead of its pace.
+      // One statement for a whole page: on a far database every round trip costs about 200 ms, so a
+      // lookup per record set the backfill's time instead of its pace.
       const rows = await client.query(
         `select distinct on (record_key) ${COLUMNS}
            from facetdb.decisions
@@ -130,6 +130,20 @@ export function createDecisionLog(client: SqlClient, sourceId: string): Decision
         entries: rows.map(toEntry),
         next: rows.length < limit || last === undefined ? undefined : integer(last, "cursor"),
       };
+    },
+
+    async count(version) {
+      const rows = await client.query(
+        `select count(*)::text as entries
+           from facetdb.decisions
+          where source_id = $1 and ($2::integer is null or version = $2::integer)`,
+        [sourceId, version ?? null],
+      );
+      const [row] = rows;
+      if (row === undefined) {
+        throw new Error("count(*) returned no row");
+      }
+      return integer(row, "entries");
     },
   };
 }

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { facetdb, noul, type SourceConfig } from "../config/index.ts";
 import { CliError } from "./program.ts";
-import { ownVariable, sameDatabase, storeSharedFor, storeUrlProblem } from "./store-door.ts";
+import {
+  ownVariable,
+  requireStoreSecret,
+  sameDatabase,
+  storeSecretWarning,
+  storeSharedFor,
+  storeUrlProblem,
+} from "./store-door.ts";
 
 /**
  * The store door's rules that need no database: when two connection strings reach one database as
@@ -119,5 +126,36 @@ describe("the store is always a Postgres", () => {
   it("names a source's own variable after it, never DATABASE_URL", () => {
     expect(ownVariable("orders")).toBe("ORDERS_URL");
     expect(ownVariable("database")).toBe("DATABASE_SOURCE_URL");
+  });
+});
+
+/**
+ * The first `facetdb worker` of a new project meets an unset FACETDB_SECRET; the words name the
+ * variable, what it is for and the fix, where the store's own refusal would reach the user as an
+ * unexpected error ending in "open an issue".
+ */
+describe("the store's secret", () => {
+  it("is refused unset or empty, before anything connects, naming what it is for and the fix", () => {
+    for (const env of [{}, { FACETDB_SECRET: "" }]) {
+      const refused = refusalOf(() => requireStoreSecret(env));
+      expect(refused.code).toBe("store-secret");
+      expect(refused.message).toBe(
+        "FACETDB_SECRET is not set, and the FacetDB store encrypts the credentials it keeps for the worker with it; nothing was connected",
+      );
+      expect(refused.fix).toBe(
+        "set FACETDB_SECRET to a long random value (openssl rand -hex 32) and keep it: credentials encrypted under it need the same value to be read later",
+      );
+      expect(refused.fix).not.toContain("open an issue");
+    }
+    expect(requireStoreSecret({ FACETDB_SECRET: "a-long-random-value" })).toBe(
+      "a-long-random-value",
+    );
+  });
+
+  it("is a warning at migrate, which needs none itself, and nothing once it is set", () => {
+    expect(storeSecretWarning({})).toMatch(
+      /^warning: FACETDB_SECRET is not set\. migrate does not need it, but facetdb worker does/,
+    );
+    expect(storeSecretWarning({ FACETDB_SECRET: "a-long-random-value" })).toBeUndefined();
   });
 });

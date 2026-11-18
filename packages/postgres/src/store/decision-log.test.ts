@@ -123,6 +123,21 @@ describe("the decision log's pages", () => {
     );
   });
 
+  it("counts a source's entries in one query, both kinds, and those of one version", async () => {
+    const store = await newStore();
+    const log = store.log("src");
+    await log.appendAnswer(answer("a", 0));
+    await log.appendHuman(human("a", 1));
+    await log.appendAnswer({ ...answer("b", 2), version: 3 });
+    await store.log("other").appendAnswer(answer("z", 3));
+
+    expect(await log.count()).toBe(3);
+    expect(await log.count(2)).toBe(2);
+    expect(await log.count(3)).toBe(1);
+    expect(await log.count(9)).toBe(0);
+    expect(await store.log("none").count()).toBe(0);
+  });
+
   it("is empty for a source with no log, and keeps sources apart", async () => {
     const store = await newStore();
     await store.log("one").appendAnswer(answer("a", 0));

@@ -1,6 +1,12 @@
 import { basename } from "node:path";
-import { type EngineTarget, parseQuestionSet, type QuestionSet } from "@facetdb/core";
+import {
+  type DatabaseEngine,
+  type EngineTarget,
+  parseQuestionSet,
+  type QuestionSet,
+} from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { databaseOf, engineFor, schemeOf } from "../engines.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
 /**
@@ -261,6 +267,40 @@ export async function adminUrl(deps: CliDeps, given: string | undefined): Promis
 }
 
 /**
+ * The engine a run of migrate or uninstall plans with, and the admin connection string it runs
+ * under, in that order: the engine from the source's own connection string, so a scheme FacetDB
+ * does not serve is refused before anyone types a credential; then the admin string. When the
+ * scheme table reads both and they name different databases (a MySQL admin string for a Postgres
+ * source), it is refused; a string the table does not read (a bare SQLite path with no extension, a
+ * local libSQL server's `http://`) goes to the source's engine, whose words judge it. A source
+ * whose connection string is unset here leaves the admin string alone to say which engine.
+ */
+export async function adminRun(
+  deps: CliDeps,
+  first: TableTarget,
+  given: string | undefined,
+): Promise<{ readonly engine: DatabaseEngine; readonly url: string }> {
+  const source = first.source.database;
+  if (source === undefined) {
+    const url = await adminUrl(deps, given);
+    return { engine: await engineFor(deps.engines, url, first.source.connector), url };
+  }
+  const engine = await engineFor(deps.engines, source, first.source.connector);
+  const url = await adminUrl(deps, given);
+  const admin = databaseOf(url);
+  const own = databaseOf(source);
+  if (admin !== undefined && own !== undefined && admin.key !== own.key) {
+    const variable = variableOf(first.source);
+    throw new CliError(
+      "admin-url-scheme",
+      `the admin connection string is ${admin.name}'s (${schemeOf(url)}:), and the source "${first.source.name}" reads ${own.name}'s (${schemeOf(source)}:) from ${variable}, so the two name different kinds of database; nothing was connected`,
+      `give the admin connection string of the database ${variable} names, in the same form (${schemeOf(source)}:)`,
+    );
+  }
+  return { engine, url };
+}
+
+/**
  * The worker login every engine creates (`facetdb_worker` on Postgres, MySQL and MongoDB alike), as
  * the words name it and the source's connection string logs in.
  */
@@ -270,20 +310,15 @@ export const WORKER_LOGIN = "facetdb_worker";
 const WORKER_USER = new RegExp(`^${WORKER_LOGIN}(?:\\.([A-Za-z0-9_-]+))?$`);
 
 /**
- * The worker login a connection string names. A connection pooler routes by the user (Supabase's
- * session pooler wants `facetdb_worker.<project ref>`) while Postgres still reports the role as
- * `facetdb_worker`, so the user is the role alone or the role plus a pooler suffix: this returns the
- * suffix (undefined for the role alone). Any other user, `postgres.<ref>` (the admin through the
- * pooler) included, is not the worker login: `undefined` instead of an object. It reads only the
- * URL; whether the login really is the worker's is `current_user`'s to say (doctor asks it).
+ * The worker login a connection string's user names (decoded, as the source's engine reads it). A
+ * connection pooler routes by the user (Supabase's session pooler wants
+ * `facetdb_worker.<project ref>`) while Postgres still reports the role as `facetdb_worker`, so the
+ * user is the role alone or the role plus a pooler suffix: this returns the suffix (undefined for
+ * the role alone). Any other user, `postgres.<ref>` (the admin through the pooler) included, is not
+ * the worker login: `undefined` instead of an object. It reads only the user; whether the login
+ * really is the worker's is `current_user`'s to say (doctor asks it).
  */
-export function workerLoginOf(url: string): { readonly suffix: string | undefined } | undefined {
-  let username: string;
-  try {
-    username = decodeURIComponent(new URL(url).username);
-  } catch {
-    return undefined;
-  }
-  const match = WORKER_USER.exec(username);
+export function workerLoginOf(user: string): { readonly suffix: string | undefined } | undefined {
+  const match = WORKER_USER.exec(user);
   return match === null ? undefined : { suffix: match[1] };
 }

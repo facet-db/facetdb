@@ -5,6 +5,7 @@ import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@fac
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { engineFor, lazyEngine, openConnector } from "../engines.ts";
+import { runEnding } from "../pipe.ts";
 import { sharePools } from "../pools.ts";
 import type { EngineEntry, HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
@@ -642,6 +643,37 @@ describe("facetdb worker", () => {
 
     stop.abort();
     const result = await running;
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Stopped: every claim was settled.");
+    const held = await world.client.query(
+      "select count(*)::int as n from facetdb.jobs where claimed_by is not null",
+    );
+    expect(held[0]?.["n"]).toBe(0);
+  });
+
+  it("@timing stops as on Ctrl+C when its reader goes (facetdb worker | head -1), never exiting mid-claim", async () => {
+    let exits = 0;
+    // The composition root's wiring: the closed pipe's end, and the stop signal the worker takes.
+    const ending = runEnding({
+      exit: () => {
+        exits += 1;
+      },
+      listen: () => {},
+    });
+    const running = run(["worker", "--no-http"], { stop: ending.stopSignal() });
+    await vi.waitFor(async () => expect(await heartbeat()).toBe(START), { timeout: 10_000 });
+    await world.client.query("insert into public.listings (id, title) values ('r3', 'A bike')");
+    clock.advance(2_000);
+    await vi.waitFor(
+      async () => expect(await listing("r3")).toMatchObject({ facetdb_status: "done" }),
+      { timeout: 10_000 },
+    );
+
+    ending.end();
+    const result = await running;
+
+    expect(exits).toBe(0);
+    expect(ending.pipeClosed()).toBe(true);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Stopped: every claim was settled.");
     const held = await world.client.query(

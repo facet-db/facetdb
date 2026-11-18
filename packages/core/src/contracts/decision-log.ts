@@ -41,4 +41,10 @@ export type DecisionLog = {
    * undefined for the first page.
    */
   page(after: number | undefined, limit: number): Promise<LogPage>;
+  /**
+   * How many entries the source's log holds, answers and human decisions alike, optionally only
+   * those of question-set version `version`: one query, never a read of the rows (`facetdb export
+   * --dry-run` says how many it would write this way).
+   */
+  count(version?: number): Promise<number>;
 };

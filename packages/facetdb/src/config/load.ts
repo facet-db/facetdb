@@ -119,7 +119,10 @@ export async function loadConfig(path: string, options: LoadOptions): Promise<Lo
     ]);
   }
   const { mtimeMs } = await stat(file);
-  // The modification time in the URL makes an edited file load afresh in a long-running process.
+  // The modification time in the URL makes an edited file load afresh in a long-running process. In
+  // a project whose package.json has no "type", Node warns here that it reparsed the file as an ES
+  // module (MODULE_TYPELESS_PACKAGE_JSON); the composition root drops that one warning
+  // (cli/warnings.ts), so no command's output starts with it.
   const loaded: unknown = await import(
     /* @vite-ignore */ `${pathToFileURL(file).href}?v=${mtimeMs}`
   );

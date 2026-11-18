@@ -135,7 +135,12 @@ function facetdb(argv: readonly string[]) {
     argv,
     {
       projectDir: PROJECT_DIR,
-      env: { DATABASE_URL: process.env["DATABASE_URL"], TYPESAFE_API_KEY: "ts-e2e-not-used" },
+      // The store's secret as a machine that runs the worker sets it (migrate warns without it).
+      env: {
+        DATABASE_URL: process.env["DATABASE_URL"],
+        TYPESAFE_API_KEY: "ts-e2e-not-used",
+        FACETDB_SECRET: TEST_SECRET,
+      },
       loadConfig: () => Promise.resolve(config),
       engines: postgresEngines(world.connect),
       connect: world.connect,

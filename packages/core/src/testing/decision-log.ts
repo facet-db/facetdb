@@ -68,6 +68,12 @@ export class FakeDecisionLog implements DecisionLog {
     });
   }
 
+  count(version?: number): Promise<number> {
+    return Promise.resolve(
+      this.#all.filter((entry) => version === undefined || entry.version === version).length,
+    );
+  }
+
   #append(entry: LogEntry): void {
     this.#all.push(entry);
     const entries = this.#entries.get(entry.key) ?? [];

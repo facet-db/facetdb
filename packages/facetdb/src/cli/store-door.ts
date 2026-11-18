@@ -728,14 +728,48 @@ export async function heartbeatCheck(
     : ok("worker", `the last heartbeat was ${ageOf(age)} ago`);
 }
 
+/** `FACETDB_SECRET`, or undefined when it is unset or empty. */
+function storeSecretOf(env: Env): string | undefined {
+  const secret = env[SECRET_VARIABLE];
+  return secret === undefined || secret === "" ? undefined : secret;
+}
+
+/** What the store's secret is for, in the words every message about it uses. */
+const SECRET_PURPOSE = "the FacetDB store encrypts the credentials it keeps for the worker with it";
+
+/** The fix for an unset secret: a value, and why it must be kept. */
+export const STORE_SECRET_FIX = `set ${SECRET_VARIABLE} to a long random value (openssl rand -hex 32) and keep it: credentials encrypted under it need the same value to be read later`;
+
 /** The store's secret is in the environment: it encrypts the credentials the store holds. */
 export function secretCheck(env: Env): DoctorCheck {
-  const secret = env[SECRET_VARIABLE];
-  return secret === undefined || secret === ""
-    ? fail(
-        "secret",
-        `${SECRET_VARIABLE} is not set`,
-        `set ${SECRET_VARIABLE} to a long random string (openssl rand -hex 32) and keep it: it encrypts the credentials the store holds`,
-      )
+  return storeSecretOf(env) === undefined
+    ? fail("secret", `${SECRET_VARIABLE} is not set`, STORE_SECRET_FIX)
     : ok("secret", `${SECRET_VARIABLE} is set`);
+}
+
+/**
+ * The store's secret, refused before anything connects when it is unset: the first `facetdb worker`
+ * of a new project meets this, and the words name the variable, what it is for and the fix, where
+ * the store's own refusal would reach the user as an unexpected error.
+ */
+export function requireStoreSecret(env: Env): string {
+  const secret = storeSecretOf(env);
+  if (secret === undefined) {
+    throw new CliError(
+      "store-secret",
+      `${SECRET_VARIABLE} is not set, and ${SECRET_PURPOSE}; nothing was connected`,
+      STORE_SECRET_FIX,
+    );
+  }
+  return secret;
+}
+
+/**
+ * What `facetdb migrate` says when the secret is unset: migrate itself never opens the encrypted
+ * part of the store, so it runs, but the worker it installs for will stop without one.
+ */
+export function storeSecretWarning(env: Env): string | undefined {
+  return storeSecretOf(env) === undefined
+    ? `warning: ${SECRET_VARIABLE} is not set. migrate does not need it, but facetdb worker does: ${SECRET_PURPOSE}. Before you start the worker, ${STORE_SECRET_FIX}.`
+    : undefined;
 }

@@ -14,6 +14,7 @@ import {
   resetPgliteWorld,
   type SqlConnect,
   sourceIdOf,
+  TEST_SECRET,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
@@ -27,6 +28,8 @@ const ADMIN_URL = "postgres://admin:s3cret-admin-password@localhost:5432/app";
 const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
 /** The project directory's name is the project's name: what uninstall asks to have typed back. */
 const PROJECT_DIR = "/work/listings-app";
+/** The store's secret, set as on a machine that runs the worker. */
+const SECRET_ENV = { FACETDB_SECRET: TEST_SECRET };
 
 function configWith(questions: SourceInput["questions"]): ProjectConfig {
   return facetdb({
@@ -142,6 +145,7 @@ function run(
     readonly config?: ProjectConfig;
     readonly answers?: readonly string[];
     readonly connect?: SqlConnect;
+    readonly env?: Readonly<Record<string, string>>;
   } = {},
 ) {
   const connect = options.connect ?? world.connect;
@@ -149,7 +153,8 @@ function run(
     argv,
     {
       projectDir: PROJECT_DIR,
-      env: {},
+      // The worker's secret is set, as on a machine that runs one: its warning has a test of its own.
+      env: options.env ?? SECRET_ENV,
       // The source reads DATABASE_URL, as the loader records it: the store is its database.
       loadConfig: () => Promise.resolve(readingDatabaseUrl(options.config ?? fullConfig)),
       engines: postgresEngines(connect),
@@ -190,7 +195,7 @@ async function runSeeingPrompts(
         answerable: () => Promise.resolve(true),
       },
       projectDir: PROJECT_DIR,
-      env: {},
+      env: SECRET_ENV,
       loadConfig: () => Promise.resolve(readingDatabaseUrl(config)),
       engines: postgresEngines(world.connect),
       connect: world.connect,
@@ -201,6 +206,7 @@ async function runSeeingPrompts(
       workspace: {
         exists: () => Promise.resolve(false),
         write: () => Promise.resolve(),
+        writeParts: () => Promise.resolve("written"),
         hasClaudeCommand: () => false,
       },
       clock: { now: () => 0, sleep: () => Promise.resolve() },
@@ -1100,5 +1106,205 @@ describe("facetdb uninstall", () => {
     const purged = await run(["uninstall", "--dry-run", "--purge", "--admin-url", ADMIN_URL]);
     expect(kept.stdout).not.toContain("delete from facetdb.decisions");
     expect(purged.stdout).toContain("delete from facetdb.decisions");
+  });
+});
+
+/**
+ * The engine is known before anyone types a credential, the admin connection string is of the
+ * source's kind, a replica set's several-host string gives the worker password through its engine,
+ * and an unset FACETDB_SECRET is a warning here, where the worker would stop.
+ */
+describe("before the admin connection string", () => {
+  const STORE_URL = "postgres://store-owner:s3cret-store-password@localhost:5432/facetdb";
+  const noConnection: SqlConnect = (url) => {
+    throw new Error(`a connection was opened to ${url}`);
+  };
+
+  /** The `listings` source on its own variable, reading `url`. */
+  const onUrl = (url: string): ProjectConfig => ({
+    ...fullConfig,
+    sources: fullConfig.sources.map((source) => ({
+      ...source,
+      database: url,
+      databaseEnv: "LISTINGS_URL",
+    })),
+  });
+
+  it.each([
+    ["migrate", ["migrate"]],
+    ["migrate --dry-run", ["migrate", "--dry-run"]],
+  ])(
+    "%s on a foo:// source refuses before asking for the admin connection string",
+    async (_name, argv) => {
+      const result = await runInProcess(
+        argv,
+        {
+          projectDir: PROJECT_DIR,
+          env: { DATABASE_URL: STORE_URL, FACETDB_SECRET: TEST_SECRET },
+          loadConfig: () => Promise.resolve(onUrl("foo://worker:s3cret-foo@db.example.com/app")),
+          engines: postgresEngines(noConnection),
+          connect: noConnection,
+        },
+        COMMANDS,
+      );
+      expect(result.code).toBe(1);
+      expect(result.prompts).toEqual([]);
+      expect(result.stderr).toContain(
+        "error: the connection string names no database FacetDB connects to (its scheme is foo:)",
+      );
+      expect(result.stderr).toContain("https://docs.facetdb.dev/fix/unknown-scheme");
+      expect(result.stdout + result.stderr).not.toContain("s3cret-foo");
+    },
+  );
+
+  it("refuses an admin connection string of another kind of database than the source's, connecting nothing", async () => {
+    const MYSQL_ADMIN = "mysql://root:s3cret-root@localhost/shop";
+    for (const [argv, answers] of [
+      [["migrate", "--dry-run", "--admin-url", MYSQL_ADMIN], []],
+      [["migrate", "--dry-run"], [MYSQL_ADMIN]],
+    ] as const) {
+      const result = await run(argv, { connect: noConnection, answers });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(
+        `error: the admin connection string is MySQL or MariaDB's (mysql:), and the source "listings" reads Postgres's (postgres:) from DATABASE_URL, so the two name different kinds of database; nothing was connected`,
+      );
+      expect(result.stderr).toContain(
+        "fix: give the admin connection string of the database DATABASE_URL names, in the same form (postgres:)",
+      );
+      expect(result.stderr).toContain("https://docs.facetdb.dev/fix/admin-url-scheme");
+      expect(result.stdout + result.stderr).not.toContain("s3cret-root");
+    }
+    // postgresql: is Postgres too.
+    const alias = await run([
+      "migrate",
+      "--dry-run",
+      "--admin-url",
+      ADMIN_URL.replace("postgres:", "postgresql:"),
+    ]);
+    expect(alias.code, alias.stderr).toBe(0);
+  });
+
+  it("hands an admin string the scheme table does not read to the source's engine: a bare SQLite path, a local libSQL server's http://", async () => {
+    const plan = (text: string): PlanResult => ({
+      ok: true,
+      plan: {
+        statements: [{ database: "source", purpose: "columns", text }],
+        transactional: true,
+        removes: [],
+        keeps: [],
+        notes: [],
+      },
+    });
+    for (const [key, schemes, source, admin] of [
+      ["sqlite", ["sqlite", "file"], "sqlite:///data/app.db", "/data/app"],
+      ["libsql", ["libsql"], "libsql://app-acme.turso.io", "http://127.0.0.1:8080"],
+    ] as const) {
+      const engine = new FakeEngine({
+        name: key,
+        schemes,
+        plans: { install: () => plan(`alter table listings add is_scam -- ${key}`) },
+      });
+      const result = await runInProcess(
+        ["migrate", "--dry-run", "--admin-url", admin],
+        {
+          projectDir: PROJECT_DIR,
+          env: { DATABASE_URL: STORE_URL, FACETDB_SECRET: TEST_SECRET },
+          loadConfig: () => Promise.resolve(onUrl(source)),
+          engines: [
+            ...postgresEngines(world.connect),
+            lazyEngine(key, () => Promise.resolve(engine)),
+          ],
+          connect: world.connect,
+        },
+        COMMANDS,
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain(`alter table listings add is_scam -- ${key}`);
+      expect(result.stderr).not.toContain("admin-url-scheme");
+    }
+  });
+
+  it("reads the worker password of a replica set's several-host string through its engine", async () => {
+    const replicaSet =
+      "mongodb://facetdb_worker:s3cret%2Fworker@a.example.com:27017,b.example.com:27017/app?replicaSet=rs0&tls=true";
+    const given: (string | undefined)[] = [];
+    const mongo = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      // As the driver splits the string: the user and password before the first @.
+      login: (url) => {
+        const match = /^mongodb:\/\/([^:@/]*):([^@/]*)@/.exec(url);
+        return match === null
+          ? undefined
+          : {
+              user: decodeURIComponent(match[1] ?? ""),
+              password: decodeURIComponent(match[2] ?? ""),
+            };
+      },
+      plans: {
+        install: (_target, options) => {
+          given.push(options.workerPassword);
+          return {
+            ok: true,
+            plan: {
+              statements: [
+                { database: "source", purpose: "login", text: "createUser facetdb_worker" },
+              ],
+              transactional: false,
+              removes: [],
+              keeps: [],
+              notes: [],
+            },
+          };
+        },
+      },
+    });
+    expect(URL.canParse(replicaSet)).toBe(false);
+    const result = await runInProcess(
+      [
+        "migrate",
+        "--dry-run",
+        "--admin-url",
+        "mongodb://admin:s3cret-admin@a.example.com:27017,b.example.com:27017/admin?replicaSet=rs0&tls=true",
+      ],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL, FACETDB_SECRET: TEST_SECRET },
+        loadConfig: () => Promise.resolve(onUrl(replicaSet)),
+        engines: [
+          ...postgresEngines(world.connect),
+          lazyEngine("mongodb", () => Promise.resolve(mongo)),
+        ],
+        connect: world.connect,
+      },
+      COMMANDS,
+    );
+    expect(result.code, result.stderr).toBe(0);
+    expect(given).toEqual(["s3cret/worker"]);
+    expect(result.stdout).toContain("createUser facetdb_worker");
+  });
+});
+
+describe("FACETDB_SECRET at migrate", () => {
+  it("warns on stderr when it is unset, since the worker needs it, and still runs", async () => {
+    const dry = await run(["migrate", "--dry-run", "--json", "--admin-url", ADMIN_URL], {
+      env: {},
+    });
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(JSON.parse(dry.stdout)).toMatchObject({ ok: true, dryRun: true });
+    expect(dry.stderr).toContain(
+      "warning: FACETDB_SECRET is not set. migrate does not need it, but facetdb worker does: the FacetDB store encrypts the credentials it keeps for the worker with it. Before you start the worker, set FACETDB_SECRET to a long random value (openssl rand -hex 32) and keep it: credentials encrypted under it need the same value to be read later.\n",
+    );
+
+    const real = await run(["migrate", "--yes", "--admin-url", ADMIN_URL], { env: {} });
+    expect(real.code, real.stderr).toBe(0);
+    expect(real.stderr).toContain("warning: FACETDB_SECRET is not set.");
+    expect(await columns()).toEqual(expect.arrayContaining(["is_scam", "category"]));
+  });
+
+  it("says nothing of it when it is set", async () => {
+    const result = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("FACETDB_SECRET");
   });
 });

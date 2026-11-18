@@ -54,6 +54,8 @@ export type FakeEngineOptions = {
   readonly database?: FakeDatabase;
   /** How its keys are written on the terminal (a tagged-key engine's); absent, keys are text. */
   readonly keyText?: KeyText;
+  /** How it reads a connection string's login (`DatabaseEngine.login`); absent, the URL's. */
+  readonly login?: NonNullable<DatabaseEngine["login"]>;
 };
 
 /** One `run` as the fake saw it. */
@@ -151,6 +153,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly capabilities: Capabilities;
   readonly checks: DatabaseEngine["checks"];
   readonly keyText?: KeyText;
+  readonly login?: NonNullable<DatabaseEngine["login"]>;
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
   readonly #label: (target: EngineTarget) => string;
@@ -177,6 +180,9 @@ export class FakeEngine implements DatabaseEngine {
     this.#database = options.database;
     if (options.keyText !== undefined) {
       this.keyText = options.keyText;
+    }
+    if (options.login !== undefined) {
+      this.login = options.login;
     }
   }
 

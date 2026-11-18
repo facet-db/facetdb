@@ -128,6 +128,7 @@ async function runSeeingPrompts(
       workspace: {
         exists: () => Promise.resolve(false),
         write: unused,
+        writeParts: unused,
         hasClaudeCommand: () => false,
       },
       clock: { now: () => 0, sleep: unused },
@@ -1068,5 +1069,56 @@ describe("the words of an engine that is not Postgres", () => {
       "Removed FacetDB from listings; only the facetdb_worker user (uninstall never drops it) stays.\n",
     );
     expect(result.stdout).not.toContain("login");
+  });
+});
+
+/**
+ * The engine is resolved from the source's connection string before the admin one is asked, so an
+ * unknown scheme is refused with nobody typing a credential, and the admin string must be of the
+ * source's kind.
+ */
+describe("before the admin connection string", () => {
+  const noConnection: SqlConnect = (url) => {
+    throw new Error(`a connection was opened to ${url}`);
+  };
+
+  it("refuses a foo:// source before asking for the admin connection string", async () => {
+    const foo: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        database: "foo://worker:s3cret-foo@db.example.com/app",
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+    const result = await runInProcess(
+      ["uninstall"],
+      {
+        projectDir: PROJECT_DIR,
+        env: {},
+        loadConfig: () => Promise.resolve(foo),
+        engines: postgresEngines(noConnection),
+        connect: noConnection,
+      },
+      COMMANDS,
+    );
+    expect(result.code).toBe(1);
+    expect(result.prompts).toEqual([]);
+    expect(result.stderr).toContain(
+      "error: the connection string names no database FacetDB connects to (its scheme is foo:)",
+    );
+    expect(result.stdout + result.stderr).not.toContain("s3cret-foo");
+  });
+
+  it("refuses an admin connection string of another kind than the source's, before any plan", async () => {
+    const result = await run(
+      ["uninstall", "--dry-run", "--admin-url", "sqlite:///tmp/app.db"],
+      undefined,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      `error: the admin connection string is SQLite's (sqlite:), and the source "listings" reads Postgres's (postgres:) from DATABASE_URL`,
+    );
+    expect(result.stdout).not.toContain("drop column");
   });
 });

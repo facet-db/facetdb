@@ -25,6 +25,8 @@ export type ConnectionString = {
   readonly hosts: readonly string[];
   /** The database in the path, decoded; undefined when the path names none. */
   readonly database: string | undefined;
+  /** The user, decoded: the login migrate checks is the worker's. */
+  readonly user: string | undefined;
   /** The password, decoded, so an error's words can blank it out. */
   readonly password: string | undefined;
   /** What `tls` (or its alias `ssl`) says; undefined when the string has neither. */
@@ -99,6 +101,7 @@ export function parseConnectionString(url: string): ConnectionString | undefined
     srv,
     hosts: written.filter((host): host is string => host !== undefined),
     database,
+    user: username === undefined ? undefined : decoded(username),
     password: password === undefined ? undefined : decoded(password),
     tls: tlsOption(query),
   };

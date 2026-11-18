@@ -7,7 +7,7 @@ import type {
   PlanResult,
 } from "@facetdb/core";
 import type { SourceConfig } from "../../config/index.ts";
-import { databaseChanged, engineFor, refusalError, stoppedError } from "../engines.ts";
+import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
 import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
 import {
   requireStoreUrl,
@@ -15,11 +15,12 @@ import {
   type StoreMigration,
   sameDatabase,
   showStoreMigration,
+  storeSecretWarning,
   storeSharedFor,
 } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
-  adminUrl,
+  adminRun,
   engineTarget,
   loadProjectConfig,
   projectRef,
@@ -98,12 +99,35 @@ function pruneLines(plan: EnginePlan, done: boolean): readonly string[] {
 }
 
 /**
+ * The user and password a connection string logs in with: as its engine reads the string where the
+ * engine says how (MongoDB's several-host replica set string), else as a URL.
+ */
+function loginOf(
+  engine: DatabaseEngine,
+  url: string,
+): { readonly user: string; readonly password: string } | undefined {
+  if (engine.login !== undefined) {
+    return engine.login(url);
+  }
+  try {
+    const parsed = new URL(url);
+    return {
+      user: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The worker login's password on the first install, from the source's connection string, which is
  * the worker's (`postgres://facetdb_worker:…@host/db`), so the login migrate creates is the one the
  * worker connects with; or why there is none. Once the login exists it is left as it is (other
  * projects on the server may share it) and the engine asks for no password.
  */
 function passwordOf(
+  engine: DatabaseEngine,
   source: SourceConfig,
 ): { readonly password: string } | { readonly problem: string } {
   const variable = variableOf(source);
@@ -112,18 +136,16 @@ function passwordOf(
       problem: `the source "${source.name}" has no connection string, so the worker login has no password to be created with`,
     };
   }
-  let url: URL;
-  try {
-    url = new URL(source.database);
-  } catch {
+  const login = loginOf(engine, source.database);
+  if (login === undefined) {
     return { problem: `the connection string in ${variable} is not a URL` };
   }
-  if (workerLoginOf(source.database) === undefined || url.password === "") {
+  if (workerLoginOf(login.user) === undefined || login.password === "") {
     return {
       problem: `the worker login ${WORKER_LOGIN} does not exist yet, and ${variable} does not log in as it with a password`,
     };
   }
-  return { password: decodeURIComponent(url.password) };
+  return { password: login.password };
 }
 
 /**
@@ -138,7 +160,7 @@ async function planInstall(
   url: string,
   deps: EngineDeps,
 ): Promise<EnginePlan> {
-  const login = passwordOf(target.source);
+  const login = passwordOf(engine, target.source);
   const planned: PlanResult = await engine.planInstall(own, url, {
     ...deps,
     ...("password" in login ? { workerPassword: login.password } : {}),
@@ -239,7 +261,6 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
   run: async ({ options, deps, print }) => {
     const config = await loadProjectConfig(deps, options.config);
     const targets = tableTargets(config, options.source);
-    const url = await adminUrl(deps, options.adminUrl);
     const project = projectRef(deps.projectDir);
     const allowInsecure = options.allowInsecure === true;
     const [first] = targets;
@@ -247,11 +268,8 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       throw new Error("tableTargets returns at least one target");
     }
     // One admin connection reaches one database (tableTargets): one engine and one store's place.
-    const engine = await engineFor(
-      deps.engines,
-      first.source.database ?? url,
-      first.source.connector,
-    );
+    // The engine first, so a scheme FacetDB does not serve is refused before a credential is asked.
+    const { engine, url } = await adminRun(deps, first, options.adminUrl);
     const storeShared = storeSharedFor(deps.env, first.source);
     const storeUrl = storeShared ? undefined : requireStoreUrl(deps.env, allowInsecure);
     const engineDeps: EngineDeps = { clock: deps.clock, allowInsecure, storeShared };
@@ -304,6 +322,13 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     ]);
     for (const note of notes) {
       print(`note: ${note}`);
+    }
+    // migrate never opens the store's encrypted part, so an unset secret stops nothing here; the
+    // worker it installs for refuses to start without it. Said before the run, on stderr, the dry
+    // run included.
+    const secretWarning = storeSecretWarning(deps.env);
+    if (secretWarning !== undefined) {
+      deps.io.stderr(`${secretWarning}\n`);
     }
     const summary = (applied: boolean) => ({
       ok: true,
@@ -378,7 +403,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
           pruned = await planPrune(engine, item.engineTarget, url, engineDeps);
           await runAsShown(engine, item.engineTarget, url, item.pruneScript, pruned, engineDeps);
         }
-        const login = passwordOf(item.target.source);
+        const login = passwordOf(engine, item.target.source);
         const install = await planInstall(engine, item.target, item.engineTarget, url, engineDeps);
         await runAsShown(engine, item.engineTarget, url, item.installScript, install, {
           ...engineDeps,

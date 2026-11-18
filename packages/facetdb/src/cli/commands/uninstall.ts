@@ -1,5 +1,5 @@
 import type { EngineObject, EnginePlan, EngineTarget, RunResult } from "@facetdb/core";
-import { databaseChanged, engineFor, refusalError, stoppedError } from "../engines.ts";
+import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
 import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
 import {
   requireStoreUrl,
@@ -11,7 +11,7 @@ import {
 } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
-  adminUrl,
+  adminRun,
   engineTarget,
   loadProjectConfig,
   projectRef,
@@ -214,7 +214,6 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
   run: async ({ options, deps, print }) => {
     const config = await loadProjectConfig(deps, options.config);
     const targets = tableTargets(config, options.source);
-    const url = await adminUrl(deps, options.adminUrl);
     const project = projectRef(deps.projectDir);
     const allowInsecure = options.allowInsecure === true;
     const [first] = targets;
@@ -222,11 +221,8 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       throw new Error("tableTargets returns at least one target");
     }
     // One admin connection reaches one database (tableTargets): one engine and one store's place.
-    const engine = await engineFor(
-      deps.engines,
-      first.source.database ?? url,
-      first.source.connector,
-    );
+    // The engine first, so a scheme FacetDB does not serve is refused before a credential is asked.
+    const { engine, url } = await adminRun(deps, first, options.adminUrl);
     const storeShared = storeSharedFor(deps.env, first.source);
     const storeUrl =
       storeShared || !options.purge ? undefined : requireStoreUrl(deps.env, allowInsecure);

@@ -26,6 +26,7 @@ describe("reading a connection string", () => {
       srv: false,
       hosts: ["db1.example.com:27017", "db2.example.com"],
       database: "app one",
+      user: "admin",
       password: "p@ss",
       tls: true,
     });
@@ -33,6 +34,7 @@ describe("reading a connection string", () => {
       srv: true,
       hosts: ["cluster0.example.mongodb.net"],
       database: undefined,
+      user: undefined,
       password: undefined,
       tls: undefined,
     });

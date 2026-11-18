@@ -56,8 +56,16 @@ let world: PgliteWorld;
 let store: Store;
 /** How many rows each `page` call was asked for, in order. */
 let pageLimits: number[];
+/** How many times the log was counted. */
+let counts: number;
 /** The files `--out` wrote. */
 let files: Map<string, string>;
+/** Each part written to a file, in order: how much it held. */
+let writes: { readonly path: string; readonly length: number }[];
+/** The `page` call that fails (counted from 1), or none. */
+let failingPage: number | undefined;
+/** A file another run makes while this one reads the log, as two exports at once would. */
+let raceTo: string | undefined;
 
 // One engine for the file, emptied after every test: a boot per test cost 440 ms.
 beforeAll(async () => {
@@ -71,7 +79,11 @@ afterAll(async () => {
 beforeEach(async () => {
   store = await createStore({ pglite: world.db, secret: TEST_SECRET, clock: new FakeClock(0) });
   pageLimits = [];
+  counts = 0;
   files = new Map();
+  writes = [];
+  failingPage = undefined;
+  raceTo = undefined;
 });
 
 afterEach(async () => {
@@ -103,17 +115,38 @@ function run(
               ...log,
               page: (after: number | undefined, limit: number) => {
                 pageLimits.push(limit);
+                if (pageLimits.length === failingPage) {
+                  return Promise.reject(new Error("the store went away"));
+                }
+                if (raceTo !== undefined) {
+                  files.set(raceTo, "another run's export\n");
+                }
                 return log.page(after, limit);
+              },
+              count: (version?: number) => {
+                counts += 1;
+                return log.count(version);
               },
             };
           },
           close: () => Promise.resolve(),
         }),
+      // The disk's rules (main.ts's diskWorkspace, proven in main.test.ts): the parts go aside and
+      // take the name at the end, replacing a file only with `overwrite`.
       workspace: {
-        exists: () => Promise.resolve(false),
-        write: (path, text) => {
+        exists: (path) => Promise.resolve(files.has(path)),
+        write: () => Promise.reject(new Error("export writes its file in parts")),
+        writeParts: async (path, parts, { overwrite }) => {
+          let text = "";
+          for await (const part of parts) {
+            writes.push({ path, length: part.length });
+            text += part;
+          }
+          if (!overwrite && files.has(path)) {
+            return "exists";
+          }
           files.set(path, text);
-          return Promise.resolve();
+          return "written";
         },
         hasClaudeCommand: () => false,
       },
@@ -415,6 +448,9 @@ describe("facetdb export", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('would write 3 log rows of "listings" as csv to log.csv');
     expect(files.size).toBe(0);
+    // One count, never a page of the log.
+    expect(counts).toBe(1);
+    expect(pageLimits).toEqual([]);
 
     const json = await run(["export", "--source", "listings", "--dry-run", "--json", "--out", "x"]);
     expect(JSON.parse(json.stdout)).toEqual({
@@ -424,6 +460,151 @@ describe("facetdb export", () => {
       format: "jsonl",
       rows: 3,
     });
+  });
+
+  it("allows --dry-run --json without --out: a dry run puts no rows on stdout", async () => {
+    await seed();
+
+    const result = await run(["export", "--source", "listings", "--dry-run", "--json"]);
+
+    expect(result.code, result.stdout).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      dryRun: true,
+      source: "listings",
+      format: "jsonl",
+      rows: 3,
+    });
+    expect(result.stderr).toContain(
+      'would write 3 log rows of "listings" as jsonl to the terminal',
+    );
+  });
+
+  it("refuses to replace the file --out names, naming --force, and replaces it with --force", async () => {
+    await seed();
+    const argv = ["export", "--source", "listings", "--format", "csv", "--out", "x.csv"];
+
+    const first = await run(argv);
+    expect(first.code, first.stderr).toBe(0);
+    const written = files.get("x.csv");
+
+    const second = await run(argv);
+    expect(second.code).toBe(1);
+    expect(second.stdout).toBe("");
+    expect(second.stderr).toContain(
+      "error: x.csv already exists, and export does not replace a file unless told to; nothing was written",
+    );
+    expect(second.stderr).toContain("fix: pass --force to replace x.csv");
+    expect(second.stderr).toContain("https://docs.facetdb.dev/fix/export-out-exists");
+    expect(files.get("x.csv")).toBe(written);
+    // Refused before the store is read: no page, and the dry run says it too.
+    expect(pageLimits).toHaveLength(1);
+    expect((await run([...argv, "--dry-run"])).code).toBe(1);
+
+    await store.log(LOG_ID).appendAnswer({
+      kind: "answer",
+      key: "r3",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "hash-r3",
+      answers: { is_scam: { type: "noul", probability: 0.2 } },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      at: new Date("2026-10-31T08:00:00Z"),
+    });
+    const forced = await run([...argv, "--force"]);
+    expect(forced.code, forced.stderr).toBe(0);
+    expect(forced.stdout).toBe('Wrote 4 log rows of "listings" as csv to x.csv.\n');
+    // Replaced, not added to: the header once, then 3 + 3 + 1 + 1 lines.
+    expect(parseCsv(files.get("x.csv") ?? "")).toHaveLength(1 + 3 + 3 + 1 + 1);
+  });
+
+  it("writes the file page by page as the log is read, never as one string", async () => {
+    const log = store.log(LOG_ID);
+    for (let n = 0; n < 1200; n += 1) {
+      await log.appendAnswer({
+        kind: "answer",
+        key: `r${n}`,
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash: `hash-${n}`,
+        answers: { is_scam: { type: "noul", probability: 0.5 } },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        at: new Date(Date.UTC(2026, 9, 28, 0, 0, n % 60)),
+      });
+    }
+
+    const result = await run(["export", "--source", "listings", "--out", "log.jsonl"]);
+
+    expect(result.code, result.stderr).toBe(0);
+    // 1,200 rows in pages of 500: three parts, each a page, none the whole log.
+    expect(writes).toHaveLength(3);
+    expect(Math.max(...writes.map((write) => write.length))).toBeLessThan(
+      (files.get("log.jsonl") ?? "").length / 2,
+    );
+    const keys = (files.get("log.jsonl") ?? "")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { record_key: string }).record_key);
+    expect(keys).toEqual(Array.from({ length: 1200 }, (_, n) => `r${n}`));
+  });
+
+  it("leaves --out as it was when a later page fails, --force or not", async () => {
+    const log = store.log(LOG_ID);
+    for (let n = 0; n < 600; n += 1) {
+      await log.appendAnswer({
+        kind: "answer",
+        key: `r${n}`,
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash: `hash-${n}`,
+        answers: { is_scam: { type: "noul", probability: 0.5 } },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        at: new Date(Date.UTC(2026, 9, 28, 0, 0, n % 60)),
+      });
+    }
+    files.set("log.jsonl", "last week's export\n");
+    failingPage = 2;
+
+    const result = await run(["export", "--source", "listings", "--out", "log.jsonl", "--force"]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("the store went away");
+    expect(writes).toHaveLength(1);
+    expect(files.get("log.jsonl")).toBe("last week's export\n");
+    expect([...files.keys()]).toEqual(["log.jsonl"]);
+  });
+
+  it("refuses in its own words when another export made --out meanwhile, and the last wins under --force", async () => {
+    await seed();
+    raceTo = "log.jsonl";
+
+    const refused = await run(["export", "--source", "listings", "--out", "log.jsonl"]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(
+      "error: log.jsonl already exists, and export does not replace a file unless told to; nothing was written",
+    );
+    expect(refused.stderr).toContain("fix: pass --force to replace log.jsonl");
+    expect(files.get("log.jsonl")).toBe("another run's export\n");
+
+    files.delete("log.jsonl");
+    const forced = await run(["export", "--source", "listings", "--out", "log.jsonl", "--force"]);
+    expect(forced.code, forced.stderr).toBe(0);
+    expect(files.get("log.jsonl")?.trim().split("\n")).toHaveLength(3);
+  });
+
+  it("makes the file even for an empty log: the CSV header alone", async () => {
+    const result = await run([
+      "export",
+      "--source",
+      "tickets",
+      "--format",
+      "csv",
+      "--out",
+      "empty.csv",
+    ]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(parseCsv(files.get("empty.csv") ?? "")).toHaveLength(1);
+    expect(writes).toHaveLength(1);
   });
 
   it("names the sources of the config for an unknown source, or none given", async () => {

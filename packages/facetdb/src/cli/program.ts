@@ -117,6 +117,18 @@ export type Workspace = {
   exists(path: string): Promise<boolean>;
   /** Writes a file, creating its directory; replaces one that exists only when `overwrite` is set. */
   write(path: string, text: string, options: { readonly overwrite: boolean }): Promise<void>;
+  /**
+   * Writes a file from parts made one at a time (`export --out`'s pages), creating its directory:
+   * the parts go to a temporary file beside it, which takes the file's name only once the last part
+   * is written, so a failure while `parts` runs leaves the file as it was and the temporary one
+   * gone. Replaces a file that exists only when `overwrite` is set, and says `"exists"` instead,
+   * writing nothing, when one exists at that moment (another run's, say).
+   */
+  writeParts(
+    path: string,
+    parts: AsyncIterable<string>,
+    options: { readonly overwrite: boolean },
+  ): Promise<"written" | "exists">;
   /** Whether the `claude` command is on the PATH. */
   hasClaudeCommand(): boolean;
 };
@@ -499,6 +511,7 @@ export async function runInProcess(
       workspace: {
         exists: () => Promise.reject(new Error("this test gave the command no workspace")),
         write: () => Promise.reject(new Error("this test gave the command no workspace")),
+        writeParts: () => Promise.reject(new Error("this test gave the command no workspace")),
         hasClaudeCommand: () => {
           throw new Error("this test gave the command no workspace");
         },

@@ -133,6 +133,19 @@ describe("the MongoDB engine", () => {
     ).toBeUndefined();
   });
 
+  it("reads the login of a replica set's several-host string, which new URL refuses", () => {
+    const engine = createMongoEngine();
+    const replicaSet =
+      "mongodb://facetdb_worker:p%40ss@a.example.com:27017,b.example.com:27017/app";
+    expect(globalThis.URL.canParse(replicaSet)).toBe(false);
+    expect(engine.login?.(replicaSet)).toEqual({ user: "facetdb_worker", password: "p@ss" });
+    expect(engine.login?.("mongodb+srv://cluster0.example.net/app")).toEqual({
+      user: "",
+      password: "",
+    });
+    expect(engine.login?.("mongodb://a@evil.example.com@127.0.0.1/app")).toBeUndefined();
+  });
+
   it("opens the store's cursors only when watch runs, and closes them with the connector", async () => {
     const fake = installed();
     const saved = new Map<string, BackfillProgress>([
