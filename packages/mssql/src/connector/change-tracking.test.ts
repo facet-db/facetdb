@@ -238,6 +238,17 @@ describe("the uninstall of a table Change Tracking watches", () => {
     expect(plan.notes).toEqual([
       "Change Tracking on dbo.listings is turned off, because FacetDB's install turned it on; if another reader of the table's changes has relied on it since, turn it on again after the uninstall: alter table [dbo].[listings] enable change_tracking with (track_columns_updated = on)",
     ]);
+    // Among what goes, so the confirmation says it, and only where it is turned off.
+    expect(plan.removes.filter((object) => object.kind === "change-tracking")).toEqual([
+      {
+        kind: "change-tracking",
+        name: "dbo.listings",
+        of: "dbo.listings",
+        scope: "source",
+        reason: "FacetDB's install turned it on",
+      },
+    ]);
+    expect(plan.keeps.some((object) => object.kind === "change-tracking")).toBe(false);
   });
 
   it("leaves tracking on where it was on before the install", async () => {
@@ -249,6 +260,17 @@ describe("the uninstall of a table Change Tracking watches", () => {
     );
     expect(plan.notes).toEqual([
       "Change Tracking stays on for dbo.listings: it was on before FacetDB's install",
+    ]);
+    expect(plan.removes.some((object) => object.kind === "change-tracking")).toBe(false);
+    // Among what stays, so the confirmation says it.
+    expect(plan.keeps.filter((object) => object.kind === "change-tracking")).toEqual([
+      {
+        kind: "change-tracking",
+        name: "dbo.listings",
+        of: "dbo.listings",
+        scope: "source",
+        reason: "it was on before FacetDB's install",
+      },
     ]);
   });
 

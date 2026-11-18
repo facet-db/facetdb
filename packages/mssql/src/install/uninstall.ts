@@ -224,6 +224,11 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
             : undefined;
   const removes: readonly EngineObject[] = [
     ...(installed.trigger === undefined ? [] : [own("trigger", names.trigger)]),
+    // The capture in Change Tracking mode: turned off only where FacetDB's install turned it on
+    // (`trackingUninstallStatements`); tracking that was on before stays, among the keeps.
+    ...(installed.tracking?.enabled === true
+      ? [{ ...own("change-tracking", names.label), reason: "FacetDB's install turned it on" }]
+      : []),
     ...(installed.grants.some(
       (grant) => grant.schema === names.schema && grant.object === names.table,
     )
@@ -252,6 +257,15 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
       : []),
   ];
   const keeps: readonly KeptObject[] = [
+    // Tracking that was on before the install stays on, said among what stays.
+    ...(installed.tracking?.enabled === false
+      ? [
+          {
+            ...own("change-tracking", names.label),
+            reason: "it was on before FacetDB's install",
+          },
+        ]
+      : []),
     ...(queue === undefined || queueKept === undefined
       ? []
       : [

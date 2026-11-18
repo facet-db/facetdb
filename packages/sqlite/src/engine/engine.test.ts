@@ -109,6 +109,8 @@ describe("the connection string names the file", () => {
     const engine = createSqliteEngine();
     expect(engine.name).toBe(ENGINE_NAME);
     expect(engine.schemes).toEqual(["sqlite", "file"]);
+    // The file is the database: a table is named bare.
+    expect(engine.label(target())).toBe("listings");
     expect(engine.capabilities).toMatchObject({ multipleWorkers: false, sideTable: false });
     expect(engine.checks.map((check) => check.name)).toEqual(DOCTOR_CHECKS.map((c) => c.name));
   });

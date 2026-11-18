@@ -105,6 +105,9 @@ describe("the MongoDB engine", () => {
     const engine = createMongoEngine();
     expect(engine.name).toBe(ENGINE_NAME);
     expect(engine.schemes).toEqual(["mongodb", "mongodb+srv"]);
+    // The collection; its database is the connection string's unless the config names one.
+    expect(engine.label(target)).toBe("tickets");
+    expect(engine.label({ ...target, schema: "app" })).toBe("app.tickets");
     expect(engine.capabilities).toEqual(MONGO_CAPABILITIES);
     expect(engine.capabilities).toMatchObject({
       pushWakeup: true,

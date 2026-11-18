@@ -124,6 +124,18 @@ describe("planUninstall: the listings example", () => {
     expect(plan.confirm).toEqual({ kind: "project", name: "Listings" });
     expect(plan.transactional).toBe(false);
     expect(plan.notes).toEqual([UNINSTALL_RERUN_NOTE]);
+    // On a MariaDB server the note says MariaDB, as the version read says.
+    const mariadb = planOf(
+      await planned({
+        ...installedListings(),
+        version: "10.6.20-MariaDB-ubu2204",
+        views: "unlisted",
+      }),
+    );
+    expect(mariadb.notes).toEqual([
+      "MariaDB runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb uninstall again completes it.",
+      "MySQL and MariaDB drop a column that a view reads, and the view then fails with error 1356; MariaDB cannot list the views that read app.listings, so check them before this runs.",
+    ]);
     const script = createMysqlInstaller({ connect: recordingDriver().connect }).render(plan);
     expect(script.startsWith(`${SCRIPT_HEADER}\n\nset session lock_wait_timeout = 10;\n`)).toBe(
       true,

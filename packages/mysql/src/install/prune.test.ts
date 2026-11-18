@@ -113,6 +113,13 @@ describe("planPrune", () => {
     );
     expect(plan).toMatchObject({ transactional: false, keeps: [], notes: [PRUNE_RERUN_NOTE] });
     expect(plan.confirm).toBeUndefined();
+    // On a MariaDB server its note says MariaDB, as the version read says.
+    const mariadb = planOf(
+      await planned({ ...installed, version: "10.6.20-MariaDB-ubu2204" }, listingsTarget()),
+    );
+    expect(mariadb.notes).toEqual([
+      "MariaDB runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate --prune again completes it.",
+    ]);
   });
 
   it("drops the columns a question had under its old type, with why", async () => {

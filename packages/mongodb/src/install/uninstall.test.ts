@@ -43,17 +43,25 @@ const LINES = [
   'if (db.getSiblingDB("app").getCollection("facetdb_meta").findOne({}) === null) db.getSiblingDB("app").runCommand({ drop: "facetdb_meta" })',
 ];
 
+/** MongoDB's words for its logins: the user that holds the roles, each collection's role. */
 const LOGIN_KEPT = {
   kind: "login",
   name: "facetdb_worker",
   scope: "run",
+  noun: "user",
   reason: "uninstall never drops it: other collections and projects of the database may share it",
 };
 
 const OWN = [
   { kind: "field", name: "facetdb", of: "app.listings", scope: "source" },
   { kind: "jobs-table", name: "facetdb_jobs", of: "app.listings", scope: "source" },
-  { kind: "login", name: "facetdb_worker_listings", of: "app.listings", scope: "source" },
+  {
+    kind: "login",
+    name: "facetdb_worker_listings",
+    of: "app.listings",
+    scope: "source",
+    noun: "role",
+  },
 ];
 
 const SHARED = ["facetdb_jobs", "facetdb_meta"];
@@ -196,6 +204,7 @@ describe("the uninstall plan", () => {
         name: "facetdb_worker_listings",
         of: "admin",
         scope: "source",
+        noun: "role",
         reason:
           "made by hand in admin, where FacetDB drops no role (Atlas keeps roles to its own pages): delete it in Database Access, Custom Roles, once nothing uses it",
       },

@@ -647,6 +647,8 @@ export function postgresWireEngine(options: PostgresWireOptions): DatabaseEngine
       },
       ...onPostgres.checks,
     ],
+    // Both dialects name a bare table in `public`.
+    label: (target) => onPostgres.label(target),
     planInstall: async (target, url, install) =>
       (await engineOf(url, install.allowInsecure)).planInstall(target, url, install),
     planUninstall: async (target, url, uninstall) =>

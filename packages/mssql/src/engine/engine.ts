@@ -7,7 +7,7 @@ import {
   noteOnStderr,
   warnOnStderr,
 } from "../connector/index.ts";
-import { createInstaller } from "../install/index.ts";
+import { createInstaller, DEFAULT_SCHEMA } from "../install/index.ts";
 import { connectMssql, MSSQL_SCHEMES, type MssqlConnect, workerUrlRefusal } from "../sql/index.ts";
 import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
 
@@ -93,6 +93,8 @@ export function createMssqlEngine(options: MssqlEngineOptions = {}): DatabaseEng
     schemes: MSSQL_SCHEMES,
     capabilities: MSSQL_CAPABILITIES,
     checks: DOCTOR_CHECKS,
+    // A bare name is in `dbo`, as every plan reads it.
+    label: (target) => `${target.schema ?? DEFAULT_SCHEMA}.${target.table}`,
     ...createInstaller({ connect }),
     checkUrl: (target, url, deps) => workerUrlRefusal(url, deps.allowInsecure, subjectOf(target)),
     async open(target, url, openOptions) {

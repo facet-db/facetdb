@@ -196,7 +196,10 @@ export async function planUninstall(
           own("field", SUBDOCUMENT),
           // Its queued jobs: the collection's part of the database's queue.
           own("jobs-table", JOBS_COLLECTION),
-          ...(role.kind === "found" ? [own("login", workerRole(collection))] : []),
+          // MongoDB's words: the collection's role, and the user that holds it.
+          ...(role.kind === "found"
+            ? [{ ...own("login", workerRole(collection)), noun: "role" }]
+            : []),
           ...(stillInstalled === undefined ? shared("no collection uses it any more") : []),
         ],
         keeps: [
@@ -207,12 +210,13 @@ export async function planUninstall(
                   name: workerRole(collection),
                   of: "admin",
                   scope: "source",
+                  noun: "role",
                   reason: HANDMADE_KEPT,
                 } satisfies KeptObject,
               ]
             : []),
           ...(stillInstalled === undefined ? [] : shared(stillInstalled)),
-          { kind: "login", name: WORKER_USER, scope: "run", reason: LOGIN_KEPT },
+          { kind: "login", name: WORKER_USER, scope: "run", noun: "user", reason: LOGIN_KEPT },
         ],
         notes: [
           `Removing the ${SUBDOCUMENT} field writes every document of ${label} that has one, an update each in the oplog: on a large collection, run it when the replica set can take the load.`,

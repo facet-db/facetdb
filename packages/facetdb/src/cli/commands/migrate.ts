@@ -40,7 +40,9 @@ import {
  * its part, today's one script; otherwise the store's part is printed and run first, under a `--
  * store:` header (a store already current says so and runs nothing; one newer than this FacetDB is
  * refused before the confirmation), and each source's under `-- source <name>:`. The store's step
- * is said as it runs, and a source's failure after it says the store moved.
+ * is said as it runs, and a source's failure after it says the store moved. Every line names the
+ * table as its engine does (`DatabaseEngine.label`): `public.listings` on Postgres, `dbo.listings`
+ * on SQL Server, `listings` on MySQL.
  */
 
 type MigrateOptions = {
@@ -56,6 +58,8 @@ type MigrateOptions = {
 type Shown = {
   readonly target: TableTarget;
   readonly engineTarget: EngineTarget;
+  /** The table as its engine names it: `public.listings`, `dbo.listings`, `listings`. */
+  readonly label: string;
   readonly install: EnginePlan;
   readonly installScript: string;
   /** Undefined without `--prune`; an empty plan when the table is not installed yet. */
@@ -185,10 +189,6 @@ async function runAsShown(
   }
 }
 
-function label(target: TableTarget): string {
-  return `${target.schema}.${target.table}`;
-}
-
 /** What the show says in place of the store's DDL when the store is at this version already. */
 const STORE_CURRENT = "-- the FacetDB store is current: nothing to run there";
 
@@ -264,6 +264,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       shown.push({
         target,
         engineTarget: own,
+        label: engine.label(own),
         install,
         installScript: engine.render(install),
         prune,
@@ -281,17 +282,17 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         print(`-- source ${item.target.source.name}: ${databaseLabel(url)}`);
       }
       if (item.pruneScript !== "") {
-        print(`-- facetdb migrate --prune: ${item.target.source.name} (${label(item.target)})`);
+        print(`-- facetdb migrate --prune: ${item.target.source.name} (${item.label})`);
         print(item.pruneScript);
       }
       // What the prune drops, keeps and revokes, column by column; a kept column is named even
       // when there is no script, so nothing stays without a word.
       const lines = item.prune === undefined ? [] : pruneLines(item.prune, false);
       if (lines.length > 0) {
-        print(`Prune of ${label(item.target)}:`);
+        print(`Prune of ${item.label}:`);
         print(lines.join("\n"));
       }
-      print(`-- facetdb migrate: ${item.target.source.name} (${label(item.target)})`);
+      print(`-- facetdb migrate: ${item.target.source.name} (${item.label})`);
       print(item.installScript);
     }
     // Store version 4 rekeys each source id to `<project>:<name>`; a log another project shared
@@ -320,7 +321,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
           }),
       sources: shown.map((item) => ({
         source: item.target.source.name,
-        table: label(item.target),
+        table: item.label,
         ...(item.pruneScript === "" ? {} : { pruneSql: item.pruneScript }),
         ...(item.prune === undefined
           ? {}
@@ -388,13 +389,13 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
           ? error
           : afterStoreMigrated(error, migratedStore, installed);
       }
-      installed.push(label(item.target));
+      installed.push(item.label);
       const lines = pruned === undefined ? [] : pruneLines(pruned, true);
       if (lines.length > 0) {
-        print(`Pruned ${label(item.target)}:`);
+        print(`Pruned ${item.label}:`);
         print(lines.join("\n"));
       }
-      print(`Installed on ${label(item.target)} (source ${item.target.source.name}).`);
+      print(`Installed on ${item.label} (source ${item.target.source.name}).`);
     }
     return summary(true);
   },

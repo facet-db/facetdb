@@ -39,6 +39,9 @@ export function createMysqlEngine(options: MysqlEngineOptions = {}): DatabaseEng
     schemes: ["mysql", "mariadb"],
     capabilities: MYSQL_CAPABILITIES,
     checks: DOCTOR_CHECKS,
+    // A bare name is in the connection string's database, which the target does not carry.
+    label: (target) =>
+      target.schema === undefined ? target.table : `${target.schema}.${target.table}`,
     ...createMysqlInstaller({ connect }),
     checkUrl: (target, url, deps) => workerUrlRefusal(url, deps.allowInsecure, subjectOf(target)),
     async open(target, url, openOptions) {

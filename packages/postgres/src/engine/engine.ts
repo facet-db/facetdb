@@ -197,6 +197,8 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
     schemes: ["postgres", "postgresql"],
     capabilities: CAPABILITIES,
     checks: DOCTOR_CHECKS,
+    // A bare name is in `public`, as every plan reads it.
+    label: (target) => `${target.schema ?? "public"}.${target.table}`,
 
     async planInstall(target, url, installOptions) {
       const insecure = adminUrlRefusal(url, installOptions.allowInsecure, pgHost);
@@ -207,8 +209,8 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
         // An existing login keeps its password: other projects on the server may share it.
         const exists = (await query(ROLE_EXISTS, [WORKER_ROLE])).length > 0;
         if (!exists && installOptions.workerPassword === undefined) {
-          // The contract's code, before anything is drafted, as the CLI refused before printing
-          //: the CLI words it from the source's connection string.
+          // The contract's code, before anything is drafted, as the CLI refused before printing:
+          // the CLI words it from the source's connection string.
           return {
             ok: false,
             refusal: {

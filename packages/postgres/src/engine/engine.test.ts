@@ -177,6 +177,11 @@ describe("the engine's identity", () => {
     });
   });
 
+  it("names a bare table in public, and a named one as the config writes it", () => {
+    expect(engine.label(target())).toBe("public.listings");
+    expect(engine.label(target({ schema: "shop" }))).toBe("shop.listings");
+  });
+
   it("renders a plan with nothing to do as nothing", () => {
     expect(
       engine.render({ statements: [], transactional: true, removes: [], keeps: [], notes: [] }),

@@ -23,6 +23,8 @@ import {
   readViews,
   readWorkerRights,
   rightsOn,
+  type ServerName,
+  serverNameOf,
   workerExists,
 } from "./catalog.ts";
 import { noDatabaseRefusal, pruneRefused } from "./refusals.ts";
@@ -52,9 +54,13 @@ import {
  * not a refusal.
  */
 
-/** The plan's note for a run that stops part way. */
-export const PRUNE_RERUN_NOTE =
-  "MySQL runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate --prune again completes it.";
+/** The plan's note for a run that stops part way, in the server's name. */
+export function pruneRerunNote(server: ServerName): string {
+  return `${server} runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate --prune again completes it.`;
+}
+
+/** The note on a MySQL server. */
+export const PRUNE_RERUN_NOTE = pruneRerunNote("MySQL");
 
 /** Why a marked column stays although the set no longer owns it, in Postgres's words. */
 export const KEPT_REASON = "storeProbabilities is off";
@@ -286,7 +292,10 @@ export async function planPrune(
             reason: KEPT_REASON,
           }),
         ),
-        notes: [PRUNE_RERUN_NOTE, ...(viewsNote === undefined ? [] : [viewsNote])],
+        notes: [
+          pruneRerunNote(serverNameOf(session)),
+          ...(viewsNote === undefined ? [] : [viewsNote]),
+        ],
       },
     };
   });

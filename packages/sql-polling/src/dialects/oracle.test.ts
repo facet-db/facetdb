@@ -211,6 +211,14 @@ describe("Oracle's own rules", () => {
     expect(client.statements).toEqual([]);
   });
 
+  it("names the table as the config writes it, schema and case alike", () => {
+    const engine = pollingEngine(oracleDialect, recordingConnect(recordingClient()), {
+      warn: () => undefined,
+    });
+    expect(engine.label(target({ table: "LISTINGS" }))).toBe("APP.LISTINGS");
+    expect(engine.label(target({ schema: "app", table: "listings" }))).toBe("app.listings");
+  });
+
   it("writes a noul's answer and the reviewed flag as 1 or 0, and reads them back as booleans", async () => {
     const client = recordingClient();
     const connector = createPollingConnector(

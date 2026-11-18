@@ -487,6 +487,9 @@ describe('a postgres:// source with connector: "polling"', () => {
     // Its words are a Postgres URL's: the CockroachDB SQL, judged by the Postgres rule.
     expect(engine.schemes).toEqual(["postgres", "postgresql"]);
     expect(engine.checks.map((check) => check.name)[0]).toBe("dialect");
+    // A bare table is in the Postgres dialect's default schema, named with no question asked; the
+    // stand-in's is the plain dialect's.
+    expect(engine.label(target)).toBe(`${postgresStandIn.defaultSchema}.listings`);
   });
 
   it("says which it found on doctor's first line", async () => {

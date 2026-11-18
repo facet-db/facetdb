@@ -20,6 +20,7 @@ import {
   withoutNothingDone,
 } from "./database.ts";
 import {
+  accountLines,
   once,
   runKept,
   runRemoved,
@@ -52,13 +53,13 @@ type UninstallOptions = {
 type Shown = {
   readonly target: TableTarget;
   readonly engineTarget: EngineTarget;
+  /** The table as its engine names it: `public.listings`, `dbo.listings`, `listings`. */
+  readonly label: string;
   readonly plan: EnginePlan;
   readonly script: string;
   /** With the store in another database and `--purge`: the store's part, run after the engine's. */
   readonly storePurge?: StorePurge;
 };
-
-const label = (target: TableTarget) => `${target.schema}.${target.table}`;
 
 /** What the run removes from the store: the source's log, with the store in its own database. */
 function storeRemoved(item: Shown): readonly string[] {
@@ -97,27 +98,32 @@ function confirmOf(item: Shown): { readonly kind: "project" | "source"; readonly
 
 /**
  * The line after the whole run. "Removed FacetDB from …" stands alone (but for the logins, which
- * uninstall never drops) only when nothing else of FacetDB is left behind.
+ * uninstall never drops) only when nothing else of FacetDB is left behind; with nothing kept at all
+ * (a SQLite file, which has no logins) it ends there.
  */
 function doneWords(ran: readonly Shown[], keeps: readonly string[]): string {
   const allLogOnly = ran.every((item) => confirmOf(item).kind === "source");
   const done = allLogOnly
     ? `Purged the decision log of source ${ran.map((item) => item.target.source.name).join(", ")}`
-    : `Removed FacetDB from ${ran.map((item) => label(item.target)).join(", ")}`;
+    : `Removed FacetDB from ${ran.map((item) => item.label).join(", ")}`;
+  if (keeps.length === 0) {
+    return `${done}.`;
+  }
   const last = ran.at(-1);
-  const logins = last === undefined ? undefined : runKept(last.plan.keeps).at(-1);
-  // The polling engine keeps one login, the trigger engine two.
-  const one = last?.plan.keeps.filter((object) => object.kind === "login").length === 1;
-  return keeps.length === 1 && keeps[0] === logins
-    ? `${done}; only ${logins} ${one ? "stays" : "stay"}.`
+  // The polling engine keeps one login, the trigger engine two; runKept says them last.
+  const kept = last?.plan.keeps.filter((object) => object.scope === "run") ?? [];
+  const logins = kept.filter((object) => object.kind === "login").length;
+  const loginWords = last === undefined || logins === 0 ? undefined : runKept(kept).at(-1);
+  return keeps.length === 1 && keeps[0] === loginWords
+    ? `${done}; only ${loginWords} ${logins === 1 ? "stays" : "stay"}.`
     : `${done}; kept: ${keeps.join("; ")}.`;
 }
 
 /** A table the run removed, in words: with the store elsewhere, its log purged there too. */
 const removedWords = (item: Shown) =>
   item.storePurge === undefined
-    ? label(item.target)
-    : `${label(item.target)} (and the decision log of source ${item.target.source.name} in the FacetDB store)`;
+    ? item.label
+    : `${item.label} (and the decision log of source ${item.target.source.name} in the FacetDB store)`;
 
 /** The run-wide removals "This removes" promised that did not happen, as the sentence that says so. */
 function notDoneWords(promised: readonly string[]): string {
@@ -141,7 +147,7 @@ function afterPartialRun(
     return error;
   }
   const cliError = asCliError(error);
-  const removed = ran.map((item) => label(item.target));
+  const removed = ran.map((item) => item.label);
   return new CliError(
     cliError.code,
     `${cliError.message} Already removed in this run, before this: ${ran.map(removedWords).join(", ")}.${notDoneWords(promised)}`,
@@ -170,8 +176,8 @@ function logNotPurged(
   const name = item.target.source.name;
   const sourceSide =
     tableRemoved(removedHere).length === 0
-      ? `${label(item.target)} had no FacetDB install left`
-      : `the FacetDB install on ${label(item.target)} was removed`;
+      ? `${item.label} had no FacetDB install left`
+      : `the FacetDB install on ${item.label} was removed`;
   const before =
     ran.length === 0
       ? ""
@@ -183,7 +189,7 @@ function logNotPurged(
     `${sourceSide}; the decision log of source ${name} in the FacetDB store on ${storeLabel} was not purged: ${withoutNothingDone(cause.message)}.${before}${notDoneWords(promised.filter((words) => !doneHere.has(words)))}`,
     `fix what the message says, then run facetdb uninstall --purge --source ${name} again: with the install gone, it purges the log alone`,
     cause.exit,
-    { removed: [...ran, item].map((done) => label(done.target)), notPurged: [name] },
+    { removed: [...ran, item].map((done) => done.label), notPurged: [name] },
   );
 }
 
@@ -260,13 +266,14 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       ) {
         throw new CliError(
           "uninstall-refused",
-          `${label(target)} has no FacetDB install left, and the FacetDB store on ${storePurge.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
+          `${engine.label(own)} has no FacetDB install left, and the FacetDB store on ${storePurge.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
           "check the source's name, table and schema; nothing was changed",
         );
       }
       shown.push({
         target,
         engineTarget: own,
+        label: engine.label(own),
         plan: planned.plan,
         script: engine.render(planned.plan),
         ...(storePurge === undefined ? {} : { storePurge }),
@@ -284,7 +291,7 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
         print(`-- source ${item.target.source.name}: ${databaseLabel(url)}`);
       }
       print(
-        `-- facetdb uninstall${options.purge ? " --purge" : ""}: ${item.target.source.name} (${label(item.target)})`,
+        `-- facetdb uninstall${options.purge ? " --purge" : ""}: ${item.target.source.name} (${item.label})`,
       );
       print(item.script);
       for (const note of item.plan.notes) {
@@ -295,9 +302,9 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
         print(item.storePurge.script);
       }
     }
-    const planned = runWords(shown, keptInStore);
-    print(`This removes: ${planned.removes.join("; ")}.`);
-    print(`This keeps: ${planned.keeps.join("; ")}.`);
+    for (const line of accountLines(runWords(shown, keptInStore))) {
+      print(line);
+    }
     const summary = (ran: readonly Shown[] | undefined) => {
       const words = runWords(ran ?? shown, keptInStore);
       return {
@@ -308,7 +315,7 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
         keeps: words.keeps,
         sources: (ran ?? shown).map((item) => ({
           source: item.target.source.name,
-          table: label(item.target),
+          table: item.label,
           sql: item.script,
           applied: ran !== undefined,
           notes: item.plan.notes,

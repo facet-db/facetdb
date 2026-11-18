@@ -107,6 +107,8 @@ export function pollingEngine(
     schemes: dialect.schemes,
     capabilities: POLLING_CAPABILITIES,
     checks: doctorChecksOf(dialect),
+    // In the dialect's default schema (`public`), or bare where it has none (Oracle).
+    label: (target) => labelOf(tableOf(dialect, target)),
 
     async planInstall(target, url, installOptions) {
       const refused =

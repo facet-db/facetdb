@@ -16,11 +16,12 @@ import {
   quoteIdent,
   quoteTable,
 } from "../sql/index.ts";
-import { INSTALL_RERUN_NOTE } from "./install.ts";
-import { PRUNE_RERUN_NOTE } from "./prune.ts";
+import type { ServerName } from "./catalog.ts";
+import { installRerunNote } from "./install.ts";
+import { pruneRerunNote } from "./prune.ts";
 import { anotherProject, NO_PASSWORD, REFUSED_FIX } from "./refusals.ts";
 import { JOBS_TABLE, OWNER_GUARD_COMMENT, OWNERS_TABLE } from "./sql.ts";
-import { UNINSTALL_RERUN_NOTE } from "./uninstall.ts";
+import { uninstallRerunNote } from "./uninstall.ts";
 
 /**
  * `run` on MySQL and MariaDB: the plan's statements against the admin URL, in order and as printed,
@@ -33,12 +34,18 @@ import { UNINSTALL_RERUN_NOTE } from "./uninstall.ts";
  * plan creates) stop the run before its first statement, so nothing changes.
  */
 
-/** The notes a plan carries for a run that stops part way: a finished run has no use for them. */
-const RERUN_NOTES: ReadonlySet<string> = new Set([
-  INSTALL_RERUN_NOTE,
-  UNINSTALL_RERUN_NOTE,
-  PRUNE_RERUN_NOTE,
-]);
+/**
+ * The notes a plan carries for a run that stops part way, in either server's name: a finished run
+ * has no use for them.
+ */
+const SERVERS: readonly ServerName[] = ["MySQL", "MariaDB"];
+const RERUN_NOTES: ReadonlySet<string> = new Set(
+  SERVERS.flatMap((server) => [
+    installRerunNote(server),
+    uninstallRerunNote(server),
+    pruneRerunNote(server),
+  ]),
+);
 
 /** MySQL's `ER_SUBQUERY_NO_1_ROW`: the owner guard's way of stopping the script. */
 const SUBQUERY_ROWS = 1242;

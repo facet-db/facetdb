@@ -29,6 +29,13 @@ export function isMariaDb(session: Session): boolean {
   return /mariadb/i.test(session.version);
 }
 
+/** How a plan's words name the server: MariaDB where its version says so. */
+export type ServerName = "MySQL" | "MariaDB";
+
+export function serverNameOf(session: Session): ServerName {
+  return isMariaDb(session) ? "MariaDB" : "MySQL";
+}
+
 /**
  * What creating a trigger needs of the admin: with binary logging on and
  * `log_bin_trust_function_creators` off, MySQL and MariaDB let only an account with SUPER create one

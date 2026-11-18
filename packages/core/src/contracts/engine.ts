@@ -164,6 +164,8 @@ export type ObjectKind =
   | "index"
   // A collection FacetDB made on MongoDB.
   | "collection"
+  // SQL Server's Change Tracking on a table, which FacetDB's install turned on: `of` the table.
+  | "change-tracking"
   // The store's decision log: its tables, or with `of` one source's entries in one of them.
   | "log"
   // Another table of the FacetDB store (usage, alerts, heartbeats, the webhook outbox).
@@ -198,6 +200,11 @@ export type EngineObject = {
   readonly count?: number;
   /** Why it goes, in words the CLI prints as they are: `no question asks it any more`. */
   readonly reason?: string;
+  /**
+   * What the database calls it, where its word is not the CLI's for the kind: MongoDB's `role` and
+   * `user` for a `login`. The CLI's word for the kind when absent.
+   */
+  readonly noun?: string;
 };
 
 /** Something a plan leaves in place on purpose, never without why. */
@@ -405,6 +412,15 @@ export type DatabaseEngine = {
   readonly keyText?: KeyText;
   /** The checks `doctor` runs, in order, and what each looks at: `doctor --dry-run` lists them. */
   readonly checks: readonly { readonly name: string; readonly looksAt: string }[];
+  /**
+   * The source's table as the engine's words name it, from the target alone: what the CLI's headers
+   * and confirmations say. The schema as the config writes it where it names one; otherwise the
+   * engine's own default where it has a fixed one (`public.listings` on Postgres and CockroachDB,
+   * `dbo.listings` on SQL Server), and the bare name where the default is the connection's
+   * database, which the target does not carry (`listings` on MySQL and MongoDB), or where there is
+   * no schema (SQLite, libSQL). Nothing connects.
+   */
+  label(target: EngineTarget): string;
   /**
    * The install for a source, from the database as the admin `url` shows it now: the answer
    * columns, the queue, the change capture, the worker login and its grants. Idempotent: on an

@@ -104,6 +104,9 @@ export function createLibsqlEngine(options: LibsqlEngineOptions): DatabaseEngine
     schemes: ["libsql", "https", "http"],
     capabilities: SQLITE_CAPABILITIES,
     checks: LIBSQL_DOCTOR_CHECKS,
+    // As SQLite: no schema but `main`, said only where the config does.
+    label: (target) =>
+      target.schema === undefined ? target.table : `${target.schema}.${target.table}`,
 
     planInstall: (target, url, installOptions) =>
       planning(target, url, installOptions.allowInsecure, (query) => planInstall(target, query)),

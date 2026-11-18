@@ -131,6 +131,23 @@ describe("planInstall: the listings example", () => {
     expect(plan.confirm).toBeUndefined();
   });
 
+  it("names MariaDB in its notes where the server's version says MariaDB", async () => {
+    const plan = planOf(
+      await planned({
+        ...freshListings(),
+        version: "10.6.20-MariaDB-ubu2204",
+        sqlMode: MARIADB_SQL_MODE,
+      }),
+    );
+    expect(plan.notes).toEqual([
+      "MariaDB runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate again completes the install.",
+      QUEUE_NOTE,
+      DEFINER_NOTE,
+      "MariaDB does not tie a trigger to the columns it names: renaming or dropping the key or a state column of app.listings makes the application's writes on it fail with error 1054 until facetdb migrate runs again.",
+    ]);
+    expect(plan.notes.join(" ")).not.toContain("MySQL");
+  });
+
   it("tags every statement as the source's, with its purpose, in the order the script runs", async () => {
     const plan = planOf(await planned(freshListings()));
     expect(plan.statements.every((statement) => statement.database === "source")).toBe(true);

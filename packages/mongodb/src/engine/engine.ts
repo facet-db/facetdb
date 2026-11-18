@@ -108,6 +108,10 @@ export function createMongoEngine(options: MongoEngineOptions = {}): DatabaseEng
     capabilities: MONGO_CAPABILITIES,
     keyText: MONGO_KEY_TEXT,
     checks: DOCTOR_CHECKS,
+    // The collection; a bare name is in the connection string's database, which the target does
+    // not carry.
+    label: (target) =>
+      target.schema === undefined ? target.table : `${target.schema}.${target.table}`,
     planInstall: (target, url, installOptions) => planInstall(connect, target, url, installOptions),
     planUninstall: (target, url, uninstallOptions) =>
       planUninstall(connect, target, url, uninstallOptions),

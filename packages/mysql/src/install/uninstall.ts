@@ -26,6 +26,8 @@ import {
   readViews,
   readWorkerRights,
   rightsOn,
+  type ServerName,
+  serverNameOf,
   type WorkerRights,
   workerExists,
 } from "./catalog.ts";
@@ -64,23 +66,27 @@ import {
  * types the project's name back.
  */
 
-/** The plan's note for a run that stops part way. */
-export const UNINSTALL_RERUN_NOTE =
-  "MySQL runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb uninstall again completes it.";
+/** The plan's note for a run that stops part way, in the server's name. */
+export function uninstallRerunNote(server: ServerName): string {
+  return `${server} runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb uninstall again completes it.`;
+}
+
+/** The note on a MySQL server. */
+export const UNINSTALL_RERUN_NOTE = uninstallRerunNote("MySQL");
 
 /** Why the login stays, in the words Postgres's uninstall prints. */
 const LOGIN_KEPT = "uninstall never drops it: every project on the server may share it";
 
-/** Why a grant stays on a table that is gone: MySQL does not drop a table's grants with it. */
-const DROPPED_TABLE_GRANTS =
-  "the table is gone, and MySQL keeps the grants of a dropped table: they go with the login";
+/** Why a grant stays on a table that is gone: the server does not drop a table's grants with it. */
+const droppedTableGrants = (server: ServerName) =>
+  `the table is gone, and ${server} keeps the grants of a dropped table: they go with the login`;
 
 /**
  * Why the worker's grants stay on a shared table the run drops: whether the table goes is decided
  * as the script runs, and a revoke cannot be made to wait for that.
  */
-const SHARED_TABLE_GRANTS =
-  "MySQL keeps a dropped table's grants, and whether this table goes is decided as the script runs: they go with the login";
+const sharedTableGrants = (server: ServerName) =>
+  `${server} keeps a dropped table's grants, and whether this table goes is decided as the script runs: they go with the login`;
 
 /**
  * The run-time checks ("an existence check on MySQL") that drop the shared tables once no table
@@ -135,6 +141,7 @@ function sharedObjects(
   table: string,
   rights: WorkerRights,
   inRun: ReadonlySet<string>,
+  server: ServerName,
 ): {
   readonly statements: readonly PlanStatement[];
   readonly removes: readonly EngineObject[];
@@ -179,7 +186,7 @@ function sharedObjects(
         name: WORKER_ACCOUNT,
         of: `${schema}.${name}`,
         scope: "run",
-        reason: SHARED_TABLE_GRANTS,
+        reason: sharedTableGrants(server),
       })),
   };
 }
@@ -193,6 +200,8 @@ type Context = {
   readonly views: readonly string[] | undefined;
   /** The side table and its view, in side-table mode. */
   readonly side: SideCatalog | undefined;
+  /** How the words name the server: MySQL or MariaDB. */
+  readonly server: ServerName;
 };
 
 /**
@@ -258,7 +267,7 @@ function sideObjects(
 
 /** The plan once the table is known to be the project's, or to have nothing of FacetDB's left. */
 function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context): EnginePlan {
-  const { rights, claimed, inRun, views, side } = context;
+  const { rights, claimed, inRun, views, side, server } = context;
   const { schema } = catalog;
   const { table } = target;
   const label = `${schema}.${table}`;
@@ -278,7 +287,7 @@ function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context)
   const heldOnTable =
     rights.columns.some((held) => held.table === table) ||
     rights.tables.some((held) => held.table === table);
-  const shared = sharedObjects(catalog, table, rights, inRun);
+  const shared = sharedObjects(catalog, table, rights, inRun, server);
   const sideOwn = sideObjects(schema, table, side);
   const viewsNote = marked.length === 0 ? undefined : droppedColumnsNote(label, views);
   const own = (kind: EngineObject["kind"], name: string): EngineObject => ({
@@ -320,12 +329,12 @@ function uninstallPlan(target: EngineTarget, catalog: Catalog, context: Context)
     ],
     keeps: [
       ...(!present && heldOnTable
-        ? [{ ...own("grant", WORKER_ACCOUNT), reason: DROPPED_TABLE_GRANTS }]
+        ? [{ ...own("grant", WORKER_ACCOUNT), reason: droppedTableGrants(server) }]
         : []),
       ...shared.keeps,
       { kind: "login", name: WORKER_ACCOUNT, scope: "run", reason: LOGIN_KEPT },
     ],
-    notes: [UNINSTALL_RERUN_NOTE, ...(viewsNote === undefined ? [] : [viewsNote])],
+    notes: [uninstallRerunNote(server), ...(viewsNote === undefined ? [] : [viewsNote])],
     confirm: { kind: "project", name: target.project.name },
   };
 }
@@ -393,6 +402,7 @@ export async function planUninstall(
               inRun,
               views,
               side: undefined,
+              server: serverNameOf(session),
             }),
           }
         : {
@@ -404,7 +414,14 @@ export async function planUninstall(
     }
     return {
       ok: true,
-      plan: uninstallPlan(target, catalog, { rights, claimed: true, inRun, views, side }),
+      plan: uninstallPlan(target, catalog, {
+        rights,
+        claimed: true,
+        inRun,
+        views,
+        side,
+        server: serverNameOf(session),
+      }),
     };
   });
 }

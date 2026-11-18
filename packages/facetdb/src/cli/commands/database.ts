@@ -16,7 +16,10 @@ export type ProjectRef = EngineTarget["project"];
 /** A source that reads a table, with the table split into schema and name. */
 export type TableTarget = {
   readonly source: SourceConfig;
-  /** The schema the config names, `public` when it names none (the words print it). */
+  /**
+   * The schema the config names, `public` when it names none: Postgres's default. migrate and
+   * uninstall name the table by `DatabaseEngine.label` instead, the engine's own spelling.
+   */
   readonly schema: string;
   readonly table: string;
 };

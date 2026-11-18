@@ -1,4 +1,5 @@
 import { createHash, createHmac, pbkdf2Sync } from "node:crypto";
+import type { EnginePlan, EngineTarget, PlanResult } from "@facetdb/core";
 import { FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
@@ -849,6 +850,129 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     expect(pglite.stderr).toContain(
       "error: a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres",
     );
+  });
+});
+
+/**
+ * The header, the prune's lines, "Installed on" and the JSON name the table as its engine does,
+ * with core's fake engine standing in for a schema-less database (MySQL: the connection's database,
+ * never `public`) and schema-bearing ones (SQL Server's dbo; Oracle's schema as the config writes
+ * it).
+ */
+describe("the table as its engine names it", () => {
+  const STORE_URL = "postgres://store-owner:s3cret-store-password@localhost:5432/facetdb";
+  type FakeEngineLabel = (target: EngineTarget) => string;
+
+  const plan = (text: string, removes: EnginePlan["removes"] = []): PlanResult => ({
+    ok: true,
+    plan: {
+      statements: [{ database: "source", purpose: "columns", text }],
+      transactional: true,
+      removes,
+      keeps: [],
+      notes: [],
+    },
+  });
+
+  /** An engine of `name` whose plans name the table as `label` does, the default when absent. */
+  function engineOf(name: string, schemes: readonly string[], label?: FakeEngineLabel) {
+    return new FakeEngine({
+      name,
+      schemes,
+      ...(label === undefined ? {} : { label }),
+      plans: {
+        install: (target) => plan(`alter table ${target.table} add is_scam`),
+        prune: (target) =>
+          plan(`alter table ${target.table} drop is_spam`, [
+            {
+              kind: "column",
+              name: "is_spam",
+              of: target.table,
+              scope: "source",
+              reason: "no question asks it any more",
+            },
+          ]),
+      },
+    });
+  }
+
+  /** `migrate` on one engine: the source on its own variable, the store in its own Postgres. */
+  function runOn(
+    engine: FakeEngine,
+    key: string,
+    url: string,
+    table: string,
+    argv: readonly string[],
+  ) {
+    const onEngine: ProjectConfig = {
+      ...fullConfig,
+      sources: fullConfig.sources.map((source) => ({
+        ...source,
+        database: url,
+        databaseEnv: "LISTINGS_URL",
+        table,
+      })),
+    };
+    return runInProcess(
+      [...argv, "--admin-url", url],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(onEngine),
+        engines: [
+          ...postgresEngines(world.connect),
+          lazyEngine(key, () => Promise.resolve(engine)),
+        ],
+        connect: world.connect,
+      },
+      COMMANDS,
+    );
+  }
+
+  it("a schema-less engine (MySQL) names the bare table, never public", async () => {
+    const mysql = engineOf("mysql", ["mysql", "mariadb"]);
+    const url = "mysql://facetdb_worker:s3cret-worker@127.0.0.1:3306/shop";
+    const dry = await runOn(mysql, "mysql", url, "listings", ["migrate", "--dry-run", "--prune"]);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain("-- facetdb migrate --prune: listings (listings)\n");
+    expect(dry.stdout).toContain(
+      "Prune of listings:\n  is_spam: to drop (no question asks it any more)\n",
+    );
+    expect(dry.stdout).toContain("-- facetdb migrate: listings (listings)\n");
+    const done = await runOn(mysql, "mysql", url, "listings", ["migrate", "--yes", "--json"]);
+    expect(done.code, done.stderr).toBe(0);
+    expect(done.stderr).toContain("Installed on listings (source listings).\n");
+    expect((JSON.parse(done.stdout) as { sources: { table: string }[] }).sources).toMatchObject([
+      { table: "listings" },
+    ]);
+    for (const words of [dry.stdout, done.stdout, done.stderr]) {
+      expect(words).not.toContain("public.listings");
+    }
+  });
+
+  it("a schema-bearing engine names its default schema (SQL Server's dbo) or the config's (Oracle's, as written)", async () => {
+    const mssql = engineOf(
+      "mssql",
+      ["mssql", "sqlserver"],
+      (target) => `${target.schema ?? "dbo"}.${target.table}`,
+    );
+    const url = "mssql://facetdb_worker:s3cret-worker@127.0.0.1:1433/shop";
+    const done = await runOn(mssql, "mssql", url, "listings", ["migrate", "--yes"]);
+    expect(done.code, done.stderr).toBe(0);
+    expect(done.stdout).toContain("-- facetdb migrate: listings (dbo.listings)\n");
+    expect(done.stdout).toContain("Installed on dbo.listings (source listings).\n");
+    const sales = await runOn(mssql, "mssql", url, "sales.listings", ["migrate", "--dry-run"]);
+    expect(sales.stdout).toContain("-- facetdb migrate: listings (sales.listings)\n");
+
+    const oracle = engineOf("oracle", ["oracle"]);
+    const oracleUrl = "oracle://facetdb_worker:s3cret-worker@127.0.0.1:1521/FREEPDB1";
+    const upper = await runOn(oracle, "oracle", oracleUrl, "APP.LISTINGS", ["migrate", "--yes"]);
+    expect(upper.code, upper.stderr).toBe(0);
+    expect(upper.stdout).toContain("-- facetdb migrate: listings (APP.LISTINGS)\n");
+    expect(upper.stdout).toContain("Installed on APP.LISTINGS (source listings).\n");
+    for (const words of [done.stdout, sales.stdout, upper.stdout]) {
+      expect(words).not.toContain("public.");
+    }
   });
 });
 

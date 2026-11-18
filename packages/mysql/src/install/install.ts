@@ -17,7 +17,9 @@ import {
   readSession,
   readTriggerRights,
   readWorkerRights,
+  type ServerName,
   type Session,
+  serverNameOf,
   type WorkerRights,
   workerHosts,
 } from "./catalog.ts";
@@ -98,9 +100,16 @@ import {
  * capture queueing records no worker can log in to answer.
  */
 
-/** The plan's note for a run that stops part way (the plan says a rerun completes it). */
-export const INSTALL_RERUN_NOTE =
-  "MySQL runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate again completes the install.";
+/**
+ * The plan's note for a run that stops part way (the plan says a rerun completes it), in the
+ * server's name.
+ */
+export function installRerunNote(server: ServerName): string {
+  return `${server} runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate again completes the install.`;
+}
+
+/** The note on a MySQL server. */
+export const INSTALL_RERUN_NOTE = installRerunNote("MySQL");
 
 /** What the queue keeps of a key, said when the plan creates it (`RECORD_KEY_BYTES`). */
 export const QUEUE_NOTE = `facetdb_jobs is shared by the database's tables and keeps each record's key as the utf8mb4 bytes of its text (a varbinary(${RECORD_KEY_BYTES}), so two keys that differ only in trailing spaces stay two jobs); a table whose key can be longer than ${RECORD_KEY_LENGTH} characters is refused.`;
@@ -111,8 +120,8 @@ function definerNote(label: string): string {
 }
 
 /** What renaming a column the triggers name does, said whenever the plan creates them. */
-function columnsNote(label: string): string {
-  return `MySQL does not tie a trigger to the columns it names: renaming or dropping the key or a state column of ${label} makes the application's writes on it fail with error 1054 until facetdb migrate runs again.`;
+function columnsNote(label: string, server: ServerName): string {
+  return `${server} does not tie a trigger to the columns it names: renaming or dropping the key or a state column of ${label} makes the application's writes on it fail with error 1054 until facetdb migrate runs again.`;
 }
 
 /** A plan with nothing to do: an installed table, as it was installed. */
@@ -456,6 +465,7 @@ function installPlan(
   key: CatalogColumn,
   loginExists: boolean,
   rights: WorkerRights,
+  server: ServerName,
 ): { readonly plan: EnginePlan; readonly createsTriggers: boolean } {
   const { schema } = catalog;
   const { table } = target;
@@ -524,9 +534,9 @@ function installPlan(
       removes: [],
       keeps: [],
       notes: [
-        INSTALL_RERUN_NOTE,
+        installRerunNote(server),
         ...(catalog.jobs.present ? [] : [QUEUE_NOTE]),
-        ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label)]),
+        ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label, server)]),
       ],
     },
     createsTriggers: triggers.length > 0,
@@ -594,6 +604,7 @@ function sideInstallPlan(
   key: CatalogColumn,
   loginExists: boolean,
   rights: WorkerRights,
+  server: ServerName,
 ): { readonly plan: EnginePlan; readonly createsTriggers: boolean } {
   const { schema } = catalog;
   const { table } = target;
@@ -677,9 +688,9 @@ function sideInstallPlan(
       removes: [],
       keeps: [],
       notes: [
-        INSTALL_RERUN_NOTE,
+        installRerunNote(server),
         ...(catalog.jobs.present ? [] : [QUEUE_NOTE]),
-        ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label)]),
+        ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label, server)]),
         ...(creates
           ? [
               foreignKey
@@ -732,10 +743,11 @@ export async function planInstall(
     if (!("key" in checked)) {
       return { ok: false, refusal: checked };
     }
+    const server = serverNameOf(session);
     const planned =
       side === undefined
-        ? installPlan(target, catalog, checked.key, loginExists, rights)
-        : sideInstallPlan(target, catalog, side, checked.key, loginExists, rights);
+        ? installPlan(target, catalog, checked.key, loginExists, rights, server)
+        : sideInstallPlan(target, catalog, side, checked.key, loginExists, rights, server);
     if (planned.createsTriggers) {
       const allowed = await readTriggerRights(query);
       if (allowed.binaryLogging && !allowed.trustCreators && !allowed.superUser) {

@@ -121,6 +121,9 @@ export function createSqliteEngine(options: SqliteEngineOptions = {}): DatabaseE
     schemes: ["sqlite", "file"],
     capabilities: SQLITE_CAPABILITIES,
     checks: DOCTOR_CHECKS,
+    // The file is the database: a table has no schema but `main`, said only where the config does.
+    label: (target) =>
+      target.schema === undefined ? target.table : `${target.schema}.${target.table}`,
 
     planInstall: (target, url) => planning(target, url, (query) => planInstall(target, query)),
 

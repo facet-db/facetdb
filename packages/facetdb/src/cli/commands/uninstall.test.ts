@@ -1,6 +1,8 @@
-import { FakeClock } from "@facetdb/core/testing";
+import type { EngineObject, EngineTarget, KeptObject, PlanResult } from "@facetdb/core";
+import { FakeClock, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
+import { lazyEngine } from "../engines.ts";
 import { runInProcess, runProgram } from "../program.ts";
 import {
   createPgliteWorld,
@@ -862,5 +864,209 @@ describe("what is left in place on purpose", () => {
     );
     expect(result.stdout).toContain("facetdb.gadgets_answers, left in place (see the note above)");
     expect(result.stdout).not.toContain("Removed FacetDB from public.gadgets.");
+  });
+});
+
+/**
+ * On every engine the words name the table as the engine does and the objects as its plan does,
+ * with core's fake engine standing in for a schema-less database (SQLite's names, nothing kept) and
+ * a schema-bearing one (SQL Server's dbo, its Change Tracking turned off), and MongoDB's role and
+ * user.
+ */
+describe("the words of an engine that is not Postgres", () => {
+  const STORE_URL = "postgres://store-owner:s3cret-store-password@localhost:5432/facetdb";
+
+  /** A plan as the engine's uninstall makes it: no statement of the store's, since it is elsewhere. */
+  function uninstallPlan(
+    removes: readonly EngineObject[],
+    keeps: readonly KeptObject[],
+  ): (target: EngineTarget) => PlanResult {
+    return (target) => ({
+      ok: true,
+      plan: {
+        statements: [
+          { database: "source", purpose: "columns", text: `alter table ${target.table} drop x` },
+        ],
+        transactional: true,
+        removes,
+        keeps,
+        notes: [],
+        confirm: { kind: "project", name: target.project.name },
+      },
+    });
+  }
+
+  /** `uninstall` on one engine, the source on its own variable and the store in its own Postgres. */
+  function runOn(
+    engine: FakeEngine,
+    key: string,
+    url: string,
+    argv: readonly string[],
+    answers?: readonly string[],
+  ) {
+    const onEngine: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        database: url,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+    return runInProcess(
+      [...argv, "--admin-url", url],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(onEngine),
+        engines: [
+          ...postgresEngines(world.connect),
+          lazyEngine(key, () => Promise.resolve(engine)),
+        ],
+        connect: world.connect,
+        ...(answers === undefined ? {} : { answers }),
+      },
+      COMMANDS,
+    );
+  }
+
+  it("a schema-less engine: the bare table, its own queue and marks, and no kept line when nothing stays", async () => {
+    const own = (kind: EngineObject["kind"], name: string): EngineObject => ({
+      kind,
+      name,
+      of: "listings",
+      scope: "source",
+    });
+    const sqlite = new FakeEngine({
+      name: "sqlite",
+      schemes: ["sqlite", "file"],
+      plans: {
+        uninstall: uninstallPlan(
+          [
+            own("column", "is_scam"),
+            own("trigger", "facetdb_listings_ins"),
+            own("jobs-table", "facetdb_jobs"),
+            { kind: "jobs-table", name: "facetdb_jobs", scope: "run" },
+            { kind: "marker", name: "facetdb_table_owners", scope: "run" },
+          ],
+          [],
+        ),
+      },
+    });
+    const url = "sqlite:///work/listings-market/app.db";
+    const result = await runOn(sqlite, "sqlite", url, ["uninstall", "--purge"], [PROJECT]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("-- facetdb uninstall --purge: listings (listings)\n");
+    expect(result.stdout).toContain(
+      "This removes: from listings: 1 FacetDB column (is_scam), the trigger facetdb_listings_ins and its queued jobs; the decision log of source listings (0 decisions, 0 question-set versions); the jobs table and the table-ownership marks (facetdb_jobs, facetdb_table_owners).\n",
+    );
+    expect(result.stdout).not.toContain("This keeps");
+    expect(result.stdout).toMatch(/\nRemoved FacetDB from listings\.\n$/);
+    expect(result.stdout).not.toContain("kept: .");
+    // Without --purge the store keeps the log: that is said, and it is all that stays.
+    const kept = await runOn(sqlite, "sqlite", url, ["uninstall"], [PROJECT]);
+    expect(kept.code, kept.stderr).toBe(0);
+    expect(kept.stdout).toContain(
+      "This keeps: the decision log of source listings in the FacetDB store (only --purge deletes a log).\n",
+    );
+    for (const words of [result.stdout, kept.stdout]) {
+      expect(words).not.toContain("public.");
+      expect(words).not.toContain("facetdb.jobs");
+      expect(words).not.toContain("facetdb.table_owners");
+    }
+  });
+
+  it("a schema-bearing engine: dbo.listings, its Change Tracking turned off, and only its login staying", async () => {
+    const own = (kind: EngineObject["kind"], name: string): EngineObject => ({
+      kind,
+      name,
+      of: "dbo.listings",
+      scope: "source",
+    });
+    const mssql = new FakeEngine({
+      name: "mssql",
+      schemes: ["mssql", "sqlserver"],
+      label: (target) => `${target.schema ?? "dbo"}.${target.table}`,
+      plans: {
+        uninstall: uninstallPlan(
+          [
+            own("column", "is_scam"),
+            { ...own("change-tracking", "dbo.listings"), reason: "FacetDB's install turned it on" },
+            own("jobs-table", "dbo.facetdb_jobs"),
+            own("marker", "dbo.facetdb_table_owners"),
+            own("grant", "facetdb_worker"),
+            { kind: "jobs-table", name: "dbo.facetdb_jobs", scope: "run" },
+            { kind: "marker", name: "dbo.facetdb_table_owners", scope: "run", reason: "now empty" },
+          ],
+          [
+            {
+              kind: "login",
+              name: "facetdb_worker",
+              scope: "run",
+              reason: "uninstall never drops it: every project on the server may share it",
+            },
+          ],
+        ),
+      },
+    });
+    const url = "mssql://facetdb_worker:s3cret-worker@127.0.0.1:1433/shop";
+    const result = await runOn(mssql, "mssql", url, ["uninstall", "--purge"], [PROJECT]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("-- facetdb uninstall --purge: listings (dbo.listings)\n");
+    expect(result.stdout).toContain(
+      "This removes: from dbo.listings: 1 FacetDB column (is_scam), its Change Tracking (turned off: FacetDB's install turned it on), its queued jobs, its table-ownership mark and the facetdb_worker login's rights on it; the decision log of source listings (0 decisions, 0 question-set versions); the jobs table and the table-ownership marks (dbo.facetdb_jobs, dbo.facetdb_table_owners).\n",
+    );
+    expect(result.stdout).toContain(
+      "This keeps: the facetdb_worker login (uninstall never drops it: every project on the server may share it).\n",
+    );
+    expect(result.stdout).toContain(
+      "Removed FacetDB from dbo.listings; only the facetdb_worker login (uninstall never drops it: every project on the server may share it) stays.\n",
+    );
+    expect(result.stdout).not.toContain("public.");
+    const json = await runOn(mssql, "mssql", url, ["uninstall", "--dry-run", "--json"]);
+    expect((JSON.parse(json.stdout) as { sources: { table: string }[] }).sources).toMatchObject([
+      { table: "dbo.listings" },
+    ]);
+  });
+
+  it("MongoDB: the collection, its role and its user", async () => {
+    const mongodb = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      plans: {
+        uninstall: uninstallPlan(
+          [
+            { kind: "field", name: "facetdb", of: "app.listings", scope: "source" },
+            { kind: "jobs-table", name: "facetdb_jobs", of: "app.listings", scope: "source" },
+            {
+              kind: "login",
+              name: "facetdb_worker_listings",
+              of: "app.listings",
+              scope: "source",
+              noun: "role",
+            },
+          ],
+          [
+            {
+              kind: "login",
+              name: "facetdb_worker",
+              scope: "run",
+              noun: "user",
+              reason: "uninstall never drops it",
+            },
+          ],
+        ),
+      },
+    });
+    const url = "mongodb://facetdb_worker:s3cret-worker@127.0.0.1:27017/app";
+    const result = await runOn(mongodb, "mongodb", url, ["uninstall", "--purge"], [PROJECT]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("-- facetdb uninstall --purge: listings (listings)\n");
+    expect(result.stdout).toContain(
+      "This removes: from app.listings: 1 FacetDB field (facetdb), the role facetdb_worker_listings and its queued jobs;",
+    );
+    expect(result.stdout).toContain(
+      "Removed FacetDB from listings; only the facetdb_worker user (uninstall never drops it) stays.\n",
+    );
+    expect(result.stdout).not.toContain("login");
   });
 });

@@ -11,7 +11,12 @@ import type { EngineObject, KeptObject, ObjectKind } from "@facetdb/core";
  * later purge ": ", the "which … may share" and "another source of …" forms ", ", log tables "(…)"
  * or ", which …", an unresolved name "the decision log: …". Each mapping is a switch over every
  * `ObjectKind`, so a kind added to the contract does not compile until it has words here; an object
- * the phrases do not cover is said plainly by its kind and name, never left out.
+ * the phrases do not cover is said plainly by its kind and name, never left out. Every engine's
+ * names are the plan's own: the queue and the marks as the engine spells them (`facetdb.jobs` on
+ * Postgres, `facetdb_jobs` on SQLite), a login by the database's word for it where the plan gives
+ * one (MongoDB's role and user), and SQL Server's Change Tracking where the plan turns it off. No
+ * name of a FacetDB object is written here but the store's own tables, which are always the
+ * Postgres store's.
  */
 
 /** `1,240 decisions`, `1 decision`. */
@@ -29,10 +34,11 @@ function inWords(items: readonly string[]): string {
 
 const DECISIONS = "facetdb.decisions";
 const VERSIONS = "facetdb.question_set_versions";
-/** The project register; with `of`, one project's entry in it. */
+/**
+ * The store's project register; with `of`, one project's entry in it. Every other marker is a
+ * database's table-ownership marks, by whatever name its engine gives them.
+ */
 const PROJECTS = "facetdb.projects";
-/** The table-ownership marks. */
-const OWNERS = "facetdb.table_owners";
 
 /** A log's size in words: `2 decisions, 1 question-set version`. */
 export function logSize(decisions: number, versions: number): string {
@@ -62,15 +68,23 @@ const NOUNS: Readonly<Record<ObjectKind, string>> = {
   collection: "collection",
   log: "decision log table",
   "store-table": "FacetDB store table",
+  "change-tracking": "Change Tracking",
 };
+
+/** What an object is called: the database's word where the plan gives one, else the kind's. */
+const nounOf = (object: EngineObject) => object.noun ?? NOUNS[object.kind];
 
 /**
  * An object no phrase covers, by its kind and name (`the index facetdb_jobs_due`), with what it is
- * on unless that is the table the words are already about.
+ * on unless that is the table the words are already about. Change Tracking has no name of its own:
+ * it is said by the table it is on.
  */
 function plainly(object: EngineObject, within?: string): string {
+  if (object.kind === "change-tracking") {
+    return `Change Tracking on ${object.of ?? object.name}`;
+  }
   const on = object.of === undefined || object.of === within ? "" : ` on ${object.of}`;
-  return `the ${NOUNS[object.kind]} ${object.name}${on}`;
+  return `the ${nounOf(object)} ${object.name}${on}`;
 }
 
 const ofKind = <T extends EngineObject>(objects: readonly T[], kind: EngineObject["kind"]) =>
@@ -132,6 +146,7 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
   const others: string[] = [];
   const grants: string[] = [];
   let jobs = false;
+  let mark = false;
   for (const object of own) {
     const { kind } = object;
     switch (kind) {
@@ -150,6 +165,12 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
       case "trigger":
         triggers.push(`the trigger ${object.name}`);
         break;
+      case "change-tracking":
+        // SQL Server's capture where no trigger is: turned off, as FacetDB's install turned it on.
+        triggers.push(
+          `its Change Tracking (turned off${object.reason === undefined ? "" : `: ${object.reason}`})`,
+        );
+        break;
       case "policy":
         policies.push(object.name);
         break;
@@ -157,11 +178,14 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
         // Its queued jobs: the table's part of the shared queue.
         jobs = true;
         break;
+      case "marker":
+        // Its mark: the table's part of the marks; the marks themselves are the run's.
+        mark = true;
+        break;
       case "grant":
         grants.push(`the ${object.name} login's rights on it`);
         break;
       case "function":
-      case "marker":
       case "schema":
       case "login":
       case "index":
@@ -193,6 +217,7 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
       : [`${policies.length === 1 ? "the policy" : "the policies"} ${inWords(policies)}`]),
     ...others,
     ...(jobs ? ["its queued jobs"] : []),
+    ...(mark ? ["its table-ownership mark"] : []),
     ...grants,
   ];
   return [
@@ -215,9 +240,10 @@ export function runRemoved(removes: readonly EngineObject[]): readonly string[] 
   const grants: EngineObject[] = [];
   let entry: EngineObject | undefined;
   let register: EngineObject | undefined;
-  let marks = false;
+  // Every queue and marks table the plan drops, each name once.
+  const marks = new Set<string>();
   let functions: EngineObject | undefined;
-  let jobs = false;
+  const jobs = new Set<string>();
   let shared: EngineObject | undefined;
   let logTables: EngineObject | undefined;
   const schemas: string[] = [];
@@ -233,17 +259,15 @@ export function runRemoved(removes: readonly EngineObject[]): readonly string[] 
           entry ??= object;
         } else if (object.name === PROJECTS) {
           register ??= object;
-        } else if (object.name === OWNERS) {
-          marks = true;
         } else {
-          others.push(plainly(object));
+          marks.add(object.name);
         }
         break;
       case "function":
         functions ??= object;
         break;
       case "jobs-table":
-        jobs = true;
+        jobs.add(object.name);
         break;
       case "store-table":
         shared ??= object;
@@ -263,6 +287,7 @@ export function runRemoved(removes: readonly EngineObject[]): readonly string[] 
       case "policy":
       case "index":
       case "collection":
+      case "change-tracking":
         others.push(plainly(object));
         break;
       default:
@@ -285,11 +310,16 @@ export function runRemoved(removes: readonly EngineObject[]): readonly string[] 
     ...(functions === undefined
       ? []
       : [`the enqueue trigger functions${inParentheses(functions.reason)}`]),
-    ...(jobs
-      ? ["the jobs table and the table-ownership marks (facetdb.jobs, facetdb.table_owners)"]
-      : marks
-        ? ["the table-ownership marks (facetdb.table_owners)"]
-        : []),
+    // Each by the name the plan gives it, and only what the plan drops.
+    ...(jobs.size === 0
+      ? marks.size === 0
+        ? []
+        : [`the table-ownership marks (${[...marks].join(", ")})`]
+      : marks.size === 0
+        ? [`${jobs.size === 1 ? "the jobs table" : "the jobs tables"} (${[...jobs].join(", ")})`]
+        : [
+            `${jobs.size === 1 ? "the jobs table" : "the jobs tables"} and the table-ownership marks (${[...jobs, ...marks].join(", ")})`,
+          ]),
     ...(shared === undefined
       ? []
       : [`the shared FacetDB tables and the alert history in them${inParentheses(shared.reason)}`]),
@@ -335,6 +365,9 @@ export function tableKept(keeps: readonly KeptObject[]): readonly string[] {
       case "side-table":
         kept.push(`${object.name}, left in place (${object.reason})`);
         break;
+      case "change-tracking":
+        kept.push(`${plainly(object)}, left on (${object.reason})`);
+        break;
       case "column":
       case "field":
       case "view":
@@ -376,7 +409,7 @@ export function runKept(keeps: readonly KeptObject[]): readonly string[] {
         if (object.name === PROJECTS) {
           register ??= object;
         } else {
-          others.push(`${plainly(object)}, because ${object.reason}`);
+          others.push(`the table-ownership marks (${object.name}), because ${object.reason}`);
         }
         break;
       case "jobs-table":
@@ -399,12 +432,16 @@ export function runKept(keeps: readonly KeptObject[]): readonly string[] {
       case "index":
       case "collection":
       case "log":
+      case "change-tracking":
         others.push(`${plainly(object)}, because ${object.reason}`);
         break;
       default:
         throw new Error(`no words for a kept ${kind satisfies never}`);
     }
   }
+  // The database's word for its logins where every one gives the same (MongoDB's user).
+  const nouns = new Set(logins.map(nounOf));
+  const noun = nouns.size === 1 ? (logins[0]?.noun ?? NOUNS.login) : NOUNS.login;
   return [
     ...(shared === undefined ? [] : [`the shared FacetDB tables, because ${shared.reason}`]),
     ...(register === undefined
@@ -423,8 +460,24 @@ export function runKept(keeps: readonly KeptObject[]): readonly string[] {
     ...(logins.length === 0
       ? []
       : [
-          `the ${logins.map((object) => object.name).join(" and ")} ${logins.length === 1 ? "login" : "logins"} (${logins[0]?.reason})`,
+          `the ${logins.map((object) => object.name).join(" and ")} ${noun}${logins.length === 1 ? "" : "s"} (${logins[0]?.reason})`,
         ]),
+  ];
+}
+
+/**
+ * The account printed before the name is typed back: what the run removes, and what it keeps when
+ * it keeps anything (a SQLite file keeps nothing of FacetDB's: no line).
+ */
+export function accountLines(words: {
+  readonly removes: readonly string[];
+  readonly keeps: readonly string[];
+}): readonly string[] {
+  return [
+    words.removes.length === 0
+      ? "This removes nothing of FacetDB's from the database."
+      : `This removes: ${words.removes.join("; ")}.`,
+    ...(words.keeps.length === 0 ? [] : [`This keeps: ${words.keeps.join("; ")}.`]),
   ];
 }
 

@@ -32,6 +32,12 @@ export type FakeEngineOptions = {
   /** Defaults to `["fake"]`. */
   readonly schemes?: readonly string[];
   readonly capabilities?: Capabilities;
+  /**
+   * How the engine names a target's table (`DatabaseEngine.label`): a schema-bearing engine's
+   * default, `dbo.listings`. When absent, the table as the config writes it, with its schema only
+   * when it names one: a schema-less engine's words.
+   */
+  readonly label?: (target: EngineTarget) => string;
   readonly plans?: FakePlans;
   /** A finished run's notes (`deleted` where the plan said `deletes`); the plan's when absent. */
   readonly runNotes?: (target: EngineTarget, plan: EnginePlan) => readonly string[];
@@ -147,6 +153,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly keyText?: KeyText;
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
+  readonly #label: (target: EngineTarget) => string;
   readonly #plans: FakePlans;
   readonly #runNotes: ((target: EngineTarget, plan: EnginePlan) => readonly string[]) | undefined;
   readonly #lastOfRun: (target: EngineTarget) => boolean;
@@ -159,6 +166,10 @@ export class FakeEngine implements DatabaseEngine {
     this.schemes = options.schemes ?? ["fake"];
     this.capabilities = options.capabilities ?? FAKE_CAPABILITIES;
     this.checks = options.checks ?? [];
+    this.#label =
+      options.label ??
+      ((target) =>
+        target.schema === undefined ? target.table : `${target.schema}.${target.table}`);
     this.#plans = options.plans ?? {};
     this.#runNotes = options.runNotes;
     this.#lastOfRun = options.lastOfRun ?? (() => true);
@@ -167,6 +178,10 @@ export class FakeEngine implements DatabaseEngine {
     if (options.keyText !== undefined) {
       this.keyText = options.keyText;
     }
+  }
+
+  label(target: EngineTarget): string {
+    return this.#label(target);
   }
 
   /** The next run stops at statement `at`, an index into its plan's statements. */
