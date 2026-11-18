@@ -10,7 +10,7 @@ import {
   type RecordingClient,
   recordingClient,
 } from "../testing/index.ts";
-import { createPollingConnector, type PollingTarget } from "./index.ts";
+import { createPollingConnector, type PollingTarget, RESTART_RETRIES } from "./index.ts";
 
 /**
  * The polling connector on a recording client, through the reference dialect: the generic code's
@@ -144,6 +144,13 @@ describe("the polling connector's install through a dialect without transactiona
   });
 });
 
+/** The driver's error for CockroachDB's restart, as postgres.js raises it: the SQLSTATE as `code`. */
+function restart(): Error {
+  return Object.assign(new Error("restart transaction: TransactionRetryWithProtoRefreshError"), {
+    code: "40001",
+  });
+}
+
 describe("the polling connector's state hash, on any dialect", () => {
   const row = (key: string, title: string, stored: string | null): PollingRow => ({
     k: key,
@@ -180,6 +187,91 @@ describe("the polling connector's state hash, on any dialect", () => {
       expect.stringMatching(/ for update$/),
     ]);
     expect(client.transactions).toEqual({ committed: 1, rolledBack: 0 });
+  });
+
+  it("@timing runs a write the server restarts (SQLSTATE 40001) again, the hash checked anew: written when the state held", async () => {
+    const client = recordingClient();
+    const { connector, clock } = open(client);
+    const hash = stateHash(questionSet.read, { title: "same", body: "body" });
+    client.failNext(restart());
+    client.answer([row("1", "same", null)]);
+    expect(await connector.write("1", { decisions: {}, status: "done" }, hash)).toEqual({
+      written: true,
+    });
+    expect(client.statements.map((statement) => statement.text)).toEqual([
+      expect.stringMatching(/ for update$/),
+      expect.stringMatching(/ for update$/),
+      expect.stringMatching(/^update "main"."tickets" set /),
+    ]);
+    expect(client.statements.every((statement) => statement.inTransaction)).toBe(true);
+    expect(client.transactions).toEqual({ committed: 1, rolledBack: 1 });
+    expect(clock.sleeps).toEqual([25]);
+  });
+
+  it("@timing ends a restarted write whose state moved meanwhile as the zero-row hash check, never a failed write", async () => {
+    const client = recordingClient();
+    const { connector } = open(client);
+    const read = stateHash(questionSet.read, { title: "before", body: "body" });
+    client.failNext(restart());
+    // The application's update committed between the two attempts.
+    client.answer([row("1", "after", null)]);
+    expect(await connector.write("1", { decisions: {}, status: "done" }, read)).toEqual({
+      written: false,
+    });
+    expect(client.statements.some((statement) => statement.text.startsWith("update"))).toBe(false);
+  });
+
+  it("@timing gives up after three restarts, backing off 25, 50 and 100 ms, and never retries another error", async () => {
+    let restarts = 0;
+    const always = recordingClient((text) => {
+      if (text.endsWith("for update")) {
+        restarts += 1;
+        throw restart();
+      }
+      return undefined;
+    });
+    const { connector, clock } = open(always);
+    await expect(
+      connector.write("1", { decisions: {}, status: "done" }, "any"),
+    ).rejects.toMatchObject({ code: "40001" });
+    expect(restarts).toBe(1 + RESTART_RETRIES);
+    expect(clock.sleeps).toEqual([25, 50, 100]);
+
+    const other = recordingClient();
+    const second = open(other);
+    other.failNext(Object.assign(new Error("deadlock detected"), { code: "40P01" }));
+    await expect(
+      second.connector.write("1", { decisions: {}, status: "done" }, "any"),
+    ).rejects.toThrow("deadlock detected");
+    expect(other.transactions).toEqual({ committed: 0, rolledBack: 1 });
+    expect(second.clock.sleeps).toEqual([]);
+  });
+
+  it("@timing never sends another attempt to a client closed during the restart's backoff", async () => {
+    const client = recordingClient();
+    let closeNow: () => Promise<void> = () => Promise.resolve();
+    // The connector is closed while it waits out the restart's backoff.
+    class ClosingClock extends FakeClock {
+      override async sleep(ms: number): Promise<void> {
+        await super.sleep(ms);
+        await closeNow();
+      }
+    }
+    const clock = new ClosingClock();
+    const connector = createPollingConnector(plainDialect, client, target, {
+      clock,
+      warn: () => undefined,
+    });
+    closeNow = () => connector.close();
+    client.failNext(restart());
+    await expect(
+      connector.write("1", { decisions: {}, status: "done" }, "any"),
+    ).rejects.toMatchObject({ code: "40001" });
+    expect(clock.sleeps).toEqual([25]);
+    expect(client.closes.count).toBe(1);
+    // One attempt only: nothing reached the client after it was closed.
+    expect(client.statements).toHaveLength(1);
+    expect(client.transactions).toEqual({ committed: 0, rolledBack: 1 });
   });
 
   it("@timing without a last-changed column reads the whole table hourly, and says so once", async () => {

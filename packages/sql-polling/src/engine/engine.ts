@@ -149,6 +149,11 @@ export function pollingEngine(
         if (unfit !== undefined) {
           return unfit;
         }
+        // A state field no poll can read (an Oracle BLOB): every poll would fail on it, so it is
+        // refused here, in the words the worker's `open` refuses it with.
+        if (found.stateRefusal !== undefined) {
+          return { ok: false, refusal: found.stateRefusal };
+        }
         const login = await loginOf(query);
         if (login !== undefined && !login.exists && installOptions.workerPassword === undefined) {
           // The contract's code, before anything is drafted: the CLI words it from the source's
@@ -286,6 +291,10 @@ export function pollingEngine(
         // cannot poll by is refused in migrate's words, never polled as "no column".
         if (found.lastChangedRefusal !== undefined) {
           throw new EngineRefusal(found.lastChangedRefusal);
+        }
+        // A state field read names since the install that no poll can read: migrate's words.
+        if (found.stateRefusal !== undefined) {
+          throw new EngineRefusal(found.stateRefusal);
         }
         const { lastChanged } = found;
         const column = lastChanged.column;

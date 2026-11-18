@@ -6,5 +6,6 @@ export {
   type PollingConnector,
   type PollingConnectorOptions,
   type PollingTarget,
+  RESTART_RETRIES,
 } from "./connector.ts";
 export { currentColumns } from "./current.ts";

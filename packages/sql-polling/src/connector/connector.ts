@@ -4,6 +4,7 @@ import {
   type Clock,
   type Connector,
   type CurrentDecision,
+  EngineRefusal,
   type EngineTarget,
   parseCurrent,
   REVIEWED_COLUMN,
@@ -33,6 +34,7 @@ import {
   readTable,
   tableOf,
   uninstallStatements,
+  unreadableStateRefusal,
 } from "../install/index.ts";
 import { booleanBind, booleanRead, currentColumns, currentRow } from "./current.ts";
 
@@ -68,7 +70,10 @@ export type PollingConnectorOptions = {
   /**
    * The table's columns as the catalog read them (the engine's `open` passes them), so a state
    * field is read by its type where the dialect needs one (`SqlDialect.stateAsText`: Oracle's CLOB,
-   * read whole); without them every state field is read through `keyAsText`.
+   * read whole) and refused where the dialect cannot read it (`SqlDialect.unreadableState`).
+   * Without them the connector reads the catalog itself before its first read of the state, where
+   * the dialect reads a type otherwise or refuses one, so a CLOB is read whole whichever door made
+   * the connector; elsewhere every state field is read through `keyAsText`.
    */
   readonly columns?: readonly Pick<ColumnFacts, "name" | "type">[];
   readonly clock: Clock;
@@ -88,6 +93,30 @@ export const POLL_INTERVAL_MS = 10_000;
 export const FULL_SCAN_INTERVAL_MS = 3_600_000;
 
 const DEFAULT_PAGE_SIZE = 500;
+
+/**
+ * SQLSTATE 40001, a serialization failure: CockroachDB's "restart transaction" (every transaction
+ * there is serializable, so a `write` racing an application's update of the row can lose where
+ * Postgres would wait on the row lock; seen on a 24.3 node as WriteTooOldError against a
+ * `priority high` update), and Postgres's own under serializable isolation. The server rolled the
+ * transaction back whole, so running it again is safe.
+ */
+const RESTART_STATE = "40001";
+
+/**
+ * How many times a transaction the server restarted runs again, after a wait that starts at
+ * `RESTART_BACKOFF_MS` and doubles: 25, 50, 100 ms. Past them the restart is the caller's error.
+ */
+export const RESTART_RETRIES = 3;
+
+const RESTART_BACKOFF_MS = 25;
+
+/** Whether the driver's error is the server's restart: postgres.js carries the SQLSTATE as `code`. */
+function isRestart(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && "code" in error && error.code === RESTART_STATE
+  );
+}
 
 /**
  * What a polled database can do: the answers in the table's own columns, no push (the poll is the
@@ -151,20 +180,102 @@ export function createPollingConnector(
 
   // Every column is read as the database's own text, so the hash is over that text; a state field
   // by its type where the dialect reads some types otherwise (an Oracle CLOB, whole).
-  const typeOf = new Map((options.columns ?? []).map((column) => [column.name, column.type]));
-  const stateText = (field: string): string => {
-    const type = typeOf.get(field);
-    return type === undefined || dialect.stateAsText === undefined
-      ? dialect.keyAsText(field)
-      : dialect.stateAsText(field, type);
-  };
-  const rowColumns = [
-    `${dialect.keyAsText(target.key)} as k`,
-    ...fields.map((field, index) => `${stateText(field)} as s${index}`),
-    `${dialect.quoteIdent(STATE_HASH_COLUMN)} as h`,
-    `${dialect.excluded(questionSet.where)} as x`,
-    ...(lastChangedColumn === undefined ? [] : [`${dialect.keyAsText(lastChangedColumn)} as c`]),
-  ].join(", ");
+  function selectList(columns: readonly Pick<ColumnFacts, "name" | "type">[]): string {
+    const typeOf = new Map(columns.map((column) => [column.name, column.type]));
+    const stateText = (field: string): string => {
+      const type = typeOf.get(field);
+      return type === undefined || dialect.stateAsText === undefined
+        ? dialect.keyAsText(field)
+        : dialect.stateAsText(field, type);
+    };
+    return [
+      `${dialect.keyAsText(target.key)} as k`,
+      ...fields.map((field, index) => `${stateText(field)} as s${index}`),
+      `${dialect.quoteIdent(STATE_HASH_COLUMN)} as h`,
+      `${dialect.excluded(questionSet.where)} as x`,
+      ...(lastChangedColumn === undefined ? [] : [`${dialect.keyAsText(lastChangedColumn)} as c`]),
+    ].join(", ");
+  }
+
+  // Whether a state field's type changes how it is read, or whether it can be: the catalog's
+  // types are needed then, given (the engine's `open`) or read here once (any other door).
+  const typed = dialect.stateAsText !== undefined || dialect.unreadableState !== undefined;
+  // Columns given with a state field no poll can read: refused as the connector is made, and the
+  // client it was handed (and owns) is let go of first, so a caller's refused open leaks none.
+  const refusedColumns =
+    options.columns === undefined || !typed
+      ? undefined
+      : unreadableStateRefusal(dialect, ref, options.columns, fields);
+  if (refusedColumns !== undefined) {
+    void client.close().catch(() => undefined);
+    throw new EngineRefusal(refusedColumns);
+  }
+  let selecting: Promise<string> | undefined =
+    options.columns === undefined || !typed
+      ? undefined
+      : Promise.resolve(selectList(options.columns));
+
+  /** The select list for `columns`, or the refusal of a state field no poll can read. */
+  function typedList(columns: readonly Pick<ColumnFacts, "name" | "type">[]): string {
+    const refusal = unreadableStateRefusal(dialect, ref, columns, fields);
+    if (refusal !== undefined) {
+      throw new EngineRefusal(refusal);
+    }
+    return selectList(columns);
+  }
+
+  /** Reads the table's types from the catalog, as the engine's `open` does, with this connection's login. */
+  async function catalogList(): Promise<string> {
+    const facts = await dialect.table(client.query, ref, dialect.login?.name ?? "");
+    if (facts === undefined) {
+      // No such table (or none this login sees): the select says so in the driver's words, and
+      // the next read asks the catalog again.
+      selecting = undefined;
+      return selectList([]);
+    }
+    return typedList(facts.columns);
+  }
+
+  /** The columns every state select reads: known at once, or after one catalog read. */
+  function rowColumns(): Promise<string> {
+    if (!typed) {
+      return Promise.resolve(selectList([]));
+    }
+    if (selecting === undefined) {
+      const pending = catalogList();
+      selecting = pending;
+      // A failed read (the connection, a refusal) is asked again next time, never kept.
+      pending.catch(() => {
+        if (selecting === pending) {
+          selecting = undefined;
+        }
+      });
+    }
+    return selecting;
+  }
+
+  /**
+   * One transaction through the client, run again up to `RESTART_RETRIES` times when the server
+   * restarts it (SQLSTATE 40001): `work` reads what it checks inside the transaction, so each
+   * attempt checks again (a state that moved meanwhile is `write`'s zero-row update, as without a
+   * restart), and nothing of a restarted attempt was committed.
+   */
+  async function transaction<T>(work: (query: PollingQuery) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await client.transaction(work);
+      } catch (error) {
+        if (!isRestart(error) || attempt >= RESTART_RETRIES || isClosing()) {
+          throw error;
+        }
+        await clock.sleep(RESTART_BACKOFF_MS * 2 ** attempt);
+        // A `close()` during the wait: the client is closed, so no attempt goes to it.
+        if (isClosing()) {
+          throw error;
+        }
+      }
+    }
+  }
 
   /** The database boundary: a row from the driver becomes a `Polled`, or an error that names the column. */
   function parseRow(row: PollingRow): Polled {
@@ -184,13 +295,13 @@ export function createPollingConnector(
 
   /** Runs `work` as one transaction where the dialect's DDL is transactional, statement by statement otherwise. */
   function inTransaction<T>(work: (query: PollingQuery) => Promise<T>): Promise<T> {
-    return dialect.transactionalDdl ? client.transaction(work) : work(client.query);
+    return dialect.transactionalDdl ? transaction(work) : work(client.query);
   }
 
   /** One page of the table in the order the caller's keyset needs, `limit` rows at most. */
   async function page(where: string, params: readonly unknown[], order: string, limit: number) {
     const rows = await client.query(
-      `select ${rowColumns} from ${table}${where === "" ? "" : ` where ${where}`} order by ${order} ${dialect.limit(placeholder(params.length + 1))}`,
+      `select ${await rowColumns()} from ${table}${where === "" ? "" : ` where ${where}`} order by ${order} ${dialect.limit(placeholder(params.length + 1))}`,
       [...params, limit],
     );
     return rows.map(parseRow);
@@ -296,9 +407,10 @@ export function createPollingConnector(
       return { rows: [], missing: [] };
     }
     const found = new Map<RecordKey, ReadRow>();
+    const columns = await rowColumns();
     for (const chunk of inChunks(wanted, dialect.maxInList)) {
       const result = await client.query(
-        `select ${rowColumns} from ${table} where ${keyColumn} ${dialect.inList(chunk.length)}`,
+        `select ${columns} from ${table} where ${keyColumn} ${dialect.inList(chunk.length)}`,
         chunk,
       );
       for (const row of result.map(parseRow)) {
@@ -323,10 +435,12 @@ export function createPollingConnector(
     decision: RecordDecision,
     expectedHash: string,
   ): Promise<WriteResult> {
-    return client.transaction(async (query) => {
+    const columns = await rowColumns();
+    // A restart (CockroachDB's 40001) runs the whole check again: never a failed write.
+    return transaction(async (query) => {
       // The row lock holds the state still between the hash check and the update.
       const current = await query(
-        `select ${rowColumns} from ${table} where ${keyColumn} = ${placeholder(1)} for update`,
+        `select ${columns} from ${table} where ${keyColumn} = ${placeholder(1)} for update`,
         [key],
       );
       const row = current[0];
@@ -463,6 +577,10 @@ export function createPollingConnector(
             `install refused: ${labelOf(ref)} is marked as project ${found.project}'s; one table belongs to one project`,
           );
         }
+        // A state field no poll can read (an Oracle BLOB): migrate's and `open`'s words.
+        if (found.stateRefusal !== undefined) {
+          throw new EngineRefusal(found.stateRefusal);
+        }
         const present = new Set(found.facts.columns.map((column) => column.name));
         for (const statement of installStatements(
           dialect,
@@ -475,7 +593,7 @@ export function createPollingConnector(
           const inner = dialect.atomic?.inner(statement.text);
           await (inner === undefined
             ? query(statement.text)
-            : client.transaction((grouped) => grouped(inner)));
+            : transaction((grouped) => grouped(inner)));
         }
       });
     },

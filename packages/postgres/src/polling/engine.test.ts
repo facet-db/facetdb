@@ -180,22 +180,25 @@ describe("the polling engine's install on Postgres", () => {
       .filter((statement) => statement.purpose === "columns")
       .map((statement) => statement.text);
     expect(`${columnsPart.join(";\n\n")};\n`).toBe(await readFile(FIXTURE, "utf8"));
-    // The header and the lock, the columns, the mark, the login, then the worker's usage of the
-    // schema, its reads, its writes, and the policies' names and block.
+    // The header and the lock (a setting the rest relies on, so a lock-timeout stop says
+    // "(settings)"), the columns, the mark, the login, then the worker's usage of the schema, its
+    // reads, its writes, and the policies' names and block.
     expect(plan.statements.map((statement) => statement.purpose)).toEqual([
       "settings",
       "settings",
-      "marker",
+      "settings",
       ...columnsPart.map(() => "columns"),
       "marker",
       "login",
       "login",
       ...Array.from({ length: 5 }, () => "grants"),
     ]);
+    expect(plan.statements[2]?.text).toBe(
+      `lock table "public"."listings" in share row exclusive mode`,
+    );
     expect(
       plan.statements.filter((statement) => statement.purpose === "marker").map((s) => s.text),
     ).toEqual([
-      `lock table "public"."listings" in share row exclusive mode`,
       `comment on column "public"."listings"."facetdb_state_hash" is 'facetdb:proj_listings'`,
     ]);
     expect(plan.statements.every((statement) => statement.database === "source")).toBe(true);
@@ -271,9 +274,11 @@ describe("the polling engine's install on Postgres", () => {
     }
     expect(await commentOf("facetdb_state_hash")).toBe("facetdb");
     const plan = await migrate();
-    expect(plan.notes[0]).toBe(
+    // Both notes are deterministic: the mark this migrate adds, then how the worker polls.
+    expect(plan.notes).toEqual([
       "public.listings was installed in polling mode before FacetDB marked a table's project; this migrate marks it as project proj_listings's, so facetdb uninstall and migrate --prune find it",
-    );
+      "FacetDB polls public.listings every 10 seconds by updated_at: the application must set updated_at on every insert and every update, or a change it makes is never noticed",
+    ]);
     expect(await commentOf("facetdb_state_hash")).toBe("facetdb:proj_listings");
   });
 

@@ -10,7 +10,12 @@ import {
   SESSION_SETTINGS,
   settleSession,
 } from "../oracle.ts";
-import { recordingClient, recordingConnect, runDialectConformance } from "../testing/index.ts";
+import {
+  type Responder,
+  recordingClient,
+  recordingConnect,
+  runDialectConformance,
+} from "../testing/index.ts";
 
 /**
  * The Oracle dialect without a server: the conformance suite of this package with every operation's
@@ -33,6 +38,41 @@ const LISTINGS: QuestionSet = {
   model: "jev-1.14.0",
   thresholds: {},
 };
+
+/** The listings table's columns as the catalog types them, the description a short text. */
+const COLUMNS = [
+  { name: "id", type: "NUMBER" },
+  { name: "title", type: "VARCHAR2" },
+  { name: "description", type: "VARCHAR2" },
+] as const;
+
+/**
+ * Oracle's catalog reads answering for APP.listings, keyed by id, with `description` of the given
+ * type; the worker may read it. Any other statement answers undefined (the next scripted rows).
+ */
+function oracleCatalog(description: string): Responder {
+  return (text) => {
+    if (text.includes("from all_tab_columns")) {
+      return [...COLUMNS.slice(0, 2), { name: "description", type: description }].map((column) => ({
+        column_name: column.name,
+        data_type: column.type,
+        remark: null,
+        holds_time: 0,
+        nullable: column.name === "id" ? "N" : "Y",
+      }));
+    }
+    if (text.includes("from all_constraints")) {
+      return [{ column_name: "id" }];
+    }
+    if (text.endsWith("where 1 = 0") || text.includes("from all_users")) {
+      return [{ found: 1 }];
+    }
+    if (text === oracleDialect.login?.whoami) {
+      return [{ name: "FACETDB_WORKER" }];
+    }
+    return undefined;
+  };
+}
 
 function target(changes: Partial<EngineTarget> = {}): EngineTarget {
   return {
@@ -166,11 +206,7 @@ describe("Oracle's own rules", () => {
       client,
       { ...target(), key: "id" },
       {
-        columns: [
-          { name: "id", type: "NUMBER" },
-          { name: "title", type: "VARCHAR2" },
-          { name: "description", type: "CLOB" },
-        ],
+        columns: [...COLUMNS.slice(0, 2), { name: "description", type: "CLOB" }],
         clock: new FakeClock(),
         warn: () => undefined,
       },
@@ -181,7 +217,149 @@ describe("Oracle's own rules", () => {
     );
     expect(oracleDialect.stateAsText?.("notes", "NCLOB")).toBe('"notes"');
     expect(oracleDialect.stateAsText?.("born", "DATE")).toBe('to_char("born")');
+    // JSON past 4000 bytes reads as NULL through to_char (23ai): serialized to a CLOB, read whole.
+    expect(oracleDialect.stateAsText?.("specs", "JSON")).toBe(
+      'json_serialize("specs" returning clob)',
+    );
     await connector.close();
+  });
+
+  it("reads the catalog's types itself when made without columns, once, so a CLOB is read whole by that door too", async () => {
+    const client = recordingClient(oracleCatalog("CLOB"));
+    const connector = createPollingConnector(
+      oracleDialect,
+      client,
+      { ...target(), key: "id" },
+      { clock: new FakeClock(), warn: () => undefined },
+    );
+    await connector.read(["1"]);
+    await connector.read(["2"]);
+    const selects = client.statements.filter((one) => one.text.startsWith("select to_char"));
+    expect(selects.map((one) => one.text)).toEqual([
+      expect.stringContaining(
+        'select to_char("id") as k, to_char("title") as s0, "description" as s1,',
+      ),
+      expect.stringContaining(
+        'select to_char("id") as k, to_char("title") as s0, "description" as s1,',
+      ),
+    ]);
+    // One catalog read, under the connection's own login, before the first state select.
+    const catalog = client.statements.filter((one) => one.text.includes("from all_tab_columns"));
+    expect(catalog).toEqual([expect.objectContaining({ params: ["APP", "listings"] })]);
+    const texts = client.statements.map((one) => one.text);
+    expect(texts.findIndex((text) => text.includes("from all_tab_columns"))).toBeLessThan(
+      texts.findIndex((text) => text.startsWith("select to_char")),
+    );
+    await connector.close();
+  });
+
+  it.each(["BLOB", "LONG", "LONG RAW", "RAW", "XMLTYPE", "ROWID"])(
+    "refuses a %s state field with the same words at migrate, at the worker's open, at doctor and in a connector made without columns",
+    async (type) => {
+      const words = {
+        code: "state-field",
+        message: `APP.listings's state field description (${type}) holds nothing Oracle can read as text, so FacetDB can neither notice its changes nor ask a question about it`,
+        fix: "take description out of read, which names text, number and date columns; to ask about what it holds, keep a description in a text column and read that one",
+      };
+      const client = recordingClient(oracleCatalog(type));
+      const engine = pollingEngine(oracleDialect, recordingConnect(client), {
+        warn: () => undefined,
+      });
+      const deps = { clock: new FakeClock(), allowInsecure: false, storeShared: false };
+      const planned = await engine.planInstall(
+        target(),
+        "oracle://system:pw@127.0.0.1:1521/FREEPDB1",
+        { ...deps, workerPassword: "a-long-random-password" },
+      );
+      expect(planned).toEqual({ ok: false, refusal: words });
+      const worker = "oracle://facetdb_worker:pw@127.0.0.1:1521/FREEPDB1";
+      await expect(engine.open(target(), worker, deps)).rejects.toEqual(new EngineRefusal(words));
+      const polling = (await engine.doctor(target(), worker, deps)).find(
+        (check) => check.name === "polling",
+      );
+      expect(polling).toEqual({
+        name: "polling",
+        status: "fail",
+        detail: words.message,
+        fix: words.fix,
+      });
+      // The door without the engine: its first read of the state refuses, and nothing is selected.
+      const bare = recordingClient(oracleCatalog(type));
+      const connector = createPollingConnector(
+        oracleDialect,
+        bare,
+        { ...target(), key: "id" },
+        { clock: new FakeClock(), warn: () => undefined },
+      );
+      const refused = await connector.read(["1"]).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refused).toBeInstanceOf(EngineRefusal);
+      expect((refused as EngineRefusal).refusal).toEqual(words);
+      expect(bare.statements.some((one) => one.text.startsWith("select to_char"))).toBe(false);
+      await expect(connector.install()).rejects.toMatchObject({ refusal: words });
+      await connector.close();
+      // Given the columns, it refuses as it is made, and lets go of the client it was handed.
+      const handed = recordingClient();
+      expect(() =>
+        createPollingConnector(
+          oracleDialect,
+          handed,
+          { ...target(), key: "id" },
+          {
+            columns: [...COLUMNS.slice(0, 2), { name: "description", type }],
+            clock: new FakeClock(),
+            warn: () => undefined,
+          },
+        ),
+      ).toThrow(words.message);
+      expect(handed.closes.count).toBe(1);
+      expect(handed.statements).toEqual([]);
+    },
+  );
+
+  it("reads the types it knows as text, precision and case aside, and refuses every other", () => {
+    for (const type of [
+      "VARCHAR2",
+      "NVARCHAR2",
+      "CHAR",
+      "NCHAR",
+      "NUMBER",
+      "FLOAT",
+      "BINARY_FLOAT",
+      "BINARY_DOUBLE",
+      "DATE",
+      "TIMESTAMP(6)",
+      "TIMESTAMP(9) WITH TIME ZONE",
+      "TIMESTAMP(6) WITH LOCAL TIME ZONE",
+      "INTERVAL DAY(2) TO SECOND(6)",
+      "INTERVAL YEAR(2) TO MONTH",
+      "CLOB",
+      "NCLOB",
+      "JSON",
+      "BOOLEAN",
+      "varchar2(255 char)",
+    ]) {
+      expect([type, oracleDialect.unreadableState?.(type)]).toEqual([type, false]);
+    }
+    for (const type of ["BFILE", "VECTOR", "UROWID", "SDO_GEOMETRY", "ANYDATA", "MLSLABEL"]) {
+      expect([type, oracleDialect.unreadableState?.(type)]).toEqual([type, true]);
+    }
+  });
+
+  it("refuses only the fields read lists: a BLOB the source does not read is left alone", () => {
+    const connector = createPollingConnector(
+      oracleDialect,
+      recordingClient(),
+      { ...target(), key: "id" },
+      {
+        columns: [...COLUMNS, { name: "photo", type: "BLOB" }],
+        clock: new FakeClock(),
+        warn: () => undefined,
+      },
+    );
+    expect(connector.capabilities.inlineColumns).toBe(true);
   });
 
   it("binds a boolean as 1 or 0 and reads only those back", () => {
@@ -227,7 +405,7 @@ describe("Oracle's own rules", () => {
       oracleDialect,
       client,
       { ...target(), key: "id" },
-      { clock: new FakeClock(1_700_000_000_000), warn: () => undefined },
+      { columns: COLUMNS, clock: new FakeClock(1_700_000_000_000), warn: () => undefined },
     );
     client.answer([{ k: "1", s0: "a", s1: "b", h: null, x: 0 }]);
     const { rows } = await connector.read(["1"]);

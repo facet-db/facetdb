@@ -7,6 +7,7 @@
 export * from "./alerts/index.ts";
 export * from "./backfill/index.ts";
 export * from "./contracts/index.ts";
+export * from "./crypto/index.ts";
 export * from "./log/index.ts";
 export * from "./questions/index.ts";
 export * from "./records/index.ts";

@@ -27,6 +27,12 @@ import { connectOracle } from "./oracle-connect.ts";
  *   `booleans`; answers' reals are `number`, which keeps the worker's decimal exactly (a
  *   `binary_float` prints nine digits, 0.93 as 9.30000007E-001, and Oracle has no shortest-text
  *   conversion of it); text is `varchar2(255 char)`, JSON `clob`, times `timestamp(3)` in UTC.
+ * - A state field is read by its catalog type, whichever door made the connector (the engine's
+ *   `open` passes the columns; a connector made without them reads the catalog itself): a CLOB
+ *   whole, since `to_char` stops past 4000 bytes, a JSON value serialized to a CLOB and read whole,
+ *   since `to_char` reads one past 4000 bytes as NULL, and any type outside the readable list (a BLOB,
+ *   RAW, LONG, XMLTYPE, ROWID, BFILE…) refused before any poll, since `to_char` cannot read it as
+ *   text.
  * - DDL commits each statement: no plan runs in a transaction, so there is no table lock (none
  *   would outlive its statement) and the run reads the mark before anything; each column is marked
  *   right after it is added. The marks are column comments.
@@ -59,6 +65,43 @@ const worker = quoteIdent(WORKER);
 
 /** The catalog's types of a character LOB, read whole as text (`all_tab_columns.data_type`). */
 const LOB_TEXT: ReadonlySet<string> = new Set(["CLOB", "NCLOB"]);
+
+/**
+ * The catalog's types a state field is read as text by, as `all_tab_columns.data_type` prints them:
+ * character data, numbers, dates and times, intervals, character LOBs (read whole, `stateAsText`),
+ * JSON (serialized to a CLOB, read whole), and 23ai's BOOLEAN. Every other type is refused at
+ * install and `open` before a poll fails on it: `to_char` refuses a RAW, LONG, LONG RAW, XMLTYPE,
+ * VECTOR or ROWID (ORA-00932 on 23ai), opens the file of a BFILE (ORA-22288), and hands a BLOB's
+ * bytes over undecoded; an object type has no text either. LONG stays refused, though it holds
+ * text.
+ */
+const TEXT_TYPES: ReadonlySet<string> = new Set([
+  "VARCHAR2",
+  "NVARCHAR2",
+  "CHAR",
+  "NCHAR",
+  "NUMBER",
+  "FLOAT",
+  "BINARY_FLOAT",
+  "BINARY_DOUBLE",
+  "DATE",
+  "TIMESTAMP",
+  "TIMESTAMP WITH TIME ZONE",
+  "TIMESTAMP WITH LOCAL TIME ZONE",
+  "INTERVAL DAY TO SECOND",
+  "INTERVAL YEAR TO MONTH",
+  "CLOB",
+  "NCLOB",
+  "JSON",
+  "BOOLEAN",
+]);
+
+/**
+ * Whether `type` is one of `TEXT_TYPES`, its precision and case aside: the catalog prints
+ * `TIMESTAMP(6) WITH TIME ZONE` and `INTERVAL DAY(2) TO SECOND(6)`, DDL writes `varchar2(255 char)`.
+ */
+const readsAsText = (type: string): boolean =>
+  TEXT_TYPES.has(type.toUpperCase().replaceAll(/\([^)]*\)/g, ""));
 
 /** Placeholders `:1` to `:count`. */
 const placeholders = (count: number): string =>
@@ -248,8 +291,18 @@ export const oracleDialect: SqlDialect = {
   // `to_char` of a CLOB stops past 4000 bytes (ORA-22835), and one long row would stop every poll
   // of the source: a CLOB or NCLOB state field is selected as it is, and the client fetches it as
   // text (oracle-connect.ts), the same text `to_char` gives a short one, so its hash is unchanged.
+  // `to_char` of a JSON value past 4000 bytes is NULL, with no error (23ai), so a large JSON state
+  // field would hash as null and its changes go unnoticed: it is serialized to a CLOB and read
+  // whole the same way. A short object, array or number reads as `to_char` read it; a JSON value
+  // that is a string alone keeps its quotes now (`"text"`, where `to_char` gave `text`), so such a
+  // row's hash changes once and the row is asked again.
   stateAsText: (column, type) =>
-    LOB_TEXT.has(type) ? quoteIdent(column) : `to_char(${quoteIdent(column)})`,
+    LOB_TEXT.has(type)
+      ? quoteIdent(column)
+      : type === "JSON"
+        ? `json_serialize(${quoteIdent(column)} returning clob)`
+        : `to_char(${quoteIdent(column)})`,
+  unreadableState: (type) => !readsAsText(type),
   inList: (count) => `in (${placeholders(count)})`,
   // ORA-01795: an `in` list holds 1000 items at most.
   maxInList: 1000,

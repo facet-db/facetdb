@@ -37,7 +37,7 @@ export type DialectConformance = {
   readonly fixture: URL;
 };
 
-/** the listings example: one noul question over title and description. */
+/** The listings example: one noul question over title and description. */
 const LISTINGS: QuestionSet = {
   questions: [
     { type: "noul", name: "is_scam", instructions: "Is this listing a scam?", stakes: "high" },
@@ -116,6 +116,17 @@ function installed(questionSet: QuestionSet, hashMark: string): Scene {
 const FRESH: Scene = { columns: APP_COLUMNS, marks: new Map(), loginExists: false };
 
 /**
+ * `columns` with their types as the dialect writes them (`types.text`, `types.timestamp`), so a
+ * dialect that reads only the types it knows as text (Oracle) reads the suite's.
+ */
+function inDialect(dialect: SqlDialect, columns: readonly ColumnFacts[]): readonly ColumnFacts[] {
+  return columns.map((column) => ({
+    ...column,
+    type: column.time ? dialect.types.timestamp : dialect.types.text,
+  }));
+}
+
+/**
  * The dialect with its catalog reads answering `scene` (undefined: no such table): its marks as
  * comments where it has them, as its rows otherwise. Every piece of SQL text stays the dialect's.
  */
@@ -125,7 +136,7 @@ function scripted(dialect: SqlDialect, scene: Scene | undefined): SqlDialect {
     scene === undefined
       ? undefined
       : {
-          columns: scene.columns.map((column) => ({
+          columns: inDialect(dialect, scene.columns).map((column) => ({
             ...column,
             comment: ownership.kind === "comment" ? (scene.marks.get(column.name) ?? null) : null,
           })),
@@ -273,8 +284,10 @@ async function connectorStatements(
     stateRow(dialect, key, state, changed);
   const open = (lastChangedColumn?: string) => {
     const client = recordingClient();
+    // The catalog's columns as the engine's `open` passes them: the connector reads none itself.
     const connector = createPollingConnector(dialect, client, target, {
       ...(lastChangedColumn === undefined ? {} : { lastChangedColumn }),
+      columns: inDialect(dialect, APP_COLUMNS),
       pageSize: 2,
       clock: new FakeClock(1_700_000_000_000),
       warn: () => undefined,
@@ -438,7 +451,11 @@ export function runDialectConformance({ dialect, fixture }: DialectConformance):
         dialect,
         client,
         { ...targetOf(LISTINGS), key: "id" },
-        { clock: new FakeClock(), warn: () => undefined },
+        {
+          columns: inDialect(dialect, APP_COLUMNS),
+          clock: new FakeClock(),
+          warn: () => undefined,
+        },
       );
       const keys = Array.from({ length: dialect.maxInList + 1 }, (_, index) => `k${index}`);
       await connector.read(keys);

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { pollingInstallSql } from "../testing/index.ts";
 
 /**
- * the listings example installed in polling mode: public.listings keyed by id, the state columns
+ * The listings example installed in polling mode: public.listings keyed by id, the state columns
  * title and description, one noul question is_scam. Its polling install SQL is the committed
  * fixture install.listings.polling.sql, pinned before the polling connector moved to
  * @facetdb/sql-polling and compared byte for byte after it: the move changes no statement Postgres

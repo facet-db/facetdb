@@ -8,7 +8,7 @@ import {
 } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import type { PollingRow } from "../dialect/index.ts";
+import type { PollingRow, SqlDialect } from "../dialect/index.ts";
 import {
   PLAIN_COLUMNS,
   PLAIN_KEY,
@@ -316,6 +316,33 @@ describe("the polling engine's run", () => {
     // (from the table as it is then: those columns present) completes it.
     expect(ran.ran).toEqual(plan.statements.slice(0, failAt));
     expect(ran.removed).toEqual([]);
+  });
+
+  it("reports a stop at the table's lock, a lock timeout, as a stop at a setting (settings), and rolls the run back", async () => {
+    // A dialect that locks the table in one transaction, as Postgres's does.
+    const locking: SqlDialect = {
+      ...plainDialect,
+      transactionalDdl: true,
+      lock: (table) => `lock table "${table.schema}"."${table.name}"`,
+    };
+    const timeout = Object.assign(new Error("canceling statement due to lock timeout"), {
+      code: "55P03",
+    });
+    const client = world({ columns: APP }, { at: 0, error: timeout });
+    const engine = pollingEngine(locking, recordingConnect(client), { warn: () => undefined });
+    const plan = planned(
+      await engine.planInstall(target(), ADMIN, { ...deps, workerPassword: PASSWORD }),
+    );
+    expect(plan.statements[0]).toEqual({
+      database: "source",
+      purpose: "settings",
+      text: 'lock table "main"."tickets"',
+    });
+    const ran = await engine.run(target(), plan, ADMIN, { ...deps, workerPassword: PASSWORD });
+    expect(ran.stopped).toEqual({ at: 0, error: "canceling statement due to lock timeout" });
+    expect(plan.statements[ran.stopped?.at ?? -1]?.purpose).toBe("settings");
+    expect(ran.ran).toEqual([]);
+    expect(client.transactions).toEqual({ committed: 0, rolledBack: 1 });
   });
 
   it("stops before anything when another project marked the table since the plan was read", async () => {

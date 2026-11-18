@@ -1,7 +1,6 @@
-import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { ConnectionOptions } from "node:tls";
-import type { DatabaseEngine, DoctorCheck } from "@facetdb/core";
+import { type DatabaseEngine, type DoctorCheck, scramVerifier } from "@facetdb/core";
 import postgres from "postgres";
 import type {
   ColumnFacts,
@@ -133,23 +132,6 @@ async function tableFacts(query: PollingQuery, ref: TableRef): Promise<TableFact
   };
 }
 
-/**
- * A SCRAM-SHA-256 verifier of the worker password, so the plaintext never reaches the server, not
- * even as a bind parameter (the Postgres install's rule, packages/postgres/src/install/scram.ts; this
- * package cannot import @facetdb/postgres, which imports it). CockroachDB stores a pre-hashed
- * password as given (`server.user_login.store_client_pre_hashed_passwords.enabled`, on by default),
- * and 4096 iterations is the least its cost setting accepts.
- */
-const SCRAM_ITERATIONS = 4096;
-
-export function scramVerifier(password: string, salt: Buffer = randomBytes(16)): string {
-  const salted = pbkdf2Sync(password, salt, SCRAM_ITERATIONS, 32, "sha256");
-  const clientKey = createHmac("sha256", salted).update("Client Key").digest();
-  const storedKey = createHash("sha256").update(clientKey).digest();
-  const serverKey = createHmac("sha256", salted).update("Server Key").digest();
-  return `SCRAM-SHA-256$${SCRAM_ITERATIONS}:${salt.toString("base64")}$${storedKey.toString("base64")}:${serverKey.toString("base64")}`;
-}
-
 const WORKER = "facetdb_worker";
 const worker = quoteIdent(WORKER);
 
@@ -166,6 +148,7 @@ const LOGIN: LoginRule = {
   name: WORKER,
   exists: async (query) => (await query(ROLE_EXISTS, [WORKER])).length > 0,
   secretText: `-- the worker login: facetdb migrate runs ${CREATE_LOGIN} here, with a SCRAM verifier of the password bound, never printed;\n-- run by hand, create it first: create user ${worker} with login password '<a long random password>'`,
+  // Core's verifier, the Postgres install's too: CockroachDB stores a pre-hashed password as given.
   secret: (password) => ({ text: CREATE_LOGIN, params: [scramVerifier(password)] }),
   create: () => [],
   // Table-level: `grant select (…)` does not parse on CockroachDB. The note below says so.

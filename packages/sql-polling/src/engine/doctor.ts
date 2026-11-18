@@ -212,7 +212,7 @@ const REINSTALL = "run facetdb migrate: it prints the SQL first and installs wha
 /**
  * The install check, and the polling line: a warning of the hourly scan when the table has no
  * column to poll by and the config did not choose the scan, a failure when the column the config's
- * `lastChanged` names cannot be polled by.
+ * `lastChanged` names cannot be polled by or a state field cannot be read as text.
  */
 async function installCheck(
   dialect: SqlDialect,
@@ -256,9 +256,10 @@ async function installCheck(
         // migrate grants it, and `open` refuses it in the same words.
         ...(unread === undefined ? [] : [unread.message]),
       ];
-      const unfit = found.lastChangedRefusal;
-      // A column the config's lastChanged names that cannot be polled by fails on the polling
-      // line, in the words migrate and the worker refuse it with: the install is not what is wrong.
+      const unfit = found.lastChangedRefusal ?? found.stateRefusal;
+      // A column the config's lastChanged names that cannot be polled by, or a state field no poll
+      // can read, fails on the polling line, in the words migrate and the worker refuse it with:
+      // the install is not what is wrong.
       polls = unfit === undefined ? `; ${pollingWords(label, found.lastChanged)}` : "";
       const scan = hourlyScan(label, found.lastChanged);
       warning =

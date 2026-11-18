@@ -12,7 +12,7 @@ import {
 import type { ScriptedColumn, ScriptedDatabase, ScriptedTable } from "./catalog.ts";
 
 /**
- * the listings example on MySQL, the one every engine's install fixture is made from
+ * The listings example on MySQL, the one every engine's install fixture is made from
  * (packages/postgres/src/install/install.listings.test.ts): one high-stakes yes-or-no question
  * about a listing's title and description, in the database `app`.
  */

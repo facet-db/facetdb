@@ -17,7 +17,6 @@ import {
   driverOptions,
   isCockroachVersion,
   postgresWireEngine,
-  scramVerifier,
 } from "./cockroach.ts";
 
 /**
@@ -285,14 +284,7 @@ describe("the CockroachDB plans", () => {
     );
     expect(one?.params[0]).not.toBe(two?.params[0]);
     expect(JSON.stringify(one)).not.toContain("a-long-random-password");
-  });
-
-  it("computes the verifier packages/postgres/src/install/scram.ts computes, byte for byte (a known answer)", () => {
-    // Printed once by the Postgres package's scramVerifier("pencil", sixteen bytes of 7), the
-    // original this module copies: a broken copy fails here before a secure node refuses its login.
-    expect(scramVerifier("pencil", Buffer.alloc(16, 7))).toBe(
-      "SCRAM-SHA-256$4096:BwcHBwcHBwcHBwcHBwcHBw==$K97YndbwHX05fl7lN8Bcm3gG4nc43WvYj0OL1dbknsk=:tvU6S2vfOxKAzPZ5dC4h+cucyZ553rNC2MQ2ZJzmu3g=",
-    );
+    // The verifier is core's, the Postgres install's too: core's scram.test.ts pins its bytes.
   });
 });
 

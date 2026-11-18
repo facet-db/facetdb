@@ -21,7 +21,9 @@ export {
   namedLastChanged,
   type PollingTable,
   readTable,
+  STATE_FIELD_CODE,
   tableOf,
+  unreadableStateRefusal,
 } from "./read.ts";
 export {
   columnStatements,

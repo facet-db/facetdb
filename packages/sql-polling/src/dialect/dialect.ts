@@ -249,9 +249,18 @@ export type SqlDialect = {
    * A state field of the catalog's `type` read as text, where `keyAsText` cannot read every type
    * whole (Oracle's `to_char` of a CLOB stops past 4000 bytes, so a CLOB is selected as it is and
    * the driver hands it over as text). Absent: `keyAsText`, whatever the type. The connector calls
-   * it for the state fields whose types it was given (`PollingConnectorOptions.columns`).
+   * it for every state field, by the type the catalog gives it (`PollingConnectorOptions.columns`,
+   * or the connector's own catalog read without them).
    */
   stateAsText?(column: string, type: string): string;
+  /**
+   * Whether a state field of the catalog's `type` holds nothing FacetDB can read as text, so no
+   * poll of it can work and no question can be asked of it (on Oracle, every type outside the list
+   * it reads as text, a BLOB, RAW, LONG, XMLTYPE or ROWID among them). Install, `open`, doctor and
+   * a connector made without the catalog's columns refuse such a field in plain words before any
+   * poll fails on it. Absent: every type reads.
+   */
+  unreadableState?(type: string): boolean;
   /** `in (…)` over `count` placeholders from the first: a statement's only list, its binds first. */
   inList(count: number): string;
   /**

@@ -399,6 +399,106 @@ describe.skipIf(skipUnless("COCKROACH_URL"))("the CockroachDB dialect on COCKROA
     expect(await yieldedWithin(iterator.next(), clock, 3)).toBe("quiet");
   });
 
+  /**
+   * The worker's connector on a client that pauses each `write` right after its row lock (its
+   * `select … for update`) to let `during` run, once, and counts the transactions the node
+   * restarted (SQLSTATE 40001) before the connector ran them again.
+   */
+  function racingConnector(during: () => Promise<void>) {
+    const client = connectCockroach(workerUrl);
+    let pending: (() => Promise<void>) | undefined = during;
+    const restarts = { count: 0 };
+    const racing: PollingClient = {
+      query: (text, params) => client.query(text, params),
+      transaction: (work) =>
+        client
+          .transaction((query) =>
+            work(async (text, params) => {
+              const rows = await query(text, params);
+              const now = pending;
+              if (now !== undefined && text.endsWith(" for update")) {
+                pending = undefined;
+                await now();
+              }
+              return rows;
+            }),
+          )
+          .catch((error: unknown) => {
+            if ((error as { code?: unknown }).code === "40001") {
+              restarts.count += 1;
+            }
+            throw error;
+          }),
+      close: () => client.close(),
+    };
+    const connector = createPollingConnector(
+      cockroachDialect,
+      racing,
+      { ...target, key: "id" },
+      { lastChangedColumn: "updated_at", clock, warn: () => undefined },
+    );
+    opened.push(connector);
+    return { connector, restarts };
+  }
+
+  /** The application's update of r1's state, in a transaction of its own. */
+  function applicationUpdate(priority: "high" | "normal"): Promise<void> {
+    return admin.transaction(async (query) => {
+      await query(`set transaction priority ${priority}`);
+      await query(
+        "update listings set title = 'changed by the app', updated_at = now() where id = 'r1'",
+      );
+    });
+  }
+
+  async function stored(): Promise<Record<string, unknown> | undefined> {
+    const [row] = await admin.query(
+      "select title, facetdb_status, facetdb_state_hash from listings where id = 'r1'",
+    );
+    return row;
+  }
+
+  it("ends a write the node restarts for an application's update of its row as the hash check: zero rows written, never a failed write", async () => {
+    await installListings();
+    await edit("r1", "one", 1_700_000_000);
+    // A `priority high` update pushes the write's transaction past the row it holds: the node
+    // restarts the write (WriteTooOldError, SQLSTATE 40001) where Postgres would have waited.
+    const { connector, restarts } = racingConnector(() => applicationUpdate("high"));
+    const { rows } = await connector.read(["r1"]);
+    const result = await connector.write("r1", decided, rows[0]?.hash ?? "");
+    expect(restarts.count).toBeGreaterThanOrEqual(1);
+    // The retry read the application's state, whose hash is not the one asked about.
+    expect(result).toEqual({ written: false });
+    expect(await stored()).toEqual({
+      title: "changed by the app",
+      facetdb_status: null,
+      facetdb_state_hash: null,
+    });
+  });
+
+  it("writes when the application's update waits on the write's row lock, and the next poll asks the changed row again", async () => {
+    await installListings();
+    await edit("r1", "one", 1_700_000_000);
+    let waiting: Promise<void> = Promise.resolve();
+    const { connector, restarts } = racingConnector(async () => {
+      waiting = applicationUpdate("normal");
+      // Long enough for the update to reach the row and queue behind the write's lock.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    const { rows } = await connector.read(["r1"]);
+    const hash = rows[0]?.hash ?? "";
+    expect(await connector.write("r1", decided, hash)).toEqual({ written: true });
+    await waiting;
+    expect(restarts.count).toBe(0);
+    expect(await stored()).toEqual({
+      title: "changed by the app",
+      facetdb_status: "done",
+      facetdb_state_hash: hash,
+    });
+    const iterator = connector.watch()[Symbol.asyncIterator]();
+    expect(await yieldedWithin(iterator.next(), clock, 1)).toEqual(["r1"]);
+  });
+
   it("passes doctor under the worker login: the login, the pooler, the install that polls every 10 seconds", async () => {
     await installListings();
     const checks = await engine.doctor(target, workerUrl, deps);

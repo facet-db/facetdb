@@ -74,7 +74,48 @@ export type PollingTable = {
    * `open` and doctor refuse on it; `lastChanged` is then `{}`. Undefined otherwise.
    */
   readonly lastChangedRefusal: Refusal | undefined;
+  /**
+   * Why a state field `read` names cannot be read as text (`state-field`): its type is one the
+   * dialect cannot read (Oracle's BLOB, RAW, LONG, XMLTYPE…). Install, `open` and doctor refuse on
+   * it, in these words. Undefined otherwise.
+   */
+  readonly stateRefusal: Refusal | undefined;
 };
+
+/** The refusal's code wherever a state field cannot be read as text: migrate, open, doctor, the connector. */
+export const STATE_FIELD_CODE = "state-field";
+
+/**
+ * The state fields `read` names whose catalog type the dialect cannot read as text, as the refusal
+ * every door gives (migrate's plan, the engine's `open`, doctor, a connector made without the
+ * catalog's columns): one poll of such a field fails, every poll after it too, so it is refused
+ * before any runs. Undefined when every field reads (or the dialect reads every type).
+ */
+export function unreadableStateRefusal(
+  dialect: Pick<SqlDialect, "name" | "unreadableState">,
+  table: TableRef,
+  columns: readonly Pick<ColumnFacts, "name" | "type">[],
+  read: readonly string[],
+): Refusal | undefined {
+  const unreadable = dialect.unreadableState;
+  if (unreadable === undefined) {
+    return undefined;
+  }
+  const fields = read.flatMap((field) =>
+    columns.filter((column) => column.name === field && unreadable(column.type)),
+  );
+  if (fields.length === 0) {
+    return undefined;
+  }
+  const one = fields.length === 1;
+  const named = fields.map((field) => `${field.name} (${field.type})`).join(", ");
+  const names = fields.map((field) => field.name).join(", ");
+  return {
+    code: STATE_FIELD_CODE,
+    message: `${labelOf(table)}'s state field${one ? "" : "s"} ${named} hold${one ? "s" : ""} nothing ${dialect.name} can read as text, so FacetDB can neither notice ${one ? "its" : "their"} changes nor ask a question about ${one ? "it" : "them"}`,
+    fix: `take ${names} out of read, which names text, number and date columns; to ask about what ${one ? "it holds" : "they hold"}, keep a description in a text column and read that one`,
+  };
+}
 
 /** The table a source reads, in the dialect's default schema when the config names none. */
 export function tableOf(
@@ -219,5 +260,6 @@ export async function readTable(
     key: more.length === 0 ? key : undefined,
     lastChanged,
     lastChangedRefusal: named !== undefined && "refusal" in named ? named.refusal : undefined,
+    stateRefusal: unreadableStateRefusal(dialect, table, facts.columns, target.questionSet.read),
   };
 }

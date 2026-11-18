@@ -17,8 +17,10 @@ const of =
 
 /**
  * What a plan with statements starts with: the dialect's settings (Postgres's lock timeout, as the
- * trigger scripts have it) and the table's lock, after which `run` reads the mark again. Prefixed
- * to a plan's own statements only when it has some: a plan with nothing to do stays empty.
+ * trigger scripts have it) and the table's lock, after which `run` reads the mark again. The lock
+ * is a setting the statements after it rely on, as the contract's purposes name one, so a run
+ * stopped by its lock timeout says "(settings)". Prefixed to a plan's own statements only when it
+ * has some: a plan with nothing to do stays empty.
  */
 export function withHeader(
   dialect: SqlDialect,
@@ -29,7 +31,7 @@ export function withHeader(
     ? []
     : [
         ...dialect.header.map(of("settings")),
-        ...(dialect.lock === undefined ? [] : [of("marker")(dialect.lock(table))]),
+        ...(dialect.lock === undefined ? [] : [of("settings")(dialect.lock(table))]),
         ...statements,
       ];
 }

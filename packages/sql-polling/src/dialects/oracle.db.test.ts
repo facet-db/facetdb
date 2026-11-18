@@ -273,6 +273,166 @@ describe.skipIf(skipUnless("ORACLE_URL"))("Oracle as a polling dialect", { timeo
     };
     expect(await connector.write("2", decision, rows[0]?.hash ?? "")).toEqual({ written: true });
     expect((await connector.current(["2"])).get("2")).toMatchObject(decision);
+
+    // The other door: a connector made without the catalog's columns reads their types itself,
+    // under the worker login, and reads the CLOB whole too.
+    const bare = createPollingConnector(
+      oracleDialect,
+      connect(workerUrl),
+      { ...target("listings", LOWER_SET), key: "id" },
+      { lastChangedColumn: "updated_at", clock: deps.clock, warn: () => undefined },
+    );
+    expect((await bare.read(["2"])).rows).toEqual(rows);
+    await bare.close();
+  });
+
+  it("refuses BLOB, RAW, LONG, XMLTYPE and ROWID state fields in the same words at migrate, at the worker's open and in a connector made without columns", async () => {
+    await admin.query(`create table "${OWNER}"."photos" (
+      "id" number(10) primary key,
+      "title" varchar2(200),
+      "image" blob,
+      "thumb" raw(16),
+      "notes" long,
+      "layout" xmltype,
+      "origin" rowid,
+      "updated_at" timestamp(6) default systimestamp not null
+    )`);
+    await admin.query(
+      `insert into "${OWNER}"."photos" ("id", "title", "image", "thumb", "notes", "layout") values (1, 'Puppy', hextoraw('DEADBEEF'), hextoraw('CAFE'), 'old notes', xmltype('<a/>'))`,
+    );
+    await admin.query(
+      `update "${OWNER}"."photos" p set "origin" = (select rowid from "${OWNER}"."photos" where "id" = 1)`,
+    );
+    const textOnly: QuestionSet = { ...LOWER_SET, read: ["title"] };
+    const binary: QuestionSet = {
+      ...LOWER_SET,
+      read: ["title", "image", "thumb", "notes", "layout", "origin"],
+    };
+    const words = {
+      code: "state-field",
+      message: `${OWNER}.photos's state fields image (BLOB), thumb (RAW), notes (LONG), layout (XMLTYPE), origin (ROWID) hold nothing Oracle can read as text, so FacetDB can neither notice their changes nor ask a question about them`,
+      fix: "take image, thumb, notes, layout, origin out of read, which names text, number and date columns; to ask about what they hold, keep a description in a text column and read that one",
+    };
+    // facetdb migrate refuses before any statement is planned.
+    expect(
+      await engine.planInstall(target("photos", binary), server, {
+        ...deps,
+        workerPassword: WORKER_PASSWORD,
+      }),
+    ).toEqual({ ok: false, refusal: words });
+    // Installed reading the title alone, then the config's read gains the binary fields: the
+    // worker's open refuses them in migrate's words, and so does doctor's polling line.
+    await install("photos", textOnly);
+    const refused = await engine.open(target("photos", binary), workerUrl, deps).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(refused).toBeInstanceOf(EngineRefusal);
+    expect((refused as EngineRefusal).refusal).toEqual(words);
+    const checks = await engine.doctor(target("photos", binary), workerUrl, deps);
+    expect(checks.find((check) => check.name === "polling")).toEqual({
+      name: "polling",
+      status: "fail",
+      detail: words.message,
+      fix: words.fix,
+    });
+    const bare = createPollingConnector(
+      oracleDialect,
+      connect(workerUrl),
+      { ...target("photos", binary), key: "id" },
+      { lastChangedColumn: "updated_at", clock: deps.clock, warn: () => undefined },
+    );
+    await expect(bare.read(["1"])).rejects.toEqual(new EngineRefusal(words));
+    await bare.close();
+    // What the refusal spares: to_char cannot read a RAW, a LONG, an XMLTYPE or a ROWID
+    // (ORA-00932) on any poll.
+    for (const column of ["thumb", "notes", "layout", "origin"]) {
+      await expect(
+        admin.query(`select to_char("${column}") as t from "${OWNER}"."photos"`),
+      ).rejects.toThrow(/ORA-00932/);
+    }
+  });
+
+  it("reads every type it lists as text through the worker's poll, the 23ai types among them", async () => {
+    await admin.query(`create table "${OWNER}"."kinds" (
+      "id" number(10) primary key,
+      "v" varchar2(20), "nv" nvarchar2(20), "c" char(3), "nc" nchar(3),
+      "n" number, "f" float, "bf" binary_float, "bd" binary_double,
+      "d" date, "ts" timestamp(6), "tz" timestamp(6) with time zone,
+      "ltz" timestamp(6) with local time zone,
+      "ids" interval day(2) to second(6), "iym" interval year(2) to month,
+      "cl" clob, "ncl" nclob, "j" json, "jl" json, "b" boolean,
+      "updated_at" timestamp(6) default systimestamp not null
+    )`);
+    // A JSON value past 4,000 bytes, which to_char reads as NULL on 23ai without an error.
+    const large = (tail: string) => `{"notes":"${"Send a gift card first. ".repeat(400)}${tail}"}`;
+    expect(Buffer.byteLength(large("one"))).toBeGreaterThan(4000);
+    await admin.query(
+      `insert into "${OWNER}"."kinds" values (
+      1, 'a', 'b', 'c', 'd', 1.5, 2.5, 3.5, 4.5,
+      date '2026-11-05', timestamp '2026-11-05 10:00:00', timestamp '2026-11-05 10:00:00 +02:00',
+      timestamp '2026-11-05 10:00:00', interval '1' day, interval '2' year,
+      'clob', 'nclob', json('{"a":1}'), json(:1), true, systimestamp
+    )`,
+      [large("one")],
+    );
+    const [unread] = await admin.query(`select to_char("jl") as t from "${OWNER}"."kinds"`);
+    expect(unread?.["t"]).toBeNull();
+    const read = [
+      "v",
+      "nv",
+      "c",
+      "nc",
+      "n",
+      "f",
+      "bf",
+      "bd",
+      "d",
+      "ts",
+      "tz",
+      "ltz",
+      "ids",
+      "iym",
+      "cl",
+      "ncl",
+      "j",
+      "jl",
+      "b",
+    ];
+    const kinds: QuestionSet = { ...LOWER_SET, read };
+    await install("kinds", kinds);
+    const connector = await open("kinds", kinds);
+    const watch = connector.watch()[Symbol.asyncIterator]();
+    expect((await watch.next()).value).toEqual(["1"]);
+    await watch.return?.();
+    const { rows } = await connector.read(["1"]);
+    expect(rows).toHaveLength(1);
+    const state = rows[0]?.state ?? {};
+    expect(Object.keys(state)).toEqual(read);
+    expect(Object.values(state).every((value) => typeof value === "string")).toBe(true);
+    // JSON is read whole, as json_serialize writes it: a short value as to_char read it before.
+    expect(state["j"]).toBe('{"a":1}');
+    expect(state["jl"]).toBe(large("one"));
+
+    // Answered, then the large value changes to another large value: the hash moves, and the
+    // next poll asks the row again.
+    expect((await connector.claim(1)).length).toBe(1);
+    const decision: RecordDecision = {
+      decisions: { is_scam: { kind: "decided", value: false, probabilityOrConfidence: 0.9 } },
+      status: "done",
+    };
+    expect(await connector.write("1", decision, rows[0]?.hash ?? "")).toEqual({ written: true });
+    await connector.ack(["1"]);
+    await admin.query(
+      `update "${OWNER}"."kinds" set "jl" = json(:1), "updated_at" = systimestamp where "id" = 1`,
+      [large("two")],
+    );
+    const after = (await connector.read(["1"])).rows[0];
+    expect(after?.state["jl"]).toBe(large("two"));
+    expect(after?.hash).not.toBe(rows[0]?.hash);
+    const again = connector.watch()[Symbol.asyncIterator]();
+    expect((await again.next()).value).toEqual(["1"]);
+    await again.return?.();
   });
 
   it("doctor checks the source as the worker login, and says how it polls", async () => {
