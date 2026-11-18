@@ -1,31 +1,18 @@
 import { randomUUID } from "node:crypto";
 import {
-  type Answer,
-  type AnswerEntry,
   type Connector,
   type CurrentDecision,
-  choiceConfidence,
   type DatabaseEngine,
-  type Decision,
-  decide,
   type EngineDeps,
   type EngineTarget,
-  type HumanEntry,
+  type ExplainedEntry,
+  explainHistory,
   type LogEntry,
   type Question,
-  type QuestionSet,
-  resolveThresholds,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
-import {
-  CliError,
-  defineCommand,
-  EXIT_USAGE,
-  likelyYes,
-  type OpenStore,
-  percent,
-} from "../program.ts";
+import { CliError, defineCommand, EXIT_USAGE, type OpenStore } from "../program.ts";
 import { requireUsableStoreUrl, storeSharedFor, storeSourceId } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -54,37 +41,6 @@ type ExplainOptions = {
   readonly allowInsecure?: boolean;
 };
 
-/** One question as it was worded in the version in force, with the answer in words. */
-type ExplainedAnswer = {
-  readonly question: string;
-  /** The wording the model was given in that version. */
-  readonly wording: string;
-  /** "58% likely yes", "billing, 82% sure". */
-  readonly said: string;
-  /** What that version's thresholds made of it: "yes", "no", a name, or "needs review". */
-  readonly decision: string;
-};
-
-type ExplainedEntry =
-  | {
-      readonly kind: "answer";
-      readonly at: string;
-      readonly model: string;
-      readonly version: number;
-      readonly answers: readonly ExplainedAnswer[];
-    }
-  | {
-      readonly kind: "human";
-      readonly at: string;
-      readonly version: number;
-      readonly question: string;
-      /** The wording of that version, or the question's name when the version is not kept. */
-      readonly wording: string;
-      readonly decided: string;
-      readonly reviewer: string;
-      readonly note?: string;
-    };
-
 /** The record as it stands now: FacetDB's own columns, in words. */
 type CurrentState = {
   readonly found: boolean;
@@ -100,67 +56,6 @@ function when(at: Date): string {
 
 function yesNo(value: boolean): string {
   return value ? "yes" : "no";
-}
-
-function said(question: Question | undefined, answer: Answer): string {
-  switch (answer.type) {
-    case "noul":
-      return likelyYes(answer.probability);
-    case "choice":
-      return `${answer.top}, ${percent(choiceConfidence(answer.probabilities))} sure`;
-    case "score": {
-      const level =
-        question?.type === "score"
-          ? question.levels[answer.probabilities.indexOf(Math.max(...answer.probabilities))]
-          : undefined;
-      return `${level?.name ?? "unknown"}, ${percent(answer.confidence)} sure`;
-    }
-  }
-}
-
-function decisionWords(decision: Decision): string {
-  if (decision.kind === "needs_review") {
-    return "needs review";
-  }
-  return typeof decision.value === "boolean" ? yesNo(decision.value) : decision.value;
-}
-
-function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): ExplainedEntry {
-  const answers = Object.entries(entry.answers).map(([name, answer]): ExplainedAnswer => {
-    const question = set?.questions.find((candidate) => candidate.name === name);
-    return {
-      question: name,
-      wording: question?.instructions ?? name,
-      said: said(question, answer),
-      decision:
-        question === undefined || set === undefined
-          ? "unknown"
-          : decisionWords(
-              decide(question, resolveThresholds(question, set.thresholds[name]), answer),
-            ),
-    };
-  });
-  return {
-    kind: "answer",
-    at: entry.at.toISOString(),
-    model: entry.model,
-    version: entry.version,
-    answers,
-  };
-}
-
-function explainHuman(entry: HumanEntry, set: QuestionSet | undefined): ExplainedEntry {
-  const question = set?.questions.find((candidate) => candidate.name === entry.question);
-  return {
-    kind: "human",
-    at: entry.at.toISOString(),
-    version: entry.version,
-    question: entry.question,
-    wording: question?.instructions ?? entry.question,
-    decided: typeof entry.value === "boolean" ? yesNo(entry.value) : entry.value,
-    reviewer: entry.reviewer,
-    ...(entry.note === undefined ? {} : { note: entry.note }),
-  };
 }
 
 function lineOf(entry: ExplainedEntry): string[] {
@@ -366,11 +261,8 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     const versions = await savedQuestionSets(deps, url, sourceId, [
       ...new Set(history.map((entry) => entry.version)),
     ]);
-    const entries = history.map((entry) =>
-      entry.kind === "answer"
-        ? explainAnswer(entry, versions.get(entry.version))
-        : explainHuman(entry, versions.get(entry.version)),
-    );
+    // The same function GET /v1/decisions/:source/:key answers with.
+    const entries = explainHistory(history, versions);
 
     print(`History of record ${shown} of "${source.name}", oldest first:`);
     for (const entry of entries) {

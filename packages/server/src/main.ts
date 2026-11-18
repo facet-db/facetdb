@@ -11,6 +11,7 @@ import {
   type PreviewSource,
   type ProjectConfigDoor,
 } from "./config/service.ts";
+import { createDecisionsService, type DecisionsServiceDeps } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 
 export type ServerDeps = {
@@ -35,6 +36,8 @@ export type ServerDeps = {
   readonly config: ProjectConfigDoor;
   /** The preview over a running source of the worker, or undefined when it runs none by that name. */
   readonly preview: (source: string) => PreviewSource | undefined;
+  /** The decision log's reader, the project's sources and how their keys are written. */
+  readonly decisions: DecisionsServiceDeps;
 };
 
 /**
@@ -51,7 +54,10 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       retryAfterSeconds: deps.retryAfterSeconds,
     }),
     config: createConfigService({ config: deps.config, preview: deps.preview }),
-    data: { runs: createRunsService({ reader: deps.store.runs }) },
+    data: {
+      runs: createRunsService({ reader: deps.store.runs }),
+      decisions: createDecisionsService(deps.decisions),
+    },
     newRequestId: randomUUID,
   });
 }

@@ -54,6 +54,10 @@ const NO_CHECK: CheckService = {
 
 const NO_DATA: DataServices = {
   runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
+  decisions: {
+    search: () => Promise.reject(new Error("these tests search no decisions")),
+    why: () => Promise.reject(new Error("these tests explain no record")),
+  },
 };
 
 const scam: Question = {

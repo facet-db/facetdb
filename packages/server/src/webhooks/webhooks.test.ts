@@ -58,6 +58,10 @@ const NO_CONFIG: ConfigService = {
 /** Nor are the dashboard's read endpoints: any call to them fails the test. */
 const NO_DATA: DataServices = {
   runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
+  decisions: {
+    search: () => Promise.reject(new Error("these tests search no decisions")),
+    why: () => Promise.reject(new Error("these tests explain no record")),
+  },
 };
 
 const UNLIMITED: SpendingGate = {

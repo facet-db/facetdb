@@ -16,7 +16,7 @@ export type AppDeps = {
   readonly check: CheckService;
   /** The project JSON, a draft's validation and the live preview (the studio's config door). */
   readonly config: ConfigService;
-  /** The read endpoints behind the dashboard's pages: the run log first. */
+  /** The read endpoints behind the dashboard's pages: the run log, the decision log and the why page. */
   readonly data: DataServices;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;

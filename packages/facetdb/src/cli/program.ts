@@ -53,15 +53,8 @@ export function docsLink(code: string): string {
   return `${DOCS_FIX_URL}${code}`;
 }
 
-/** "58%": a probability or a confidence as a whole percent, never a decimal. */
-export function percent(probability: number): string {
-  return `${Math.round(probability * 100)}%`;
-}
-
-/** "58% likely yes": how a probability reads anywhere a user sees one. */
-export function likelyYes(probability: number): string {
-  return `${percent(probability)} likely yes`;
-}
+// How a probability reads is core's (the explain history shares it with the HTTP surface).
+export { likelyYes, percent } from "@facetdb/core";
 
 /** Where a connection string points, without its user or password: what a confirmation names. */
 export function databaseLabel(url: string): string {

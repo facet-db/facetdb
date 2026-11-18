@@ -30,6 +30,18 @@ export type {
   SourceDraft,
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";
+export type {
+  DecisionRow,
+  DecisionsPage,
+  DecisionsService,
+  DecisionsServiceDeps,
+  DecisionsStore,
+} from "./data/index.ts";
+export {
+  createDecisionsService,
+  DECISIONS_DEFAULT_LIMIT,
+  DECISIONS_MAX_LIMIT,
+} from "./data/index.ts";
 export type { DataServices } from "./data/routes.ts";
 export type { RunsPage, RunsService, RunView } from "./data/runs.ts";
 export { createRunsService, RUNS_PER_PAGE } from "./data/runs.ts";

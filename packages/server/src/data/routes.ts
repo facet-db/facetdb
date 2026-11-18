@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
+import { decisionsRoutes } from "./decisions.ts";
+import type { DecisionsService } from "./decisions-service.ts";
 import { RUNS_PER_PAGE, type RunsService } from "./runs.ts";
 
 /**
@@ -10,6 +12,8 @@ import { RUNS_PER_PAGE, type RunsService } from "./runs.ts";
  */
 export type DataServices = {
   readonly runs: RunsService;
+  /** The decision log searched, and one record's history (the Decisions page and the why page). */
+  readonly decisions: DecisionsService;
 };
 
 /** A source as the config names one; anything else could never match, so it is refused plainly. */
@@ -62,6 +66,9 @@ export function dataRoutes(services: DataServices): Hono<AppEnv> {
     );
     return c.json(await services.runs.list(c.get("projectId"), query.source, query.page));
   });
+
+  // The decision log and the why page, in their own file.
+  route.route("/", decisionsRoutes(services.decisions));
 
   return route;
 }

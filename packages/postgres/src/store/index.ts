@@ -1,6 +1,14 @@
 export type { StoreConnector, StoreConnectorOptions, StoredRecord } from "./connector.ts";
 export type { Crypto } from "./crypto.ts";
 export { createCrypto, newSalt, requireSecret, SECRET_VARIABLE } from "./crypto.ts";
+export type {
+  DecisionSearch,
+  DecisionSearchPage,
+  DecisionStatus,
+  FoundDecision,
+  SearchCursor,
+} from "./decision-log.ts";
+export { SEARCH_MAX_SCAN, SEARCH_SCAN_BATCH, searchStatement } from "./decision-log.ts";
 export {
   type PurgedSource,
   readStoreLog,

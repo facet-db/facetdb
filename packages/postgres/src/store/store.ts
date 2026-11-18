@@ -17,8 +17,14 @@ import {
   type StoreConnectorOptions,
 } from "./connector.ts";
 import { createCrypto, newSalt, requireSecret } from "./crypto.ts";
-import { createDecisionLog } from "./decision-log.ts";
+import {
+  createDecisionLog,
+  type DecisionSearch,
+  type DecisionSearchPage,
+  searchDecisions,
+} from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
+import { readQuestionSets } from "./question-sets.ts";
 import { createReviewQueue } from "./reviews.ts";
 import { integer, text, toMs } from "./rows.ts";
 import { createRunStore, type RunStore } from "./runs.ts";
@@ -99,12 +105,22 @@ export type Store = {
   /** The decision log of one source. */
   log(sourceId: string): DecisionLog;
   /**
+   * Searches one source's log, newest first, over the time index: the Decisions page's filters,
+   * each answer with the decision its version's thresholds made of it.
+   */
+  searchDecisions(search: DecisionSearch): Promise<DecisionSearchPage>;
+  /**
    * The question-set versions of one source: `record` stores the set under the version it should
    * run under, which is the previous one when its content is unchanged and the next otherwise.
+   * `versions` reads the saved sets of the given versions; one the store does not keep is absent.
    */
   questionSets: {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
     record(sourceId: string, questionSet: QuestionSet): Promise<QuestionSetVersion>;
+    versions(
+      sourceId: string,
+      versions: readonly number[],
+    ): Promise<ReadonlyMap<number, QuestionSet>>;
   };
   /** The queue and records of one source, claimed with `skip locked`. */
   connector(options: StoreConnectorOptions): StoreConnector;
@@ -257,8 +273,11 @@ export async function createStore(options: StoreOptions): Promise<Store> {
 
       log: (sourceId) => createDecisionLog(client, sourceId),
 
+      searchDecisions: (search) => searchDecisions(client.query, search),
+
       questionSets: {
         latest: (sourceId) => latestVersion(client.query, sourceId),
+        versions: (sourceId, versions) => readQuestionSets(client.query, sourceId, versions),
         async record(sourceId, questionSet) {
           return client.transaction(async (query) => {
             await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);

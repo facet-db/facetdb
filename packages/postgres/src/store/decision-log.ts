@@ -1,14 +1,18 @@
-import type {
-  Answer,
-  AnswerEntry,
-  DecisionLog,
-  HumanEntry,
-  HumanValue,
-  LogEntry,
-  LoggedUsage,
-  RecordKey,
+import {
+  type Answer,
+  type AnswerEntry,
+  answerDecisions,
+  chosenWords,
+  type DecisionLog,
+  type HumanEntry,
+  type HumanValue,
+  type LogEntry,
+  type LoggedUsage,
+  type QuestionSet,
+  type RecordKey,
 } from "@facetdb/core";
-import type { SqlClient, SqlRow } from "../sql/index.ts";
+import type { SqlClient, SqlQuery, SqlRow } from "../sql/index.ts";
+import { readQuestionSets } from "./question-sets.ts";
 import { fromMs, integer, json, jsonObject, text, textOrNull, toMs } from "./rows.ts";
 
 const COLUMNS = `record_key, kind, version::text as version, state_hash, model, answers::text as answers,
@@ -150,6 +154,182 @@ export function createDecisionLog(client: SqlClient, sourceId: string): Decision
 
 function isAnswer(entry: LogEntry): entry is AnswerEntry {
   return entry.kind === "answer";
+}
+
+/** What a log entry came to: a human decision always stands; an answer needs review while any question does. */
+export type DecisionStatus = "decided" | "needs_review";
+
+/**
+ * Where a search page ends: the `at` and `id` of its last row. The order is `at desc, id` (rows of
+ * one instant oldest first, as the index `decisions_by_time (source_id, at desc, id)` holds them),
+ * so the pair is a total order and a page never repeats or skips a row, even when two rows share a
+ * millisecond or a row was appended with an earlier time than the one before it.
+ */
+export type SearchCursor = { readonly atMs: number; readonly id: number };
+
+/** The filters of the Decisions page; every one but `source` and `limit` is optional. */
+export type DecisionSearch = {
+  /** The source's id in the store (`sourceIdOf`): the time index leads with it. */
+  readonly source: string;
+  readonly key?: string;
+  /** Answers to this question, and human decisions on it. */
+  readonly question?: string;
+  readonly status?: DecisionStatus;
+  /** Human decisions by this reviewer. */
+  readonly reviewer?: string;
+  /** Inclusive. */
+  readonly from?: Date;
+  /** Exclusive. */
+  readonly to?: Date;
+  /** The `next` of the previous page; absent for the first. */
+  readonly before?: SearchCursor;
+  readonly limit: number;
+};
+
+/** One log entry as the export has it, with the decision each of its answers led to. */
+export type FoundDecision = {
+  readonly cursor: SearchCursor;
+  readonly entry: LogEntry;
+  /**
+   * By question name, in the words `facetdb explain` uses ("yes", "no", an option, "needs review";
+   * "unknown" when the store no longer keeps the version it ran under). A human entry holds its one
+   * question's chosen value.
+   */
+  readonly decisions: Readonly<Record<string, string>>;
+};
+
+export type DecisionSearchPage = {
+  readonly found: readonly FoundDecision[];
+  /** The cursor of the page after this one; undefined when the log holds nothing older. */
+  readonly next: SearchCursor | undefined;
+};
+
+/** Raw rows read per query while a status is looked for (it is decided after the read). */
+export const SEARCH_SCAN_BATCH = 200;
+
+/**
+ * The most raw rows one search reads while looking for a status: a page may come back short, with
+ * a `next`, instead of reading a whole log for a status that is rare.
+ */
+export const SEARCH_MAX_SCAN = 5000;
+
+/**
+ * The SQL of one search batch, newest first over `decisions_by_time (source_id, at desc, id)`: the
+ * source and the time range are the index's prefix, the cursor continues it, and the other filters
+ * are applied to rows the index already ordered. Values are parameters, never text.
+ */
+export function searchStatement(
+  search: Omit<DecisionSearch, "limit" | "status">,
+  rows: number,
+): { readonly sql: string; readonly params: readonly unknown[] } {
+  const params: unknown[] = [search.source];
+  const where = ["source_id = $1"];
+  const param = (value: unknown): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  if (search.from !== undefined) {
+    where.push(`at >= ${fromMs(param(search.from.getTime()))}`);
+  }
+  if (search.to !== undefined) {
+    where.push(`at < ${fromMs(param(search.to.getTime()))}`);
+  }
+  if (search.before !== undefined) {
+    // Not a row comparison: the time runs down and the id up, as `decisions_by_time` does.
+    const atMs = param(search.before.atMs);
+    const id = param(search.before.id);
+    where.push(`(at < ${fromMs(atMs)} or (at = ${fromMs(atMs)} and id > ${id}::bigint))`);
+  }
+  if (search.key !== undefined) {
+    where.push(`record_key = ${param(search.key)}`);
+  }
+  if (search.question !== undefined) {
+    const name = param(search.question);
+    where.push(
+      `((kind = 'answer' and jsonb_exists(answers, ${name})) or (kind = 'human' and question = ${name}))`,
+    );
+  }
+  if (search.reviewer !== undefined) {
+    where.push(`(kind = 'human' and reviewer = ${param(search.reviewer)})`);
+  }
+  const limit = param(rows);
+  return {
+    sql: `select id::text as cursor, ${COLUMNS}
+            from facetdb.decisions
+           where ${where.join(" and ")}
+           order by at desc, id
+           limit ${limit}::integer`,
+    params,
+  };
+}
+
+function statusOfDecisions(decisions: Readonly<Record<string, string>>): DecisionStatus {
+  return Object.values(decisions).includes("needs review") ? "needs_review" : "decided";
+}
+
+/**
+ * Searches one source's log, newest first (the Decisions page). The question sets of the versions
+ * found are read once each, so every answer carries the decision its own version's thresholds made
+ * of it. A status is a property of those decisions, so it is applied after the read: the search
+ * keeps reading batches until the page is full, the log is spent, or `SEARCH_MAX_SCAN` rows were
+ * looked at, and `next` always continues from the last row looked at.
+ */
+export async function searchDecisions(
+  query: SqlQuery,
+  search: DecisionSearch,
+): Promise<DecisionSearchPage> {
+  const { status, limit, ...filters } = search;
+  const versions = new Map<number, QuestionSet>();
+  const asked = new Set<number>();
+  const found: FoundDecision[] = [];
+  let before = search.before;
+  let scanned = 0;
+  for (;;) {
+    // Without a status the page is exactly the rows asked for, plus one to know whether more follow.
+    const size = status === undefined ? limit + 1 : SEARCH_SCAN_BATCH;
+    const { sql, params } = searchStatement(
+      { ...filters, ...(before === undefined ? {} : { before }) },
+      size,
+    );
+    const rows = await query(sql, params);
+    const entries = rows.map((row) => ({
+      cursor: { atMs: integer(row, "at_ms"), id: integer(row, "cursor") },
+      entry: toEntry(row),
+    }));
+    const missing = [...new Set(entries.map(({ entry }) => entry.version))].filter(
+      (version) => !asked.has(version),
+    );
+    for (const [version, set] of await readQuestionSets(query, search.source, missing)) {
+      versions.set(version, set);
+    }
+    for (const version of missing) {
+      asked.add(version);
+    }
+    const full = rows.length === size;
+    for (const [index, { cursor, entry }] of entries.entries()) {
+      const decisions =
+        entry.kind === "answer"
+          ? answerDecisions(entry, versions.get(entry.version))
+          : { [entry.question]: chosenWords(entry.value) };
+      if (status === undefined || statusOfDecisions(decisions) === status) {
+        found.push({ cursor, entry, decisions });
+      }
+      if (found.length === limit) {
+        // Another row exists when the batch holds one after this, or was full and so may.
+        const more = index < entries.length - 1 || full;
+        return { found, next: more ? cursor : undefined };
+      }
+    }
+    const last = entries.at(-1);
+    scanned += rows.length;
+    if (!full || last === undefined) {
+      return { found, next: undefined };
+    }
+    if (scanned >= SEARCH_MAX_SCAN) {
+      return { found, next: last.cursor };
+    }
+    before = last.cursor;
+  }
 }
 
 /** A row of `facetdb.decisions` becomes a log entry; a row of neither kind is a corrupt store. */

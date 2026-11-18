@@ -394,6 +394,18 @@ export async function runWorkers(
             }).preview,
           };
         },
+        // The Decisions page and the why page read the store's log: the same history `facetdb
+        // explain` words, by the project-scoped source id.
+        decisions: {
+          projectId: project.id,
+          sources: config.sources.map((source) => source.name),
+          keyText: (name) => running.find((entry) => entry.source === name)?.keyText,
+          store: {
+            search: (search) => store.searchDecisions(search),
+            history: (sourceId, key) => store.log(sourceId).history(key),
+            questionSets: (sourceId, versions) => store.questionSets.versions(sourceId, versions),
+          },
+        },
       });
       listener = await deps.serve((request) => app.fetch(request), port);
       print(`Serving the check API on port ${listener.port}.`);

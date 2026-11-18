@@ -148,6 +148,16 @@ async function rig() {
       },
     },
     preview: () => undefined,
+    decisions: {
+      projectId: PROJECT,
+      sources: [],
+      keyText: () => undefined,
+      store: {
+        search: () => Promise.reject(new Error("the SDK searches no decisions")),
+        history: () => Promise.reject(new Error("the SDK explains no record")),
+        questionSets: () => Promise.reject(new Error("the SDK reads no question set")),
+      },
+    },
     store: {
       ...createCheckStore(
         store,

@@ -73,7 +73,13 @@ function rig(total: number) {
     keys,
     check: NO_CHECK,
     config: NO_CONFIG,
-    data: { runs: createRunsService({ reader }) },
+    data: {
+      runs: createRunsService({ reader }),
+      decisions: {
+        search: () => Promise.reject(new Error("these tests search no decisions")),
+        why: () => Promise.reject(new Error("these tests explain no record")),
+      },
+    },
     newRequestId: () => "req-1",
   });
   const get = async (path: string, authorization: string | null = KEY) => {
