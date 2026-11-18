@@ -66,12 +66,23 @@ describe("the store's purge of one source's log", () => {
       [other],
     );
     expect(await readStoreLog(client.query, ID)).toEqual({ decisions: 2, versions: 1, records: 0 });
+    // The source's review cards go with its log; another source's stay.
+    for (const owner of [ID, other]) {
+      await client.query(
+        `insert into facetdb.reviews (source_id, record_key, state_hash, open_questions, numbers, since)
+         values ($1, '1', 'h', '["scam"]', '{"scam": 0.5}', now())`,
+        [owner],
+      );
+    }
 
     await runAll(client, storePurgeStatements(source));
 
     expect(await readStoreLog(client.query, ID)).toEqual({ decisions: 0, versions: 0, records: 0 });
     expect(await client.query("select id from facetdb.sources")).toEqual([]);
     expect(await client.query("select source_id from facetdb.question_set_versions")).toEqual([
+      { source_id: other },
+    ]);
+    expect(await client.query("select source_id from facetdb.reviews")).toEqual([
       { source_id: other },
     ]);
   });

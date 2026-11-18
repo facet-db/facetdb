@@ -10,6 +10,7 @@ import type { SourceConfig } from "../../config/index.ts";
 import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
 import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
 import {
+  rebuildReviewCards,
   requireStoreUrl,
   runStoreMigration,
   type StoreMigration,
@@ -17,6 +18,7 @@ import {
   showStoreMigration,
   storeSecretWarning,
   storeSharedFor,
+  storeSourceId,
 } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -24,6 +26,7 @@ import {
   engineTarget,
   loadProjectConfig,
   projectRef,
+  questionSetOf,
   type TableTarget,
   tableTargets,
   variableOf,
@@ -421,6 +424,25 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         print(lines.join("\n"));
       }
       print(`Installed on ${item.label} (source ${item.target.source.name}).`);
+    }
+    // The store now holds the review queue (migration 6, in the store's part or the engine's plan);
+    // the records decided needs_review before it existed get their cards, once per project of the
+    // store, for every source of the config.
+    const waiting = await rebuildReviewCards(
+      deps.connect,
+      storeUrl ?? url,
+      project.id,
+      new Map(
+        config.sources.map((source) => [
+          storeSourceId(project.id, source.name),
+          questionSetOf(config, source),
+        ]),
+      ),
+    );
+    if (waiting !== undefined && waiting > 0) {
+      print(
+        `Listed ${waiting} record(s) decided before the review queue existed: they wait for review.`,
+      );
     }
     return summary(true);
   },

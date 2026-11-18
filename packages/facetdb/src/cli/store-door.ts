@@ -1,4 +1,4 @@
-import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS } from "@facetdb/core";
+import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS, type QuestionSet } from "@facetdb/core";
 import {
   AmbiguousHostError,
   deleteCursorsSql,
@@ -7,6 +7,7 @@ import {
   type PurgedSource,
   readResumeRows,
   readStoreLog,
+  rebuildStoreReviewQueue,
   rekeyNotes,
   requireTls,
   resumeRowsStatements,
@@ -120,7 +121,7 @@ function tlsProblem(
       };
 }
 
-/** Q1b: a `pglite://` store is `facetdb dev`'s embedded one, never a store elsewhere. */
+/** A `pglite://` store is `facetdb dev`'s embedded one, never a store elsewhere. */
 export const PGLITE_STORE = "a PGlite store is for facetdb dev; point DATABASE_URL at a Postgres";
 
 const PGLITE_FIX =
@@ -429,6 +430,33 @@ export async function runStoreMigration(connect: SqlConnect, url: string): Promi
       );
     }
     throw error;
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * Once the store holds the review queue (migration 6), the records decided needs_review before it
+ * existed get their cards from the decision log, once per project of the store
+ * (`rebuildStoreReviewQueue`). `questionSets` maps each of the project's sources, by store id, to
+ * the set it runs under. Returns how many records wait, or undefined when an earlier migrate of the
+ * project already listed them.
+ */
+export async function rebuildReviewCards(
+  connect: SqlConnect,
+  url: string,
+  projectId: string,
+  questionSets: ReadonlyMap<string, QuestionSet>,
+): Promise<number | undefined> {
+  const client = connect(url);
+  try {
+    return await rebuildStoreReviewQueue(client, projectId, questionSets);
+  } catch (error) {
+    throw new CliError(
+      "review-queue",
+      `the review queue could not be listed from the decision log in ${databaseLabel(url)}: ${plainMessage(error, [url])}; everything above ran`,
+      "run facetdb migrate again: it lists the records waiting for review once the store answers",
+    );
   } finally {
     await client.close();
   }

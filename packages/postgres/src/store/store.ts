@@ -7,6 +7,7 @@ import {
   nextVersion,
   type QuestionSet,
   type QuestionSetVersion,
+  type ReviewQueue,
   type UsageStore,
 } from "@facetdb/core";
 import { connectPostgres, pgliteClient, type SqlClient, type SqlConnect } from "../sql/index.ts";
@@ -18,6 +19,7 @@ import {
 import { createCrypto, newSalt, requireSecret } from "./crypto.ts";
 import { createDecisionLog } from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
+import { createReviewQueue } from "./reviews.ts";
 import { integer, text, toMs } from "./rows.ts";
 import { migrateStore } from "./schema.ts";
 import {
@@ -68,6 +70,8 @@ export type Store = {
   readonly cursors: CursorStore;
   readonly credentials: CredentialStore;
   readonly apiKeys: ApiKeyStore;
+  /** The review queue of every source: the worker keeps it, the review screens read it. */
+  readonly reviews: ReviewQueue;
   /** Registers a project; registering it again changes nothing. */
   ensureProject(project: { readonly id: string; readonly name: string }): Promise<void>;
   /**
@@ -224,6 +228,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
       cursors: createCursorStore(client),
       credentials: createCredentialStore(client, crypto),
       apiKeys: createApiKeyStore(client),
+      reviews: createReviewQueue(client),
 
       async ensureProject(project) {
         await client.query(

@@ -22,6 +22,7 @@ import {
 import type { QuestionSet } from "../questions/index.ts";
 import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
 import { checkStateSize, estimateRequestTokens, estimateTokens } from "../requests/index.ts";
+import { reviewEntryOf, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import type { ActionStep } from "./action-pipeline.ts";
 
@@ -48,18 +49,9 @@ export const DEFAULT_WORKER_LIMITS: WorkerLimits = {
 };
 
 /**
- * The review screen's side of a withdrawal, for a record that changed while waiting for review.
- * `withdraw` marks the pending review of the record at `stateHash` as superseded; it must be safe
- * to call twice, because a retry may repeat it.
- */
-export type ReviewQueue = {
-  withdraw(key: RecordKey, stateHash: string): Promise<void>;
-};
-
-/**
- * What the retry window decides about a record whose model call failed: `retry` keeps it queued
- * and pending; `error` and `unchecked` take it out of the queue with that status, to be queued
- * again by the policy.
+ * What the retry window decides about a record whose model call failed: `retry` keeps it queued and
+ * pending; `error` and `unchecked` take it out of the queue with that status, to be queued again by
+ * the policy.
  */
 export type OutageVerdict = "retry" | "error" | "unchecked";
 
@@ -85,7 +77,8 @@ export type WorkerDeps = {
   readonly connector: Connector;
   readonly provider: ModelProvider;
   readonly log: DecisionLog;
-  readonly reviews: ReviewQueue;
+  /** The review queue of this worker's source: it follows every write that lands. */
+  readonly reviews: SourceReviews;
   /** The configured actions, in order. The write of the answer columns is not one: it always runs first. */
   readonly actions: readonly ActionStep[];
   readonly clock: Clock;
@@ -146,9 +139,12 @@ export type PassReport = {
   readonly alreadyAnswered: readonly RecordKey[];
   /** The record changed while the model was answering: the answer was discarded and the record queued again. */
   readonly discarded: readonly RecordKey[];
-  /** Deleted before the worker reached them: left the queue, history stays in the log. */
+  /** Deleted before the worker reached them: left the queue and the review queue, history stays in the log. */
   readonly gone: readonly RecordKey[];
-  /** Pending reviews withdrawn because the record's state changed. */
+  /**
+   * Records whose state changed since their latest logged answer: the review card at that answer's
+   * hash, if there was one, was withdrawn.
+   */
   readonly withdrawn: readonly RecordKey[];
   /** State too large to send: the model was not called and the record is marked error. */
   readonly refused: readonly { readonly key: RecordKey; readonly estimate: number }[];
@@ -247,9 +243,12 @@ export function createWorker(deps: WorkerDeps): Worker {
   }
 
   /**
-   * A record changed while waiting for review has its pending review withdrawn. The record counts
-   * as waiting when its latest logged answer, with the people's decisions on it, still leaves a
-   * question to a person. `prior` is that latest answer, read with the rest of the batch's.
+   * A record changed while waiting for review has its pending review withdrawn. Whenever the state
+   * moved from its latest logged answer's (`prior`, read with the rest of the batch's), the card at
+   * that answer's hash is withdrawn, whatever the thresholds in force now say of that answer: the
+   * withdrawal is one delete by key and hash, a no-op when there is no card, and a card the worker
+   * did not make (a rebuild's, a reviewer's undo) or made under other thresholds is withdrawn all
+   * the same.
    */
   async function withdrawStaleReview(
     row: ReadRow,
@@ -258,17 +257,45 @@ export function createWorker(deps: WorkerDeps): Worker {
     if (prior === undefined || prior.stateHash === row.hash) {
       return false;
     }
-    const decisions = decideRecord(
-      questionSet,
-      questionSet.thresholds,
-      prior,
-      await log.history(row.key),
-    );
-    if (decisions !== undefined && statusOf(decisions) === "done") {
-      return false;
-    }
     await reviews.withdraw(row.key, prior.stateHash);
     return true;
+  }
+
+  /**
+   * The review queue follows every write that lands, before the actions run (a failure here
+   * releases the record, and the next pass writes it again and follows again). A needs_review
+   * record's card is added or refreshed with its open questions and the model's figures from
+   * `answer`, the logged answer it was decided from, waiting since that answer; any other status
+   * takes the card out.
+   */
+  async function followReview(
+    row: ReadRow,
+    decision: RecordDecision,
+    answer: AnswerEntry,
+  ): Promise<void> {
+    if (decision.status !== "needs_review") {
+      await leaveReview(row.key);
+      return;
+    }
+    await reviews.upsert(
+      reviewEntryOf({
+        key: row.key,
+        stateHash: row.hash,
+        decisions: decision.decisions,
+        answers: answer.answers,
+        since: answer.at,
+      }),
+    );
+  }
+
+  /**
+   * A write that lands with a status other than needs_review, or a record deleted from its source,
+   * takes the record's card out, whatever the worker knows of its past: one delete by key. A card
+   * may outlive the log the worker reads (a purged and reinstalled source, a rebuild's card), and
+   * a record written done at an unchanged hash must not leave one behind, still decidable.
+   */
+  async function leaveReview(key: RecordKey): Promise<void> {
+    await reviews.remove(key);
   }
 
   /**
@@ -374,6 +401,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       report.discarded.push(row.key);
       return "release";
     }
+    await leaveReview(row.key);
     report.held.push({ key: row.key, status: verdict });
     return "ack";
   }
@@ -391,7 +419,15 @@ export function createWorker(deps: WorkerDeps): Worker {
   async function currentDecision(
     row: ReadRow,
     prior: AnswerEntry | undefined,
-  ): Promise<{ readonly decision: RecordDecision; readonly decidedAt: Date } | undefined> {
+  ): Promise<
+    | {
+        readonly decision: RecordDecision;
+        readonly decidedAt: Date;
+        /** The logged answer the decision was made from. */
+        readonly answer: AnswerEntry;
+      }
+    | undefined
+  > {
     if (
       prior === undefined ||
       !answersCurrentFor(prior, {
@@ -416,7 +452,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         decidedAt = human.at;
       }
     }
-    return { decision: { decisions, status: statusOf(decisions) }, decidedAt };
+    return { decision: { decisions, status: statusOf(decisions) }, decidedAt, answer: prior };
   }
 
   async function processRecord(
@@ -440,19 +476,21 @@ export function createWorker(deps: WorkerDeps): Worker {
           report.discarded.push(row.key);
           return "release";
         }
+        await leaveReview(row.key);
         report.skipped.push(row.key);
         return "ack";
       }
 
       const current = await currentDecision(row, prior);
       if (current !== undefined) {
-        const { decision, decidedAt } = current;
+        const { decision, decidedAt, answer } = current;
         const result = await connector.write(row.key, decision, row.hash);
         if (!result.written) {
           // The state changed since: the record is asked again with it, and nothing runs now.
           report.discarded.push(row.key);
           return "release";
         }
+        await followReview(row, decision, answer);
         report.alreadyAnswered.push(row.key);
         // The actions follow every write that lands. After a lost ack they run again, at least
         // once, as they did when the record was asked again, and report the logged decision's time,
@@ -476,6 +514,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           report.discarded.push(row.key);
           return "release";
         }
+        await leaveReview(row.key);
         report.refused.push({ key: row.key, estimate });
         return "ack";
       }
@@ -555,6 +594,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.discarded.push(row.key);
         return "release";
       }
+      await followReview(row, written, entry);
       report.written.push(row.key);
 
       // The write above is the default action; the rest follow it.
@@ -603,9 +643,21 @@ export function createWorker(deps: WorkerDeps): Worker {
       report.failures.push({ key: null, stage: "log", error });
       return report;
     }
-    report.gone.push(...missing);
-    const toAck: RecordKey[] = [...missing];
+    const toAck: RecordKey[] = [];
     const toRelease: RecordKey[] = [];
+    // A deleted record leaves the queue, its card with it (its history stays in the log). A card
+    // that could not be removed keeps the job, so the next pass finds the record gone again and
+    // removes it then.
+    for (const key of missing) {
+      try {
+        await leaveReview(key);
+        report.gone.push(key);
+        toAck.push(key);
+      } catch (error) {
+        report.failures.push({ key, stage: "record", error });
+        toRelease.push(key);
+      }
+    }
 
     await forEachLimited(rows, limits.maxInFlight, async (row) => {
       const settled = await processRecord(row, priors.get(row.key), report);

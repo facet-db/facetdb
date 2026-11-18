@@ -5,9 +5,10 @@ import {
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type ModelProvider,
+  reviewsOf,
   spendingGate,
 } from "@facetdb/core";
-import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
+import { FakeClock, FakeReviewQueue, runConnectorContract } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { CLAIM_LEASE_MS, pgliteClient } from "../sql/index.ts";
 import { createStore } from "./store.ts";
@@ -265,7 +266,7 @@ describe("store statements per answered record", () => {
       connector,
       provider,
       log: store.log("src"),
-      reviews: { withdraw: () => Promise.resolve() },
+      reviews: reviewsOf(new FakeReviewQueue(), "src"),
       actions: [],
       clock,
       limits: DEFAULT_WORKER_LIMITS,

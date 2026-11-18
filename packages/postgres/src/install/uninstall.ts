@@ -544,10 +544,12 @@ end $$`,
 
 /**
  * The decision log: the resolved source's rows, its question-set versions (they only explain the
- * log's version numbers) and its registration in `sources` (the worker's, under the project, as a
- * plugin-kind source; with its log gone it holds nothing). An unresolved source gets no `delete` at
- * all. Then each table, once no row of anyone's is left and no store uses it. Both serve the store:
- * with the store elsewhere, the CLI's store door purges and the engine plans neither.
+ * log's version numbers), its review cards (made from that log: a reinstalled source's record
+ * written done at its old hash must find no card left), and its registration in `sources` (the
+ * worker's, under the project, as a plugin-kind source; with its log gone it holds nothing). An
+ * unresolved source gets no `delete` at all. Then each table, once no row of anyone's is left and
+ * no store uses it. Both serve the store: with the store elsewhere, the CLI's store door purges and
+ * the engine plans neither.
  */
 function purgeStatements(sourceId: string | undefined): readonly InstallStatement[] {
   const source = `current_setting('${SOURCE_SETTING}')`;
@@ -565,6 +567,9 @@ begin
   end if;
   if to_regclass('facetdb.question_set_versions') is not null then
     delete from facetdb.question_set_versions where source_id = ${source};
+  end if;
+  if to_regclass('facetdb.reviews') is not null then
+    delete from facetdb.reviews where source_id = ${source};
   end if;
   if to_regclass('facetdb.sources') is not null then
     delete from facetdb.sources where id = ${source} and project_id = ${project} and kind = 'plugin';

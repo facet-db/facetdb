@@ -24,13 +24,13 @@ import {
 } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { stateHash } from "../records/index.ts";
+import type { SourceReviewEntry, SourceReviews } from "../review/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
 import { conditionHolds, configureAction } from "./action-pipeline.ts";
 import {
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type OutagePolicy,
-  type ReviewQueue,
   type WorkerDeps,
   type WorkerLimits,
 } from "./worker.ts";
@@ -90,8 +90,16 @@ class ScriptedProvider implements ModelProvider {
   }
 }
 
-class FakeReviews implements ReviewQueue {
+class FakeReviews implements SourceReviews {
   readonly withdrawals: { key: RecordKey; stateHash: string }[] = [];
+
+  upsert(_entry: SourceReviewEntry): Promise<void> {
+    return Promise.resolve();
+  }
+
+  remove(_key: RecordKey): Promise<void> {
+    return Promise.resolve();
+  }
 
   withdraw(key: RecordKey, hash: string): Promise<void> {
     this.withdrawals.push({ key, stateHash: hash });
@@ -393,7 +401,9 @@ describe("the worker loop", () => {
       expect(test.db.decisionOf("a")?.status).toBe("done");
     });
 
-    it("is not withdrawn when the record was already decided", async () => {
+    it("is withdrawn at the old hash on any state change, even when the old answer was decided whole", async () => {
+      // A card the worker did not make (a rebuild's, one made under other thresholds) must not
+      // outlive the state it shows; the withdrawal by key and hash is a no-op when there is none.
       const test = await rig();
       const worker = createWorker(test.deps);
       test.db.edit("a", { body: "old" });
@@ -402,8 +412,10 @@ describe("the worker loop", () => {
 
       const report = await worker.runOnce();
 
-      expect(report.withdrawn).toEqual([]);
-      expect(test.reviews.withdrawals).toEqual([]);
+      expect(report.withdrawn).toEqual(["a"]);
+      expect(test.reviews.withdrawals).toEqual([
+        { key: "a", stateHash: stateHash(["body"], { body: "old" }) },
+      ]);
     });
   });
 
@@ -923,7 +935,7 @@ describe("round trips per record", () => {
     expect(test.calls.of("record")).toBe(0);
   });
 
-  it("a batch of 20 records answered before and changed since also reads each record's log twice", async () => {
+  it("a batch of 20 records answered before and changed since also reads each record's log once", async () => {
     const test = await recordingRig();
     const worker = createWorker(test.deps);
     for (let index = 0; index < 20; index += 1) {
@@ -943,9 +955,10 @@ describe("round trips per record", () => {
       claim: 1,
       read: 1,
       latestAnswers: 1,
-      // Per record: one read to see whether a review waits on the old state, one after the append
-      // so a person's decision on this state stands.
-      history: 40,
+      // Per record: one read after the append so a person's decision on this state stands. The
+      // withdrawal of a card at the old state reads no log: it is one delete by key and hash,
+      // whatever the old answer decided.
+      history: 20,
       admit: 20,
       appendAnswer: 20,
       write: 20,

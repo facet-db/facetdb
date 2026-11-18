@@ -22,4 +22,5 @@ export {
   type FakeRun,
   type FakeStop,
 } from "./engine.ts";
+export { FakeReviewQueue } from "./review-queue.ts";
 export { FakeStore } from "./store.ts";

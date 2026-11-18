@@ -1,4 +1,10 @@
-import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeConnector,
+  FakeDatabase,
+  FakeDecisionLog,
+  FakeReviewQueue,
+} from "@facetdb/core/testing";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
@@ -17,6 +23,7 @@ import type {
   RecordKey,
 } from "../contracts/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
+import { reviewsOf } from "../review/index.ts";
 import { createWorker, DEFAULT_WORKER_LIMITS } from "../worker/index.ts";
 import {
   createSpending,
@@ -778,7 +785,7 @@ async function workersOnOneQueue(
       connector: new FakeConnector(db),
       provider,
       log,
-      reviews: { withdraw: () => Promise.resolve() },
+      reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       actions: [],
       clock,
       limits: { ...DEFAULT_WORKER_LIMITS, claimBatch: 1 },
@@ -841,7 +848,7 @@ async function workerWith(
     connector,
     provider,
     log: new FakeDecisionLog([]),
-    reviews: { withdraw: () => Promise.resolve() },
+    reviews: reviewsOf(new FakeReviewQueue(), "listings"),
     actions: [],
     clock,
     limits,

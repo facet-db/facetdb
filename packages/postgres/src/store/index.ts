@@ -15,6 +15,7 @@ export {
   readResumeRows,
   resumeRowsStatements,
 } from "./resume-rows.ts";
+export { createReviewQueue, rebuildReviewQueue, rebuildStoreReviewQueue } from "./reviews.ts";
 export {
   migrateStore,
   PROJECTS_TABLE_SQL,

@@ -8,7 +8,6 @@ export type {
   OutageVerdict,
   PassReport,
   RecordFailure,
-  ReviewQueue,
   Worker,
   WorkerDeps,
   WorkerLimits,

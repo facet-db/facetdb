@@ -1,14 +1,13 @@
 import { quoteLiteral, type SqlQuery } from "../sql/index.ts";
 
 /**
- * The store's part of `facetdb uninstall --purge` when the store is not the source's database
- *: the engine's plan holds the source's side only,
- * so the CLI's store door deletes the source's decision log here, after the engine's run. The
- * script is printed before it runs and run as printed, in one transaction: the source's rows, its
- * question-set versions and its registration, after a guard that refuses while a live store source
- * of the same id (an API or plugin source holding records) still writes the log. The values reach
- * the statements through transaction-local settings, as the engine's scripts do, so no value is
- * spliced into a `do` block.
+ * The store's part of `facetdb uninstall --purge` when the store is not the source's database: the
+ * engine's plan holds the source's side only, so the CLI's store door deletes the source's decision
+ * log here, after the engine's run. The script is printed before it runs and run as printed, in one
+ * transaction: the source's rows, its question-set versions, its review cards (made from that log)
+ * and its registration, after a guard that refuses while a live store source of the same id (an API
+ * or plugin source holding records) still writes the log. The values reach the statements through
+ * transaction-local settings, as the engine's scripts do, so no value is spliced into a `do` block.
  */
 
 /** A source's decision log in the store, read before the purge is shown. */
@@ -85,6 +84,9 @@ begin
   end if;
   if to_regclass('facetdb.question_set_versions') is not null then
     delete from facetdb.question_set_versions where source_id = ${current(SOURCE)};
+  end if;
+  if to_regclass('facetdb.reviews') is not null then
+    delete from facetdb.reviews where source_id = ${current(SOURCE)};
   end if;
   if to_regclass('facetdb.sources') is not null then
     delete from facetdb.sources where id = ${current(SOURCE)} and project_id = ${current(PROJECT)} and kind = 'plugin';

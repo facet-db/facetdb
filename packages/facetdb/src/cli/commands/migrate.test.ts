@@ -1309,3 +1309,56 @@ describe("FACETDB_SECRET at migrate", () => {
     expect(result.stderr).not.toContain("FACETDB_SECRET");
   });
 });
+
+describe("the review queue's one rebuild from the log", () => {
+  /** An answer the worker logged before the queue existed: unsure whether it is a scam. */
+  async function logUnsureAnswer(key: string): Promise<void> {
+    const owners = await world.client.query(
+      "select project_id from facetdb.table_owners where table_name = 'listings'",
+    );
+    await world.client.query(
+      `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+       values ($1, $2, 'answer', 1, 'h-1', 'jev-1.14.0', $3::jsonb, '{"inputTokens":1,"outputTokens":1}'::jsonb, now())`,
+      [
+        sourceIdOf(String(owners[0]?.["project_id"]), "listings"),
+        key,
+        JSON.stringify({
+          is_scam: { type: "noul", probability: 0.5 },
+          category: { type: "choice", top: "car", probabilities: [1, 0] },
+        }),
+      ],
+    );
+  }
+
+  const reviewKeys = async () =>
+    (await world.client.query("select record_key from facetdb.reviews order by 1")).map((row) =>
+      String(row["record_key"]),
+    );
+
+  it("lists the records decided needs_review before the queue existed, once per store", async () => {
+    expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    await logUnsureAnswer("1");
+    // A store migrated by an earlier version: the rebuild has not run on it yet.
+    await world.client.query(
+      "delete from facetdb.install where starts_with(key, 'review_queue_rebuilt:')",
+    );
+
+    const dry = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(await reviewKeys()).toEqual([]);
+
+    const first = await run(["migrate", "--yes", "--admin-url", ADMIN_URL]);
+    expect(first.code, first.stderr).toBe(0);
+    expect(first.stdout).toContain(
+      "Listed 1 record(s) decided before the review queue existed: they wait for review.\n",
+    );
+    expect(await reviewKeys()).toEqual(["1"]);
+
+    await world.client.query("delete from facetdb.reviews");
+    await logUnsureAnswer("2");
+    const again = await run(["migrate", "--yes", "--admin-url", ADMIN_URL]);
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stdout).not.toContain("Listed");
+    expect(await reviewKeys()).toEqual([]);
+  });
+});

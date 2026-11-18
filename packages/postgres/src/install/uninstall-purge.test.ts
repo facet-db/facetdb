@@ -461,6 +461,14 @@ describe("uninstall --purge finds the log by the source's id", () => {
       await twoProjects();
       const before = await beeColumns();
       expect(before).toContain("is_scam");
+      // Each source's review cards; A's go with A's log.
+      for (const owner of [LOG_ID, BEE_LOG]) {
+        await q(
+          `insert into facetdb.reviews (source_id, record_key, state_hash, open_questions, numbers, since)
+           values ($1, '1', 'h', '["is_scam"]', '{"is_scam": 0.5}', now())`,
+          [owner],
+        );
+      }
       const { result, events } = await runUninstall({ purge: true });
       expect(result).toMatchObject({ ok: true, applied: true });
       expect(events).toEqual(["print", "confirm Listings"]);
@@ -477,6 +485,9 @@ describe("uninstall --purge finds the log by the source's id", () => {
       ]);
       expect(await versionRows()).toEqual([{ source_id: BEE_LOG }]);
       expect(await q(`select id from facetdb.sources order by 1`)).toEqual([{ id: BEE_LOG }]);
+      expect(await q(`select source_id from facetdb.reviews order by 1`)).toEqual([
+        { source_id: BEE_LOG },
+      ]);
       // B's table and its install are untouched.
       expect(await beeColumns()).toEqual(before);
       expect(

@@ -9,7 +9,7 @@ import {
   type ModelProvider,
   type OpenConnector,
   type PassReport,
-  type ReviewQueue,
+  reviewsOf,
   type SpendingGate,
   type Worker,
 } from "@facetdb/core";
@@ -160,12 +160,6 @@ export function parsePort(text: string): number {
   return port;
 }
 
-/**
- * Pending reviews belong to the review screen, which does not exist yet: there is no card to
- * withdraw, and the decision log the screen will read already carries the newer answer.
- */
-const NO_REVIEW_CARDS: ReviewQueue = { withdraw: () => Promise.resolve() };
-
 /** One source's loop, with what it holds open. */
 type Running = {
   readonly source: string;
@@ -224,7 +218,8 @@ export async function runWorkers(
       connector,
       provider,
       log: store.log(idOf(source)),
-      reviews: NO_REVIEW_CARDS,
+      // The store's review queue follows this source's writes, API sources too.
+      reviews: reviewsOf(store.reviews, idOf(source)),
       actions: [],
       clock,
       limits: {
