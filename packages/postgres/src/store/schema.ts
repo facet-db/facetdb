@@ -263,6 +263,53 @@ $$`,
       `create index if not exists decisions_by_source on facetdb.decisions (source_id, id)`,
     ],
   },
+  {
+    version: 6,
+    statements: [
+      // The review queue, one row per record that needs review, kept by the worker (a needs_review
+      // write adds or refreshes it, any other status deletes it). The state hash is the version of
+      // the record the card shows, so a withdrawal at an old hash leaves a newer card alone;
+      // `numbers` holds the model's answers for the probability band filter. An opened card is
+      // locked for 10 minutes, so its holder and the lease's end are set together or not at all.
+      `create table if not exists facetdb.reviews (
+  source_id text not null,
+  record_key text not null,
+  state_hash text not null,
+  open_questions jsonb not null,
+  numbers jsonb not null,
+  since timestamptz not null,
+  locked_by text,
+  locked_until timestamptz,
+  skipped_by jsonb not null default '[]'::jsonb,
+  primary key (source_id, record_key),
+  check ((locked_by is null) = (locked_until is null))
+)`,
+      // The open-source studio's reviewer accounts, made by `facetdb users add`. A scrypt hash
+      // only, never the password; the worker login reads the table and writes nothing to it.
+      `create table if not exists facetdb.users (
+  name text primary key,
+  password_hash text not null,
+  created_at timestamptz not null default now()
+)`,
+      // The run log, one row per worker pass that did work, pruned by the worker after 30 days.
+      `create table if not exists facetdb.runs (
+  id bigserial primary key,
+  source_id text not null,
+  started_at timestamptz not null,
+  ended_at timestamptz not null,
+  claimed integer not null,
+  answered integer not null,
+  to_review integer not null,
+  errors integer not null,
+  discarded integer not null,
+  tokens bigint not null
+)`,
+      // The Decisions page searches one source's log by a time range, newest first, paged by the
+      // log's id; neither `decisions_by_record` nor `decisions_by_source` orders by time. A plain
+      // `create index` inside the migration's transaction, as migration 5's.
+      `create index if not exists decisions_by_time on facetdb.decisions (source_id, at desc, id)`,
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */
@@ -323,6 +370,9 @@ export const STORE_TABLES: readonly string[] = [
   "cursors",
   "install",
   "webhook_outbox",
+  "reviews",
+  "users",
+  "runs",
 ];
 
 /**
@@ -332,6 +382,13 @@ export const STORE_TABLES: readonly string[] = [
  * --purge` deletes from them.
  */
 export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versions", "decisions"];
+
+/**
+ * The store's tables the worker login only reads: the reviewer accounts, whose passwords the studio
+ * checks; `facetdb users add` writes them with the admin's or the store's credential, so the worker
+ * login holds select on them and nothing more.
+ */
+export const STORE_WORKER_READ_ONLY_TABLES: readonly string[] = ["users"];
 
 /**
  * Every function the store's migrations create, by signature: `facetdb migrate` grants the worker
@@ -348,6 +405,7 @@ export const STORE_SEQUENCES: readonly string[] = [
   "decisions_id_seq",
   "alert_history_id_seq",
   "webhook_outbox_id_seq",
+  "runs_id_seq",
 ];
 
 const VERSION_TABLE_SQL = `create table if not exists facetdb.store_migrations (

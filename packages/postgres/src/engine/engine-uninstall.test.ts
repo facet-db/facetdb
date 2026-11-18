@@ -68,6 +68,9 @@ const SHARED = [
   "cursors",
   "install",
   "webhook_outbox",
+  "reviews",
+  "users",
+  "runs",
   "store_migrations",
 ].map((name) => `facetdb.${name}`);
 

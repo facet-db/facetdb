@@ -61,10 +61,14 @@ const STORE_ONLY = [
   "heartbeats",
   "cursors",
   "webhook_outbox",
+  "reviews",
+  "users",
+  "runs",
   "reserve_usage",
   "decisions_id_seq",
   "alert_history_id_seq",
   "webhook_outbox_id_seq",
+  "runs_id_seq",
 ];
 
 const mentions = (name: string) => new RegExp(`(facetdb|"facetdb")\\."?${name}(?![a-z_])`);

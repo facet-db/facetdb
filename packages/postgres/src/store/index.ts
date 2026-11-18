@@ -25,6 +25,7 @@ export {
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
+  STORE_WORKER_READ_ONLY_TABLES,
   StoreNotInstalledError,
   storeInstallStatements,
   storeVersion,

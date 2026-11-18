@@ -284,6 +284,9 @@ describe("the log-only purge, after a plain uninstall", () => {
         "cursors",
         "install",
         "webhook_outbox",
+        "reviews",
+        "users",
+        "runs",
         "store_migrations",
       ].map((name) => ({
         kind: "store-table",

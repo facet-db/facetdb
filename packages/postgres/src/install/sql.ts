@@ -33,6 +33,7 @@ import {
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
+  STORE_WORKER_READ_ONLY_TABLES,
   storeInstallStatements,
 } from "../store/index.ts";
 import { scramVerifier } from "./scram.ts";
@@ -405,6 +406,13 @@ export function installSql(
   const side = source.storage === "side-table";
   const onChange = source.onChange ?? "reset";
   const appendOnly = new Set(STORE_APPEND_ONLY_TABLES);
+  const readOnly = new Set(STORE_WORKER_READ_ONLY_TABLES);
+  const storeRights = (name: string) =>
+    readOnly.has(name)
+      ? "select"
+      : appendOnly.has(name)
+        ? "select, insert"
+        : "select, insert, update, delete";
   const policy = (name: string, command: "select" | "update") =>
     `  if not exists (select 1 from pg_catalog.pg_policies
                  where schemaname = current_setting('${SCHEMA_SETTING}')
@@ -662,13 +670,14 @@ end $$`,
       : []),
     plain("grants", `grant usage on schema ${quoteIdent(SCHEMA)} to ${worker}`),
     // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
-    // The logs are append-only (read and insert); the version table is read-only, so the worker can
-    // see the store is current and never migrates. The queue and the projects serve the source's
-    // database whatever the store; the rest are the store's.
+    // The logs are append-only (read and insert); the reviewer accounts and the version table are
+    // read-only, so the worker checks a password but never makes an account, and sees the store is
+    // current but never migrates. The queue and the projects serve the source's database whatever
+    // the store; the rest are the store's.
     ...STORE_TABLES.map((name) =>
       plain(
         "grants",
-        `grant ${appendOnly.has(name) ? "select, insert" : "select, insert, update, delete"} on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
+        `grant ${storeRights(name)} on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} to ${worker}`,
         SOURCE_STORE_TABLES.has(name) ? "source" : "store",
       ),
     ),

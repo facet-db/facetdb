@@ -6,7 +6,9 @@ import { defineConfig } from "vitest/config";
 // runs this; `pnpm --filter <pkg> test <pattern>` still runs one package.
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    // Every package and every app is a project: `vitest --project <name>` selects one by its
+    // directory's name, so an app absent from this list would have its tests skipped silently.
+    projects: ["packages/*/vitest.config.ts", "apps/*/vitest.config.ts"],
     // Four workers, not one per core: an uncapped run on a 16-core laptop spawned 16 node workers
     // (7 to 13 GB a run) and two overlapping runs took the desktop session down with the OOM
     // killer, twice. Each package config repeats the cap for single-package runs.

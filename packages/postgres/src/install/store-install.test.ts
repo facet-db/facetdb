@@ -10,6 +10,7 @@ import {
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
+  STORE_WORKER_READ_ONLY_TABLES,
   StoreNotInstalledError,
   sourceIdOf,
 } from "../store/index.ts";
@@ -153,14 +154,20 @@ describe("the install script and the store", () => {
     const byTable = new Map(rows.map((row) => [String(row["table_name"]), row["privileges"]]));
     for (const table of STORE_TABLES) {
       expect(byTable.get(table)).toEqual(
-        STORE_APPEND_ONLY_TABLES.includes(table)
-          ? ["INSERT", "SELECT"]
-          : ["DELETE", "INSERT", "SELECT", "UPDATE"],
+        STORE_WORKER_READ_ONLY_TABLES.includes(table)
+          ? ["SELECT"]
+          : STORE_APPEND_ONLY_TABLES.includes(table)
+            ? ["INSERT", "SELECT"]
+            : ["DELETE", "INSERT", "SELECT", "UPDATE"],
       );
     }
     // The append-only logs, by name: the decision log and the question-set versions.
     expect(byTable.get("decisions")).toEqual(["INSERT", "SELECT"]);
     expect(byTable.get("question_set_versions")).toEqual(["INSERT", "SELECT"]);
+    // The reviewer accounts, by name: read-only; the queue and the run log are rows.
+    expect(byTable.get("users")).toEqual(["SELECT"]);
+    expect(byTable.get("reviews")).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
+    expect(byTable.get("runs")).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);
     expect(byTable.get(STORE_VERSION_TABLE)).toEqual(["SELECT"]);
     expect(byTable.has("table_owners")).toBe(false);
     // The store's function: the worker may call it, and no one else but its owner.
@@ -423,7 +430,8 @@ describe("the install script and the store", () => {
     expect(await q(`select max(version) as v from facetdb.store_migrations`)).toEqual([
       { v: SCHEMA_VERSION },
     ]);
-    expect(SCHEMA_VERSION).toBe(5);
+    // Migration 5 is no longer the newest (6 came after it), and runs all the same.
+    expect(SCHEMA_VERSION).toBeGreaterThan(5);
     // Run again, by the install script and by a store opening: nothing changes, nothing fails.
     const before = await facetdbCatalog(world);
     await install(world);

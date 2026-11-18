@@ -239,6 +239,43 @@ create index if not exists decisions_by_source on facetdb.decisions (source_id, 
 
 insert into facetdb.store_migrations (version) values (5) on conflict (version) do nothing;
 
+create table if not exists facetdb.reviews (
+  source_id text not null,
+  record_key text not null,
+  state_hash text not null,
+  open_questions jsonb not null,
+  numbers jsonb not null,
+  since timestamptz not null,
+  locked_by text,
+  locked_until timestamptz,
+  skipped_by jsonb not null default '[]'::jsonb,
+  primary key (source_id, record_key),
+  check ((locked_by is null) = (locked_until is null))
+);
+
+create table if not exists facetdb.users (
+  name text primary key,
+  password_hash text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists facetdb.runs (
+  id bigserial primary key,
+  source_id text not null,
+  started_at timestamptz not null,
+  ended_at timestamptz not null,
+  claimed integer not null,
+  answered integer not null,
+  to_review integer not null,
+  errors integer not null,
+  discarded integer not null,
+  tokens bigint not null
+);
+
+create index if not exists decisions_by_time on facetdb.decisions (source_id, at desc, id);
+
+insert into facetdb.store_migrations (version) values (6) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -428,6 +465,12 @@ grant select, insert, update, delete on "facetdb"."install" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."webhook_outbox" to "facetdb_worker";
 
+grant select, insert, update, delete on "facetdb"."reviews" to "facetdb_worker";
+
+grant select on "facetdb"."users" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."runs" to "facetdb_worker";
+
 revoke update, delete on "facetdb"."question_set_versions" from "facetdb_worker";
 
 revoke update, delete on "facetdb"."decisions" from "facetdb_worker";
@@ -458,6 +501,8 @@ grant usage, select on sequence "facetdb"."decisions_id_seq" to "facetdb_worker"
 grant usage, select on sequence "facetdb"."alert_history_id_seq" to "facetdb_worker";
 
 grant usage, select on sequence "facetdb"."webhook_outbox_id_seq" to "facetdb_worker";
+
+grant usage, select on sequence "facetdb"."runs_id_seq" to "facetdb_worker";
 
 grant execute on function facetdb.reserve_usage(text, text, bigint, bigint, bigint, bigint) to "facetdb_worker";
 
