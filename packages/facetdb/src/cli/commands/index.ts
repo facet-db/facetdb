@@ -7,10 +7,11 @@ import { exportCommand } from "./export.ts";
 import { initCommand } from "./init.ts";
 import { migrateCommand } from "./migrate.ts";
 import { previewCommand } from "./preview.ts";
+import { typesCommand } from "./types.ts";
 import { uninstallCommand } from "./uninstall.ts";
 import { workerCommand } from "./worker.ts";
 
-/** Every command the `facetdb` program registers. types joins later. */
+/** Every command the `facetdb` program registers. */
 export const COMMANDS: readonly RegisteredCommand[] = [
   initCommand,
   doctorCommand,
@@ -22,6 +23,7 @@ export const COMMANDS: readonly RegisteredCommand[] = [
   exportCommand,
   workerCommand,
   devCommand,
+  typesCommand,
 ];
 
 export { backfillCommand } from "./backfill.ts";
@@ -32,5 +34,6 @@ export { exportCommand } from "./export.ts";
 export { initCommand } from "./init.ts";
 export { migrateCommand } from "./migrate.ts";
 export { previewCommand } from "./preview.ts";
+export { typesCommand } from "./types.ts";
 export { uninstallCommand } from "./uninstall.ts";
 export { workerCommand } from "./worker.ts";

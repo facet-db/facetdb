@@ -129,9 +129,21 @@ export type Workspace = {
     parts: AsyncIterable<string>,
     options: { readonly overwrite: boolean },
   ): Promise<"written" | "exists">;
+  /**
+   * What is at a path, never through a symbolic link: nothing, a regular file with its first line
+   * (from its first 4 KiB), or something else (a link, a directory), which is never read through.
+   * `facetdb types` replaces a file only when its first line is the generated header.
+   */
+  peek(path: string): Promise<PathFound>;
   /** Whether the `claude` command is on the PATH. */
   hasClaudeCommand(): boolean;
 };
+
+/** What `Workspace.peek` finds at a path. */
+export type PathFound =
+  | { readonly kind: "none" }
+  | { readonly kind: "file"; readonly firstLine: string }
+  | { readonly kind: "other" };
 
 /** Everything a command may touch, wired once by the composition root (`main.ts`). */
 export type CliDeps = {
@@ -512,6 +524,7 @@ export async function runInProcess(
         exists: () => Promise.reject(new Error("this test gave the command no workspace")),
         write: () => Promise.reject(new Error("this test gave the command no workspace")),
         writeParts: () => Promise.reject(new Error("this test gave the command no workspace")),
+        peek: () => Promise.reject(new Error("this test gave the command no workspace")),
         hasClaudeCommand: () => {
           throw new Error("this test gave the command no workspace");
         },

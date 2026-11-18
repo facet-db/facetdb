@@ -155,10 +155,10 @@ invocation.
 | `facetdb uninstall` | Shows the SQL that removes FacetDB from a source and asks you to type the project name before it runs (`--purge` also deletes the log) |
 | `facetdb worker` | Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API on port 7411 (`--port`, `--no-http`, `--once`); refuses to start without `TYPESAFE_API_KEY` or a `modelUrl` |
 | `facetdb dev` | Runs the worker offline on an embedded Postgres under `.facetdb/dev/` with the fake model, no key needed (`--model-url` for Ollama or another compatible server, `--reset` starts empty) |
+| `facetdb types` | Writes facetdb.types.d.ts with each source's answer columns and the choice and score unions, typed as the source's database returns them (1 or 0 for a yes-or-no answer on MySQL, MariaDB, SQLite, libSQL and Oracle; the fields of the facetdb subdocument on MongoDB), and prints that database's Prisma and Drizzle snippets (`--prisma`, `--drizzle`, `--out <file>.d.ts`, `--dry-run`); where the database has no Drizzle (SQL Server, Oracle, MongoDB) or no Prisma (Oracle), one comment line says so |
 
 Other commands are not in this build yet; do not tell the user to run them as if
-they were: `facetdb review`, `facetdb studio`, `facetdb add <plugin>`, `facetdb types`, and
-`facetdb test`.
+they were: `facetdb review`, `facetdb studio`, `facetdb add <plugin>`, and `facetdb test`.
 
 Always show before doing: run `--dry-run` or read the printed SQL and estimate before anything
 writes. Never pass `--yes` for the user on a database you have not been told is safe to change.

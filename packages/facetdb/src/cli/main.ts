@@ -5,6 +5,7 @@ import {
   chmod,
   copyFile,
   link,
+  lstat,
   mkdir,
   open,
   rename,
@@ -99,6 +100,9 @@ function codeOf(error: unknown): unknown {
   return (error as { readonly code?: unknown } | undefined)?.code;
 }
 
+/** How much of a file `Workspace.peek` reads for its first line: a generated header fits many times. */
+const PEEK_BYTES = 4096;
+
 /** What `link` fails with on a filesystem that has no hard links (FAT, some network mounts). */
 const NO_HARD_LINKS: ReadonlySet<unknown> = new Set(["EPERM", "ENOTSUP", "EXDEV"]);
 
@@ -184,6 +188,34 @@ export function diskWorkspace(
       } finally {
         // Gone already after a rename; after a link, or a failure, the temporary name goes.
         await rm(partial, { force: true });
+      }
+    },
+    peek: async (path) => {
+      const file = resolve(projectDir, path);
+      try {
+        if (!(await lstat(file)).isFile()) {
+          return { kind: "other" };
+        }
+        // O_NOFOLLOW: a link put there since the lstat is refused, never read through.
+        const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const head = Buffer.alloc(PEEK_BYTES);
+          const { bytesRead } = await handle.read(head, 0, PEEK_BYTES, 0);
+          return {
+            kind: "file",
+            firstLine: head.toString("utf8", 0, bytesRead).split("\n")[0] ?? "",
+          };
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        if (codeOf(error) === "ENOENT") {
+          return { kind: "none" };
+        }
+        if (codeOf(error) === "ELOOP") {
+          return { kind: "other" };
+        }
+        throw error;
       }
     },
     hasClaudeCommand: () =>

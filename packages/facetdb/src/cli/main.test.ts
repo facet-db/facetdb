@@ -1,4 +1,14 @@
-import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -162,5 +172,36 @@ describe("a file written in parts", () => {
       broken.writeParts("log.jsonl", parts("a\n"), { overwrite: false }),
     ).rejects.toThrow("EIO");
     expect(await readdir(dir)).toEqual([]);
+  });
+});
+
+describe("what is at a path (Workspace.peek)", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "facetdb-peek-"));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("reads a file's first line, and says none where nothing is", async () => {
+    await writeFile(join(dir, "facetdb.types.d.ts"), "// first line\nexport type A = {};\n");
+    const workspace = diskWorkspace(dir, {});
+    expect(await workspace.peek("facetdb.types.d.ts")).toEqual({
+      kind: "file",
+      firstLine: "// first line",
+    });
+    expect(await workspace.peek("missing.d.ts")).toEqual({ kind: "none" });
+  });
+
+  it("never reads through a symbolic link, and calls a directory something else", async () => {
+    await writeFile(join(dir, "target.d.ts"), "// first line\n");
+    await symlink(join(dir, "target.d.ts"), join(dir, "link.d.ts"));
+    await mkdir(join(dir, "folder.d.ts"));
+    const workspace = diskWorkspace(dir, {});
+    expect(await workspace.peek("link.d.ts")).toEqual({ kind: "other" });
+    expect(await workspace.peek("folder.d.ts")).toEqual({ kind: "other" });
   });
 });

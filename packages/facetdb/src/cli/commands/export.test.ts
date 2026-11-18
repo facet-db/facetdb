@@ -148,6 +148,7 @@ function run(
           files.set(path, text);
           return "written";
         },
+        peek: () => Promise.reject(new Error("export reads no file")),
         hasClaudeCommand: () => false,
       },
     },

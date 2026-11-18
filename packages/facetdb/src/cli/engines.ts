@@ -42,7 +42,70 @@ export type KnownDatabase = {
    * `connector: "polling"` names the engine the scheme picks already.
    */
   readonly polls: boolean;
+  /** What `facetdb types` writes for a source on it. */
+  readonly types: EngineTypes;
 };
+
+/**
+ * How a database keeps FacetDB's answers, as `facetdb types` writes them: static words, read with
+ * no driver loaded. The declaration file types what a raw driver read returns; the ORM snippets use
+ * the Drizzle core and the Prisma provider the database has, or say there is none.
+ */
+export type EngineTypes = {
+  /** The `drizzle-orm/<core>` its tables are built with; absent where Drizzle has no driver for it. */
+  readonly drizzle?: "pg-core" | "mysql-core" | "sqlite-core";
+  /** The Prisma datasource provider; absent where Prisma has none for it. */
+  readonly prisma?: "postgresql" | "cockroachdb" | "mysql" | "sqlserver" | "sqlite" | "mongodb";
+  /** A yes-or-no answer: the type the install gives it, and what a raw read returns. */
+  readonly boolean: { readonly stored: string; readonly read: "boolean" | "0 | 1" };
+  /** A probability, confidence or expected value: the type the install gives it (read as a number). */
+  readonly real: string;
+  /**
+   * A choice's probabilities: the type the install gives them, and what a raw read returns
+   * (`clob fetched as text`: node-oracledb hands back a Lob unless the application fetches a clob
+   * as a string).
+   */
+  readonly json: {
+    readonly stored: string;
+    readonly read: "object" | "text" | "object or text" | "clob fetched as text";
+  };
+  /** Where the answers live: columns of the table, or fields of each document's `facetdb` subdocument. */
+  readonly answersIn: "columns" | "subdocument";
+  /**
+   * When a read finds `facetdb_status` null, in words ("a row the trigger has not seen yet"): the
+   * install adds it nullable with no default, and pending is set only once a row is reached (SQL
+   * Server; the polling installs). Absent where the install adds it not null with the pending
+   * default.
+   */
+  readonly statusNullUntil?: string;
+  /** `facetdb_reviewed` as the install adds it: whether a read can find it null, and whether it starts false. */
+  readonly reviewed: { readonly nullable: boolean; readonly defaultFalse: boolean };
+  /** Where a side table lives: in the `facetdb` schema, or beside the table as `facetdb_<table>_answers`. */
+  readonly sideTableIn: "facetdb schema" | "beside the table";
+};
+
+/** Postgres's types: what `facetdb types` writes for an API source and a source with no connection string. */
+export const POSTGRES_TYPES: EngineTypes = {
+  drizzle: "pg-core",
+  prisma: "postgresql",
+  boolean: { stored: "boolean", read: "boolean" },
+  real: "real",
+  json: { stored: "jsonb", read: "object" },
+  answersIn: "columns",
+  reviewed: { nullable: false, defaultFalse: true },
+  sideTableIn: "facetdb schema",
+};
+
+/**
+ * FacetDB's own columns as a polling install adds them (`@facetdb/sql-polling`'s `ownedColumns`):
+ * the status nullable with no default, set to pending only when the poller reaches the row;
+ * reviewed nullable with a false default. CockroachDB and Oracle are always polled, and `connector:
+ * "polling"` polls a Postgres table the same way.
+ */
+export const POLLED_COLUMNS = {
+  statusNullUntil: "a row the poller has not reached yet",
+  reviewed: { nullable: true, defaultFalse: true },
+} as const satisfies Pick<EngineTypes, "statusNullUntil" | "reviewed">;
 
 /** Every database FacetDB connects to: its engine's key and schemes. */
 const DATABASES: readonly KnownDatabase[] = [
@@ -55,6 +118,7 @@ const DATABASES: readonly KnownDatabase[] = [
     polls: false,
     workerUrl:
       "postgres://facetdb_worker:<a long random password>@<host>:5432/<database>?sslmode=require",
+    types: POSTGRES_TYPES,
   },
   {
     key: "mysql",
@@ -65,6 +129,17 @@ const DATABASES: readonly KnownDatabase[] = [
     polls: false,
     workerUrl:
       'mysql://facetdb_worker:<a long random password>@<host>:3306/<database>?ssl={"rejectUnauthorized":true}',
+    // mysql2 reads tinyint(1) as a number; MySQL's json comes back parsed, MariaDB's (a longtext) as text.
+    types: {
+      drizzle: "mysql-core",
+      prisma: "mysql",
+      boolean: { stored: "boolean, which is tinyint(1)", read: "0 | 1" },
+      real: "float",
+      json: { stored: "json", read: "object or text" },
+      answersIn: "columns",
+      reviewed: { nullable: false, defaultFalse: true },
+      sideTableIn: "beside the table",
+    },
   },
   {
     key: "mssql",
@@ -74,6 +149,16 @@ const DATABASES: readonly KnownDatabase[] = [
     sideTable: true,
     polls: false,
     workerUrl: "mssql://facetdb_worker:<a long random password>@<host>:1433/<database>",
+    types: {
+      prisma: "sqlserver",
+      boolean: { stored: "bit", read: "boolean" },
+      real: "real",
+      json: { stored: "nvarchar(max)", read: "text" },
+      answersIn: "columns",
+      statusNullUntil: "a row the trigger has not seen yet",
+      reviewed: { nullable: true, defaultFalse: false },
+      sideTableIn: "beside the table",
+    },
   },
   {
     key: "sqlite",
@@ -83,6 +168,16 @@ const DATABASES: readonly KnownDatabase[] = [
     sideTable: false,
     polls: false,
     workerUrl: "sqlite:///absolute/path/to/app.db",
+    types: {
+      drizzle: "sqlite-core",
+      prisma: "sqlite",
+      boolean: { stored: "integer", read: "0 | 1" },
+      real: "real",
+      json: { stored: "text", read: "text" },
+      answersIn: "columns",
+      reviewed: { nullable: false, defaultFalse: true },
+      sideTableIn: "beside the table",
+    },
   },
   {
     key: "libsql",
@@ -92,6 +187,16 @@ const DATABASES: readonly KnownDatabase[] = [
     sideTable: false,
     polls: false,
     workerUrl: "libsql://<database>-<organization>.turso.io",
+    types: {
+      drizzle: "sqlite-core",
+      prisma: "sqlite",
+      boolean: { stored: "integer", read: "0 | 1" },
+      real: "real",
+      json: { stored: "text", read: "text" },
+      answersIn: "columns",
+      reviewed: { nullable: false, defaultFalse: true },
+      sideTableIn: "beside the table",
+    },
   },
   {
     key: "mongodb",
@@ -102,6 +207,16 @@ const DATABASES: readonly KnownDatabase[] = [
     polls: false,
     workerUrl:
       "mongodb://facetdb_worker:<a long random password>@<host>:27017/<database>?replicaSet=rs0",
+    types: {
+      prisma: "mongodb",
+      boolean: { stored: "a BSON boolean", read: "boolean" },
+      real: "a double",
+      json: { stored: "an embedded document", read: "object" },
+      answersIn: "subdocument",
+      // Written only as true, once a person decides; absent until then.
+      reviewed: { nullable: true, defaultFalse: false },
+      sideTableIn: "beside the table",
+    },
   },
   {
     key: "cockroachdb",
@@ -112,6 +227,16 @@ const DATABASES: readonly KnownDatabase[] = [
     polls: true,
     workerUrl:
       "cockroachdb://facetdb_worker:<a long random password>@<host>:26257/<database>?sslmode=verify-full",
+    types: {
+      drizzle: "pg-core",
+      prisma: "cockroachdb",
+      boolean: { stored: "boolean", read: "boolean" },
+      real: "real",
+      json: { stored: "jsonb", read: "object" },
+      answersIn: "columns",
+      ...POLLED_COLUMNS,
+      sideTableIn: "facetdb schema",
+    },
   },
   {
     key: "oracle",
@@ -122,6 +247,16 @@ const DATABASES: readonly KnownDatabase[] = [
     polls: true,
     workerUrl:
       "oracle://facetdb_worker:<a long random password>@<host>:2484/<service>?protocol=tcps",
+    // node-oracledb reads number(1) as a number, and a clob as a Lob unless the application fetches
+    // clobs as strings (FacetDB's own connection does: sql-polling's oracle-connect.ts).
+    types: {
+      boolean: { stored: "number(1)", read: "0 | 1" },
+      real: "number",
+      json: { stored: "clob", read: "clob fetched as text" },
+      answersIn: "columns",
+      ...POLLED_COLUMNS,
+      sideTableIn: "beside the table",
+    },
   },
 ];
 
@@ -174,6 +309,19 @@ export function databaseOf(url: string): KnownDatabase | undefined {
   return scheme === undefined
     ? undefined
     : DATABASES.find((database) => database.schemes.includes(scheme));
+}
+
+/**
+ * The types of the database a connection string's scheme names, with its name and whether it is
+ * SQL (which `connector: "polling"` needs); nothing is loaded.
+ */
+export function typesOf(
+  url: string,
+): { readonly database: string; readonly sql: boolean; readonly types: EngineTypes } | undefined {
+  const database = databaseOf(url);
+  return database === undefined
+    ? undefined
+    : { database: database.name, sql: database.sql, types: database.types };
 }
 
 /** Whether an engine is registered for a connection string's scheme; nothing is loaded. */

@@ -16,8 +16,12 @@ import type { EngineEntry } from "./program.ts";
 // with, byte for byte (migrate.test.ts).
 export {
   createStore,
+  // The trigger install's statements and the polling dialect: `facetdb types` ties its column
+  // nullability to them (types-install.test.ts).
+  installSql,
   migrate,
   pgliteClient,
+  postgresDialect,
   type SqlClient,
   type SqlConnect,
   type Store,

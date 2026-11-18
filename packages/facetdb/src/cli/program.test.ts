@@ -127,6 +127,7 @@ describe("the facetdb program", () => {
           exists: () => Promise.resolve(false),
           write: () => Promise.resolve(),
           writeParts: () => Promise.resolve("written"),
+          peek: () => Promise.resolve({ kind: "none" }),
           hasClaudeCommand: () => false,
         },
         clock: { now: () => 0, sleep: () => Promise.resolve() },
@@ -163,6 +164,7 @@ describe("the facetdb program", () => {
       "export",
       "worker",
       "dev",
+      "types",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

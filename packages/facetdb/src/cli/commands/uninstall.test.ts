@@ -131,6 +131,7 @@ async function runSeeingPrompts(
         exists: () => Promise.resolve(false),
         write: unused,
         writeParts: unused,
+        peek: unused,
         hasClaudeCommand: () => false,
       },
       clock: { now: () => 0, sleep: unused },
