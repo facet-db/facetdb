@@ -489,7 +489,7 @@ describe('a postgres:// source with connector: "polling"', () => {
     expect(engine.checks.map((check) => check.name)[0]).toBe("dialect");
     // A bare table is in the Postgres dialect's default schema, named with no question asked; the
     // stand-in's is the plain dialect's.
-    expect(engine.label(target)).toBe(`${postgresStandIn.defaultSchema}.listings`);
+    expect(engine.label(target, url)).toBe(`${postgresStandIn.defaultSchema}.listings`);
   });
 
   it("says which it found on doctor's first line", async () => {

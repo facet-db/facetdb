@@ -2,7 +2,7 @@ import type { DatabaseEngine } from "@facetdb/core";
 import type { MysqlConnect } from "../sql/index.ts";
 import { planInstall } from "./install.ts";
 import { planPrune } from "./prune.ts";
-import { runPlan } from "./run.ts";
+import { runPlan, serverOfPlan } from "./run.ts";
 import { renderScript } from "./sql.ts";
 import { planUninstall } from "./uninstall.ts";
 
@@ -28,7 +28,8 @@ export function createMysqlInstaller(options: MysqlInstallerOptions): MysqlInsta
     planUninstall: (target, url, uninstallOptions) =>
       planUninstall(connect, target, url, uninstallOptions),
     planPrune: (target, url, deps) => planPrune(connect, target, url, deps),
-    render: renderScript,
+    // In the name of the server the plan was read from: MariaDB's script says MariaDB.
+    render: (plan) => renderScript(plan, serverOfPlan(plan)),
     run: (target, plan, url, runOptions) => runPlan(connect, target, plan, url, runOptions),
   };
 }

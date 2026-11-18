@@ -74,6 +74,20 @@ export function tlsProblem(url: string, allowInsecure: boolean): TlsProblem {
   return { host };
 }
 
+/**
+ * The database a connection string's path names, as mysql2 reads it (`parseUrl`: the path after its
+ * slash, percent-decoded): the one `database()` answers on that connection. Undefined when the path
+ * names none, or when the string is no URL.
+ */
+export function databaseInUrl(url: string): string | undefined {
+  try {
+    const database = decodeURIComponent(new URL(url).pathname.slice(1));
+    return database === "" ? undefined : database;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The admin URL's refusal, before anything connects: it plans and runs every script. */
 export function adminUrlRefusal(url: string, allowInsecure: boolean): Refusal | undefined {
   const problem = tlsProblem(url, allowInsecure);

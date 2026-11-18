@@ -450,14 +450,20 @@ export function revokeStatement(
 /**
  * The script's first words, before any statement: what a stop leaves and how to finish, since MySQL
  * commits each statement as it runs; and how to run it by hand, since the owner guard and the
- * login's placeholder stop it only in a client that stops at an error.
+ * login's placeholder stop it only in a client that stops at an error. In the server's name, and
+ * its client's: MariaDB's is `mariadb`.
  */
-export const SCRIPT_HEADER = [
-  "-- MySQL runs this script statement by statement, with no transaction around it: if it stops",
-  "-- part way, what ran stays, and running the same facetdb command again completes it. Run by",
-  "-- hand, give it to mysql --batch, which stops at the first error: the source command and a",
-  "-- paste go on past one.",
-].join("\n");
+export function scriptHeader(server: "MySQL" | "MariaDB"): string {
+  return [
+    `-- ${server} runs this script statement by statement, with no transaction around it: if it stops`,
+    "-- part way, what ran stays, and running the same facetdb command again completes it. Run by",
+    `-- hand, give it to ${server === "MariaDB" ? "mariadb" : "mysql"} --batch, which stops at the first error: the source command and a`,
+    "-- paste go on past one.",
+  ].join("\n");
+}
+
+/** The header on a MySQL server. */
+export const SCRIPT_HEADER = scriptHeader("MySQL");
 
 /** Quoted strings, quoted names and comments: where a `;` does not end a statement. */
 const OPAQUE = /'(?:[^'\\]|\\.|'')*'|`(?:[^`]|``)*`|"(?:[^"\\]|\\.|"")*"|--[^\n]*|#[^\n]*/g;
@@ -471,14 +477,15 @@ function compound(text: string): boolean {
  * The plan as the script the CLI prints and a DBA can paste into the mysql client: the header, then
  * each statement with its `;`, a blank line between. The client ends a statement at the first `;`,
  * so a compound one goes between `delimiter //` and `delimiter ;` lines, which are the client's
- * commands and no SQL: `run` sends each statement's text alone, one statement per call.
+ * commands and no SQL: `run` sends each statement's text alone, one statement per call. The header
+ * names the server the plan was made on (the engine's `render` reads it off the plan's notes).
  */
-export function renderScript(plan: EnginePlan): string {
+export function renderScript(plan: EnginePlan, server: "MySQL" | "MariaDB" = "MySQL"): string {
   if (plan.statements.length === 0) {
     return "";
   }
   const body = plan.statements
     .map(({ text }) => (compound(text) ? `delimiter //\n${text}//\ndelimiter ;` : `${text};`))
     .join("\n\n");
-  return `${SCRIPT_HEADER}\n\n${body}\n`;
+  return `${scriptHeader(server)}\n\n${body}\n`;
 }

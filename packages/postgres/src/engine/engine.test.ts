@@ -178,8 +178,10 @@ describe("the engine's identity", () => {
   });
 
   it("names a bare table in public, and a named one as the config writes it", () => {
-    expect(engine.label(target())).toBe("public.listings");
-    expect(engine.label(target({ schema: "shop" }))).toBe("shop.listings");
+    // The database in the URL's path is not a schema: the label ignores it.
+    const url = "postgres://facetdb_worker:pw@127.0.0.1:5432/app";
+    expect(engine.label(target(), url)).toBe("public.listings");
+    expect(engine.label(target({ schema: "shop" }), url)).toBe("shop.listings");
   });
 
   it("renders a plan with nothing to do as nothing", () => {

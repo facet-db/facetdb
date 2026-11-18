@@ -335,7 +335,7 @@ describe("the engine through the client", () => {
     const engine = createLibsqlEngine({ env: ENV, open: made.open });
     expect(engine.name).toBe("libsql");
     expect(engine.schemes).toEqual(["libsql", "https", "http"]);
-    expect(engine.label(target())).toBe("listings");
+    expect(engine.label(target(), "libsql://app-org.turso.io")).toBe("listings");
     expect(engine.capabilities).toMatchObject({ multipleWorkers: false, pushWakeup: false });
     expect(engine.checks).toBe(LIBSQL_DOCTOR_CHECKS);
 

@@ -184,8 +184,9 @@ async function runLine(
 }
 
 /**
- * Whether this run was its uninstall's last: every run-scoped object of the plan, the jobs and
- * marker collections, is gone because no collection needed it any more.
+ * Whether this run was its uninstall's last: every run-scoped object of the plan, the jobs
+ * collection (`jobs-table`) and the marker collection (`marker`), is gone because no collection
+ * needed it any more. Each is a collection of the database, looked for by its name.
  */
 async function lastOfRun(
   client: AdminClient,
@@ -196,10 +197,7 @@ async function lastOfRun(
     if (object.scope !== "run") {
       continue;
     }
-    if (
-      object.kind !== "collection" ||
-      (await client.listCollections(database, { name: object.name })).length > 0
-    ) {
+    if ((await client.listCollections(database, { name: object.name })).length > 0) {
       return false;
     }
   }

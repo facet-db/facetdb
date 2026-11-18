@@ -1,5 +1,6 @@
 import { EngineRefusal, type EngineTarget, type PlanResult, type Refusal } from "@facetdb/core";
 import { TLS_PARAMETER } from "../sql/index.ts";
+import type { ServerName } from "./catalog.ts";
 import {
   JOBS_TABLE,
   NAME_LIMIT,
@@ -56,17 +57,18 @@ export function workerLoginRefusal(target: EngineTarget): Refusal {
 }
 
 /**
- * Accounts of the worker's name for other hosts. MySQL matches a connection to the account with
- * the most specific host, so one for `localhost` would take the worker's logins from there and run
- * them without FacetDB's rights; install adds no second account of the name.
+ * Accounts of the worker's name for other hosts. MySQL and MariaDB match a connection to the
+ * account with the most specific host, so one for `localhost` would take the worker's logins from
+ * there and run them without FacetDB's rights; install adds no second account of the name. In the
+ * server's name.
  */
-export function workerHostRefusal(hosts: readonly string[]): Refusal {
+export function workerHostRefusal(hosts: readonly string[], server: ServerName): Refusal {
   const others = hosts.filter((host) => host !== WORKER_HOST);
   const accounts = others.map((host) => `'${WORKER_USER}'@'${host}'`).join(", ");
   return {
     code: "worker-host",
     message: hosts.includes(WORKER_HOST)
-      ? `this server has ${accounts} beside ${WORKER_ACCOUNT}; MySQL logs a connection from a matching host in as the more specific account, which has none of the rights FacetDB gives ${WORKER_ACCOUNT}`
+      ? `this server has ${accounts} beside ${WORKER_ACCOUNT}; ${server} logs a connection from a matching host in as the more specific account, which has none of the rights FacetDB gives ${WORKER_ACCOUNT}`
       : `this server has ${accounts} and no ${WORKER_ACCOUNT}; FacetDB's worker login is ${WORKER_ACCOUNT}, and install adds no second account of the name`,
     fix: `drop ${accounts} (drop user ${accounts}) if nothing else uses ${others.length === 1 ? "it" : "them"}, then run facetdb migrate again`,
   };
@@ -126,21 +128,21 @@ export function notATableRefusal(label: string, type: string): Refusal {
 
 /**
  * Side-table mode names its table `facetdb_<table>_answers`, 16 characters more than the table's
- * own name, within MySQL's 64.
+ * own name, within the server's 64 (MySQL's and MariaDB's alike, said in its name).
  */
-export function sideNameTooLongRefusal(table: string, most: number): Refusal {
+export function sideNameTooLongRefusal(table: string, most: number, server: ServerName): Refusal {
   return {
     code: "name-too-long",
-    message: `the table name ${table} has ${table.length} characters; side-table mode keeps the answers in facetdb_<table>_answers, and MySQL allows ${NAME_LIMIT} characters in a name, so a table name can have ${most} at most`,
+    message: `the table name ${table} has ${table.length} characters; side-table mode keeps the answers in facetdb_<table>_answers, and ${server} allows ${NAME_LIMIT} characters in a name, so a table name can have ${most} at most`,
     fix: `rename the table to ${most} characters or fewer, or set storage "inline" for this source, then run facetdb migrate again`,
   };
 }
 
-export function nameTooLongRefusal(table: string): Refusal {
+export function nameTooLongRefusal(table: string, server: ServerName): Refusal {
   const most = NAME_LIMIT - "facetdb__ins".length;
   return {
     code: "name-too-long",
-    message: `the table name ${table} has ${table.length} characters; FacetDB names its triggers facetdb_<table>_new, _ins and _upd, and MySQL allows ${NAME_LIMIT} characters in a name, so a table name can have ${most} at most`,
+    message: `the table name ${table} has ${table.length} characters; FacetDB names its triggers facetdb_<table>_new, _ins and _upd, and ${server} allows ${NAME_LIMIT} characters in a name, so a table name can have ${most} at most`,
     fix: `rename the table to ${most} characters or fewer, then run facetdb migrate again`,
   };
 }

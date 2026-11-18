@@ -109,9 +109,9 @@ describe("the mssql engine", () => {
     expect(engine.name).toBe(ENGINE_NAME);
     expect(engine.name).toBe("mssql");
     expect(engine.schemes).toEqual(["mssql", "sqlserver"]);
-    // A bare name is in dbo, as every plan reads it.
-    expect(engine.label(LISTINGS)).toBe("dbo.listings");
-    expect(engine.label({ ...LISTINGS, schema: "sales" })).toBe("sales.listings");
+    // A bare name is in dbo, as every plan reads it, whatever database the URL names.
+    expect(engine.label(LISTINGS, WORKER_URL)).toBe("dbo.listings");
+    expect(engine.label({ ...LISTINGS, schema: "sales" }, WORKER_URL)).toBe("sales.listings");
     expect(engine.capabilities).toBe(MSSQL_CAPABILITIES);
     expect(engine.checks).toBe(DOCTOR_CHECKS);
     expect(engine.checks.map((check) => check.name)).toEqual([

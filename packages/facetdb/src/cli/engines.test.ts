@@ -360,16 +360,44 @@ describe("the connector: override", () => {
   it("picks the polling engine for a SQL scheme once one is registered", async () => {
     const polling = entry("polling");
     const entries = [...everyEngine, polling.entry];
-    for (const url of [
-      "postgres://db.example.com/app",
-      "mysql://db.example.com/app",
-      "cockroachdb://db.example.com/app",
-    ]) {
+    for (const url of ["postgres://db.example.com/app", "mysql://db.example.com/app"]) {
       expect(await engineFor(entries, url, "polling")).toBe(polling.engine);
     }
     const error = await refusal(engineFor(entries, "mongodb://db.example.com/app", "polling"));
     expect(error.code).toBe("connector-polling");
     expect(error.message).toContain("MongoDB's (mongodb:)");
+  });
+
+  it('resolves "polling" on a scheme whose engine polls already to that engine, with or without a polling engine registered', async () => {
+    const polling = entry("polling");
+    for (const entries of [everyEngine, [...everyEngine, polling.entry]]) {
+      expect(await engineFor(entries, "oracle://u:p@db.example.com:2484/ORCLPDB1", "polling")).toBe(
+        oracle.engine,
+      );
+      expect(
+        await engineFor(entries, "cockroachdb://u:p@db.example.com:26257/app", "polling"),
+      ).toBe(cockroachdb.engine);
+    }
+    expect(polling.loads.count).toBe(0);
+    // A scheme with no polling engine of its own still needs one registered.
+    const error = await refusal(engineFor(everyEngine, "mysql://db.example.com/app", "polling"));
+    expect(error.code).toBe("connector-polling");
+    // The scheme's engine unregistered: refused as without the override.
+    const missing = await refusal(
+      engineFor([postgres.entry], "oracle://u:p@db.example.com:2484/ORCLPDB1", "polling"),
+    );
+    expect(missing.code).toBe("unknown-scheme");
+    expect(missing.message).toContain("no Oracle engine is registered here");
+  });
+
+  it('plans an oracle:// source with connector: "polling" with the Oracle engine main.ts registers', async () => {
+    const { engines } = processDeps();
+    const url = "oracle://facetdb_worker:pw@db.example.com:2484/ORCLPDB1?protocol=tcps";
+    const engine = await engineFor(engines, url, "polling");
+    expect(engine).toBe(await engineFor(engines, url));
+    expect(engine.schemes).toEqual(["oracle"]);
+    const cockroach = "cockroachdb://u:p@db.example.com:26257/app?sslmode=verify-full";
+    expect((await engineFor(engines, cockroach, "polling")).schemes).toEqual(["cockroachdb"]);
   });
 });
 
@@ -394,5 +422,33 @@ describe("a scheme no engine here reads is refused before any connection", () =>
     const none = await refusal(engineFor([], "no scheme at all"));
     expect(none.message).toContain("(it has no scheme, such as postgres://)");
     expect(none.message).toContain("the engines registered here read none");
+  });
+});
+
+describe("every engine main.ts registers names a bare table as its plans do", () => {
+  const bare = {
+    project: { id: "p", name: "p" },
+    source: "listings",
+    table: "listings",
+    storage: "inline",
+    onChange: "reset",
+    questionSet: { questions: [], read: [], model: "jev-1.14.0", thresholds: {} },
+    urlVariable: "LISTINGS_URL",
+  } as const;
+
+  it.each([
+    ["postgres://facetdb_worker:pw@db.example.com/app?sslmode=require", "public.listings"],
+    ["mysql://facetdb_worker:pw@db.example.com:3306/app", "app.listings"],
+    ["mariadb://facetdb_worker:pw@db.example.com:3306/app", "app.listings"],
+    ["mssql://facetdb_worker:pw@db.example.com:1433/app", "dbo.listings"],
+    ["sqlite:///var/lib/app.db", "listings"],
+    ["libsql://app-org.turso.io", "listings"],
+    ["mongodb://facetdb_worker:pw@a.example.com:27017,b.example.com:27017/app", "app.listings"],
+    ["cockroachdb://facetdb_worker:pw@db.example.com:26257/app", "public.listings"],
+    ["oracle://facetdb_worker:pw@db.example.com:2484/ORCLPDB1", "listings"],
+  ])("%s names listings %s", async (url, label) => {
+    const { engines } = processDeps();
+    const engine = await engineFor(engines, url);
+    expect(engine.label(bare, url)).toBe(label);
   });
 });

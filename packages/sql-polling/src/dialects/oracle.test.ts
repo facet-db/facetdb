@@ -215,8 +215,10 @@ describe("Oracle's own rules", () => {
     const engine = pollingEngine(oracleDialect, recordingConnect(recordingClient()), {
       warn: () => undefined,
     });
-    expect(engine.label(target({ table: "LISTINGS" }))).toBe("APP.LISTINGS");
-    expect(engine.label(target({ schema: "app", table: "listings" }))).toBe("app.listings");
+    // The service in the URL's path is no schema: the label ignores it.
+    const url = "oracle://facetdb_worker:pw@127.0.0.1:1521/FREEPDB1";
+    expect(engine.label(target({ table: "LISTINGS" }), url)).toBe("APP.LISTINGS");
+    expect(engine.label(target({ schema: "app", table: "listings" }), url)).toBe("app.listings");
   });
 
   it("writes a noul's answer and the reviewed flag as 1 or 0, and reads them back as booleans", async () => {

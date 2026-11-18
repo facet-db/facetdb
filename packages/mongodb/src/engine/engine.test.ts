@@ -105,9 +105,14 @@ describe("the MongoDB engine", () => {
     const engine = createMongoEngine();
     expect(engine.name).toBe(ENGINE_NAME);
     expect(engine.schemes).toEqual(["mongodb", "mongodb+srv"]);
-    // The collection; its database is the connection string's unless the config names one.
-    expect(engine.label(target)).toBe("tickets");
-    expect(engine.label({ ...target, schema: "app" })).toBe("app.tickets");
+    // The collection in the connection string's database unless the config names one, as the plans
+    // name it; a replica set's several hosts read too; no database leaves it bare.
+    expect(engine.label(target, URL)).toBe("app.tickets");
+    expect(engine.label({ ...target, schema: "support" }, URL)).toBe("support.tickets");
+    expect(engine.label(target, "mongodb://a:27017,b:27017/shop?replicaSet=rs0")).toBe(
+      "shop.tickets",
+    );
+    expect(engine.label(target, "mongodb://127.0.0.1:27017/")).toBe("tickets");
     expect(engine.capabilities).toEqual(MONGO_CAPABILITIES);
     expect(engine.capabilities).toMatchObject({
       pushWakeup: true,

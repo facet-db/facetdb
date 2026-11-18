@@ -426,14 +426,17 @@ export type DatabaseEngine = {
   /** The checks `doctor` runs, in order, and what each looks at: `doctor --dry-run` lists them. */
   readonly checks: readonly { readonly name: string; readonly looksAt: string }[];
   /**
-   * The source's table as the engine's words name it, from the target alone: what the CLI's headers
-   * and confirmations say. The schema as the config writes it where it names one; otherwise the
-   * engine's own default where it has a fixed one (`public.listings` on Postgres and CockroachDB,
-   * `dbo.listings` on SQL Server), and the bare name where the default is the connection's
-   * database, which the target does not carry (`listings` on MySQL and MongoDB), or where there is
-   * no schema (SQLite, libSQL). Nothing connects.
+   * The source's table as the engine's words name it: what every command's headers and
+   * confirmations say (migrate, uninstall, preview, backfill, explain, dev). `url` is a connection
+   * string of the source's database: the source's own, or the admin one migrate and uninstall plan
+   * with, so the label agrees with the plan's object names. The schema as the config writes it
+   * where it names one; otherwise the engine's own default where it has a fixed one
+   * (`public.listings` on Postgres and CockroachDB, `dbo.listings` on SQL Server), the database
+   * `url`'s path names where the default is the connection's database (`app.listings` on MySQL and
+   * MongoDB; the bare name when the path names none), and the bare name where there is no schema
+   * (SQLite, libSQL). Nothing connects; an engine with a fixed default ignores `url`.
    */
-  label(target: EngineTarget): string;
+  label(target: EngineTarget, url: string): string;
   /**
    * The user and password a connection string logs in with, read as this engine's driver reads it,
    * each decoded and empty when the string has none; undefined when the driver would not take the

@@ -61,6 +61,8 @@ describe("planUninstall", () => {
       { kind: "trigger", name: "facetdb_listings_ins", of: "listings", scope: "source" },
       { kind: "trigger", name: "facetdb_listings_upd", of: "listings", scope: "source" },
       { kind: "jobs-table", name: "facetdb_jobs", of: "listings", scope: "source" },
+      // Its row in the marker table, as MySQL and SQL Server say theirs.
+      { kind: "marker", name: "facetdb_table_owners", of: "listings", scope: "source" },
       { kind: "jobs-table", name: "facetdb_jobs", scope: "run" },
       { kind: "marker", name: "facetdb_table_owners", scope: "run" },
     ]);
@@ -243,6 +245,15 @@ describe("planUninstall", () => {
     // The queue is empty: only the other table's trigger keeps it.
     const uninstall = planned(await plan());
     expect(uninstall.removes.filter((object) => object.scope === "run")).toEqual([]);
+    // The table's own row in the marks goes while the marker table stays: the words can say "its
+    // table-ownership mark" as on MySQL and SQL Server.
+    expect(uninstall.removes).toContainEqual({
+      kind: "marker",
+      name: "facetdb_table_owners",
+      of: "listings",
+      scope: "source",
+    });
+    expect(uninstall.statements.filter((one) => one.purpose === "marker")).toHaveLength(1);
     expect(uninstall.keeps).toEqual([
       {
         kind: "jobs-table",

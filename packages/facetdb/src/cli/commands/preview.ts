@@ -9,13 +9,13 @@ import {
   type ProviderRequest,
   type Question,
   type ReadRow,
+  type RecordKey,
   type RecordStatus,
   resolveThresholds,
   shouldSkip,
   statusOf,
 } from "@facetdb/core";
-import type { ProjectConfig } from "../../config/index.ts";
-import { engineFor, openConnector } from "../engines.ts";
+import { keyWords, openConnector } from "../engines.ts";
 import {
   type CliDeps,
   CliError,
@@ -27,12 +27,12 @@ import {
 import { storeSharedFor } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
-  engineTarget,
   loadProjectConfig,
-  projectRef,
   questionSetOf,
+  reachedOf,
+  type SourceTable,
   singleTarget,
-  sourceUrlOf,
+  sourceTable,
   type TableTarget,
 } from "./database.ts";
 
@@ -56,7 +56,10 @@ const PREVIEW_MAX_LIMIT = 100;
 /** Requests in flight at once: a preview is a handful of rows, not a worker. */
 const PREVIEW_IN_FLIGHT = 4;
 
-/** One row's preview: what the model said for each question and the status that would follow. */
+/**
+ * One row's preview: what the model said for each question and the status that would follow. Its
+ * key as the user writes it (`keyWords`): MongoDB's `65f1…`, never the stored `oid:65f1…`.
+ */
 type PreviewedRow =
   | { readonly key: string; readonly kind: "skipped"; readonly why: string }
   | {
@@ -124,28 +127,23 @@ function decisionWords(decision: Decision): string {
  */
 async function recentRows(
   deps: CliDeps,
-  config: ProjectConfig,
   target: TableTarget,
+  table: SourceTable,
   limit: number,
   allowInsecure: boolean,
 ): Promise<readonly ReadRow[]> {
   const { source } = target;
-  const url = sourceUrlOf(
+  const { engine, url } = reachedOf(
+    table,
     source,
     `the connection string of the database that holds ${target.table}`,
   );
-  const engine = await engineFor(deps.engines, url, source.connector);
-  const connector = await openConnector(
-    engine,
-    engineTarget(config, target, projectRef(deps.projectDir)),
-    url,
-    {
-      clock: deps.clock,
-      allowInsecure,
-      storeShared: storeSharedFor(deps.env, source),
-      workerId: `preview-${randomUUID()}`,
-    },
-  );
+  const connector = await openConnector(engine, table.own, url, {
+    clock: deps.clock,
+    allowInsecure,
+    storeShared: storeSharedFor(deps.env, source),
+    workerId: `preview-${randomUUID()}`,
+  });
   try {
     return (await connector.scan(null)).rows.slice(0, limit);
   } finally {
@@ -188,7 +186,9 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
     const target = singleTarget(config, options.source);
     const source = target.source;
     const questionSet = questionSetOf(config, source);
-    const name = `${target.schema}.${target.table}`;
+    // The table as its engine names it, as migrate's header does.
+    const table = await sourceTable(deps, config, target);
+    const name = table.label;
     if (options.dryRun) {
       print(
         `Dry run: would read the ${limit} most recent rows of ${name} (source ${source.name}) and ask the model ${questionSet.questions.length} question${questionSet.questions.length === 1 ? "" : "s"} about each. Nothing would be written, and nothing was asked.`,
@@ -196,7 +196,10 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       return { ok: true, dryRun: true, source: source.name, table: name, rows: limit };
     }
 
-    const rows = await recentRows(deps, config, target, limit, options.allowInsecure === true);
+    const rows = await recentRows(deps, target, table, limit, options.allowInsecure === true);
+    // A key as the user writes it: MongoDB's `65f1…` for `oid:65f1…`, `1` for `n:1`.
+    const keyText = table.reached?.engine.keyText;
+    const shown = (key: RecordKey) => keyWords(keyText, key);
     if (rows.length === 0) {
       print(`${name} has no rows yet, so there is nothing to preview.`);
       return { ok: true, source: source.name, table: name, rows: [] };
@@ -206,10 +209,11 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       rows,
       PREVIEW_IN_FLIGHT,
       async (row): Promise<PreviewedRow> => {
+        const key = shown(row.key);
         const skip = shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded });
         if (skip.skip) {
           return {
-            key: row.key,
+            key,
             kind: "skipped",
             why:
               skip.reason === "filtered-out"
@@ -225,7 +229,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
         if (
           checkStateSize(estimateRequestTokens(request), source.maxStateTokens).kind === "refuse"
         ) {
-          return { key: row.key, kind: "skipped", why: "too large to send to the model" };
+          return { key, kind: "skipped", why: "too large to send to the model" };
         }
         let response: Awaited<ReturnType<typeof provider.ask>>;
         try {
@@ -233,7 +237,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
         } catch (cause) {
           throw new CliError(
             "model-call",
-            `the model did not answer for row ${row.key}: ${cause instanceof Error ? cause.message : String(cause)}`,
+            `the model did not answer for row ${key}: ${cause instanceof Error ? cause.message : String(cause)}`,
             "run facetdb doctor to check the model key and the connection, then run preview again; nothing was written",
           );
         }
@@ -243,7 +247,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
           if (answer === undefined) {
             throw new CliError(
               "model-call",
-              `the model's response has no answer for "${question.name}" (row ${row.key})`,
+              `the model's response has no answer for "${question.name}" (row ${key})`,
               "run preview again; if it repeats, run facetdb doctor",
             );
           }
@@ -259,7 +263,7 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
             decision: decisionWords(decision),
           };
         });
-        return { key: row.key, kind: "answered", status: statusOf(decisions), lines };
+        return { key, kind: "answered", status: statusOf(decisions), lines };
       },
     );
 

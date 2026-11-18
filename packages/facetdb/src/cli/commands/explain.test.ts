@@ -509,3 +509,63 @@ describe("facetdb explain on an engine whose keys carry a type tag", () => {
     expect(result.stdout).not.toContain("primary key, as text");
   });
 });
+
+describe("facetdb explain names the table as its engine does", () => {
+  const MYSQL_URL = "mysql://facetdb_worker:worker-password@localhost:3306/app";
+
+  /** A MySQL-like engine whose connector cannot read the record now: its words name the table. */
+  class UnreadableEngine extends FakeEngine {
+    override async open(...args: Parameters<FakeEngine["open"]>) {
+      const connector = await super.open(...args);
+      connector.current = () => Promise.reject(new Error("the connection was reset"));
+      return connector;
+    }
+  }
+
+  it("says the table it could not read as migrate's header does, never public.", async () => {
+    const config: ProjectConfig = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: MYSQL_URL,
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul(FIRST_WORDING) },
+        },
+      ],
+    });
+    await store.questionSets.record(LOG_ID, setOf(config));
+    await store.log(LOG_ID).appendAnswer({
+      kind: "answer",
+      key: "r1",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "hash-r1",
+      answers: { is_scam: { type: "noul", probability: 0.03 } },
+      usage: { inputTokens: 100, outputTokens: 5 },
+      at: new Date("2026-11-04T09:00:00Z"),
+    });
+    const engine = new UnreadableEngine({
+      name: "mysql",
+      schemes: ["mysql", "mariadb"],
+      database: new FakeDatabase({ fields: ["title"] }),
+      // MySQL's rule: a bare table is in the connection string's database.
+      label: (target, url) => `${target.schema ?? new URL(url).pathname.slice(1)}.${target.table}`,
+    });
+
+    const result = await run(
+      ["explain", "listings", "r1"],
+      config,
+      { DATABASE_URL: "postgres://localhost:5432/app" },
+      world.connect,
+      [lazyEngine("mysql", () => Promise.resolve(engine))],
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "the record's current state could not be read from app.listings: the connection was reset",
+    );
+    expect(result.stderr).not.toContain("public.");
+  });
+});

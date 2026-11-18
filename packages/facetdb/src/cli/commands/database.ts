@@ -177,16 +177,65 @@ export function engineTarget(
   };
 }
 
+/** A table source as a command that reads it holds it: its engine, target, URL and its table's name. */
+export type SourceTable = {
+  readonly own: EngineTarget;
+  /** The source's engine and connection string; absent when the string is unset here. */
+  readonly reached?: { readonly engine: DatabaseEngine; readonly url: string };
+  /**
+   * The table as its engine names it (`DatabaseEngine.label`), as migrate's header does:
+   * `public.listings` on Postgres, `app.listings` on MySQL. With the connection string unset here,
+   * the table as the config writes it: no engine says what its default would be.
+   */
+  readonly label: string;
+};
+
+/**
+ * A table source's engine, by its connection string's scheme or its `connector:` (nothing
+ * connects, and nothing judges the string yet), and the name every line of the command gives the
+ * table: what preview, backfill and explain print.
+ */
+export async function sourceTable(
+  deps: Pick<CliDeps, "engines" | "projectDir">,
+  config: ProjectConfig,
+  target: TableTarget,
+): Promise<SourceTable> {
+  const own = engineTarget(config, target, projectRef(deps.projectDir));
+  const url = target.source.database;
+  if (url === undefined || url === "") {
+    return { own, label: target.source.table ?? target.table };
+  }
+  const engine = await engineFor(deps.engines, url, target.source.connector);
+  return { own, reached: { engine, url }, label: engine.label(own, url) };
+}
+
+/** A source's unset connection string, with the fix: `what` it should be set to. */
+function noUrlError(source: SourceConfig, what: string): CliError {
+  return new CliError(
+    "database-url",
+    `the source "${source.name}" has no connection string`,
+    `set ${variableOf(source)} to ${what}`,
+  );
+}
+
 /** The source's connection string, or the fix when the config left it unset. */
 export function sourceUrlOf(source: SourceConfig, what: string): string {
   if (source.database === undefined || source.database === "") {
-    throw new CliError(
-      "database-url",
-      `the source "${source.name}" has no connection string`,
-      `set ${variableOf(source)} to ${what}`,
-    );
+    throw noUrlError(source, what);
   }
   return source.database;
+}
+
+/** The engine and connection string of a table source, or the fix when the string is unset. */
+export function reachedOf(
+  table: SourceTable,
+  source: SourceConfig,
+  what: string,
+): NonNullable<SourceTable["reached"]> {
+  if (table.reached === undefined) {
+    throw noUrlError(source, what);
+  }
+  return table.reached;
 }
 
 /**

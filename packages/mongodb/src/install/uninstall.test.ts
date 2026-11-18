@@ -62,9 +62,20 @@ const OWN = [
     scope: "source",
     noun: "role",
   },
+  // Its marker document: "its table-ownership mark", as on every other engine.
+  { kind: "marker", name: "facetdb_meta", of: "app.listings", scope: "source" },
 ];
 
 const SHARED = ["facetdb_jobs", "facetdb_meta"];
+
+/**
+ * The database's queue and marks as every other engine's kinds name them, the `collection` kind
+ * left to the user's collections.
+ */
+const shared = (reason: string) => [
+  { kind: "jobs-table", name: "facetdb_jobs", scope: "run", reason },
+  { kind: "marker", name: "facetdb_meta", scope: "run", reason },
+];
 
 const users = target({ table: "users", source: "users" });
 
@@ -93,15 +104,8 @@ describe("the uninstall plan", () => {
     ]);
     expect(plan.transactional).toBe(false);
     expect(plan.confirm).toEqual({ kind: "project", name: PROJECT.name });
-    expect(plan.removes).toEqual([
-      ...OWN,
-      ...SHARED.map((name) => ({
-        kind: "collection",
-        name,
-        scope: "run",
-        reason: "no collection uses it any more",
-      })),
-    ]);
+    expect(plan.removes).toEqual([...OWN, ...shared("no collection uses it any more")]);
+    expect(plan.removes.some((object) => object.kind === "collection")).toBe(false);
     expect(plan.keeps).toEqual([LOGIN_KEPT]);
     expect(plan.notes).toEqual([
       "Removing the facetdb field writes every document of app.listings that has one, an update each in the oplog: on a large collection, run it when the replica set can take the load.",
@@ -147,15 +151,7 @@ describe("the uninstall plan", () => {
     const plan = planOf(await planUninstall(server.connect, target(), ADMIN, options));
     expect(plan.statements.map((statement) => statement.text)).toEqual(LINES);
     expect(plan.removes).toEqual(OWN);
-    expect(plan.keeps).toEqual([
-      ...SHARED.map((name) => ({
-        kind: "collection",
-        name,
-        scope: "run",
-        reason: "app.users is still installed",
-      })),
-      LOGIN_KEPT,
-    ]);
+    expect(plan.keeps).toEqual([...shared("app.users is still installed"), LOGIN_KEPT]);
     const result = await runToEnd(server, plan);
     // The guard found the other collection's marker: nothing shared was dropped.
     expect(result.removed).toEqual(OWN);

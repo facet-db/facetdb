@@ -18,6 +18,7 @@ import {
   PRUNE_RERUN_NOTE,
   REFUSED_FIX,
   SETTINGS,
+  scriptHeader,
   WORKER_ACCOUNT,
 } from "./index.ts";
 
@@ -121,6 +122,10 @@ describe("planPrune", () => {
     expect(mariadb.notes).toEqual([
       "MariaDB runs these statements one by one, with no transaction around them: if one fails, the ones before it stay done, and running facetdb migrate --prune again completes it.",
     ]);
+    // And its script's header, as the note does; MySQL's stays MySQL's.
+    const { render } = createMysqlInstaller({ connect: recordingDriver().connect });
+    expect(render(mariadb).startsWith(`${scriptHeader("MariaDB")}\n\n`)).toBe(true);
+    expect(render(plan).startsWith(`${scriptHeader("MySQL")}\n\n`)).toBe(true);
   });
 
   it("drops the columns a question had under its old type, with why", async () => {

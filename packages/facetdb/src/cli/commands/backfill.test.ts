@@ -4,11 +4,18 @@ import {
   type BackfillProgress,
   type Connector,
   type CursorStore,
+  type EngineTarget,
   type QuestionSet,
   type RecordKey,
   stateHash,
 } from "@facetdb/core";
-import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeConnector,
+  FakeDatabase,
+  FakeDecisionLog,
+  FakeEngine,
+} from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -19,7 +26,8 @@ import {
   type SourceConfig,
 } from "../../config/index.ts";
 import { wireBackfillDryRun } from "../backfill-wiring.ts";
-import { runInProcess } from "../program.ts";
+import { lazyEngine } from "../engines.ts";
+import { type EngineEntry, runInProcess } from "../program.ts";
 import { postgresEngines, type SqlConnect } from "../testing.ts";
 import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
@@ -163,7 +171,11 @@ function run(
   argv: readonly string[],
   provider: FakeProvider,
   answers: readonly string[] = [],
-  setup: { readonly config?: ProjectConfig; readonly env?: Record<string, string> } = {},
+  setup: {
+    readonly config?: ProjectConfig;
+    readonly env?: Record<string, string>;
+    readonly engines?: readonly EngineEntry[];
+  } = {},
 ) {
   return runInProcess(
     argv,
@@ -172,7 +184,7 @@ function run(
       env: setup.env ?? {},
       loadConfig: () => Promise.resolve(setup.config ?? config),
       // The source's engine says whether its URL may be used, and connects to nothing for that.
-      engines: postgresEngines(noDatabase),
+      engines: setup.engines ?? postgresEngines(noDatabase),
       connect: noDatabase,
       // The same split the composition root makes: a dry run is wired without any store
       // (`world.log` and `world.cursors` stand for the store and are not handed to it).
@@ -445,5 +457,71 @@ describe("facetdb backfill", () => {
 
     expect(result.code).toBe(2);
     expect(result.stderr).toContain("--pace");
+  });
+});
+
+describe("facetdb backfill names the table as its engine does", () => {
+  /** MySQL's and MongoDB's rule: a bare table is in the connection string's database. */
+  const inUrlDatabase = (target: EngineTarget, url: string) =>
+    `${target.schema ?? new URL(url).pathname.slice(1)}.${target.table}`;
+
+  /** The fixture's source on another engine's connection string. */
+  function on(url: string): ProjectConfig {
+    return { ...config, sources: config.sources.map((one) => ({ ...one, database: url })) };
+  }
+
+  it("says public.listings on Postgres, as it always has", async () => {
+    const result = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT));
+
+    expect(result.stdout).toContain(
+      "Backfill of public.listings (source listings), newest records first:",
+    );
+  });
+
+  it("says app.listings on a MySQL source, as migrate's header does, never public.", async () => {
+    const mysql = new FakeEngine({
+      name: "mysql",
+      schemes: ["mysql", "mariadb"],
+      label: inUrlDatabase,
+    });
+
+    const result = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT), [], {
+      config: on("mysql://facetdb_worker:pw@localhost:3306/app"),
+      engines: [lazyEngine("mysql", () => Promise.resolve(mysql))],
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "Backfill of app.listings (source listings), newest records first:",
+    );
+    expect(result.stdout).not.toContain("public.");
+  });
+
+  it("says a MongoDB collection in its database, its tagged keys never on the screen", async () => {
+    const mongo = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      label: inUrlDatabase,
+      keyText: {
+        toText: (key) => key.replace(/^(?:oid|n):/, ""),
+        fromText: (text) => (/^[0-9]+$/.test(text) ? `n:${text}` : `oid:${text}`),
+        form: "the document's _id as you write it",
+      },
+    });
+    // The documents behind the connector carry MongoDB's tagged keys.
+    for (const key of ["n:1", "oid:65f1a2b3c4d5e6f708192a3b"]) {
+      world.db.edit(key, { id: key, title: `Listing ${key}` });
+    }
+
+    const result = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT), [], {
+      config: on("mongodb://facetdb_worker:pw@localhost:27017/app"),
+      engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Backfill of app.listings (source listings)");
+    expect(result.stdout).toContain("8 records to answer");
+    expect(result.stdout).not.toContain("oid:");
+    expect(result.stdout).not.toContain("public.");
   });
 });

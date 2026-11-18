@@ -17,7 +17,7 @@ import {
   renderScript,
   runPlan,
 } from "../install/index.ts";
-import { parseConnectionString, subjectOf } from "../urls/index.ts";
+import { databaseOf, parseConnectionString, subjectOf } from "../urls/index.ts";
 import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
 
 /**
@@ -108,10 +108,12 @@ export function createMongoEngine(options: MongoEngineOptions = {}): DatabaseEng
     capabilities: MONGO_CAPABILITIES,
     keyText: MONGO_KEY_TEXT,
     checks: DOCTOR_CHECKS,
-    // The collection; a bare name is in the connection string's database, which the target does
-    // not carry.
-    label: (target) =>
-      target.schema === undefined ? target.table : `${target.schema}.${target.table}`,
+    // The collection in its database: the config's, else the connection string's, as the plans name
+    // it (`sourceDatabase`).
+    label: (target, url) => {
+      const database = target.schema ?? databaseOf(url);
+      return database === undefined ? target.table : `${database}.${target.table}`;
+    },
     // A replica set's string names several hosts, which `new URL` refuses: the login is read as the
     // driver splits the string.
     login: (url) => {

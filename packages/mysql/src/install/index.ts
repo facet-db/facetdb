@@ -53,6 +53,7 @@ export {
   renderScript,
   SCRIPT_HEADER,
   SETTINGS,
+  scriptHeader,
   type TriggerDefinition,
   type TriggerNames,
   triggerDefinitions,

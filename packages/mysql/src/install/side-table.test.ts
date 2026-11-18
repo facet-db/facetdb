@@ -29,8 +29,10 @@ import {
   normalizedDefinition,
   OWNED_MARK,
   REFUSED_FIX,
+  SCRIPT_HEADER,
   SETTINGS,
   SIDE_TABLE_NAME_LIMIT,
+  scriptHeader,
   storedViewDefinition,
   WORKER_ACCOUNT,
 } from "./index.ts";
@@ -121,7 +123,7 @@ describe("planInstall in side-table mode: the listings example", () => {
     expect(render(plan)).toBe(await readFile(FIXTURE, "utf8"));
   });
 
-  it("is one text for MySQL and MariaDB", async () => {
+  it("is one text for MySQL and MariaDB, under a header in the server's name", async () => {
     const mysql = planOf(await install(freshListings()));
     const mariadb = planOf(
       await install({
@@ -130,7 +132,9 @@ describe("planInstall in side-table mode: the listings example", () => {
         sqlMode: MARIADB_SQL_MODE,
       }),
     );
-    expect(render(mariadb)).toBe(render(mysql));
+    expect(texts(mariadb)).toEqual(texts(mysql));
+    expect(render(mariadb)).toBe(render(mysql).replace(SCRIPT_HEADER, scriptHeader("MariaDB")));
+    expect(render(mariadb).startsWith("-- MariaDB runs this script")).toBe(true);
   });
 
   it("adds no column to the table and writes none of its rows: it names the table only to reference, read, grant and trigger on it", async () => {

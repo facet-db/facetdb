@@ -37,6 +37,11 @@ export type KnownDatabase = {
   readonly workerUrl: string;
   /** Whether its trigger engine keeps answers in a side table (`storage: "side-table"`). */
   readonly sideTable: boolean;
+  /**
+   * Whether the engine its scheme picks is a polling engine itself (CockroachDB, Oracle), so
+   * `connector: "polling"` names the engine the scheme picks already.
+   */
+  readonly polls: boolean;
 };
 
 /** Every database FacetDB connects to: its engine's key and schemes. */
@@ -47,6 +52,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["postgres", "postgresql"],
     sql: true,
     sideTable: true,
+    polls: false,
     workerUrl:
       "postgres://facetdb_worker:<a long random password>@<host>:5432/<database>?sslmode=require",
   },
@@ -56,6 +62,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["mysql", "mariadb"],
     sql: true,
     sideTable: true,
+    polls: false,
     workerUrl:
       'mysql://facetdb_worker:<a long random password>@<host>:3306/<database>?ssl={"rejectUnauthorized":true}',
   },
@@ -65,6 +72,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["mssql", "sqlserver"],
     sql: true,
     sideTable: true,
+    polls: false,
     workerUrl: "mssql://facetdb_worker:<a long random password>@<host>:1433/<database>",
   },
   {
@@ -73,6 +81,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["sqlite", "file"],
     sql: true,
     sideTable: false,
+    polls: false,
     workerUrl: "sqlite:///absolute/path/to/app.db",
   },
   {
@@ -81,6 +90,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["libsql"],
     sql: true,
     sideTable: false,
+    polls: false,
     workerUrl: "libsql://<database>-<organization>.turso.io",
   },
   {
@@ -89,6 +99,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["mongodb", "mongodb+srv"],
     sql: false,
     sideTable: false,
+    polls: false,
     workerUrl:
       "mongodb://facetdb_worker:<a long random password>@<host>:27017/<database>?replicaSet=rs0",
   },
@@ -98,6 +109,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["cockroachdb"],
     sql: true,
     sideTable: false,
+    polls: true,
     workerUrl:
       "cockroachdb://facetdb_worker:<a long random password>@<host>:26257/<database>?sslmode=verify-full",
   },
@@ -107,6 +119,7 @@ const DATABASES: readonly KnownDatabase[] = [
     schemes: ["oracle"],
     sql: true,
     sideTable: false,
+    polls: true,
     workerUrl:
       "oracle://facetdb_worker:<a long random password>@<host>:2484/<service>?protocol=tcps",
   },
@@ -201,9 +214,11 @@ export function lazyEngine(key: string, load: () => Promise<DatabaseEngine>): En
 
 /**
  * The engine for a source's connection string, or the one its `connector:` override picks:
- * `"polling"` for a SQL scheme, from the polling engine. Only that engine is loaded. Refused before
- * anything connects: an unknown scheme, a database whose engine is not registered here, polling on
- * a database that is not SQL, or polling where no polling engine is registered.
+ * `"polling"` for a SQL scheme, from the polling engine; on a scheme whose engine polls already
+ * (CockroachDB, Oracle), that engine, as with no override. Only that engine is loaded. Refused
+ * before anything connects: an unknown scheme, a database whose engine is not registered here,
+ * polling on a database that is not SQL, or polling where no polling engine is registered and the
+ * scheme's own engine is no polling engine.
  */
 export async function engineFor(
   entries: readonly EngineEntry[],
@@ -212,7 +227,7 @@ export async function engineFor(
 ): Promise<DatabaseEngine> {
   const scheme = schemeOf(url);
   const database = databaseOf(url);
-  if (override === "polling") {
+  if (override === "polling" && database?.polls !== true) {
     if (database !== undefined && !database.sql) {
       throw new CliError(
         "connector-polling",

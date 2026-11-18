@@ -4,16 +4,10 @@ import {
   createBackfill,
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
-import { engineFor, requireUsableUrl } from "../engines.ts";
+import { requireUsableUrl } from "../engines.ts";
 import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
-import {
-  ALLOW_INSECURE_OPTION,
-  engineTarget,
-  loadProjectConfig,
-  projectRef,
-  singleTarget,
-} from "./database.ts";
+import { ALLOW_INSECURE_OPTION, loadProjectConfig, singleTarget, sourceTable } from "./database.ts";
 
 /**
  * `facetdb backfill`: answers every existing row of a source, newest first, at a pace, resumable.
@@ -125,18 +119,14 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       options.question,
       source.questions.map((question) => question.name),
     );
-    const name = `${target.schema}.${target.table}`;
+    // The table as its engine names it, as migrate's header does.
+    const table = await sourceTable(deps, config, target);
+    const name = table.label;
     // Before anything connects, a dry run included (it reads the source): no password in the clear,
     // by the source's engine for its connection string and by the store door for the store's.
     const allowInsecure = options.allowInsecure === true;
-    if (source.database !== undefined && source.database !== "") {
-      const engine = await engineFor(deps.engines, source.database, source.connector);
-      requireUsableUrl(
-        engine,
-        engineTarget(config, target, projectRef(deps.projectDir)),
-        source.database,
-        allowInsecure,
-      );
+    if (table.reached !== undefined) {
+      requireUsableUrl(table.reached.engine, table.own, table.reached.url, allowInsecure);
     }
     const storeUrl = storeUrlOf(deps.env);
     if (!options.dryRun && storeUrl !== undefined) {

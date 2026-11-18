@@ -273,7 +273,12 @@ function holds(rights: WorkerRights, table: string, privilege: string, column?: 
 type Keyed = { readonly key: CatalogColumn };
 
 /** The table as install needs it, or why install must not touch it. */
-function tableRefusal(target: EngineTarget, catalog: Catalog, label: string): Refusal | Keyed {
+function tableRefusal(
+  target: EngineTarget,
+  catalog: Catalog,
+  label: string,
+  server: ServerName,
+): Refusal | Keyed {
   if (catalog.tableType === undefined) {
     return installRefused(
       `${label} does not exist; FacetDB adds columns to a table, it does not create one.`,
@@ -283,10 +288,10 @@ function tableRefusal(target: EngineTarget, catalog: Catalog, label: string): Re
     return notATableRefusal(label, catalog.tableType);
   }
   if (target.storage === "side-table" && target.table.length > SIDE_TABLE_NAME_LIMIT) {
-    return sideNameTooLongRefusal(target.table, SIDE_TABLE_NAME_LIMIT);
+    return sideNameTooLongRefusal(target.table, SIDE_TABLE_NAME_LIMIT, server);
   }
   if (target.table.length > NAME_LIMIT - "facetdb__ins".length) {
-    return nameTooLongRefusal(target.table);
+    return nameTooLongRefusal(target.table, server);
   }
   const [name, ...rest] = catalog.primaryKey;
   if (name === undefined) {
@@ -462,7 +467,7 @@ function installRefusal(
   if (!loginExists && isMariaDb(session) && !modes.includes("NO_AUTO_CREATE_USER")) {
     return autoCreateUserRefusal();
   }
-  const keyed = tableRefusal(target, catalog, label);
+  const keyed = tableRefusal(target, catalog, label, serverNameOf(session));
   if (!("key" in keyed)) {
     return keyed;
   }
@@ -819,7 +824,9 @@ export async function planInstall(
       // anything else is read, as on Postgres.
       const hosts = await workerHosts(query);
       if (hosts.some((host) => host !== WORKER_HOST)) {
-        return { ok: false, refusal: workerHostRefusal(hosts) };
+        // In the server's name, read only for the refusal: a plan reads it next anyway.
+        const server = serverNameOf(await readSession(query));
+        return { ok: false, refusal: workerHostRefusal(hosts, server) };
       }
       const loginExists = hosts.includes(WORKER_HOST);
       if (!loginExists && options.workerPassword === undefined) {

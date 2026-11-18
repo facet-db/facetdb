@@ -266,6 +266,44 @@ describe("the words of every engine's plan", () => {
     ).toEqual(["the role facetdb_worker_listings on admin, left in place (made by hand in admin)"]);
   });
 
+  it("says MongoDB's queue and marks, and SQLite's mark, in every other engine's words", () => {
+    const mongoOwn: readonly EngineObject[] = [
+      { kind: "field", name: "facetdb", of: "app.listings", scope: "source" },
+      { kind: "jobs-table", name: "facetdb_jobs", of: "app.listings", scope: "source" },
+      { kind: "marker", name: "facetdb_meta", of: "app.listings", scope: "source" },
+    ];
+    const last = "no collection uses it any more";
+    const removes: readonly EngineObject[] = [
+      ...mongoOwn,
+      { kind: "jobs-table", name: "facetdb_jobs", scope: "run", reason: last },
+      { kind: "marker", name: "facetdb_meta", scope: "run", reason: last },
+    ];
+    expect(once([...tableRemoved(removes), ...runRemoved(removes)])).toEqual([
+      "from app.listings: 1 FacetDB field (facetdb), its queued jobs and its table-ownership mark",
+      "the jobs table and the table-ownership marks (facetdb_jobs, facetdb_meta)",
+    ]);
+    const still = "app.users is still installed";
+    expect(
+      runKept([
+        { kind: "jobs-table", name: "facetdb_jobs", scope: "run", reason: still },
+        { kind: "marker", name: "facetdb_meta", scope: "run", reason: still },
+      ]),
+    ).toEqual([
+      "the jobs table (app.users is still installed)",
+      "the table-ownership marks (facetdb_meta), because app.users is still installed",
+    ]);
+    // SQLite's row in a marker table another table keeps.
+    expect(
+      tableRemoved([
+        { kind: "column", name: "is_scam", of: "listings", scope: "source" },
+        { kind: "jobs-table", name: "facetdb_jobs", of: "listings", scope: "source" },
+        { kind: "marker", name: "facetdb_table_owners", of: "listings", scope: "source" },
+      ]),
+    ).toEqual([
+      "from listings: 1 FacetDB column (is_scam), its queued jobs and its table-ownership mark",
+    ]);
+  });
+
   it("says the marks a run keeps by the engine's name", () => {
     expect(
       runKept([

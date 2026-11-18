@@ -35,6 +35,7 @@ import {
   REFUSED_FIX,
   SCRIPT_HEADER,
   SETTINGS,
+  scriptHeader,
   WORKER_ACCOUNT,
 } from "./index.ts";
 
@@ -149,6 +150,28 @@ describe("planInstall: the listings example", () => {
       "MariaDB does not tie a trigger to the columns it names: renaming or dropping the key or a state column of app.listings makes the application's writes on it fail with error 1054 until facetdb migrate runs again.",
     ]);
     expect(plan.notes.join(" ")).not.toContain("MySQL");
+  });
+
+  it("heads a MariaDB dry run's script with MariaDB and its client, the statements MySQL's", async () => {
+    const mysql = planOf(await planned(freshListings()));
+    const mariadb = planOf(
+      await planned({
+        ...freshListings(),
+        version: "10.6.20-MariaDB-ubu2204",
+        sqlMode: MARIADB_SQL_MODE,
+      }),
+    );
+    const script = render(mariadb);
+    expect(script.split("\n")[0]).toBe(
+      "-- MariaDB runs this script statement by statement, with no transaction around it: if it stops",
+    );
+    expect(script.startsWith(`${scriptHeader("MariaDB")}\n\n`)).toBe(true);
+    expect(scriptHeader("MariaDB")).toContain("give it to mariadb --batch");
+    expect(scriptHeader("MariaDB")).not.toContain("MySQL");
+    expect(texts(mariadb)).toEqual(texts(mysql));
+    // MySQL's header unchanged, byte for byte with the fixture.
+    expect(render(mysql).startsWith(`${SCRIPT_HEADER}\n\n`)).toBe(true);
+    expect(scriptHeader("MySQL")).toBe(SCRIPT_HEADER);
   });
 
   it("tags every statement as the source's, with its purpose, in the order the script runs", async () => {
@@ -665,6 +688,39 @@ describe("planInstall refuses, says why and what to do, and changes nothing", ()
         "this server has 'facetdb_worker'@'10.0.0.%' and no 'facetdb_worker'@'%'; FacetDB's worker login is 'facetdb_worker'@'%', and install adds no second account of the name",
     });
     readOnly(beside.driver);
+  });
+
+  it("names MariaDB in the refusals that name the server, on a MariaDB", async () => {
+    const mariadb = {
+      ...freshListings(),
+      version: "10.6.20-MariaDB-ubu2204",
+      sqlMode: MARIADB_SQL_MODE,
+    };
+    const beside = await planned({
+      ...mariadb,
+      worker: { global: ["USAGE"] },
+      otherWorkerHosts: ["localhost"],
+    });
+    expect(refusalOf(beside).message).toBe(
+      "this server has 'facetdb_worker'@'localhost' beside 'facetdb_worker'@'%'; MariaDB logs a connection from a matching host in as the more specific account, which has none of the rights FacetDB gives 'facetdb_worker'@'%'",
+    );
+    readOnly(beside.driver);
+    const long = "l".repeat(53);
+    const refusedLong = await planned(
+      { ...mariadb, tables: [{ ...LISTINGS_TABLE, name: long }] },
+      listingsTarget({ table: long }),
+    );
+    expect(refusalOf(refusedLong).message).toBe(
+      `the table name ${long} has 53 characters; FacetDB names its triggers facetdb_<table>_new, _ins and _upd, and MariaDB allows 64 characters in a name, so a table name can have 52 at most`,
+    );
+    const side = "s".repeat(49);
+    const refusedSide = await planned(
+      { ...mariadb, tables: [{ ...LISTINGS_TABLE, name: side }] },
+      listingsTarget({ table: side, storage: "side-table" }),
+    );
+    expect(refusalOf(refusedSide).message).toBe(
+      `the table name ${side} has 49 characters; side-table mode keeps the answers in facetdb_<table>_answers, and MariaDB allows 64 characters in a name, so a table name can have 48 at most`,
+    );
   });
 
   it("refuses when neither the connection string nor the config names a database", async () => {

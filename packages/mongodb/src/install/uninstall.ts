@@ -183,10 +183,12 @@ export async function planUninstall(
       others.length === 0
         ? undefined
         : `${inWords(remaining.complete ? others : [...others, "others"])} ${others.length === 1 && remaining.complete ? "is" : "are"} still installed`;
-    const shared = (reason: string) =>
-      [JOBS_COLLECTION, META_COLLECTION].map(
-        (name): KeptObject => ({ kind: "collection", name, scope: "run", reason }),
-      );
+    // The database's queue and marks, in every other engine's kinds: `collection` stays for the
+    // user's collections.
+    const shared = (reason: string): readonly KeptObject[] => [
+      { kind: "jobs-table", name: JOBS_COLLECTION, scope: "run", reason },
+      { kind: "marker", name: META_COLLECTION, scope: "run", reason },
+    ];
     return {
       ok: true,
       plan: {
@@ -200,6 +202,8 @@ export async function planUninstall(
           ...(role.kind === "found"
             ? [{ ...own("login", workerRole(collection)), noun: "role" }]
             : []),
+          // Its marker document, which every run deletes: the collection's part of the marks.
+          own("marker", META_COLLECTION),
           ...(stillInstalled === undefined ? shared("no collection uses it any more") : []),
         ],
         keeps: [

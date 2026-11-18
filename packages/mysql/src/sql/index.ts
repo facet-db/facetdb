@@ -10,6 +10,7 @@ export {
 export { quoteIdent, quoteLiteral, quoteTable } from "./identifier.ts";
 export {
   adminUrlRefusal,
+  databaseInUrl,
   plainMessage,
   TLS_PARAMETER,
   type TlsProblem,

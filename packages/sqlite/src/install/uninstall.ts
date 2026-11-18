@@ -198,6 +198,9 @@ export async function planUninstall(
       ...triggers.map((trigger) => own("trigger", trigger)),
       // Its queued jobs: the table's part of the shared queue.
       ...(tables.jobs ? [own("jobs-table", JOBS_TABLE)] : []),
+      // Its row in the marker table, which every run deletes (`forgetOwnerStatement`), said as
+      // MySQL and SQL Server say theirs: whether the marker table then goes is the run's.
+      own("marker", OWNERS_TABLE),
       ...removes,
     ],
     keeps,

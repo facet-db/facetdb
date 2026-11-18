@@ -1,7 +1,9 @@
-import { FakeClock } from "@facetdb/core/testing";
+import type { EngineTarget, KeyText } from "@facetdb/core";
+import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
+import { lazyEngine } from "../engines.ts";
 import { runInProcess } from "../program.ts";
 import {
   createPgliteWorld,
@@ -312,5 +314,119 @@ describe("facetdb preview keeps the worker's password out of the clear", () => {
       noConnection,
     );
     expect(dry.code, dry.stderr).toBe(0);
+  });
+});
+
+describe("facetdb preview names the table and the rows as the engine does", () => {
+  const HEX = "65f1a2b3c4d5e6f708192a3b";
+  const MONGO_URL = "mongodb://facetdb_worker:worker-password@localhost:27017/app";
+  const MYSQL_URL = "mysql://facetdb_worker:worker-password@localhost:3306/app";
+
+  /** A handwritten key text with MongoDB's rule: 24 hex an ObjectId, digits a number. */
+  const tagged: KeyText = {
+    toText: (key) => key.replace(/^(?:oid|n):/, ""),
+    fromText: (text) =>
+      /^[0-9a-f]{24}$/.test(text) ? `oid:${text}` : /^[0-9]+$/.test(text) ? `n:${text}` : text,
+    form: "the document's _id as you write it",
+  };
+
+  /** MySQL's and MongoDB's rule: a bare table is in the connection string's database. */
+  const inUrlDatabase = (target: EngineTarget, url: string) =>
+    `${target.schema ?? new URL(url).pathname.slice(1)}.${target.table}`;
+
+  function sourceOn(url: string): ProjectConfig {
+    return facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: url,
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+  }
+
+  /** A MongoDB-like engine over two documents: an ObjectId's, the newest, and a number's. */
+  function mongo(): FakeEngine {
+    const database = new FakeDatabase({ fields: ["title"] });
+    database.edit("n:1", { title: "A flat" });
+    database.edit(`oid:${HEX}`, { title: "A car" });
+    return new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      database,
+      keyText: tagged,
+      label: inUrlDatabase,
+    });
+  }
+
+  function previewOn(
+    argv: readonly string[],
+    engine: FakeEngine,
+    url: string,
+    provider: FakeProvider = createFakeProvider({ defaults: { noul: 0.02 } }),
+  ) {
+    return runInProcess(
+      ["preview", ...argv],
+      {
+        projectDir: "/work/listings-app",
+        env: {},
+        loadConfig: () => Promise.resolve(sourceOn(url)),
+        engines: [lazyEngine(engine.name, () => Promise.resolve(engine))],
+        connect: () => {
+          throw new Error("preview reaches the source only through its engine");
+        },
+        provider: () => provider,
+      },
+      COMMANDS,
+    );
+  }
+
+  it("prints a MongoDB row by its _id as the user writes it, the table as migrate's header does", async () => {
+    const result = await previewOn([], mongo(), MONGO_URL);
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Preview of app.listings: the 2 most recent rows.");
+    expect(result.stdout).toContain(`Row ${HEX}: would be decided`);
+    expect(result.stdout).toContain("Row 1: would be decided");
+    expect(result.stdout).not.toContain("oid:");
+    expect(result.stdout).not.toContain("n:1");
+    expect(result.stdout).not.toContain("public.");
+
+    const json = await previewOn(["--json"], mongo(), MONGO_URL);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      table: "app.listings",
+      rows: [{ key: HEX }, { key: "1" }],
+    });
+  });
+
+  it("says the row a failed model call was for by its _id as the user writes it", async () => {
+    const result = await previewOn(
+      [],
+      mongo(),
+      MONGO_URL,
+      createFakeProvider({ defaults: { noul: 0.02 }, failures: { 0: { kind: "503" } } }),
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`the model did not answer for row ${HEX}`);
+    expect(result.stderr).not.toContain("oid:");
+  });
+
+  it("names a MySQL table by the connection string's database in a dry run, never public.", async () => {
+    const mysql = new FakeEngine({
+      name: "mysql",
+      schemes: ["mysql", "mariadb"],
+      label: inUrlDatabase,
+    });
+
+    const result = await previewOn(["--dry-run"], mysql, MYSQL_URL);
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain("would read the 20 most recent rows of app.listings");
+    expect(result.stdout).not.toContain("public.");
   });
 });

@@ -34,10 +34,11 @@ export type FakeEngineOptions = {
   readonly capabilities?: Capabilities;
   /**
    * How the engine names a target's table (`DatabaseEngine.label`): a schema-bearing engine's
-   * default, `dbo.listings`. When absent, the table as the config writes it, with its schema only
-   * when it names one: a schema-less engine's words.
+   * default, `dbo.listings`; a connection-database engine's, from `url`'s path (`app.listings`).
+   * When absent, the table as the config writes it, with its schema only when it names one: a
+   * schema-less engine's words.
    */
-  readonly label?: (target: EngineTarget) => string;
+  readonly label?: (target: EngineTarget, url: string) => string;
   readonly plans?: FakePlans;
   /** A finished run's notes (`deleted` where the plan said `deletes`); the plan's when absent. */
   readonly runNotes?: (target: EngineTarget, plan: EnginePlan) => readonly string[];
@@ -156,7 +157,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly login?: NonNullable<DatabaseEngine["login"]>;
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
-  readonly #label: (target: EngineTarget) => string;
+  readonly #label: (target: EngineTarget, url: string) => string;
   readonly #plans: FakePlans;
   readonly #runNotes: ((target: EngineTarget, plan: EnginePlan) => readonly string[]) | undefined;
   readonly #lastOfRun: (target: EngineTarget) => boolean;
@@ -186,8 +187,8 @@ export class FakeEngine implements DatabaseEngine {
     }
   }
 
-  label(target: EngineTarget): string {
-    return this.#label(target);
+  label(target: EngineTarget, url: string): string {
+    return this.#label(target, url);
   }
 
   /** The next run stops at statement `at`, an index into its plan's statements. */

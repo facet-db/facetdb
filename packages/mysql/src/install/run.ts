@@ -47,6 +47,22 @@ const RERUN_NOTES: ReadonlySet<string> = new Set(
   ]),
 );
 
+/** The rerun notes a plan made on a MariaDB server carries, one per kind of plan. */
+const MARIADB_NOTES: ReadonlySet<string> = new Set([
+  installRerunNote("MariaDB"),
+  uninstallRerunNote("MariaDB"),
+  pruneRerunNote("MariaDB"),
+]);
+
+/**
+ * The server a plan was made on, as its rerun note names it: every plan with a statement carries
+ * one, in the name of the server it read. What `render` heads its script with, so a MariaDB dry run
+ * says MariaDB.
+ */
+export function serverOfPlan(plan: EnginePlan): ServerName {
+  return plan.notes.some((note) => MARIADB_NOTES.has(note)) ? "MariaDB" : "MySQL";
+}
+
 /** MySQL's `ER_SUBQUERY_NO_1_ROW`: the owner guard's way of stopping the script. */
 const SUBQUERY_ROWS = 1242;
 

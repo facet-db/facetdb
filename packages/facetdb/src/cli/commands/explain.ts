@@ -17,7 +17,7 @@ import {
   resolveThresholds,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
-import { engineFor, keyWords, openConnector, requireUsableUrl } from "../engines.ts";
+import { keyWords, openConnector, requireUsableUrl } from "../engines.ts";
 import {
   CliError,
   defineCommand,
@@ -29,12 +29,12 @@ import {
 import { requireUsableStoreUrl, storeSharedFor, storeSourceId } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
-  engineTarget,
   loadProjectConfig,
   projectRef,
+  reachedOf,
   savedQuestionSets,
   singleTarget,
-  sourceUrlOf,
+  sourceTable,
 } from "./database.ts";
 
 /**
@@ -217,27 +217,26 @@ type TableRead = {
   readonly engine: DatabaseEngine;
   readonly target: EngineTarget;
   readonly url: string;
-  /** `schema.table`, what a failure to read it names. */
+  /** The table as its engine names it, what a failure to read it names. */
   readonly label: string;
 };
 
 /** The table source's engine, target and URL; its URL refused before anything connects. */
 async function tableRead(
-  entries: Parameters<typeof engineFor>[0],
+  deps: Parameters<typeof sourceTable>[0],
   config: ProjectConfig,
   source: SourceConfig,
-  project: ReturnType<typeof projectRef>,
   allowInsecure: boolean,
 ): Promise<TableRead> {
-  const table = singleTarget(config, source.name);
-  const url = sourceUrlOf(
+  const target = singleTarget(config, source.name);
+  const table = await sourceTable(deps, config, target);
+  const { engine, url } = reachedOf(
+    table,
     source,
-    `the connection string of the database that holds ${table.table}`,
+    `the connection string of the database that holds ${target.table}`,
   );
-  const engine = await engineFor(entries, url, source.connector);
-  const target = engineTarget(config, table, project);
-  requireUsableUrl(engine, target, url, allowInsecure);
-  return { engine, target, url, label: `${table.schema}.${table.table}` };
+  requireUsableUrl(engine, table.own, url, allowInsecure);
+  return { engine, target: table.own, url, label: table.label };
 }
 
 /** The record now: its table's FacetDB columns through its engine, or its row in the store. */
@@ -325,9 +324,7 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
     const project = projectRef(deps.projectDir);
     const table =
-      source.table === undefined
-        ? undefined
-        : await tableRead(deps.engines, config, source, project, allowInsecure);
+      source.table === undefined ? undefined : await tableRead(deps, config, source, allowInsecure);
     // The key as the store and the connector hold it, read from the key as the user wrote it; and
     // the form every line prints it in (MongoDB: `1` for `n:1`, the hex for `oid:<hex>`).
     const keyText = table?.engine.keyText;

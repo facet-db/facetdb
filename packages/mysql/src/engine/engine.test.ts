@@ -103,9 +103,15 @@ describe("the engine", () => {
     const engine = createMysqlEngine({ connect: driver.connect });
     expect(engine.name).toBe(ENGINE_NAME);
     expect(engine.schemes).toEqual(["mysql", "mariadb"]);
-    // A bare name is in the connection's database, which the target does not carry.
-    expect(engine.label(listingsTarget())).toBe("listings");
-    expect(engine.label(listingsTarget({ schema: "shop" }))).toBe("shop.listings");
+    // A bare name is in the connection string's database, as the plans name it; the config's
+    // database wins; a string whose path names none leaves the name bare.
+    expect(engine.label(listingsTarget(), WORKER_URL)).toBe("app.listings");
+    expect(engine.label(listingsTarget(), "mysql://admin:pw@127.0.0.1:3306/my%20shop")).toBe(
+      "my shop.listings",
+    );
+    expect(engine.label(listingsTarget({ schema: "shop" }), WORKER_URL)).toBe("shop.listings");
+    expect(engine.label(listingsTarget(), "mysql://admin:pw@127.0.0.1:3306/")).toBe("listings");
+    expect(engine.label(listingsTarget(), "mysql://admin:pw@127.0.0.1:3306")).toBe("listings");
     expect(engine.capabilities).toBe(MYSQL_CAPABILITIES);
     expect(engine.checks).toBe(DOCTOR_CHECKS);
     expect(engine.checks.map((check) => check.name)).toEqual([

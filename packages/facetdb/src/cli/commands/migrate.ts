@@ -282,7 +282,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       shown.push({
         target,
         engineTarget: own,
-        label: engine.label(own),
+        label: engine.label(own, url),
         install,
         installScript: engine.render(install),
         prune,

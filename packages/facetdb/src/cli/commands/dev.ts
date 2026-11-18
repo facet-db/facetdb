@@ -102,11 +102,13 @@ export const devCommand = defineCommand<DevOptions>("dev", {
             continue;
           }
           const table = { source, ...splitTable(source.table ?? "") };
+          // The embedded Postgres engine's name for it, `public` for a bare one.
+          const named = engine.label(targetOf(table), DEV_URL);
           // The engine sets the password only on a login it creates: an existing one keeps its own.
           const options = { ...engineDeps, workerPassword: DEV_WORKER_PASSWORD };
           const skipped = (reason: string) =>
             print(
-              `skipped ${source.name}: ${reason}. Create ${table.schema}.${table.table} in the dev database, then run facetdb dev again.`,
+              `skipped ${source.name}: ${reason}. Create ${named} in the dev database, then run facetdb dev again.`,
             );
           const planned = await engine.planInstall(targetOf(table), DEV_URL, options);
           if (!planned.ok) {
@@ -122,7 +124,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
             throw stoppedError(ran.stopped);
           }
           installed.push(source);
-          print(`Installed ${source.name} on ${table.schema}.${table.table} in ${DEV_DIR}/.`);
+          print(`Installed ${source.name} on ${named} in ${DEV_DIR}/.`);
         }
         return await runWorkers(context, {
           config: { ...devConfig, sources: installed },

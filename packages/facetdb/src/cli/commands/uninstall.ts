@@ -335,14 +335,14 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       ) {
         throw new CliError(
           "uninstall-refused",
-          `${engine.label(own)} has no FacetDB install left, and the FacetDB store on ${store.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
+          `${engine.label(own, url)} has no FacetDB install left, and the FacetDB store on ${store.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
           "check the source's name, table and schema; nothing was changed",
         );
       }
       shown.push({
         target,
         engineTarget: own,
-        label: engine.label(own),
+        label: engine.label(own, url),
         plan: planned.plan,
         script: engine.render(planned.plan),
         ...(store === undefined ? {} : { store }),
