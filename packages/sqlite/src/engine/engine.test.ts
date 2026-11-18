@@ -152,6 +152,7 @@ describe("plans and runs", () => {
       ["wal", "skip"],
       ["sqlite", "skip"],
       ["install", "skip"],
+      ["marks", "skip"],
       ["lock", "skip"],
     ]);
     expect(existsSync(missing)).toBe(false);
@@ -260,6 +261,7 @@ describe("doctor", () => {
       ["wal", "fail"],
       ["sqlite", "ok"],
       ["install", "fail"],
+      ["marks", "skip"],
       ["lock", "skip"],
     ]);
     expect(before[3]?.detail).toBe(

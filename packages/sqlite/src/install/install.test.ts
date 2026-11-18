@@ -14,6 +14,7 @@ import {
   LISTINGS,
   listings,
   planned,
+  ran,
   reading,
   rows,
   snapshot,
@@ -28,7 +29,7 @@ import { planUninstall } from "./uninstall.ts";
 
 /**
  * The install on a SQLite file, run for real on a temporary file: node:sqlite is in-process, so no
- * server and no container. the listings example is the committed fixture install.listings.sql,
+ * server and no container. The listings example is the committed fixture install.listings.sql,
  * compared byte for byte with the printed script; it is read, never written (`UPDATE_FIXTURES=1`
  * rewrites it on purpose, and the diff is reviewed).
  */
@@ -282,44 +283,250 @@ describe("run", () => {
     ).not.toContainEqual(expect.objectContaining({ purpose: "columns" }));
   });
 
-  // A column of FacetDB's name that the application made is the application's.
-  const rebuilt = {
-    "rebuilt the SQLite way (a new table, the rows copied, the old one dropped, the new one renamed)": `
-      create table new_listings (id integer primary key, title text, description text, price real, is_scam integer, note text not null default '');
-      insert into new_listings (id, title, description, price, is_scam) select id, title, description, price, is_scam from listings;
-      drop table listings;
-      alter table new_listings rename to listings;`,
-    "dropped and added again": `
-      alter table listings drop column is_scam;
-      alter table listings add column is_scam integer;
-      update listings set is_scam = 1;`,
-    "rebuilt with its own is_scam of another type": `
-      create table new_listings (id integer primary key, title text, description text, price real, is_scam text);
-      insert into new_listings (id, title, description, price) select id, title, description, price from listings;
-      drop table listings;
-      alter table new_listings rename to listings;`,
-  };
+  // A column of FacetDB's name and another type is the application's.
+  it("refuses to adopt a column of FacetDB's name and another type the application rebuilt the table with, naming it the application's", async () => {
+    execute(file, LISTINGS);
+    await install(file);
+    execute(file, "insert into listings (title, description) values ('bike', 'red')");
+    execute(
+      file,
+      `create table new_listings (id integer primary key, title text, description text, price real, is_scam text);
+       insert into new_listings (id, title, description, price) select id, title, description, price from listings;
+       drop table listings;
+       alter table new_listings rename to listings;`,
+    );
+    expect(await plan()).toEqual({
+      ok: false,
+      refusal: {
+        code: "migrate-refused",
+        message:
+          "listings already has a column named is_scam that is the application's: FacetDB marks every column it adds (/* facetdb */ in the table's definition), and this one has no mark, so FacetDB neither writes nor drops it. Rename the question or the column.",
+        fix: REFUSED_FIX,
+      },
+    });
+  });
 
-  it.each(Object.entries(rebuilt))(
-    "refuses to adopt a column the application %s, naming it the application's",
-    async (_, change) => {
+  /*
+   * An ORM's table rebuild copies FacetDB's columns without their marks. migrate names the case and
+   * the recovery, and the recovery, run as printed, brings the columns back marked with the
+   * answered records queued for the worker to write back from the decision log.
+   */
+  describe("a table rebuilt since the install (lost marks)", () => {
+    /** Prisma's and Drizzle's form: the table made again with every column, the rows copied. */
+    const ORM_REBUILD = `
+    create table new_listings ("id" integer primary key, "title" text, "description" text, "price" real,
+      "is_scam" integer, "is_scam_probability" real, "facetdb_status" text not null default 'pending',
+      "facetdb_updated_at" text, "facetdb_reviewed" integer not null default 0);
+    insert into new_listings select * from listings;
+    drop table listings;
+    alter table new_listings rename to listings;`;
+
+    const COPIES = [
+      "is_scam",
+      "is_scam_probability",
+      "facetdb_status",
+      "facetdb_updated_at",
+      "facetdb_reviewed",
+    ];
+
+    const CASE =
+      "listings has columns named is_scam, is_scam_probability, facetdb_status, facetdb_updated_at and facetdb_reviewed with FacetDB's names and types but without FacetDB's mark (/* facetdb */ in the table's definition), on a table FacetDB installed for this project where no column carries the mark any more and FacetDB's two triggers are gone: the table was rebuilt since (a new table, the rows copied, the old one dropped and the new one renamed, as an ORM migration that copies every column does, or a hand-written create table … as select), which copies columns and their values but not their marks and drops the triggers, so changes made since were not queued. SQLite cannot mark a column without rebuilding the table again, and FacetDB never adopts an unmarked column: it may be the application's own.";
+
+    const RECOVERY = [
+      "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it queues every record FacetDB has written to and drops the copies:",
+      "  begin immediate;",
+      `  insert or ignore into "facetdb_jobs" ("table_name", "record_key") select 'listings', "id" from "listings" where "facetdb_updated_at" is not null;`,
+      ...COPIES.map((column) => `  alter table "listings" drop column "${column}";`),
+      "  commit;",
+      "Then run facetdb migrate, which adds the columns back, marked, with the triggers, and start facetdb worker: it writes each queued record's decision back from the decision log without asking the model, and runs the record's actions again as every write does (webhooks, plugins). It asks the model for a queued record whose state changed since its last answer, whose question set or model version changed since, or whose last outcome was an error or held, and those asks skip backfill's estimate. facetdb backfill asks the records never answered, after its estimate. If the application made these columns itself, rename the question or the column instead.",
+    ].join("\n");
+
+    /** The listings installed, one record decided by the worker and one never asked, the queue empty. */
+    async function decided(): Promise<void> {
       execute(file, LISTINGS);
       await install(file);
-      execute(file, "insert into listings (title, description) values ('bike', 'red')");
-      execute(file, change);
+      execute(
+        file,
+        `insert into listings (id, title, description) values (1, 'bike', 'red'), (2, 'car', 'blue');
+       update listings set is_scam = 1, is_scam_probability = 0.93, facetdb_status = 'done',
+         facetdb_updated_at = '2026-11-04T09:00:00.000Z' where id = 1;
+       delete from facetdb_jobs;`,
+      );
+    }
+
+    it("migrate names the rebuild and the recovery, step by step, as SQL to run", async () => {
+      await decided();
+      execute(file, ORM_REBUILD);
+      expect(await plan()).toEqual({
+        ok: false,
+        refusal: { code: "migrate-refused", message: CASE, fix: RECOVERY },
+      });
+    });
+
+    it("the recovery run as printed brings the columns back marked, the answered record queued and the values gone only from the table", async () => {
+      await decided();
+      execute(file, ORM_REBUILD);
+      const refused = await plan();
+      if (refused.ok) {
+        throw new Error("the rebuilt table was not refused");
+      }
+      const script = refused.refusal.fix
+        .split("\n")
+        .filter((line) => line.startsWith("  "))
+        .join("\n");
+      execute(file, script);
+      expect(columns(file)).toEqual(["id", "title", "description", "price"]);
+      // Only the record FacetDB had written to is queued: the one never asked waits for a backfill.
+      expect(jobs(file.open())).toEqual([
+        { table_name: "listings", record_key: "1", claimed_by: null, claimed_at: null },
+      ]);
+
+      const again = planned(await plan());
+      expect(again.statements.filter((one) => one.purpose === "columns")).toHaveLength(5);
+      ran(target(), again, file);
+      const db = file.open();
+      const definition = String(
+        db.prepare("select sql from sqlite_master where name = 'listings'").get()?.["sql"],
+      );
+      for (const column of COPIES) {
+        expect(definition).toContain(`"${column}" /* facetdb */`);
+      }
+      expect(rows(db, "select id, is_scam, facetdb_status from listings order by id")).toEqual([
+        { id: 1, is_scam: null, facetdb_status: "pending" },
+        { id: 2, is_scam: null, facetdb_status: "pending" },
+      ]);
+      expect(jobs(db)).toHaveLength(1);
+      // The triggers are back: the application's next change is queued again.
+      db.exec("update listings set title = 'red bike' where id = 2");
+      expect(jobs(db)).toHaveLength(2);
+    });
+
+    it("names a rebuild that copied one column, and queues nothing when no facetdb_updated_at survived", async () => {
+      await decided();
+      execute(
+        file,
+        `create table new_listings (id integer primary key, title text, description text, price real, is_scam integer, note text not null default '');
+         insert into new_listings (id, title, description, price, is_scam) select id, title, description, price, is_scam from listings;
+         drop table listings;
+         alter table new_listings rename to listings;`,
+      );
       const result = await plan();
-      expect(result).toEqual({
+      expect(result).toMatchObject({ ok: false, refusal: { code: "migrate-refused" } });
+      if (result.ok) {
+        return;
+      }
+      expect(result.refusal.message).toMatch(
+        /^listings has a column named is_scam with FacetDB's name and type but without FacetDB's mark/,
+      );
+      // Queuing every record would ask the model for each one never answered, unpaced, unestimated.
+      expect(result.refusal.fix).toBe(
+        [
+          "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the copy, and queues nothing, since the table kept no facetdb_updated_at to tell the answered records from the others:",
+          "  begin immediate;",
+          `  alter table "listings" drop column "is_scam";`,
+          "  commit;",
+          "Then run facetdb migrate, which adds the column back, marked, with the triggers. facetdb backfill asks the records never answered, after its estimate; an answered record's columns fill again when its state next changes, and facetdb explain shows its answers meanwhile. If the application made this column itself, rename the question or the column instead.",
+        ].join("\n"),
+      );
+    });
+
+    // Anything short of a rebuild (no mark left, no trigger left) is the application's column,
+    // refused as before, and never handed a drop.
+    it("refuses a column the application dropped and added again beside FacetDB's marked ones as the application's", async () => {
+      await decided();
+      execute(
+        file,
+        "alter table listings drop column is_scam; alter table listings add column is_scam integer; update listings set is_scam = 1;",
+      );
+      expect(await plan()).toEqual({
         ok: false,
         refusal: {
           code: "migrate-refused",
-          message: expect.stringMatching(
-            /^listings already has a column named is_scam that is the application's: FacetDB marks every column it adds \(\/\* facetdb \*\/ in the table's definition\), and this one has no mark/,
-          ),
+          message:
+            "listings already has a column named is_scam that is the application's: FacetDB marks every column it adds (/* facetdb */ in the table's definition), and this one has no mark, so FacetDB neither writes nor drops it. Rename the question or the column.",
           fix: REFUSED_FIX,
         },
       });
-    },
-  );
+    });
+
+    it("refuses a question added under the name of the application's own column of the same type as the application's", async () => {
+      execute(
+        file,
+        "create table listings (id integer primary key, title text, description text, price real, verified integer)",
+      );
+      await install(file);
+      execute(file, "insert into listings (title, verified) values ('bike', 1)");
+      const grown = target({
+        questionSet: {
+          ...listings,
+          questions: [
+            ...listings.questions,
+            {
+              type: "noul",
+              name: "verified",
+              instructions: "Is the seller verified?",
+              stakes: "low",
+            },
+          ],
+        },
+      });
+      expect(await plan(grown)).toEqual({
+        ok: false,
+        refusal: {
+          code: "migrate-refused",
+          message:
+            "listings already has a column named verified that is the application's: FacetDB marks every column it adds (/* facetdb */ in the table's definition), and this one has no mark, so FacetDB neither writes nor drops it. Rename the question or the column.",
+          fix: REFUSED_FIX,
+        },
+      });
+    });
+
+    it("after create table as select, which drops the key too, names the rebuild and asks for the key first", async () => {
+      await decided();
+      execute(
+        file,
+        `create table new_listings as select * from listings;
+       drop table listings;
+       alter table new_listings rename to listings;`,
+      );
+      // CTAS declares the copies INT, REAL, TEXT: FacetDB's types by SQLite's affinity.
+      expect(await plan()).toEqual({
+        ok: false,
+        refusal: {
+          code: "migrate-refused",
+          message: CASE,
+          fix: "The rebuild left the table without the key FacetDB keys its records by: listings has no primary key; FacetDB keys its jobs and decisions by it. Add one, or name rowid as the source's key, and run migrate again. Then run facetdb migrate again: it names the rest of the recovery. If the application made these columns itself, rename the question or the column instead.",
+        },
+      });
+    });
+
+    it("names what of the application's blocks the drops first", async () => {
+      await decided();
+      execute(file, ORM_REBUILD);
+      execute(file, "create index listings_scam on listings (is_scam)");
+      const result = await plan();
+      expect(result).toMatchObject({
+        ok: false,
+        refusal: {
+          fix: expect.stringMatching(
+            /^First, the index listings_scam uses is_scam, and SQLite cannot drop a column in use: drop or change it\. Nothing is lost:/,
+          ),
+        },
+      });
+    });
+
+    it("never names a recovery on a table this project did not install: the columns are the application's", async () => {
+      execute(
+        file,
+        "create table listings (id integer primary key, title text, description text, is_scam integer)",
+      );
+      const result = await plan();
+      expect(result).toMatchObject({
+        ok: false,
+        refusal: { fix: REFUSED_FIX, message: expect.stringContaining("the application's") },
+      });
+    });
+  });
 
   it("keys a table by its rowid when the config names it, and says when VACUUM may renumber it", async () => {
     execute(file, "create table listings (title text, description text)");
@@ -557,7 +764,7 @@ describe("planInstall refuses", () => {
       table:
         "create table listings (id integer primary key, title text, description text, is_scam text)",
       message:
-        /^listings already has a column named is_scam that is the application's: .*Rename the question or the column;/,
+        /^listings already has a column named is_scam that is the application's: .*Rename the question or the column\.$/,
     },
     {
       what: "a table another project installed on",

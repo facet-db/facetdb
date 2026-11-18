@@ -18,11 +18,13 @@ import {
   run,
   sqliteQuery,
 } from "../install/index.ts";
-import { type TemporaryDatabase, temporaryDatabase } from "../testing/index.ts";
+import { FakeRepeat, type TemporaryDatabase, temporaryDatabase } from "../testing/index.ts";
 import {
   CLAIM_LEASE_MS,
   createSqliteConnector,
   LOCK_FRESH_MS,
+  LOCK_HEARTBEAT_MS,
+  openNodeSqlite,
   POLL_MS,
   type SqliteConnector,
 } from "./index.ts";
@@ -57,6 +59,8 @@ function ticketsTarget(onChange: OnChange = "keep"): EngineTarget {
 class World {
   readonly file: TemporaryDatabase = temporaryDatabase();
   readonly clock = new FakeClock(START);
+  /** Every connector's lock heartbeat: it beats only when a test moves the clock through it. */
+  readonly beats = new FakeRepeat(this.clock);
   readonly app: DatabaseSync;
   readonly #connectors: SqliteConnector[] = [];
 
@@ -113,6 +117,7 @@ class World {
   async connector(workerId: string, scanPageSize?: number): Promise<SqliteConnector> {
     const connector = await createSqliteConnector(this.target, this.file.path, {
       clock: this.clock,
+      repeat: this.beats.repeat,
       workerId,
       installer: { install: () => this.install(), uninstall: () => this.uninstall() },
       ...(scanPageSize === undefined ? {} : { scanPageSize }),
@@ -214,6 +219,10 @@ const decided: RecordDecision = {
   status: "done",
 };
 
+function iso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
 async function refusalOf(pending: Promise<unknown>): Promise<EngineRefusal> {
   const error = await pending.then(
     () => undefined,
@@ -314,9 +323,11 @@ describe("the sqlite connector", () => {
       const refused = await refusalOf(second.claim(10));
       expect(refused.refusal.code).toBe("one-worker");
       expect(refused.message).toBe(
-        `SQLite allows one worker; another started at ${new Date(START).toISOString()} or before (w1), and its lock on tickets in ${made.file.path} was renewed then, under 2 minutes ago`,
+        `SQLite allows one worker, and worker w1 holds the lock on tickets in ${made.file.path}: it last renewed it at ${iso(START)}, and the lock frees at ${iso(START + LOCK_FRESH_MS)} unless it is renewed before then (a running worker renews it every 30 seconds)`,
       );
-      expect(refused.refusal.fix).toContain("a lock not renewed for 2 minutes is taken over");
+      expect(refused.refusal.fix).toBe(
+        `stop the other facetdb worker first: a worker that stops lets go of its lock at once. One that was killed keeps it until ${iso(START + LOCK_FRESH_MS)}, 2 minutes after its last renewal; start this worker after then, and it takes the lock over`,
+      );
       // watch is the worker's too.
       const watching = second.watch()[Symbol.asyncIterator]();
       expect((await refusalOf(watching.next())).refusal.code).toBe("one-worker");
@@ -330,7 +341,7 @@ describe("the sqlite connector", () => {
         worker_id: "w2",
         heartbeat_at: new Date(START + LOCK_FRESH_MS).toISOString(),
       });
-      expect((await refusalOf(first.claim(10))).message).toContain("(w2)");
+      expect((await refusalOf(first.claim(10))).message).toContain("worker w2 holds the lock");
     });
 
     it("renews its lock on every poll of watch, and lets go of it on close", async () => {
@@ -352,6 +363,136 @@ describe("the sqlite connector", () => {
       expect(made.lock()).toEqual({ worker_id: null, heartbeat_at: null });
       const second = await made.connector("w2");
       expect(await second.claim(10)).toEqual(["t1", "t2"]);
+    });
+
+    it("@timing a worker whose pass waits 3 minutes on the model keeps its lock: its own heartbeat renews it every 30 seconds", async () => {
+      const made = world();
+      await made.install();
+      const first = await made.connector("w1");
+      const second = await made.connector("w2");
+      made.edit("t1", { subject: "Refund", body: "Charged twice" });
+      expect(await first.claim(10)).toEqual(["t1"]);
+      const sent = (await first.read(["t1"])).rows[0]?.hash ?? "";
+      expect(made.beats.intervals).toEqual([LOCK_HEARTBEAT_MS]);
+
+      // The pass waits on the model's backoff: no poll and no claim for 3 minutes, only the beats.
+      await made.beats.advance(30_000);
+      expect(made.lock()).toEqual({ worker_id: "w1", heartbeat_at: iso(START + 30_000) });
+      await made.beats.advance(3 * 60_000 - 30_000);
+      expect(made.lock()).toEqual({ worker_id: "w1", heartbeat_at: iso(START + 3 * 60_000) });
+
+      // No second worker takes the lock, and the refusal says when it would free.
+      const refused = await refusalOf(second.claim(10));
+      expect(refused.refusal.code).toBe("one-worker");
+      expect(refused.message).toBe(
+        `SQLite allows one worker, and worker w1 holds the lock on tickets in ${made.file.path}: it last renewed it at ${iso(START + 3 * 60_000)}, and the lock frees at ${iso(START + 5 * 60_000)} unless it is renewed before then (a running worker renews it every 30 seconds)`,
+      );
+      expect(made.jobs()).toEqual([{ record_key: "t1", claimed_by: "w1", claimed_at: iso(START) }]);
+
+      // The pass ends as it began, the record still its own.
+      expect(await first.write("t1", decided, sent)).toEqual({ written: true });
+      await first.ack(["t1"]);
+      expect(made.jobs()).toEqual([]);
+      expect(made.decisionOf("t1")).toEqual(decided);
+
+      // close stops the beat and lets go of the lock.
+      await first.close();
+      expect(made.beats.running).toBe(0);
+      expect(made.lock()).toEqual({ worker_id: null, heartbeat_at: null });
+    });
+
+    it("@timing a worker killed without close keeps its lock 2 minutes past its last beat, and the next worker is told when, then takes it", async () => {
+      const made = world();
+      await made.install();
+      const first = await made.connector("w1");
+      const second = await made.connector("w2");
+      expect(await first.claim(10)).toEqual([]);
+      await made.beats.advance(30_000);
+      // Killed: no close, so the lock stays as its last beat left it, and nothing renews it.
+      made.beats.kill();
+      const frees = iso(START + 30_000 + LOCK_FRESH_MS);
+
+      made.clock.advance(60_000);
+      const refused = await refusalOf(second.claim(10));
+      expect(refused.message).toContain(
+        `it last renewed it at ${iso(START + 30_000)}, and the lock frees at ${frees}`,
+      );
+      expect(refused.refusal.fix).toContain(`One that was killed keeps it until ${frees}`);
+      made.clock.advance(LOCK_FRESH_MS - 60_000 - 1);
+      expect((await refusalOf(second.claim(10))).message).toContain(`the lock frees at ${frees}`);
+
+      // At the time the refusal named, the supervisor's restart takes the lock over.
+      made.clock.advance(1);
+      expect(await second.claim(10)).toEqual([]);
+      expect(made.lock()).toEqual({ worker_id: "w2", heartbeat_at: frees });
+    });
+
+    it("says once when its heartbeat cannot renew the lock, with the time the lock frees, and again only after a beat landed", async () => {
+      const made = world();
+      await made.install();
+      let failing = true;
+      const warnings: string[] = [];
+      const connector = await createSqliteConnector(made.target, made.file.path, {
+        clock: made.clock,
+        repeat: made.beats.repeat,
+        workerId: "w1",
+        warn: (line) => warnings.push(line),
+        // The beat's own statement fails while `failing`, as on a file the application holds locked.
+        open: (path) => {
+          const client = openNodeSqlite(path);
+          return {
+            ...client,
+            run: (sql, params) =>
+              failing && sql.includes("set heartbeat_at = ? where")
+                ? Promise.reject(new Error("database is locked"))
+                : client.run(sql, params),
+          };
+        },
+      });
+      try {
+        expect(await connector.claim(10)).toEqual([]);
+        await made.beats.advance(LOCK_HEARTBEAT_MS);
+        expect(warnings).toEqual([
+          `facetdb: the worker's lock on tickets in ${made.file.path} could not be renewed (database is locked); it tries again every 30 seconds, and unless a renewal lands by ${iso(START + LOCK_FRESH_MS)} the lock frees and another worker may take it over`,
+        ]);
+        await made.beats.advance(LOCK_HEARTBEAT_MS);
+        expect(warnings).toHaveLength(1);
+        expect(made.lock()).toEqual({ worker_id: "w1", heartbeat_at: iso(START) });
+
+        failing = false;
+        await made.beats.advance(LOCK_HEARTBEAT_MS);
+        expect(made.lock()).toEqual({ worker_id: "w1", heartbeat_at: iso(START + 90_000) });
+        failing = true;
+        await made.beats.advance(LOCK_HEARTBEAT_MS);
+        expect(warnings).toHaveLength(2);
+        expect(warnings[1]).toContain(
+          `unless a renewal lands by ${iso(START + 90_000 + LOCK_FRESH_MS)}`,
+        );
+      } finally {
+        failing = false;
+        await connector.close();
+      }
+    });
+
+    it("a beat never takes a lock back: once another worker took it over, the old worker's heartbeat stops", async () => {
+      const made = world();
+      await made.install();
+      const first = await made.connector("w1");
+      const second = await made.connector("w2");
+      expect(await first.claim(10)).toEqual([]);
+      // The first worker's beats did not land for 2 minutes (a file locked by the application, say).
+      made.clock.advance(LOCK_FRESH_MS);
+      expect(await second.claim(10)).toEqual([]);
+      expect(made.beats.running).toBe(2);
+
+      // The first one's late beat finds the lock another's, changes nothing and stops for good.
+      await made.beats.advance(LOCK_HEARTBEAT_MS);
+      expect(made.beats.running).toBe(1);
+      expect(made.lock()).toEqual({
+        worker_id: "w2",
+        heartbeat_at: iso(START + LOCK_FRESH_MS + LOCK_HEARTBEAT_MS),
+      });
+      expect((await refusalOf(first.claim(10))).message).toContain("worker w2 holds the lock");
     });
 
     it("a backfill beside the running worker queues and holds keys without the lock", async () => {

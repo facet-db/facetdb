@@ -200,8 +200,11 @@ describe("facetdb worker on a SQLite file", () => {
 
     const second = await runWorker(new AbortController().signal);
     expect(second.code).toBe(1);
+    expect(second.stderr).toMatch(
+      /error: SQLite allows one worker, and worker worker-\S+ holds the lock on listings in /,
+    );
     expect(second.stderr).toContain(
-      `error: SQLite allows one worker; another started at ${new Date(START).toISOString()} or before`,
+      `it last renewed it at ${new Date(START).toISOString()}, and the lock frees at ${new Date(START + 2 * 60_000).toISOString()}`,
     );
 
     stop.abort();

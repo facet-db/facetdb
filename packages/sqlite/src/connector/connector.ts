@@ -39,6 +39,7 @@ import {
   type SqliteParam,
   type SqliteStatements,
 } from "./client.ts";
+import { LOCK_HEARTBEAT_MS, type Repeat, repeatEvery } from "./heartbeat.ts";
 
 /**
  * The SQLite runtime connector. The triggers the install makes queue a changed record's key in the
@@ -50,10 +51,12 @@ import {
  * case-sensitively). Times are the clock's, as ISO text, the form the queue's own defaults write.
  *
  * One worker: `watch` and `claim`, the queue worker's calls, take the lock row of the table in
- * `facetdb_table_owners` (`worker_id`, `heartbeat_at`) and renew it every poll, and refuse while
- * another worker's lock on the file is fresh; a lock not renewed for 2 minutes is taken over, and
- * `close` lets go of it. A backfill's `enqueue` and `claimKey`, and `read`, `write`, `scan` and
- * `current`, take no lock, so a backfill, `explain` or the review screen run beside the worker.
+ * `facetdb_table_owners` (`worker_id`, `heartbeat_at`) and renew it every poll and every claim, and
+ * refuse while another worker's lock on the file is fresh, saying who holds it, when it last
+ * renewed it and when it frees; a lock not renewed for 2 minutes is taken over, and `close` lets go
+ * of it. While it holds the lock, a heartbeat of its own renews it every 30 seconds, so a pass
+ * waiting on the model keeps it. A backfill's `enqueue` and `claimKey`, and `read`, `write`, `scan`
+ * and `current`, take no lock, so a backfill, `explain` or the review screen run beside the worker.
  */
 
 /** The jobs table is polled every second. */
@@ -101,6 +104,16 @@ export type SqliteConnectorDeps = {
   readonly pollMs?: number;
   /** Rows per `scan` page; 500 by default, a test pages smaller to cross page boundaries. */
   readonly scanPageSize?: number;
+  /**
+   * Beats the lock's own heartbeat every `LOCK_HEARTBEAT_MS` while this worker holds the lock:
+   * real timers by default (`repeatEvery`); a test passes its own, run by its fake clock.
+   */
+  readonly repeat?: Repeat;
+  /**
+   * Where the connector says what nobody is waiting on: a heartbeat that could not renew the lock,
+   * once per run of failed beats. A line to stderr by default; a test passes its own.
+   */
+  readonly warn?: (line: string) => void;
   /**
    * `facetdb migrate` and `facetdb uninstall` for `Connector.install` and `uninstall`; without it
    * both reject: the CLI installs through the engine's plans, shown before they run.
@@ -278,6 +291,8 @@ export async function createSqliteConnector(
   deps: SqliteConnectorDeps,
 ): Promise<SqliteConnector> {
   const { clock, installer } = deps;
+  const repeat = deps.repeat ?? repeatEvery;
+  const warn = deps.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const workerId = deps.workerId ?? `worker-${randomUUID()}`;
   const pollMs = deps.pollMs ?? POLL_MS;
   const pageSize = deps.scanPageSize ?? SCAN_PAGE_SIZE;
@@ -337,9 +352,20 @@ export async function createSqliteConnector(
     };
   }
 
+  // `close()` sets the flag while `watch` awaits; read through a call so TypeScript does not narrow it.
+  let closed = false;
+  const isClosed = () => closed;
+  /** Stops the lock's heartbeat; set while this worker holds the lock. */
+  let stopBeating: (() => void) | undefined;
+  /** When this worker last renewed its lock, by a poll, a claim or a beat. */
+  let lastRenewed = 0;
+  /** Whether the last beat failed, so a run of failures is said once. */
+  let beatFailing = false;
+
   /**
    * Takes or renews this worker's lock on the table, inside the caller's transaction: refused
-   * while another worker's lock anywhere in the file is fresh, taken over once it is stale.
+   * while another worker's lock anywhere in the file is fresh, taken over once it is stale. The
+   * first lock taken starts its heartbeat.
    */
   async function holdLock(tx: SqliteStatements, now: number): Promise<void> {
     const marker = await tx.all("select 1 from sqlite_master where type = 'table' and name = ?", [
@@ -372,10 +398,16 @@ export async function createSqliteConnector(
     );
     if (holder !== undefined) {
       const at = textOf(holder, "heartbeat_at");
+      const renewed = Date.parse(at);
+      if (Number.isNaN(renewed)) {
+        throw new Error(`${OWNERS_TABLE} holds heartbeat_at "${at}", not an ISO time`);
+      }
+      // Fresh while renewed within LOCK_FRESH_MS: stale, and taken over, from exactly then.
+      const frees = iso(renewed + LOCK_FRESH_MS);
       throw new EngineRefusal({
         code: "one-worker",
-        message: `SQLite allows one worker; another started at ${at} or before (${textOf(holder, "worker_id")}), and its lock on ${textOf(holder, "table_name")} in ${where} was renewed then, under 2 minutes ago`,
-        fix: "stop the other facetdb worker on this database first: a worker that stops lets go of its lock, and a lock not renewed for 2 minutes is taken over by the next worker",
+        message: `SQLite allows one worker, and worker ${textOf(holder, "worker_id")} holds the lock on ${textOf(holder, "table_name")} in ${where}: it last renewed it at ${at}, and the lock frees at ${frees} unless it is renewed before then (a running worker renews it every 30 seconds)`,
+        fix: `stop the other facetdb worker first: a worker that stops lets go of its lock at once. One that was killed keeps it until ${frees}, 2 minutes after its last renewal; start this worker after then, and it takes the lock over`,
       });
     }
     await tx.run(`update ${owners} set worker_id = ?, heartbeat_at = ? where table_name = ?`, [
@@ -383,11 +415,45 @@ export async function createSqliteConnector(
       iso(now),
       name,
     ]);
+    lastRenewed = now;
+    stopBeating ??= repeat(LOCK_HEARTBEAT_MS, beat);
   }
 
-  // `close()` sets the flag while `watch` awaits; read through a call so TypeScript does not narrow it.
-  let closed = false;
-  const isClosed = () => closed;
+  /**
+   * The lock's own heartbeat: renews this worker's lock, and only while it is still this worker's;
+   * never takes one. A lock another worker took over, after this one went 2 minutes without a
+   * renewal, stops the beat, and this worker's next poll or claim is refused. A beat that fails (a
+   * busy file, a server away) changes nothing: the next beat, poll or claim renews, and the first
+   * failure of a run is said through `warn` with the time the lock frees without a renewal.
+   */
+  async function beat(): Promise<void> {
+    if (isClosed()) {
+      return;
+    }
+    const now = clock.now();
+    try {
+      const renewed = await client.run(
+        `update ${owners} set heartbeat_at = ? where table_name = ? and worker_id = ?`,
+        [iso(now), name, workerId],
+      );
+      if (renewed.changes === 0) {
+        stopBeating?.();
+        stopBeating = undefined;
+        return;
+      }
+      lastRenewed = now;
+      beatFailing = false;
+    } catch (error) {
+      // The lock stays fresh for 2 minutes, four beats: said once per run of failures, not each.
+      if (!beatFailing) {
+        beatFailing = true;
+        warn(
+          `facetdb: the worker's lock on ${name} in ${where} could not be renewed (${error instanceof Error ? error.message : String(error)}); it tries again every 30 seconds, and unless a renewal lands by ${iso(lastRenewed + LOCK_FRESH_MS)} the lock frees and another worker may take it over`,
+        );
+      }
+    }
+  }
+
   let wake: (() => void) | undefined;
 
   async function* watch(): AsyncGenerator<readonly RecordKey[], void, undefined> {
@@ -711,6 +777,8 @@ export async function createSqliteConnector(
         return;
       }
       closed = true;
+      stopBeating?.();
+      stopBeating = undefined;
       wake?.();
       try {
         // Lets go of the lock, so the next worker need not wait 2 minutes for it to go stale.

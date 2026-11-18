@@ -8,11 +8,11 @@ import {
   sameName,
   type TableFacts,
 } from "./catalog.ts";
+import { applicationColumns, lostMarks } from "./marks.ts";
 import { anotherProject, refused } from "./plan.ts";
 import {
   addColumnStatement,
   type CaptureTable,
-  COLUMN_MARK,
   claimStatement,
   declaredType,
   JOURNAL_MODE,
@@ -48,12 +48,6 @@ export const ONE_WORKER = "One worker may run on this file at a time.";
 export const WAL_NOTE =
   "The file is put in WAL mode before the transaction opens (SQLite cannot change the journal mode inside one) and stays in it: the mode is persistent, and it lets the application and the worker read and write without blocking each other.";
 
-/** The refusal for columns of FacetDB's names that FacetDB did not add: they are the application's. */
-function applicationColumns(table: string, names: readonly string[]): string {
-  const one = names.length === 1;
-  return `${table} already has ${one ? "a column" : "columns"} named ${names.join(", ")} that ${one ? "is" : "are"} the application's: FacetDB marks every column it adds (${COLUMN_MARK} in the table's definition), and ${one ? "this one has" : "these have"} no mark, so FacetDB neither writes nor drops ${one ? "it" : "them"}. Rename the question or the column; a table rebuilt, or a column dropped and added again, since an earlier install holds the application's copy, unmarked.`;
-}
-
 function rowidNote(table: string): string {
   return `${table} is keyed by its rowid, and no integer primary key holds it: VACUUM may renumber such rowids, and the queue and the decision log would then name other rows. Give the table an integer primary key to keep its keys stable.`;
 }
@@ -69,8 +63,11 @@ function configRefusal(target: EngineTarget): string | undefined {
   return undefined;
 }
 
-/** The key the queue holds for each record: the table's one-column primary key, or its rowid when named. */
-function keyOf(target: EngineTarget, table: TableFacts): CaptureTable["key"] | string {
+/**
+ * The key the queue holds for each record: the table's one-column primary key, or its rowid when
+ * named; or why the table has none FacetDB can key by. Doctor's `marks` check reads it too.
+ */
+export function keyOf(target: EngineTarget, table: TableFacts): CaptureTable["key"] | string {
   const label = table.name;
   const column = (name: string) => table.columns.find((one) => sameName(one.name, name));
   if (target.key !== undefined && sameName(target.key, ROWID) && column(ROWID) === undefined) {
@@ -143,11 +140,22 @@ export async function planInstall(target: EngineTarget, query: SqliteQuery): Pro
     );
   }
   const key = keyOf(target, table);
+  const tables = await readFacetdbTables(query);
+  const owner = await readOwner(query, table.name, tables);
+  // Before the key: a `create table … as select` rebuild drops the primary key with the marks, and
+  // the words name the rebuild first.
+  if (owner === target.project.id) {
+    const lost = await lostMarks(query, table, target.questionSet, key);
+    if (lost !== undefined) {
+      return {
+        ok: false,
+        refusal: { code: "migrate-refused", message: lost.message, fix: lost.fix },
+      };
+    }
+  }
   if (typeof key === "string") {
     return refuse(key);
   }
-  const tables = await readFacetdbTables(query);
-  const owner = await readOwner(query, table.name, tables);
   if (owner !== undefined && owner !== target.project.id) {
     return refuse(anotherProject(table.name, owner));
   }
@@ -161,8 +169,9 @@ export async function planInstall(target: EngineTarget, query: SqliteQuery): Pro
     const column = table.columns.find((one) => sameName(one.name, name));
     return column === undefined ? [] : [{ name, definition, column }];
   });
-  // A column of FacetDB's name without FacetDB's mark is the application's, whatever its type:
-  // adopting it would hand the app's values to the worker, and uninstall would drop it.
+  // A column of FacetDB's name without FacetDB's mark is never adopted: adopting it would hand the
+  // app's values to the worker, and uninstall would drop it. Past `lostMarks` (a rebuild: no mark
+  // left, no trigger left), it is the application's, whatever its type.
   const collisions = present.filter(({ column }) => !marked.includes(column.name));
   if (collisions.length > 0) {
     return refuse(

@@ -19,6 +19,7 @@ import {
   sameName,
   textOf,
 } from "./catalog.ts";
+import { UNMARKED_KEPT, unmarkedCopies } from "./marks.ts";
 import { refused } from "./plan.ts";
 import {
   dropColumnStatement,
@@ -42,7 +43,8 @@ import {
  * the second's run, planned the same before and after the first, drops it. Run by hand with
  * `sqlite3 -bail`, the same guard stops the script instead, and nothing of it is committed.
  *
- * A column of FacetDB's name without its mark is the application's and stays. A marked column an
+ * A column of FacetDB's name without its mark is the application's and stays; one of FacetDB's type
+ * too (a rebuild's copy, or the application's own) is listed in keeps with why. A marked column an
  * application's index, view or trigger uses is refused before anything runs, naming what uses it.
  * `--purge` adds nothing here: the decision log is in the FacetDB store, which the CLI's store door
  * purges.
@@ -183,6 +185,11 @@ export async function planUninstall(
     scope: "source",
   });
   const { removes, keeps } = shared(tables, await forecast(query, run, tables));
+  // A rebuild's unmarked copies of FacetDB's columns stay, listed: never dropped unseen, never left
+  // unsaid.
+  const copies = unmarkedCopies(table, target.questionSet).map(
+    (column): KeptObject => ({ ...own("column", column), reason: UNMARKED_KEPT }),
+  );
   const guarded = dropSharedStatements(tables);
   const plan: EnginePlan = {
     statements: [
@@ -203,7 +210,7 @@ export async function planUninstall(
       own("marker", OWNERS_TABLE),
       ...removes,
     ],
-    keeps,
+    keeps: [...copies, ...keeps],
     notes: [WAL_KEPT, ...(guarded.length > 0 ? [GUARDED] : [])],
     confirm: { kind: "project", name: target.project.name },
   };

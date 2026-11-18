@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { serverUrl, skipUnless } from "./index.ts";
+import * as testing from "./index.ts";
+
+const { serverUrl } = testing;
 
 const UNSET =
   "environment, not code: LIBSQL_URL is unset (point it at a libSQL server (sqld); scripts/test-databases.sh up libsql starts one)";
@@ -15,21 +17,15 @@ describe("serverUrl", () => {
       expect(() => serverUrl("LIBSQL_URL", env)).toThrow(UNSET);
     }
   });
-});
 
-describe("skipUnless", () => {
-  it("runs the suite when its variable is set, printing nothing", () => {
-    const printed: string[] = [];
-    const env = { LIBSQL_URL: "http://127.0.0.1:8080" };
-    expect(skipUnless("LIBSQL_URL", env, (line) => printed.push(line))).toBe(false);
-    expect(printed).toEqual([]);
-  });
-
-  it("never skips the package's only server: unset, the suite fails as serverUrl does", () => {
-    const printed: string[] = [];
-    for (const env of [{}, { LIBSQL_URL: "", MYSQL_URL: "mysql://x" }]) {
-      expect(() => skipUnless("LIBSQL_URL", env, (line) => printed.push(line))).toThrow(UNSET);
+  it("fails the same when another engine's variable is set: the package's one server never skips", () => {
+    for (const env of [
+      { MYSQL_URL: "mysql://x" },
+      { LIBSQL_URL: "", DATABASE_URL: "postgres://x", MSSQL_URL: "mssql://x" },
+    ]) {
+      expect(() => serverUrl("LIBSQL_URL", env)).toThrow(UNSET);
     }
-    expect(printed).toEqual([]);
+    // No skip helper to reach for: the db suite reads its URL through serverUrl.
+    expect(Object.keys(testing)).not.toContain("skipUnless");
   });
 });

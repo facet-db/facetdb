@@ -1,6 +1,6 @@
 import type { DoctorCheck, EngineDeps, EngineTarget } from "@facetdb/core";
 import type { SqliteClient } from "../connector/index.ts";
-import { installChecks, sqliteCheck } from "../engine/index.ts";
+import { installChecks, MARKS_LOOKS_AT, sqliteCheck } from "../engine/index.ts";
 import { textOf } from "../install/index.ts";
 import type { OpenLibsql } from "./client.ts";
 import {
@@ -16,9 +16,9 @@ import {
 /**
  * `facetdb doctor`'s checks of a libSQL source: the server answers, the auth token is read from the
  * environment and accepted, the SQLite under the server, the install (the jobs table, the marker
- * row, the two triggers) and the one worker's lock. One query reaches the server for the first
- * three; the install and the lock are the SQLite engine's checks, read through the same client.
- * Nothing is changed. No word holds the token or the URL.
+ * row, the two triggers), the marks of FacetDB's columns and the one worker's lock. One query
+ * reaches the server for the first three; the install, the marks and the lock are the file's
+ * checks, read through the same client. Nothing is changed. No word holds the token or the URL.
  */
 
 export const LIBSQL_DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: string }[] =
@@ -41,6 +41,7 @@ export const LIBSQL_DOCTOR_CHECKS: readonly { readonly name: string; readonly lo
       looksAt:
         "reads the database for the jobs table, the project's marker row and the two triggers",
     },
+    { name: "marks", looksAt: MARKS_LOOKS_AT },
     {
       name: "lock",
       looksAt: "reads which worker holds the database's one worker lock, and when it renewed it",

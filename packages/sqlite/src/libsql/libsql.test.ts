@@ -460,11 +460,9 @@ describe("the engine through the client", () => {
     );
     expect(refused).toBeInstanceOf(EngineRefusal);
     expect((refused as EngineRefusal).message).toContain(
-      "lock on listings in the libSQL database at listings-acme.turso.io was renewed then",
+      "worker w1 holds the lock on listings in the libSQL database at listings-acme.turso.io: it last renewed it at",
     );
-    expect((refused as EngineRefusal).refusal.fix).toContain(
-      "stop the other facetdb worker on this database first",
-    );
+    expect((refused as EngineRefusal).refusal.fix).toContain("stop the other facetdb worker first");
     expect(JSON.stringify((refused as EngineRefusal).refusal)).not.toContain(TURSO);
     await Promise.all([a.close(), b.close(), second.close()]);
   });
@@ -479,6 +477,7 @@ describe("doctor", () => {
       "token",
       "sqlite",
       "install",
+      "marks",
       "lock",
     ]);
     const before = await engine.doctor(target(), TURSO, deps);
@@ -487,6 +486,7 @@ describe("doctor", () => {
       ["token", "ok"],
       ["sqlite", "ok"],
       ["install", "fail"],
+      ["marks", "skip"],
       ["lock", "skip"],
     ]);
     expect(before[1]?.detail).toBe(
@@ -515,6 +515,7 @@ describe("doctor", () => {
       ["token", "fail"],
       ["sqlite", "skip"],
       ["install", "skip"],
+      ["marks", "skip"],
       ["lock", "skip"],
     ]);
     expect(missing[0]?.detail).toBe("not contacted: there is no auth token to send it");
@@ -598,6 +599,7 @@ describe("doctor", () => {
       ["token", "skip"],
       ["sqlite", "skip"],
       ["install", "skip"],
+      ["marks", "skip"],
       ["lock", "skip"],
     ]);
     expect(made.configs).toEqual([]);

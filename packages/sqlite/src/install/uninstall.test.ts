@@ -111,6 +111,15 @@ describe("planUninstall", () => {
       execute(file, change);
       const uninstall = planned(await plan());
       expect(uninstall.removes).not.toContainEqual(expect.objectContaining({ name: "is_scam" }));
+      // Kept, and said: a rebuild's copy or the application's own, never dropped unseen.
+      expect(uninstall.keeps).toContainEqual({
+        kind: "column",
+        name: "is_scam",
+        of: "listings",
+        scope: "source",
+        reason:
+          "it has FacetDB's name and type but not FacetDB's mark (/* facetdb */ in the table's definition): a table rebuild that copies every column (an ORM migration, or a hand-written create table … as select) copies FacetDB's columns without their marks, or the application made it, and FacetDB drops only the columns it marked; if it is FacetDB's copy, drop it by hand (its answers stay in the decision log)",
+      });
       expect(render(uninstall)).not.toContain('drop column "is_scam";');
       ran(target(), uninstall, file);
       expect(columns(file)).toEqual(left);
@@ -118,6 +127,26 @@ describe("planUninstall", () => {
       expect(facetdbObjects(file)).toEqual([]);
     },
   );
+
+  it("lists every copy an ORM rebuild left in keeps, with why, and none of another type", async () => {
+    execute(file, LISTINGS);
+    await install(file);
+    execute(
+      file,
+      `create table new_listings (id integer primary key, title text, description text, price real,
+         is_scam integer, is_scam_probability real, facetdb_status text not null default 'pending',
+         facetdb_updated_at text, facetdb_reviewed text);
+       insert into new_listings select * from listings;
+       drop table listings;
+       alter table new_listings rename to listings;`,
+    );
+    const uninstall = planned(await plan());
+    expect(
+      uninstall.keeps.filter((kept) => kept.kind === "column").map((kept) => kept.name),
+    ).toEqual(["is_scam", "is_scam_probability", "facetdb_status", "facetdb_updated_at"]);
+    expect(uninstall.removes.filter((removed) => removed.kind === "column")).toEqual([]);
+    expect(render(uninstall)).not.toContain("drop column");
+  });
 
   it("prints how to run it by hand, the triggers' drop first, then the columns, the table's rows, and the guarded drops", async () => {
     execute(file, LISTINGS);

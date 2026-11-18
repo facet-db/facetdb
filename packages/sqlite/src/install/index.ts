@@ -11,7 +11,17 @@ export {
   type TableFacts,
   textOf,
 } from "./catalog.ts";
-export { NO_USERS, ONE_WORKER, planInstall, WAL_NOTE } from "./install.ts";
+export { keyOf, NO_USERS, ONE_WORKER, planInstall, WAL_NOTE } from "./install.ts";
+// FacetDB's columns a table rebuild copied without their marks.
+export {
+  absentColumns,
+  applicationColumns,
+  type LostMarks,
+  lostMarks,
+  UNMARKED_KEPT,
+  unmarkedCopies,
+  unmarkedNamesakes,
+} from "./marks.ts";
 export { NOTHING } from "./plan.ts";
 export { KEPT_REASON, planPrune } from "./prune.ts";
 export {

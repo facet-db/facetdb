@@ -19,3 +19,5 @@ export {
   type SqliteConnector,
   type SqliteConnectorDeps,
 } from "./connector.ts";
+// The one-worker lock's own heartbeat.
+export { LOCK_HEARTBEAT_MS, type Repeat, repeatEvery } from "./heartbeat.ts";

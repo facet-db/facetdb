@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createSqliteConnector, type SqliteClient } from "../connector/index.ts";
 import { createSqliteEngine } from "../engine/index.ts";
 import { JOURNAL_MODE } from "../install/index.ts";
-import { serverUrl, skipUnless, temporaryDatabase } from "../testing/index.ts";
+import { FakeRepeat, serverUrl, temporaryDatabase } from "../testing/index.ts";
 import { createLibsqlEngine, openLibsql, SERVER_JOURNAL } from "./index.ts";
 
 /**
@@ -22,7 +22,8 @@ import { createLibsqlEngine, openLibsql, SERVER_JOURNAL } from "./index.ts";
  * fixture's tables and FacetDB's own before it starts, and the suite drops them again at the end.
  */
 
-const skipped = skipUnless("LIBSQL_URL");
+// The package's one server: unset, the file fails as it loads, never skips.
+const url = serverUrl("LIBSQL_URL");
 
 const START = Date.parse("2026-11-04T09:00:00.000Z");
 /** The source's connection-string variable; the loopback test server needs no token. */
@@ -53,6 +54,7 @@ function listingsTarget(): EngineTarget {
 /** Everything a test here may leave on the server: the fixtures' tables and FacetDB's. */
 const LEFT_BEHIND = [
   "listings",
+  "new_listings",
   "offers",
   "tickets",
   "facetdb_jobs",
@@ -67,8 +69,7 @@ function planned(result: PlanResult): EnginePlan {
   return result.plan;
 }
 
-describe.skipIf(skipped)("the libSQL engine on sqld", () => {
-  const url = skipped ? "" : serverUrl("LIBSQL_URL");
+describe("the libSQL engine on sqld", () => {
   const env = { [VARIABLE]: url };
   const engine = createLibsqlEngine({ env });
   const clock = new FakeClock(START);
@@ -165,8 +166,75 @@ describe.skipIf(skipped)("the libSQL engine on sqld", () => {
         ["token", "ok"],
         ["sqlite", "ok"],
         ["install", "ok"],
+        ["marks", "ok"],
         ["lock", "ok"],
       ]);
+    });
+
+    it("after an ORM rebuild on the server: migrate names the case and the recovery, doctor fails marks, uninstall keeps the copies, and the recovery as printed runs", async () => {
+      await wipe();
+      await app.exec(LISTINGS);
+      await install(listings);
+      await app.exec("insert into listings (id, title, description) values (1, 'bike', 'red')");
+      await app.exec(
+        "update listings set is_scam = 1, facetdb_status = 'done', facetdb_updated_at = '2026-11-04T09:00:00.000Z' where id = 1",
+      );
+      await app.exec("delete from facetdb_jobs");
+      for (const statement of [
+        `create table new_listings (id integer primary key, title text, description text, price real,
+           is_scam integer, is_scam_probability real, facetdb_status text not null default 'pending',
+           facetdb_updated_at text, facetdb_reviewed integer not null default 0)`,
+        "insert into new_listings select * from listings",
+        "drop table listings",
+        "alter table new_listings rename to listings",
+      ]) {
+        await app.exec(statement);
+      }
+
+      const refused = await engine.planInstall(listings, url, deps);
+      expect(refused).toMatchObject({
+        ok: false,
+        refusal: {
+          code: "migrate-refused",
+          message: expect.stringMatching(
+            /^listings has columns named is_scam, .* but without FacetDB's mark .*the table was rebuilt since/,
+          ),
+        },
+      });
+      if (refused.ok) {
+        return;
+      }
+      const checks = await engine.doctor(listings, url, deps);
+      const marks = checks.find((check) => check.name === "marks");
+      expect(marks).toEqual({
+        name: "marks",
+        status: "fail",
+        detail: refused.refusal.message,
+        fix: refused.refusal.fix,
+      });
+      const uninstall = planned(
+        await engine.planUninstall(listings, url, { ...deps, purge: false, alsoUninstalling: [] }),
+      );
+      expect(
+        uninstall.keeps.filter((kept) => kept.kind === "column").map((kept) => kept.name),
+      ).toEqual([
+        "is_scam",
+        "is_scam_probability",
+        "facetdb_status",
+        "facetdb_updated_at",
+        "facetdb_reviewed",
+      ]);
+
+      // The recovery as printed, run through a client, then migrate: the columns come back marked.
+      const script = refused.refusal.fix
+        .split("\n")
+        .filter((line) => line.startsWith("  "))
+        .join("\n");
+      await app.exec(script);
+      expect(await rows("select record_key from facetdb_jobs")).toEqual([{ record_key: "1" }]);
+      await install(listings);
+      const after = await engine.doctor(listings, url, deps);
+      expect(after.find((check) => check.name === "marks")?.status).toBe("ok");
     });
 
     it("an application write from a second client re-queues a claimed key, and write refuses the stale answer", async () => {
@@ -268,6 +336,78 @@ describe.skipIf(skipped)("the libSQL engine on sqld", () => {
           (row) => row["name"],
         ),
       ).toEqual(["id", "title", "description", "price"]);
+    });
+  });
+
+  describe("one worker on the server", () => {
+    const tickets: EngineTarget = {
+      ...listingsTarget(),
+      source: "tickets",
+      table: "tickets",
+      onChange: "keep",
+      urlVariable: VARIABLE,
+      questionSet: { ...listingsTarget().questionSet, read: ["subject"] },
+    };
+
+    async function workers() {
+      await wipe();
+      await app.exec("create table tickets (id text primary key, subject text)");
+      await install(tickets);
+      const fixtureClock = new FakeClock(START);
+      const beats = new FakeRepeat(fixtureClock);
+      const open = (workerId: string) =>
+        createSqliteConnector(tickets, url, {
+          clock: fixtureClock,
+          repeat: beats.repeat,
+          workerId,
+          open: () => openLibsql({ url }),
+          label: "the libSQL database under test",
+        });
+      return { beats, first: await open("w1"), second: await open("w2") };
+    }
+
+    async function lock(): Promise<readonly Record<string, unknown>[]> {
+      return rows(
+        "select worker_id, heartbeat_at from facetdb_table_owners where table_name = 'tickets'",
+      );
+    }
+
+    const iso = (ms: number) => new Date(ms).toISOString();
+
+    it("a worker whose pass waits 3 minutes keeps its lock on its heartbeat, and the second is told when it frees", async () => {
+      const { beats, first, second } = await workers();
+      try {
+        await app.run("insert into tickets (id, subject) values (?, ?)", ["t1", "Refund"]);
+        expect(await first.claim(10)).toEqual(["t1"]);
+        await beats.advance(3 * 60_000);
+        expect(await lock()).toEqual([{ worker_id: "w1", heartbeat_at: iso(START + 3 * 60_000) }]);
+        await expect(second.claim(10)).rejects.toThrow(
+          `SQLite allows one worker, and worker w1 holds the lock on tickets in the libSQL database under test: it last renewed it at ${iso(START + 3 * 60_000)}, and the lock frees at ${iso(START + 5 * 60_000)} unless it is renewed before then`,
+        );
+        await first.ack(["t1"]);
+      } finally {
+        await first.close();
+        await second.close();
+      }
+      expect(await lock()).toEqual([{ worker_id: null, heartbeat_at: null }]);
+    });
+
+    it("a worker killed without close keeps its lock until the time the refusal names, then the next takes it", async () => {
+      const { beats, first, second } = await workers();
+      try {
+        expect(await first.claim(10)).toEqual([]);
+        await beats.advance(30_000);
+        beats.kill();
+        const frees = iso(START + 30_000 + 2 * 60_000);
+        await beats.advance(2 * 60_000 - 1);
+        await expect(second.claim(10)).rejects.toThrow(`the lock frees at ${frees}`);
+        await beats.advance(1);
+        expect(await second.claim(10)).toEqual([]);
+        expect(await lock()).toEqual([{ worker_id: "w2", heartbeat_at: frees }]);
+      } finally {
+        await second.close();
+        await first.close();
+      }
     });
   });
 
