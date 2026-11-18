@@ -1,3 +1,5 @@
+export type { DraftJudgement, SourceDraft } from "./draft.ts";
+export { judgeDraftSource } from "./draft.ts";
 export type {
   ActionCall,
   CaptureMode,

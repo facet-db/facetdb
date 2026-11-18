@@ -19,6 +19,7 @@ import { createApiKeys } from "../auth/api-keys.ts";
 import { createCheckService } from "../check/service.ts";
 import { createCheckStore } from "../check/store.ts";
 import { onlyRecord } from "../check/target.ts";
+import type { ConfigService } from "../config/service.ts";
 import { createWebhookAction, type WebhookPayload } from "./action.ts";
 import {
   ALERT_NOT_RAISED,
@@ -41,6 +42,17 @@ const FIELDS = ["subject", "body"] as const;
 const ENDPOINT = "https://hooks.example.com/facetdb";
 const SECRET = "whsec-test-secret";
 const START = 1_700_000_000_000;
+
+/** The config routes are not what these tests are about: any call to them fails the test. */
+const NO_CONFIG: ConfigService = {
+  json: () => {
+    throw new Error("these tests read no config");
+  },
+  validate: () => {
+    throw new Error("these tests validate no draft");
+  },
+  preview: () => Promise.reject(new Error("these tests preview nothing")),
+};
 
 const UNLIMITED: SpendingGate = {
   allowsWork: () => Promise.resolve(true),
@@ -314,6 +326,7 @@ async function rig() {
       clock,
       retryAfterSeconds: 30,
     }),
+    config: NO_CONFIG,
     newRequestId: () => "req-1",
   });
   const { secret } = await keys.create(PROJECT, "test");

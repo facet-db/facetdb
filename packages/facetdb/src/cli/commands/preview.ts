@@ -1,19 +1,19 @@
 import { randomUUID } from "node:crypto";
 import {
   type Answer,
-  checkStateSize,
   choiceConfidence,
+  createPreviewService,
   type Decision,
-  decide,
-  estimateRequestTokens,
-  type ProviderRequest,
+  type ModelProvider,
+  PREVIEW_DEFAULT_LIMIT,
+  PreviewModelError,
+  type PreviewRow,
+  type PreviewSkipReason,
   type Question,
-  type ReadRow,
+  type QuestionSet,
   type RecordKey,
   type RecordStatus,
-  resolveThresholds,
-  shouldSkip,
-  statusOf,
+  type SpendingGate,
 } from "@facetdb/core";
 import { keyWords, openConnector } from "../engines.ts";
 import {
@@ -37,11 +37,11 @@ import {
 } from "./database.ts";
 
 /**
- * `facetdb preview`: reads the most recent rows of a source through its engine's connector (the
- * first page of `scan`, newest first), asks the model every question of the set once per row, and
- * prints what FacetDB would decide, in words, with the status each row would get. It writes
- * nothing: it calls the connector's `scan` alone, never `write`, the queue or the decision log, and
- * closes it before the model is asked.
+ * `facetdb preview`: reads the most recent rows of a source through its engine's connector (`scan`,
+ * newest first), asks the model every question of the set once per row through core's preview
+ * service (the one the studio's `POST /v1/preview` runs too), and prints what FacetDB would decide,
+ * in words, with the status each row would get. It writes nothing: the service calls the
+ * connector's `scan` alone, never `write`, the queue or the decision log.
  */
 
 type PreviewOptions = {
@@ -51,10 +51,23 @@ type PreviewOptions = {
   readonly allowInsecure?: boolean;
 };
 
-export const PREVIEW_DEFAULT_LIMIT = 20;
+export { PREVIEW_DEFAULT_LIMIT };
+
 const PREVIEW_MAX_LIMIT = 100;
-/** Requests in flight at once: a preview is a handful of rows, not a worker. */
-const PREVIEW_IN_FLIGHT = 4;
+
+/**
+ * The terminal's preview opens no FacetDB store: opening one builds its schema in the database, and
+ * a preview changes nothing, before `facetdb migrate` too, so its tokens are not counted against
+ * the month. The studio's preview runs inside `facetdb worker` on the project's own gate, the
+ * store-backed one its workers share (`projectSpending`).
+ */
+const TERMINAL_UNMETERED: SpendingGate = {
+  allowsWork: () => Promise.resolve(true),
+  admit: () => Promise.resolve("terminal-preview"),
+  settle: () => Promise.resolve(),
+  record: () => Promise.resolve(),
+  finish: () => Promise.resolve(),
+};
 
 /**
  * One row's preview: what the model said for each question and the status that would follow. Its
@@ -121,17 +134,65 @@ function decisionWords(decision: Decision): string {
   return decision.value;
 }
 
+const SKIPPED_WHY: Readonly<Record<PreviewSkipReason, string>> = {
+  "filtered-out": "left out by the source's where filter",
+  "empty-state": "nothing to read: every field is empty",
+  "too-large": "too large to send to the model",
+  "spending-cap": "not asked: the spending cap was reached",
+};
+
+/** The service's row in the terminal's words. */
+function inWords(questionSet: QuestionSet, row: PreviewRow, key: string): PreviewedRow {
+  if (row.kind === "skipped") {
+    return { key, kind: "skipped", why: SKIPPED_WHY[row.reason] };
+  }
+  const lines = questionSet.questions.map((question): PreviewedAnswer => {
+    const answer = row.answers[question.name];
+    const decision = row.decisions[question.name];
+    if (answer === undefined || decision === undefined) {
+      throw new Error(`the preview service answered row ${key} without "${question.name}"`);
+    }
+    return {
+      question: label(question),
+      said: said(question, answer),
+      decision: decisionWords(decision),
+    };
+  });
+  return { key, kind: "answered", status: row.status, lines };
+}
+
+/** A failed model call in words: the row as the user writes it, and what to do. */
+function modelFailure(error: PreviewModelError, key: string): CliError {
+  if (error.question !== undefined) {
+    return new CliError(
+      "model-call",
+      `the model's response has no answer for "${error.question}" (row ${key})`,
+      "run preview again; if it repeats, run facetdb doctor",
+    );
+  }
+  return new CliError(
+    "model-call",
+    `the model did not answer for row ${key}: ${error.message}`,
+    "run facetdb doctor to check the model key and the connection, then run preview again; nothing was written",
+  );
+}
+
 /**
- * The `limit` most recent rows: the first page of the engine connector's `scan`, newest first. The
- * engine refuses a password in the clear to another machine before it connects.
+ * The preview through the engine's connector, closed afterwards. The engine refuses a password in
+ * the clear to another machine before it connects.
  */
-async function recentRows(
+async function previewRows(
   deps: CliDeps,
   target: TableTarget,
   table: SourceTable,
+  questionSet: QuestionSet,
   limit: number,
-  allowInsecure: boolean,
-): Promise<readonly ReadRow[]> {
+  options: {
+    readonly allowInsecure: boolean;
+    readonly provider: ModelProvider;
+    readonly print: (text: string) => void;
+  },
+) {
   const { source } = target;
   const { engine, url } = reachedOf(
     table,
@@ -140,28 +201,23 @@ async function recentRows(
   );
   const connector = await openConnector(engine, table.own, url, {
     clock: deps.clock,
-    allowInsecure,
+    allowInsecure: options.allowInsecure,
     storeShared: storeSharedFor(deps.env, source),
     workerId: `preview-${randomUUID()}`,
   });
   try {
-    return (await connector.scan(null)).rows.slice(0, limit);
+    return await createPreviewService({
+      connector,
+      provider: options.provider,
+      spending: TERMINAL_UNMETERED,
+      log: (line) => options.print(`note: ${line}`),
+      // Read only at a reached cap, which the terminal's unmetered gate never reports.
+      clock: deps.clock,
+      ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
+    }).preview(questionSet, limit);
   } finally {
     await connector.close();
   }
-}
-
-/** Runs `work` over `items`, `width` at a time, keeping the order of the results. */
-async function inChunks<Item, Result>(
-  items: readonly Item[],
-  width: number,
-  work: (item: Item) => Promise<Result>,
-): Promise<Result[]> {
-  const results: Result[] = [];
-  for (let start = 0; start < items.length; start += width) {
-    results.push(...(await Promise.all(items.slice(start, start + width).map(work))));
-  }
-  return results;
 }
 
 export const previewCommand = defineCommand<PreviewOptions>("preview", {
@@ -196,76 +252,38 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       return { ok: true, dryRun: true, source: source.name, table: name, rows: limit };
     }
 
-    const rows = await recentRows(deps, target, table, limit, options.allowInsecure === true);
     // A key as the user writes it: MongoDB's `65f1…` for `oid:65f1…`, `1` for `n:1`.
     const keyText = table.reached?.engine.keyText;
     const shown = (key: RecordKey) => keyWords(keyText, key);
-    if (rows.length === 0) {
+    // Made on the first request only, so a table with no rows needs no model.
+    let provider: ModelProvider | undefined;
+    const lazyProvider: ModelProvider = {
+      ask: (request) => {
+        provider ??= deps.provider(config);
+        return provider.ask(request);
+      },
+    };
+    let result: Awaited<ReturnType<typeof previewRows>>;
+    try {
+      result = await previewRows(deps, target, table, questionSet, limit, {
+        allowInsecure: options.allowInsecure === true,
+        provider: lazyProvider,
+        print,
+      });
+    } catch (error) {
+      if (error instanceof PreviewModelError) {
+        throw modelFailure(error, shown(error.key));
+      }
+      throw error;
+    }
+    if (result.kind === "capped") {
+      throw new CliError("spending-cap", result.message, result.fix);
+    }
+    if (result.rows.length === 0) {
       print(`${name} has no rows yet, so there is nothing to preview.`);
       return { ok: true, source: source.name, table: name, rows: [] };
     }
-    const provider = deps.provider(config);
-    const previewed = await inChunks(
-      rows,
-      PREVIEW_IN_FLIGHT,
-      async (row): Promise<PreviewedRow> => {
-        const key = shown(row.key);
-        const skip = shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded });
-        if (skip.skip) {
-          return {
-            key,
-            kind: "skipped",
-            why:
-              skip.reason === "filtered-out"
-                ? "left out by the source's where filter"
-                : "nothing to read: every field is empty",
-          };
-        }
-        const request: ProviderRequest = {
-          model: questionSet.model,
-          state: row.state,
-          questions: questionSet.questions,
-        };
-        if (
-          checkStateSize(estimateRequestTokens(request), source.maxStateTokens).kind === "refuse"
-        ) {
-          return { key, kind: "skipped", why: "too large to send to the model" };
-        }
-        let response: Awaited<ReturnType<typeof provider.ask>>;
-        try {
-          response = await provider.ask(request);
-        } catch (cause) {
-          throw new CliError(
-            "model-call",
-            `the model did not answer for row ${key}: ${cause instanceof Error ? cause.message : String(cause)}`,
-            "run facetdb doctor to check the model key and the connection, then run preview again; nothing was written",
-          );
-        }
-        const decisions: Record<string, Decision> = {};
-        const lines = questionSet.questions.map((question): PreviewedAnswer => {
-          const answer = response.answers[question.name];
-          if (answer === undefined) {
-            throw new CliError(
-              "model-call",
-              `the model's response has no answer for "${question.name}" (row ${key})`,
-              "run preview again; if it repeats, run facetdb doctor",
-            );
-          }
-          const decision = decide(
-            question,
-            resolveThresholds(question, source.thresholds[question.name]),
-            answer,
-          );
-          decisions[question.name] = decision;
-          return {
-            question: label(question),
-            said: said(question, answer),
-            decision: decisionWords(decision),
-          };
-        });
-        return { key, kind: "answered", status: statusOf(decisions), lines };
-      },
-    );
+    const previewed = result.rows.map((row) => inWords(questionSet, row, shown(row.key)));
 
     print(`Preview of ${name}: the ${previewed.length} most recent rows. Nothing was written.`);
     for (const row of previewed) {

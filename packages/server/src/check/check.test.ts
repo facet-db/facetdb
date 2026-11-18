@@ -20,6 +20,7 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
+import type { ConfigService } from "../config/service.ts";
 import { CHECK_POLL_MS, CHECK_WAIT_MS, createCheckService } from "./service.ts";
 import { createCheckStore } from "./store.ts";
 import { onlyRecord } from "./target.ts";
@@ -29,6 +30,17 @@ const OTHER_PROJECT = "project-2";
 const SOURCE = "support_tickets";
 const SOURCE_ID = sourceIdOf(PROJECT, SOURCE);
 const FIELDS = ["subject", "body"] as const;
+
+/** The config routes are not what these tests are about: any call to them fails the test. */
+const NO_CONFIG: ConfigService = {
+  json: () => {
+    throw new Error("these tests read no config");
+  },
+  validate: () => {
+    throw new Error("these tests validate no draft");
+  },
+  preview: () => Promise.reject(new Error("these tests preview nothing")),
+};
 
 const UNLIMITED: SpendingGate = {
   allowsWork: () => Promise.resolve(true),
@@ -182,6 +194,7 @@ async function rig(
   const app = createApp({
     keys,
     check,
+    config: NO_CONFIG,
     newRequestId: () => {
       requestCount += 1;
       return `req-${requestCount}`;
@@ -547,6 +560,7 @@ describe("the error shape", () => {
       check: {
         check: () => Promise.reject(new Error(`boom: ${CHARGED}`)),
       },
+      config: NO_CONFIG,
       newRequestId: () => "req-x",
     });
     const response = await broken.request("/v1/check", {

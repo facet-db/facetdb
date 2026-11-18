@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type Connector,
   createAlerts,
+  createPreviewService,
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type KeyText,
@@ -27,7 +28,12 @@ import {
   type DeliveryReport,
   onlyRecord,
 } from "@facetdb/server";
-import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
+import {
+  judgeDraftSource,
+  type ProjectConfig,
+  type SourceConfig,
+  toProjectJson,
+} from "../../config/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl } from "../engines.ts";
 import {
@@ -164,6 +170,8 @@ const NO_REVIEW_CARDS: ReviewQueue = { withdraw: () => Promise.resolve() };
 type Running = {
   readonly source: string;
   readonly worker: Worker;
+  /** What the studio's preview reads the newest rows through (`scan` only). */
+  readonly connector: Pick<Connector, "scan">;
   /** How its keys print; undefined where a key is its own text. */
   readonly keyText: KeyText | undefined;
   close(): Promise<void>;
@@ -270,6 +278,7 @@ export async function runWorkers(
         running.push({
           source: source.name,
           worker,
+          connector,
           keyText: undefined,
           close: () => Promise.resolve(),
           answered: 0,
@@ -293,6 +302,7 @@ export async function runWorkers(
       running.push({
         source: source.name,
         worker: workerFor(source, connector, true),
+        connector,
         keyText: parts.keyTextOf?.(source),
         close: () => connector.close(),
         answered: 0,
@@ -351,6 +361,37 @@ export async function runWorkers(
         clock,
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
+        // The studio's door to the configuration: the loader's export and judgement, which only
+        // this package has; applying a draft is not built yet.
+        config: {
+          projectId: project.id,
+          json: () => toProjectJson(config),
+          validate: (draft) => judgeDraftSource(config, draft, deps.env),
+        },
+        // A preview reads a running source through the connector its loop holds, asks through the
+        // workers' provider (backoff and the in-flight limit) and admits under their spending gate.
+        preview: (name) => {
+          const source = config.sources.find((candidate) => candidate.name === name);
+          const entry = running.find((candidate) => candidate.source === name);
+          if (source === undefined || entry === undefined) {
+            return undefined;
+          }
+          return {
+            read: source.read,
+            where: source.where,
+            keyText: entry.keyText,
+            preview: createPreviewService({
+              connector: entry.connector,
+              provider,
+              spending,
+              log: (line) => print(`${name}: preview: ${line}`),
+              clock,
+              ...(source.maxStateTokens === undefined
+                ? {}
+                : { maxStateTokens: source.maxStateTokens }),
+            }).preview,
+          };
+        },
       });
       listener = await deps.serve((request) => app.fetch(request), port);
       print(`Serving the check API on port ${listener.port}.`);

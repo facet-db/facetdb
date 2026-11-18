@@ -12,6 +12,7 @@ export type {
 export {
   createSpending,
   monthOf,
+  nextMonthOf,
   RESERVATION_LEASE_MS,
   SpendingAlertError,
   spendingGate,

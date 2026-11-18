@@ -1,4 +1,4 @@
-import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
+import { type Clock, DEFAULT_WORKER_LIMITS, monthOf } from "@facetdb/core";
 import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
@@ -585,6 +585,104 @@ describe("facetdb worker", () => {
       new Request("http://localhost/v1/check", { method: "POST", body: "{}" }),
     );
     expect(response?.status).toBe(401);
+  });
+
+  it("serves the project JSON, a draft's judgement and the preview of a running source", async () => {
+    // What the loader makes of `database: process.env.LISTINGS_URL`: the value, and the variable.
+    const loaded: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({ ...source, databaseEnv: "LISTINGS_URL" })),
+    };
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const result = await run(["worker", "--once"], {
+      config: loaded,
+      env: {
+        DATABASE_URL: "postgres://localhost:5432/facetdb",
+        LISTINGS_URL: WORKER_URL,
+        TYPESAFE_API_KEY: "ts-test-key",
+      },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    const { secret } = await store.apiKeys.create(projectRef(PROJECT_DIR).id, "studio");
+    const [listener] = served;
+    const call = async (method: string, path: string, body?: unknown) => {
+      const response = await listener?.handler(
+        new Request(`http://localhost${path}`, {
+          method,
+          headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      );
+      return { status: response?.status, json: (await response?.json()) as unknown };
+    };
+
+    const json = await call("GET", "/v1/config");
+    expect(json.status).toBe(200);
+    expect(json.json).toMatchObject({
+      model: "jev-1.14.0",
+      sources: [{ name: "listings", database: { env: "LISTINGS_URL" }, table: "listings" }],
+    });
+    // The export names the variable, never the connection string.
+    expect(JSON.stringify(json.json)).not.toContain("worker-password");
+
+    const judged = await call("POST", "/v1/config/validate", {
+      source: {
+        name: "listings",
+        questions: {
+          is_scam: {
+            type: "noul",
+            instructions: "Does it cost more than 500 euros?",
+            stakes: "low",
+          },
+        },
+      },
+    });
+    expect(judged).toMatchObject({
+      status: 200,
+      json: {
+        valid: true,
+        issues: [],
+        warnings: [{ source: "listings", question: "is_scam", code: "counting" }],
+      },
+    });
+
+    const broken = await call("POST", "/v1/config/validate", {
+      source: { name: "listings", model: "jev-latest" },
+    });
+    expect(broken).toMatchObject({
+      status: 200,
+      json: { valid: false, issues: [{ path: "sources[0].model" }] },
+    });
+
+    const asked = provider.callCount;
+    const usage = () => store.usage.total(projectRef(PROJECT_DIR).id, monthOf(clock.now()));
+    const usedBefore = await usage();
+    const previewed = await call("POST", "/v1/preview", {
+      source: { name: "listings", thresholds: { is_scam: { noBelow: 0.001 } } },
+    });
+    expect(previewed).toMatchObject({
+      status: 200,
+      json: {
+        rows: [
+          {
+            key: "r1",
+            kind: "answered",
+            answers: { is_scam: { type: "noul", probability: 0.01 } },
+            decisions: { is_scam: { kind: "needs_review" } },
+          },
+        ],
+        decided: 0,
+        review: 1,
+      },
+    });
+    expect(provider.callCount).toBe(asked + 1);
+    // Counted against the project like the worker's own requests: the store-backed gate, not an
+    // unmetered one.
+    const { cost } = previewed.json as { readonly cost: { readonly inputTokens: number } };
+    expect(cost.inputTokens).toBeGreaterThan(0);
+    expect(await usage()).toBe(usedBefore + cost.inputTokens);
+    // The preview wrote nothing: the row keeps the decision the worker wrote, not the draft's.
+    expect(await listing("r1")).toMatchObject({ is_scam: false, facetdb_status: "done" });
   });
 
   it("--port binds the given port, and refuses one that is not a port", async () => {

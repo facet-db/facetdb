@@ -3,6 +3,8 @@ import type { ApiKeys } from "./auth/api-keys.ts";
 import { type AppEnv, requireApiKey } from "./auth/middleware.ts";
 import { checkRoute } from "./check/route.ts";
 import type { CheckService } from "./check/service.ts";
+import { configRoutes } from "./config/routes.ts";
+import type { ConfigService } from "./config/service.ts";
 import { ApiError } from "./errors.ts";
 
 /** The path prefix of every endpoint; a breaking change makes a new one beside it. */
@@ -11,6 +13,8 @@ export const API_VERSION = "v1";
 export type AppDeps = {
   readonly keys: ApiKeys;
   readonly check: CheckService;
+  /** The project JSON, a draft's validation and the live preview (the studio's config door). */
+  readonly config: ConfigService;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;
 };
@@ -33,6 +37,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
 
   app.use(`/${API_VERSION}/*`, requireApiKey(deps.keys));
   app.route(`/${API_VERSION}/check`, checkRoute(deps.check));
+  // Behind the API key for now; reviewer sessions join them with the studio's accounts.
+  app.route(`/${API_VERSION}`, configRoutes(deps.config));
 
   app.notFound((c) =>
     c.json(

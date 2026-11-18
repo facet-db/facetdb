@@ -137,6 +137,17 @@ async function rig() {
     });
   const app = createServer({
     retryAfterSeconds: 30,
+    // The SDK calls the check API only: the config door fails the test if it is reached.
+    config: {
+      projectId: PROJECT,
+      json: () => {
+        throw new Error("the SDK reads no config");
+      },
+      validate: () => {
+        throw new Error("the SDK validates no draft");
+      },
+    },
+    preview: () => undefined,
     store: {
       ...createCheckStore(
         store,

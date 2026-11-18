@@ -19,6 +19,17 @@ export { createCheckService } from "./check/service.ts";
 export type { DeclaredApiSource } from "./check/store.ts";
 export { createCheckStore } from "./check/store.ts";
 export { onlyRecord } from "./check/target.ts";
+export { PREVIEW_MAX_LIMIT } from "./config/routes.ts";
+export type {
+  ConfigService,
+  DraftCheck,
+  DraftIssue,
+  DraftWarning,
+  PreviewSource,
+  ProjectConfigDoor,
+  SourceDraft,
+} from "./config/service.ts";
+export { createConfigService } from "./config/service.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";

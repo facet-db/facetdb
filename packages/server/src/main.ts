@@ -6,6 +6,11 @@ import { createApp } from "./app.ts";
 import { createApiKeys } from "./auth/api-keys.ts";
 import type { AppEnv } from "./auth/middleware.ts";
 import { type CheckStore, type CheckWorkers, createCheckService } from "./check/service.ts";
+import {
+  createConfigService,
+  type PreviewSource,
+  type ProjectConfigDoor,
+} from "./config/service.ts";
 
 export type ServerDeps = {
   /** The API keys and the API sources' records and queues, from the FacetDB store. */
@@ -19,6 +24,13 @@ export type ServerDeps = {
    * depend on the model package, so the number has one owner and no copy here.
    */
   readonly retryAfterSeconds: number;
+  /**
+   * The project's configuration as only the CLI has it: the loader's JSON export and its judgement
+   * of a draft (this package never imports the `facetdb` package).
+   */
+  readonly config: ProjectConfigDoor;
+  /** The preview over a running source of the worker, or undefined when it runs none by that name. */
+  readonly preview: (source: string) => PreviewSource | undefined;
 };
 
 /**
@@ -34,6 +46,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       clock: deps.clock,
       retryAfterSeconds: deps.retryAfterSeconds,
     }),
+    config: createConfigService({ config: deps.config, preview: deps.preview }),
     newRequestId: randomUUID,
   });
 }

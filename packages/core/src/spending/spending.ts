@@ -206,6 +206,12 @@ export function monthOf(ms: number): string {
   return new Date(ms).toISOString().slice(0, 7);
 }
 
+/** When the UTC calendar month of a clock reading ends and the next count begins, in ms. */
+export function nextMonthOf(ms: number): number {
+  const at = new Date(ms);
+  return Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1);
+}
+
 /**
  * The status, with an alert that could not be raised reported to `onAlertFailure`. The status was
  * settled before the alert went out, so it still decides.

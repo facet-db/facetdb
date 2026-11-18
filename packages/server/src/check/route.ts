@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
+import { bodyProblems, readJson } from "../request.ts";
 import type { CheckService } from "./service.ts";
 
 /** The body of `facetdb.check(source, { id, record })`. Values are text, or null for blank. */
@@ -24,12 +25,7 @@ export function checkRoute(service: CheckService): Hono<AppEnv> {
       throw new ApiError(
         400,
         "invalid_request",
-        `The request body is not valid: ${body.error.issues
-          .map(
-            (issue) =>
-              `${issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue.message}`,
-          )
-          .join("; ")}.`,
+        bodyProblems(body.error),
         'Send {"source": "<source name>", "id": "<record id>", "record": {"<field>": "<text or null>"}}.',
       );
     }
@@ -79,17 +75,4 @@ export function checkRoute(service: CheckService): Hono<AppEnv> {
   });
 
   return route;
-}
-
-async function readJson(request: { json(): Promise<unknown> }): Promise<unknown> {
-  try {
-    return await request.json();
-  } catch {
-    throw new ApiError(
-      400,
-      "invalid_json",
-      "The request body is not JSON.",
-      "Send a JSON body with the header `Content-Type: application/json`.",
-    );
-  }
 }
