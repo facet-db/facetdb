@@ -9,15 +9,16 @@ import type {
   StateValue,
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createMssqlEngine } from "../engine/index.ts";
 import { createInstaller, JOBS_TABLE, WORKER_USER } from "../install/index.ts";
-import { connectMssql, type MssqlClient, type MssqlRow } from "../sql/index.ts";
-import { skipUnless, testServerUrl } from "../testing/index.ts";
+import { connectMssql, type MssqlClient, type MssqlQuery, type MssqlRow } from "../sql/index.ts";
+import { dropScratch, skipUnless, testServerUrl } from "../testing/index.ts";
 import {
   connectMssqlPool,
   createMssqlConnector,
   type MssqlConnector,
+  type MssqlPoolConnect,
   VERSION_SAVE_MS,
   versionRun,
 } from "./index.ts";
@@ -35,8 +36,14 @@ import {
  * table's uninstall keeping the queue, and doctor under the worker login.
  *
  * The worker is the server login the other suites share (contained database authentication is off
- * on the test server): this suite never drops it, and its password is theirs, so whichever suite
- * made it first, the others log in with it.
+ * on the test server), and its password is theirs, so whichever suite made it first, the others log
+ * in with it. The files run one after another, so this suite's end drops its databases and the
+ * login (`dropScratch`); the next suite's install makes the login again.
+ *
+ * The poller's lock is held through a pass on a real server too: a lock lost between two queuing
+ * chunks (its session killed from another connection, the second process taking the lock), and a
+ * lock session killed between ticks; and the refusals before any statement of a rowversion state
+ * field and a memory-optimized table, with either capture.
  */
 
 const START = Date.parse("2026-11-04T09:00:00.000Z");
@@ -93,6 +100,72 @@ async function within<T>(pending: Promise<T>, ms: number, what: string): Promise
     ]);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The pools a connector opens, watched through the same `connect` parameter (no module patched):
+ * the lock's session (its pool of one) handed back, and the main pool's transactions counted as
+ * they commit, `afterFirstCommit` run once the first has (between a pass's first two chunks).
+ */
+function watchedPools(afterFirstCommit?: () => Promise<void>) {
+  let lock: MssqlClient | undefined;
+  let commits = 0;
+  const connect: MssqlPoolConnect = (url, options) => {
+    const pool = connectMssqlPool(url, options);
+    if (options.maxConnections === 1) {
+      lock = pool;
+      return pool;
+    }
+    return {
+      query: pool.query,
+      close: () => pool.close(),
+      async transaction<T>(work: (query: MssqlQuery) => Promise<T>): Promise<T> {
+        const result = await pool.transaction(work);
+        commits += 1;
+        if (commits === 1) {
+          await afterFirstCommit?.();
+        }
+        return result;
+      },
+    };
+  };
+  return {
+    connect,
+    commits: () => commits,
+    lockSession(): MssqlClient {
+      if (lock === undefined) {
+        throw new Error("the connector opened no lock session");
+      }
+      return lock;
+    },
+  };
+}
+
+/**
+ * Ends `session`'s connection from the admin's (`kill <spid>`), as a failover or an operator would,
+ * and waits until the server has let it go.
+ */
+async function killSession(admin: MssqlClient, session: MssqlClient): Promise<void> {
+  const [row] = await session.query("select @@spid as spid");
+  const spid = Number(row?.["spid"]);
+  if (!Number.isInteger(spid)) {
+    throw new Error(`no session id: ${String(row?.["spid"])}`);
+  }
+  await admin.query(`kill ${spid}`);
+  for (let tries = 0; tries < 50; tries += 1) {
+    const [left] = await admin.query(
+      "select count(*) as n from sys.dm_exec_sessions where session_id = @p1 and login_name = @p2",
+      [spid, WORKER_USER],
+    );
+    if (left?.["n"] === 0) {
+      break;
+    }
+    await pause(100);
   }
 }
 
@@ -155,12 +228,27 @@ class World {
   }
 
   async alterDatabase(setting: string): Promise<void> {
+    await this.rootQuery(`alter database [${this.database}] ${setting}`);
+  }
+
+  /** A statement of the server's admin, on master. */
+  async rootQuery(text: string): Promise<void> {
     const root = connectMssql(this.server);
     try {
-      await root.query(`alter database [${this.database}] ${setting}`);
+      await root.query(text);
     } finally {
       await root.close();
     }
+  }
+
+  /** `count` application inserts in one statement, keys t001 on: one change each. */
+  async insertMany(count: number): Promise<void> {
+    await this.admin.query(
+      `insert into tickets (id, subject, body)
+select concat(N't', right(N'000' + cast(n as nvarchar(10)), 3)), N's', N'b'
+  from (select top (@p1) row_number() over (order by (select null)) as n from sys.all_columns) numbers`,
+      [count],
+    );
   }
 
   async install(target: EngineTarget = this.target): Promise<void> {
@@ -203,11 +291,15 @@ class World {
     }
   }
 
-  async connector(workerId: string, scanPageSize?: number): Promise<MssqlConnector> {
+  async connector(
+    workerId: string,
+    scanPageSize?: number,
+    connect: MssqlPoolConnect = connectMssqlPool,
+  ): Promise<MssqlConnector> {
     const connector = await createMssqlConnector(this.target, this.urls.worker, {
       clock: this.clock,
       workerId,
-      connect: connectMssqlPool,
+      connect,
       maxConnections: 4,
       cursors: this.cursors,
       warn: (line) => {
@@ -298,6 +390,10 @@ describe.skipIf(skipUnless("MSSQL_URL"))("Change Tracking as the capture on MSSQ
     for (const made of worlds.splice(0)) {
       await made.close();
     }
+  });
+  // The shared server keeps nothing of this suite: its databases and the worker's login.
+  afterAll(async () => {
+    await dropScratch(testServerUrl("MSSQL_URL"), [SCRATCH, SCRATCH_OFF]);
   });
 
   async function world(
@@ -473,6 +569,136 @@ describe.skipIf(skipUnless("MSSQL_URL"))("Change Tracking as the capture on MSSQ
       "w2: tickets: claiming only: another worker polls Change Tracking for dbo.tickets; this one takes over if it stops",
       "w2: tickets: this worker takes over polling Change Tracking for dbo.tickets: the worker that polled it stopped",
     ]);
+  });
+
+  // The pass runs on the pool while the lock lives on a session of its own; 600 changes are two
+  // queuing transactions (500 and 100), with the lock checked before each.
+  it("a lock lost between two chunks of a pass: the first process stops queuing there, the second takes the lock and polls, and the first keeps running", async () => {
+    const made = await world();
+    await made.install();
+    await made.insertMany(600);
+    const second = await made.connector("w2");
+    const watched = watchedPools(async () => {
+      // Between the first chunk's commit and the second chunk's check, from another connection:
+      // the first process's lock session is killed, and the second process takes the lock.
+      await killSession(made.admin, watched.lockSession());
+      for (let tries = 0; tries < 50 && second.tracked?.polling() !== true; tries += 1) {
+        await second.tracked?.poll();
+        if (second.tracked?.polling() !== true) {
+          await pause(100);
+        }
+      }
+      expect(second.tracked?.polling()).toBe(true);
+    });
+    const first = await made.connector("w1", undefined, watched.connect);
+    await expect(first.tracked?.poll()).resolves.toBeUndefined();
+    // The first queued its first chunk, then found its lock gone and queued nothing more.
+    expect(watched.commits()).toBe(1);
+    expect(first.tracked?.polling()).toBe(false);
+    expect(await made.jobs()).toHaveLength(600);
+    expect(made.notes).toContainEqual(
+      expect.stringContaining(
+        "w1: tickets: this worker stopped queuing the changes of dbo.tickets in the middle of a pass: the connection that held its lock on polling Change Tracking was lost (",
+      ),
+    );
+    // The first keeps running, claiming only, while the second polls the next change.
+    await made.write("u1", { subject: "s", body: "one more" });
+    await expect(first.tracked?.poll()).resolves.toBeUndefined();
+    expect(first.tracked?.polling()).toBe(false);
+    expect(watched.commits()).toBe(1);
+    await second.tracked?.poll();
+    expect(await made.jobs()).toHaveLength(601);
+    expect(made.notes.filter((line) => line.startsWith("w1: "))).toEqual([
+      "w1: tickets: this worker polls Change Tracking for dbo.tickets",
+      expect.stringContaining("w1: tickets: this worker stopped queuing"),
+      "w1: tickets: claiming only: another worker polls Change Tracking for dbo.tickets; this one takes over if it stops",
+    ]);
+  });
+
+  it("a lock session the server killed: the next tick says the lock is not held and goes on, then the one after takes it back on a new connection", async () => {
+    const made = await world();
+    await made.install();
+    const watched = watchedPools();
+    const connector = await made.connector("w1", undefined, watched.connect);
+    await connector.tracked?.poll();
+    expect(connector.tracked?.polling()).toBe(true);
+    // A session sees its own row of sys.dm_exec_sessions: its login time tells a new one (the
+    // server may hand the killed session's id to the next).
+    const loggedIn = async () =>
+      (
+        await watched
+          .lockSession()
+          .query(
+            "select convert(nvarchar(30), login_time, 121) as at from sys.dm_exec_sessions where session_id = @@spid",
+          )
+      )[0]?.["at"];
+    const before = await loggedIn();
+    await killSession(made.admin, watched.lockSession());
+    await made.write("t1", { subject: "s", body: "one" });
+
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(connector.tracked?.polling()).toBe(false);
+    expect(await made.jobs()).toEqual([]);
+
+    await connector.tracked?.poll();
+    expect(connector.tracked?.polling()).toBe(true);
+    expect(await made.jobs()).toEqual(["t1"]);
+    // The lock lives on a new session now.
+    expect(before).toEqual(expect.any(String));
+    expect(await loggedIn()).not.toBe(before);
+    expect(made.notes).toEqual([
+      "w1: tickets: this worker polls Change Tracking for dbo.tickets",
+      expect.stringMatching(
+        /^w1: tickets: the connection that held this worker's lock on polling Change Tracking for dbo\.tickets was lost \(.+\); this worker claims only for this tick and asks for the lock again on a new connection at the next$/,
+      ),
+      "w1: tickets: this worker polls Change Tracking for dbo.tickets again: it took its lock back",
+    ]);
+  });
+
+  it("refuses a rowversion state field and a memory-optimized table before any statement runs, with either capture", async () => {
+    const made = await world();
+    // A memory-optimized table needs the database's memory-optimized filegroup, as its admin adds it.
+    await made.rootQuery(
+      `alter database [${SCRATCH}] add filegroup facetdb_t069_imoltp contains memory_optimized_data`,
+    );
+    await made.rootQuery(
+      `declare @file nvarchar(4000) = cast(serverproperty('InstanceDefaultDataPath') as nvarchar(4000)) + N'facetdb_t069_imoltp';
+declare @add nvarchar(max) = N'alter database [${SCRATCH}] add file (name = N''facetdb_t069_imoltp'', filename = N''' + @file + N''') to filegroup facetdb_t069_imoltp';
+exec (@add);`,
+    );
+    await made.admin.query(
+      "create table memo (id int not null primary key nonclustered, subject nvarchar(100), body nvarchar(100)) with (memory_optimized = on, durability = schema_only)",
+    );
+    await made.admin.query(
+      "create table versioned (id int primary key, subject nvarchar(100), body nvarchar(100), rv rowversion)",
+    );
+    const options = { ...deps(made.clock), workerPassword: PASSWORD };
+    for (const capture of ["trigger", "change-tracking"] as const) {
+      const memo = ticketsTarget({ source: "memo", table: "memo", capture });
+      expect(await made.installer.planInstall(memo, made.urls.admin, options)).toMatchObject({
+        ok: false,
+        refusal: { code: "memory-optimized" },
+      });
+      const versioned = ticketsTarget({
+        source: "versioned",
+        table: "versioned",
+        capture,
+        questionSet: { ...questionSet, read: ["subject", "rv"] },
+      });
+      expect(await made.installer.planInstall(versioned, made.urls.admin, options)).toMatchObject({
+        ok: false,
+        refusal: {
+          code: "state-column",
+          message: expect.stringContaining("the state field rv is a rowversion column"),
+        },
+      });
+    }
+    // Nothing ran: neither table has a trigger, tracking, or a column of FacetDB's.
+    expect(
+      await made.one(
+        "select (select count(*) from sys.triggers) + (select count(*) from sys.change_tracking_tables) + (select count(*) from sys.columns where name like N'facetdb[_]%') as n",
+      ),
+    ).toEqual({ n: 0 });
   });
 
   it("a re-read of the same changes, its version held back by a held row, never clears a claim taken since", async () => {

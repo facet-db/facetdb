@@ -1,5 +1,6 @@
 import type { EngineTarget, QuestionSet } from "@facetdb/core";
 import {
+  BOUND_TO_VIEW_QUERY,
   type CatalogColumn,
   COLUMNS_QUERY,
   CREATION_COLUMN,
@@ -19,8 +20,8 @@ import {
   ROLES_QUERY,
   SERVER_QUERY,
   SHARED_SCHEMA,
-  SIDE_FACTS_QUERY,
   SIDE_RIGHTS,
+  TABLE_FACTS_QUERY,
   tableNames,
   triggerText,
   viewText,
@@ -37,7 +38,7 @@ import type { RecordingScript } from "./recording-client.ts";
  * it; `installedWorld` is a database once an install ran on one of its tables.
  */
 
-/** the listings example, as every engine's fixture takes it. */
+/** The listings example, as every engine's fixture takes it. */
 export const listings: QuestionSet = {
   questions: [
     { type: "noul", name: "is_scam", instructions: "Is this listing a scam?", stakes: "high" },
@@ -147,6 +148,8 @@ export type WorldObject = {
   readonly disabled?: boolean;
   /** Carries FacetDB's own extended property (the side table and the view install makes). */
   readonly marked?: boolean;
+  /** A view: the objects bound to it with schemabinding, as `schema.name`. */
+  readonly boundBy?: readonly string[];
 };
 
 export type WorldGrant = {
@@ -446,7 +449,17 @@ export function answer(world: World): NonNullable<RecordingScript["answer"]> {
             disabled: object.disabled ?? false,
             marked: object.marked ?? false,
           }));
-      case SIDE_FACTS_QUERY: {
+      case BOUND_TO_VIEW_QUERY:
+        return world.objects
+          .filter(
+            (object) => object.type === "V" && qualifiedName(object.schema, object.name) === p1,
+          )
+          .flatMap((object) => object.boundBy ?? [])
+          .map((bound) => {
+            const [schema = "", ...name] = bound.split(".");
+            return { dependent_schema: schema, dependent_name: name.join(".") };
+          });
+      case TABLE_FACTS_QUERY: {
         const found = Object.entries(world.tables).find(([label]) => {
           const [schema = "", ...table] = label.split(".");
           return qualifiedName(schema, table.join(".")) === p1;

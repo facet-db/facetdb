@@ -5,6 +5,7 @@ export {
   NO_CURSORS,
   noteOnStderr,
   POLLER_LOCK,
+  POLLER_LOCK_HELD,
   pollerLock,
   type TrackedCapture,
   type TrackedCaptureDeps,

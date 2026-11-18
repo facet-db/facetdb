@@ -7,11 +7,11 @@ import type {
   StateValue,
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createMssqlEngine } from "../engine/index.ts";
 import { createInstaller, JOBS_TABLE, WORKER_USER } from "../install/index.ts";
 import { connectMssql, type MssqlClient, type MssqlRow } from "../sql/index.ts";
-import { skipUnless, testServerUrl } from "../testing/index.ts";
+import { dropScratch, skipUnless, testServerUrl } from "../testing/index.ts";
 import { connectMssqlPool, createMssqlConnector, type MssqlConnector } from "./index.ts";
 
 /**
@@ -26,8 +26,10 @@ import { connectMssqlPool, createMssqlConnector, type MssqlConnector } from "./i
  * re-queued, prune and uninstall, and doctor under the worker login.
  *
  * The worker is a server login on this server (contained database authentication is off), shared by
- * every suite of the package: the scratch database is this file's own, the login is never dropped
- * here, and its password is the connector suite's, so whichever suite made it, both log in.
+ * every suite of the package: the scratch database is this file's own, and its password is the
+ * connector suite's, so whichever suite made it, both log in. The files run one after another, so
+ * the suite's end drops its database and the login (`dropScratch`): the next suite's install makes
+ * the login again.
  */
 
 const START = Date.parse("2026-11-04T09:00:00.000Z");
@@ -269,6 +271,10 @@ describe.skipIf(skipUnless("MSSQL_URL"))("side-table mode on MSSQL_URL", () => {
     for (const made of worlds.splice(0)) {
       await made.close();
     }
+  });
+  // The shared server keeps nothing of this suite: its database and the worker's login.
+  afterAll(async () => {
+    await dropScratch(testServerUrl("MSSQL_URL"), [SCRATCH]);
   });
 
   async function world(target: EngineTarget = ticketsTarget()): Promise<World> {
@@ -515,6 +521,77 @@ describe.skipIf(skipUnless("MSSQL_URL"))("side-table mode on MSSQL_URL", () => {
     expect(await made.tableColumns()).toEqual(before);
     // With the foreign key gone, the application may truncate its table again.
     await made.admin.query("truncate table tickets");
+  });
+
+  // The side table keeps a removed question's columns until prune, and the view shows them; without
+  // the refusal, create or alter view failed with error 4506 and the migrate rolled back.
+  it("refuses an application column of a removed question's name before any statement, and the route its fix names works", async () => {
+    const made = await world();
+    await made.install();
+    const fewer: EngineTarget = {
+      ...made.target,
+      questionSet: { ...questionSet, questions: CONTRACT_QUESTIONS.slice(0, 1) },
+    };
+    await made.admin.query("alter table tickets add category nvarchar(40) null");
+    const options = { ...deps(made.clock), workerPassword: PASSWORD };
+    const refused = await made.installer.planInstall(fewer, made.urls.admin, options);
+    expect(refused).toMatchObject({
+      ok: false,
+      refusal: {
+        code: "column-collision",
+        message: expect.stringContaining(
+          "dbo.tickets has a column named category, and dbo.facetdb_tickets_answers still keeps FacetDB's column of that name",
+        ),
+        fix: expect.stringContaining("facetdb migrate --prune"),
+      },
+    });
+    // The fix's route: the column renamed for the prune's run, the prune, the name back, migrate.
+    await made.admin.query("exec sp_rename N'dbo.tickets.category', N'category_app', N'COLUMN'");
+    const pruned = await made.installer.planPrune(fewer, made.urls.admin, deps(made.clock));
+    if (!pruned.ok) {
+      throw new Error(pruned.refusal.message);
+    }
+    expect((await made.installer.run(fewer, pruned.plan, made.urls.admin, options)).stopped).toBe(
+      undefined,
+    );
+    await made.admin.query("exec sp_rename N'dbo.tickets.category_app', N'category', N'COLUMN'");
+    await made.install(fewer);
+    const [row] = await made.admin.query(
+      "select count(*) as n from sys.columns where object_id = object_id(N'dbo.tickets_with_answers') and name = N'category'",
+    );
+    expect(row).toEqual({ n: 1 });
+  });
+
+  // An object bound to the view with schemabinding makes create or alter view fail (3729).
+  it("refuses a view the application made again with schemabinding and bound another view to, naming it, before any statement", async () => {
+    const made = await world();
+    await made.install();
+    // SQL Server binds nothing to a view without schemabinding (4513): the application rebinds ours.
+    await made.admin.query(
+      "create or alter view dbo.tickets_with_answers with schemabinding as select t.id, t.subject from dbo.tickets t",
+    );
+    await made.admin.query(
+      "create view dbo.ticket_subjects with schemabinding as select id, subject from dbo.tickets_with_answers",
+    );
+    const options = { ...deps(made.clock), workerPassword: PASSWORD };
+    const planned = await made.installer.planInstall(made.target, made.urls.admin, options);
+    expect(planned).toMatchObject({
+      ok: false,
+      refusal: {
+        code: "view-bound",
+        message: expect.stringContaining(
+          "dbo.ticket_subjects is bound to dbo.tickets_with_answers with schemabinding",
+        ),
+        fix: expect.stringContaining("drop dbo.ticket_subjects, run facetdb migrate"),
+      },
+    });
+    // The fix: the bound view dropped, migrate makes FacetDB's view again, unbound.
+    await made.admin.query("drop view dbo.ticket_subjects");
+    await made.install();
+    const [view] = await made.admin.query(
+      "select cast(objectproperty(object_id(N'dbo.tickets_with_answers'), 'IsSchemaBound') as int) as bound",
+    );
+    expect(view).toEqual({ bound: 0 });
   });
 
   it("doctor under the worker login: every check passes on the side-table install", async () => {

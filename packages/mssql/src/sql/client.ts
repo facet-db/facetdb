@@ -69,7 +69,9 @@ function errorNumber(error: unknown): number | undefined {
  * column drop that an index depends on says 5074, then 4922), and tedious hands them over as an
  * AggregateError with no message and no number: its messages are joined and the first one's number
  * kept, so a stopped run says what the server said and a script's own `throw 51000` is still read
- * by its number. Any other error passes as it is.
+ * by its number. The highest severity among them (tedious's `class`) is kept too, so a session the
+ * server ended (severity 20 and above, such as 596 after a `kill`) is told from a refused
+ * statement. Any other error passes as it is.
  */
 export function serverFailure(error: unknown): unknown {
   if (!(error instanceof AggregateError)) {
@@ -78,7 +80,16 @@ export function serverFailure(error: unknown): unknown {
   const errors: readonly unknown[] = error.errors;
   const messages = errors.map((one) => (one instanceof Error ? one.message : String(one)));
   const number = errors.map(errorNumber).find((found) => found !== undefined);
-  return Object.assign(new Error(messages.join(" ")), number === undefined ? {} : { number });
+  const severities = errors.flatMap((one) =>
+    typeof one === "object" && one !== null && "class" in one && typeof one.class === "number"
+      ? [one.class]
+      : [],
+  );
+  return Object.assign(
+    new Error(messages.join(" ")),
+    number === undefined ? {} : { number },
+    severities.length === 0 ? {} : { class: Math.max(...severities) },
+  );
 }
 
 type Tedious = typeof import("tedious");

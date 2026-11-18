@@ -1,5 +1,5 @@
 -- FacetDB runs this script as one transaction: if a statement fails, all of it rolls back and nothing is changed.
--- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once one failed; then run set noexec off.
+-- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once a statement fails and rolls the transaction back (a batch that fails to compile rolls nothing back, and the rest runs); then run set noexec off.
 set xact_abort on;
 set ansi_nulls on;
 set quoted_identifier on;

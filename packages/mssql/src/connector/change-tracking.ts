@@ -56,7 +56,24 @@ import { type MssqlClient, type MssqlRow, quoteName, quoteString } from "../sql/
  * kept for the watch's life; application locks belong to the database, so the name needs no
  * database). The others' `watch` announces what the queue holds, as every worker does, and asks for
  * the lock again each tick, so one takes over within a tick when the poller stops (its session, and
- * so its lock, ends with it). Two pollers would read the same changes and clear each other's claims.
+ * so its lock, ends with it). Two pollers would read the same changes and clear each other's
+ * claims. The pass runs on the other pool, so the lock is checked again on its own session just
+ * before each queuing transaction (the change pages' and the reconcile's): a pass whose lock is
+ * gone, its session ended by the server (`kill`, a failover, a network cut) while the pass ran and
+ * the lock perhaps taken since by another process, stops queuing at once, says so in a line, and
+ * leaves its version where it was; what it queued stays, and the poller that holds the lock reads
+ * those changes again (at least once). What no check closes is a lock lost between the check and
+ * that one transaction's commit: that one chunk may be queued by both, which the queue's key makes
+ * one job per key, and its claims cleared by both, so a claim the new poller's own pass left alone
+ * can be cleared under a worker whose model call is in flight, and that record asked a second time.
+ * The window is short on the change pages, which read past held rows; in the reconcile, whose
+ * queuing waits on the application's row locks, it can last as long as one statement may run (the
+ * worker's 60-second request timeout). A lock session the server dropped makes the lock's statement
+ * fail with the driver's socket error, or with a server error of severity 20 or above (596 after a
+ * `kill` mid-statement): that tick reads it as not held, the pool of one lets go of the dead
+ * connection, and the next tick asks for the lock on a new one, so the watch goes on. A connection
+ * the server refuses to make again (`ELOGIN`: the login disabled, its password changed) ends the
+ * watch in words, since every later tick would meet it too and poll nothing.
  *
  * Retention is the risk: the database keeps changes for its retention (two days at least, install
  * refuses less), and a stored version older than `change_tracking_min_valid_version` means the
@@ -99,6 +116,13 @@ if applock_mode(N'public', @p1, N'Session') = N'Exclusive'
 else
   exec @result = sp_getapplock @Resource = @p1, @LockMode = N'Exclusive', @LockOwner = N'Session', @LockTimeout = 0;
 select cast(case when @result >= 0 then 1 else 0 end as int) as held;`;
+
+/**
+ * Whether the session still holds the poller's lock, taking nothing: the check before each queuing
+ * transaction of a pass. A lock lost mid-pass is not taken back there; the next tick asks for it.
+ */
+export const POLLER_LOCK_HELD =
+  "select cast(case when applock_mode(N'public', @p1, N'Session') = N'Exclusive' then 1 else 0 end as int) as held;";
 
 /**
  * How often the version is stored when the poll queued nothing: the database's version moves with
@@ -162,6 +186,16 @@ export type TrackedCapture = {
   /** Whether this process held the poller's lock at its last tick. */
   polling(): boolean;
 };
+
+/** A row the queuing statement takes: its key, the hash of its state now, whether its claim may go. */
+type QueuedRow = { readonly key: RecordKey; readonly hash: string; readonly clear: boolean };
+
+/** The pass stops: this session no longer holds the poller's lock (said in a line already). */
+class LockLost extends Error {
+  constructor() {
+    super("the poller's lock was lost in the middle of a pass");
+  }
+}
 
 /** A version as SQL Server compares it: a `bigint`, beyond a JavaScript number. */
 function asNumber(version: string): bigint {
@@ -247,14 +281,23 @@ export function createTrackedCapture(deps: TrackedCaptureDeps): TrackedCapture {
    *
    * A row's `clear` says whether its job's claim may be cleared: only at the poller's first sight
    * of that change, so a re-read never takes a claim a worker took since.
+   *
+   * The lock is checked on its own session before each chunk's transaction, and a lock gone stops
+   * the queuing there (`LockLost`). `committed` hears each chunk's rows and the keys it read past
+   * as soon as that chunk commits, so what a later chunk's failure leaves (a lost deadlock, a lost
+   * lock) is told apart from what is in the queue already.
    */
-  async function queue(
-    rows: readonly { readonly key: RecordKey; readonly hash: string; readonly clear: boolean }[],
+  async function queue<Row extends QueuedRow>(
+    rows: readonly Row[],
     skipHeld: boolean,
+    committed: (part: readonly Row[], held: ReadonlySet<RecordKey>) => void = () => undefined,
   ): Promise<ReadonlySet<RecordKey>> {
     const skipped = new Set<RecordKey>();
     for (let from = 0; from < rows.length; from += QUEUE_CHUNK) {
       const part = rows.slice(from, from + QUEUE_CHUNK);
+      if (!(await stillHolds())) {
+        throw new LockLost();
+      }
       const values = part
         .map((_, index) => `(@p${3 * index + 2}, @p${3 * index + 3}, @p${3 * index + 4})`)
         .join(", ");
@@ -285,10 +328,15 @@ select v.[k] as skipped
           [table, ...part.flatMap((row) => [row.key, row.hash, row.clear])],
         ),
       );
+      const held = new Set<RecordKey>();
       for (const row of result) {
         if ("skipped" in row) {
-          skipped.add(String(row["skipped"]));
+          held.add(String(row["skipped"]));
         }
+      }
+      committed(part, held);
+      for (const key of held) {
+        skipped.add(key);
       }
     }
     return skipped;
@@ -467,14 +515,17 @@ select top (@p2) ${changedKey} as k, convert(nvarchar(20), ct.sys_change_version
           version: versionOf.get(row.key) ?? "",
           clear: seen.get(row.key)?.hash !== row.hash,
         }));
-        const held = await queue(rows, true);
+        // Each chunk's keys are seen as it commits: a later chunk's lost deadlock or lost lock
+        // leaves the next tick to clear the claims of what it did not queue only.
+        const held = await queue(rows, true, (part, passed) => {
+          for (const row of part) {
+            if (!passed.has(row.key)) {
+              see(row.key, row.hash, row.version);
+            }
+          }
+        });
         // A key with no row read was held (or deleted since, which the next poll reads as such).
         skipped += changes.length - rows.length + held.size;
-        for (const row of rows) {
-          if (!held.has(row.key)) {
-            see(row.key, row.hash, row.version);
-          }
-        }
         queued = queued || rows.length > 0;
       }
       const last = changes.at(-1);
@@ -514,31 +565,105 @@ select top (@p2) ${changedKey} as k, convert(nvarchar(20), ct.sys_change_version
 
   /** Whether this process's session holds the poller's lock, taking it when free; said once a change. */
   let polling: boolean | undefined;
+  /** Whether this process stopped polling because its own lock went, not for another poller. */
+  let lostOwn = false;
+
+  /**
+   * The lock's statement on its own session: whether the session holds the lock, or the driver's
+   * words when the connection was dropped (`droppedConnection`). Anything else ends the watch: a
+   * server's error below severity 20 (a right refused, a statement it cannot run), and a connection
+   * the server refused to make again (a login disabled or its password changed, `ELOGIN`), which
+   * every later tick would meet the same way, polling nothing.
+   */
+  async function askLock(
+    text: string,
+  ): Promise<{ readonly held: true } | { readonly held: false; readonly dropped?: string }> {
+    try {
+      const [row] = await lockSession.query(text, [lock]);
+      return row?.["held"] === 1 ? { held: true } : { held: false };
+    } catch (error) {
+      const words = error instanceof Error ? error.message : String(error);
+      if (droppedConnection(error)) {
+        return { held: false, dropped: words };
+      }
+      if (errorCode(error) === "ELOGIN") {
+        throw new Error(
+          `${target.source}: the worker login could not log in again on the connection that holds the lock on polling Change Tracking for ${label} (${words}); the login may be disabled or its password changed: check the login and the password in ${target.urlVariable ?? "the source's connection string"}, then start the worker again`,
+        );
+      }
+      if (errorNumber(error) === undefined && errorCode(error) !== undefined) {
+        throw new Error(
+          `${target.source}: the server refused the connection that holds the lock on polling Change Tracking for ${label} (${words}); run facetdb doctor, then start the worker again`,
+        );
+      }
+      throw error;
+    }
+  }
+
   async function holdLock(): Promise<boolean> {
-    const [row] = await lockSession.query(POLLER_LOCK, [lock]);
-    const held = row?.["held"] === 1;
+    const answer = await askLock(POLLER_LOCK);
+    if (!answer.held && answer.dropped !== undefined) {
+      // The pool of one let go of the dead connection: the next tick's statement opens another.
+      note(
+        `${target.source}: the connection that held this worker's lock on polling Change Tracking for ${label} was lost (${answer.dropped}); this worker claims only for this tick and asks for the lock again on a new connection at the next`,
+      );
+      polling = false;
+      lostOwn = true;
+      return false;
+    }
+    const { held } = answer;
     if (held && polling !== true) {
       // A poller starts from what the store holds, whatever it read before it lost the lock.
       since = undefined;
       seen.clear();
       note(
-        polling === false
-          ? `${target.source}: this worker takes over polling Change Tracking for ${label}: the worker that polled it stopped`
-          : `${target.source}: this worker polls Change Tracking for ${label}`,
+        lostOwn
+          ? `${target.source}: this worker polls Change Tracking for ${label} again: it took its lock back`
+          : polling === false
+            ? `${target.source}: this worker takes over polling Change Tracking for ${label}: the worker that polled it stopped`
+            : `${target.source}: this worker polls Change Tracking for ${label}`,
       );
-    } else if (!held && polling !== false) {
+    } else if (!held && (polling !== false || lostOwn)) {
       note(
         `${target.source}: claiming only: another worker polls Change Tracking for ${label}; this one takes over if it stops`,
       );
     }
     polling = held;
+    lostOwn = false;
     return held;
+  }
+
+  /**
+   * The check before each queuing transaction: the lock still held by this session. When it is not
+   * (the server ended the session, and another process may hold the lock now), the pass stops and
+   * a line says so; the next tick asks for the lock again.
+   */
+  async function stillHolds(): Promise<boolean> {
+    const answer = await askLock(POLLER_LOCK_HELD);
+    if (answer.held) {
+      return true;
+    }
+    note(
+      `${target.source}: this worker stopped queuing the changes of ${label} in the middle of a pass: ${answer.dropped === undefined ? "its session no longer holds the lock on polling Change Tracking" : `the connection that held its lock on polling Change Tracking was lost (${answer.dropped})`}, and another worker may poll now; what it queued stays, its version is not stored, and it asks for the lock again at the next tick`,
+    );
+    polling = false;
+    lostOwn = true;
+    return false;
   }
 
   /** One tick: the changes, when this process polls; nothing else otherwise. */
   async function tick(): Promise<void> {
-    if (await holdLock()) {
+    if (!(await holdLock())) {
+      return;
+    }
+    try {
       await once();
+    } catch (error) {
+      // The lock went in the middle of the pass: said already, and nothing more is queued.
+      if (error instanceof LockLost) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -569,4 +694,51 @@ function errorNumber(error: unknown): number | undefined {
     return undefined;
   }
   return typeof error.number === "number" ? error.number : undefined;
+}
+
+/** tedious's code on its own errors (`ESOCKET`, `ELOGIN`, …), when it has one. */
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+/** A server error's severity (tedious's `class`), when it has one. */
+function errorClass(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("class" in error)) {
+    return undefined;
+  }
+  return typeof error.class === "number" ? error.class : undefined;
+}
+
+/**
+ * tedious's codes for a connection that went away under a statement or between two (a reset, a
+ * cut, a timeout, a request on a connection that already closed): the server dropped us, it did
+ * not refuse us, so a new connection may well work.
+ */
+const DROPPED_CODES: ReadonlySet<string> = new Set([
+  "ESOCKET",
+  "ECONNRESET",
+  "ETIMEOUT",
+  "ECLOSE",
+  "EINVALIDSTATE",
+]);
+
+/**
+ * Whether the lock session's error means its connection was dropped: one of tedious's socket-class
+ * codes, or a server error of severity 20 or above, which ends the session (a `kill` while the
+ * lock's statement runs can come back as error 596, severity 21). A server error below 20 (229, a
+ * right refused) and a refused login (`ELOGIN`) are not.
+ */
+function droppedConnection(error: unknown): boolean {
+  const severity = errorClass(error);
+  if (severity !== undefined && severity >= 20) {
+    return true;
+  }
+  if (errorNumber(error) !== undefined) {
+    return false;
+  }
+  const code = errorCode(error);
+  return code !== undefined && DROPPED_CODES.has(code);
 }

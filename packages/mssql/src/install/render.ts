@@ -22,8 +22,12 @@ import type { EnginePlan } from "@facetdb/core";
 export const ONE_TRANSACTION =
   "-- FacetDB runs this script as one transaction: if a statement fails, all of it rolls back and nothing is changed.";
 
+/**
+ * The hand-run line says what the guards cover: a statement that fails and rolls the transaction
+ * back. A batch that fails to compile rolls nothing back, and the batches after it run.
+ */
 const HAND_RUN =
-  "-- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once one failed; then run set noexec off.";
+  "-- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once a statement fails and rolls the transaction back (a batch that fails to compile rolls nothing back, and the rest runs); then run set noexec off.";
 
 /** The guard batch before each statement and before the commit. */
 const GUARD = "if @@trancount = 0 set noexec on;\ngo\n";

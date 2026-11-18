@@ -35,6 +35,8 @@ export {
   serverErrors,
   type TransactionEnd,
 } from "./recording-client.ts";
+// What the db suites drop at their end on the shared test server.
+export { dropScratch } from "./scratch.ts";
 
 /** What each variable points at, and how to start one. */
 const SERVERS: Readonly<Record<UrlVariable, string>> = {

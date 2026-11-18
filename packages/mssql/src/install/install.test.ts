@@ -146,8 +146,10 @@ describe("the listings example", () => {
     const [first, second] = (await readFile(FIXTURE, "utf8")).split("\n");
     expect(first).toBe(ONE_TRANSACTION);
     expect(first).toContain("one transaction: if a statement fails, all of it rolls back");
+    // The guards cover a statement that fails at run time; a compile error keeps the transaction
+    // open, and the line says so rather than promise more.
     expect(second).toBe(
-      "-- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once one failed; then run set noexec off.",
+      "-- Run by hand (sqlcmd, SSMS), a check before each statement skips the rest once a statement fails and rolls the transaction back (a batch that fails to compile rolls nothing back, and the rest runs); then run set noexec off.",
     );
   });
 
@@ -841,6 +843,38 @@ describe("refusals", () => {
     expect((await refused(computed, reading(["title", "blurb"]))).refusal).toMatchObject({
       code: "state-column",
       message: expect.stringContaining("blurb is a computed column"),
+    });
+  });
+
+  // A rowversion moves with FacetDB's own write, so the hash `write` compares never matches and the
+  // record is asked again forever; `sys.types` names it timestamp. Change Tracking's planner
+  // answers its own catalog: its cases are in change-tracking.test.ts.
+  it("refuses a rowversion state field, naming the fix", async () => {
+    const world = withColumns([...LISTINGS_COLUMNS, typed("row_version", "timestamp")]);
+    const target: EngineTarget = {
+      ...LISTINGS,
+      questionSet: { ...listings, read: ["title", "row_version"] },
+    };
+    expect((await refused(world, target)).refusal).toEqual({
+      code: "state-column",
+      message:
+        "dbo.listings: the state field row_version is a rowversion column, which SQL Server sets anew on every update of the row, whatever the update changed (FacetDB's own write of an answer included, when the answers are on the table), so the state FacetDB answered would stop matching the row's at once, and FacetDB would ask about the record again and again",
+      fix: "remove it from the source's read list in facetdb.config.ts, and list the columns the model reads instead",
+    });
+    // The same column outside the read list is the application's business.
+    expect((await planned(world)).result.ok).toBe(true);
+  });
+
+  it("refuses an inline install on a memory-optimized table in side-table mode's words, before any statement", async () => {
+    const world: World = {
+      ...freshWorld(),
+      tables: { "dbo.listings": { columns: LISTINGS_COLUMNS, key: ["id"], memoryOptimized: true } },
+    };
+    expect((await refused(world)).refusal).toEqual({
+      code: "memory-optimized",
+      message:
+        "dbo.listings is a memory-optimized table: a memory-optimized table takes only natively compiled triggers, which FacetDB's trigger is not, and no Change Tracking, so FacetDB could not watch it in either mode",
+      fix: "point the source at a disk-based table (a view of a memory-optimized table cannot carry a trigger either)",
     });
   });
 

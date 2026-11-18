@@ -402,6 +402,68 @@ describe("refusals in side-table mode", () => {
       message: expect.stringContaining("dbo.facetdb_listings_answers: is_scam is nvarchar(255)"),
     });
   });
+
+  // The view shows a removed question's side columns until migrate --prune, so an application
+  // column added under that name would be two columns of one name (error 4506).
+  it("refuses an application column of a removed question's name, which the side table keeps until migrate --prune", async () => {
+    const before: EngineTarget = { ...SIDE, questionSet: everyType };
+    const installed = installedWorld(before);
+    const table = installed.tables["dbo.listings"];
+    if (table === undefined) {
+      throw new Error("no listings");
+    }
+    const world: World = {
+      ...installed,
+      tables: {
+        ...installed.tables,
+        "dbo.listings": { ...table, columns: [...table.columns, typed("quality", "int")] },
+      },
+    };
+    // The set no longer has quality: its side columns stay, and the table's quality takes the name.
+    const after: EngineTarget = {
+      ...SIDE,
+      questionSet: { ...everyType, questions: everyType.questions.slice(0, 2) },
+    };
+    expect(await refused(world, after)).toEqual({
+      code: "column-collision",
+      message:
+        "dbo.listings has a column named quality, and dbo.facetdb_listings_answers still keeps FacetDB's column of that name for a question no longer in the set (kept, with its answers, until facetdb migrate --prune); dbo.listings_with_answers shows the table's columns beside FacetDB's and cannot show two of one name",
+      fix: "drop FacetDB's quality with facetdb migrate --prune, which runs while the name is free: rename the application's column for that run, run facetdb migrate --prune, then give the column its name back and run facetdb migrate; or rename the application's column for good",
+    });
+    // A removed question's columns that no application column takes plan as before: kept, shown.
+    const plan = planOf((await planned(installed, after)).result);
+    expect(plan.statements).toEqual([]);
+  });
+
+  it("refuses a view the application bound objects to with schemabinding, naming them, before any statement", async () => {
+    const installed = installedWorld(SIDE);
+    const world: World = {
+      ...installed,
+      objects: installed.objects.map((object) =>
+        object.name === "listings_with_answers"
+          ? {
+              ...object,
+              definition: `create view ${VIEW} with schemabinding\nas\nselect t.[id] from [dbo].[listings] t`,
+              boundBy: ["dbo.listing_totals", "reports.daily"],
+            }
+          : object,
+      ),
+    };
+    expect(await refused(world)).toEqual({
+      code: "view-bound",
+      message:
+        "dbo.listing_totals, reports.daily are bound to dbo.listings_with_answers with schemabinding, so SQL Server refuses to make the view again (error 3729), as facetdb migrate does to follow dbo.listings's columns and the questions; FacetDB makes dbo.listings_with_answers without schemabinding, so that the application's own changes to dbo.listings are never refused because of it",
+      fix: "drop dbo.listing_totals, reports.daily, run facetdb migrate (it makes dbo.listings_with_answers again, without schemabinding), then make them again without schemabinding, or bound to dbo.listings and dbo.facetdb_listings_answers rather than to the view",
+    });
+    // Nothing bound: the same view is made again, FacetDB's way.
+    const unbound: World = {
+      ...world,
+      objects: world.objects.map(({ boundBy: _bound, ...object }) => object),
+    };
+    expect(textOf(planOf((await planned(unbound)).result), "create or alter view")).not.toContain(
+      "schemabinding",
+    );
+  });
 });
 
 describe("uninstall and prune in side-table mode", () => {

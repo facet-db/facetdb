@@ -97,8 +97,8 @@ export type CatalogObject = {
   readonly marked: boolean;
 };
 
-/** What side-table mode reads of the server and the table besides (`SIDE_FACTS_QUERY`). */
-export type SideFacts = {
+/** What install reads of the server's build and the table's storage (`TABLE_FACTS_QUERY`). */
+export type TableFacts = {
   /** `ProductBuild`: 4001 and up on SQL Server 2016 is Service Pack 1 or later. */
   readonly build: number | null;
   readonly memoryOptimized: boolean;
@@ -210,12 +210,13 @@ export const OBJECTS_QUERY = `select s.name as object_schema, o.name as name, rt
  order by s.name, o.name`;
 
 /**
- * What side-table mode needs of the server and the table beyond the rest, `@p1` the table as
- * `[schema].[table]`: the build (`create or alter view` came with SQL Server 2016 Service Pack 1,
- * build 13.0.4001), and whether the table is memory-optimized (no foreign key joins one to a
- * disk-based table, and it takes only natively compiled triggers).
+ * The server's build and the table's storage, `@p1` the table as `[schema].[table]`: the build,
+ * which side-table mode needs (`create or alter view` came with SQL Server 2016 Service Pack 1,
+ * build 13.0.4001), and whether the table is memory-optimized, which every mode refuses: it takes
+ * only natively compiled triggers and no Change Tracking, and no foreign key joins it to a
+ * disk-based side table.
  */
-export const SIDE_FACTS_QUERY = `select cast(serverproperty('ProductBuild') as int) as build,
+export const TABLE_FACTS_QUERY = `select cast(serverproperty('ProductBuild') as int) as build,
        cast(coalesce(objectproperty(object_id(@p1), 'TableIsMemoryOptimized'), 0) as bit) as memory_optimized`;
 
 /**
@@ -423,8 +424,8 @@ export function viewOf(
   return found?.type === "V" && found.marked ? found : undefined;
 }
 
-export async function readSideFacts(query: MssqlQuery, names: TableNames): Promise<SideFacts> {
-  const [row] = await query(SIDE_FACTS_QUERY, [names.relation]);
+export async function readTableFacts(query: MssqlQuery, names: TableNames): Promise<TableFacts> {
+  const [row] = await query(TABLE_FACTS_QUERY, [names.relation]);
   if (row === undefined) {
     throw new Error(`the catalog gave no answer about ${names.label}'s server and storage`);
   }

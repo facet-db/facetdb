@@ -22,10 +22,10 @@ export {
   readServer,
   SERVER_QUERY,
   type ServerFacts,
-  SIDE_FACTS_QUERY,
-  type SideFacts,
   sharedObject,
   sideTableOf,
+  TABLE_FACTS_QUERY,
+  type TableFacts,
   viewOf,
   WORKER_QUERY,
   type WorkerGrant,
@@ -82,6 +82,12 @@ export {
 export { keyText, keyTextLength } from "./queue.ts";
 export { ONE_TRANSACTION, render } from "./render.ts";
 export { runPlan } from "./run.ts";
-export { answerColumnsOf, sameView, sideKeyType, viewText } from "./side-table.ts";
+export {
+  answerColumnsOf,
+  BOUND_TO_VIEW_QUERY,
+  sameView,
+  sideKeyType,
+  viewText,
+} from "./side-table.ts";
 export { type Storage, sameTrigger, triggerText } from "./trigger.ts";
 export { planUninstall, ranNote, WORKER_KEPT } from "./uninstall.ts";

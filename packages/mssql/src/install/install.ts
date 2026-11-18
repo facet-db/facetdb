@@ -23,12 +23,12 @@ import {
   readObjects,
   readOwner,
   readServer,
-  readSideFacts,
+  readTableFacts,
   readWorker,
   type ServerFacts,
-  type SideFacts,
   sharedObject,
   sideTableOf,
+  type TableFacts,
   type TableOwner,
   viewOf,
   type WorkerFacts,
@@ -70,8 +70,10 @@ import {
 import { keyTextLength, queueStatement } from "./queue.ts";
 import {
   answerColumnsOf,
+  boundViewRefusal,
   CONSTRAINT_SUFFIX_LENGTH,
   foreignKeyNote,
+  readBoundToView,
   sameView,
   sideColumnStatement,
   sideConstraints,
@@ -156,7 +158,9 @@ type InstallCatalog =
       readonly marker: readonly MarkerRow[] | undefined;
       readonly worker: WorkerFacts;
       readonly grants: readonly WorkerGrant[];
-      /** Side-table mode alone: the side table's columns (none before the install) and the facts. */
+      /** The server's build and whether the table is memory-optimized, read in every mode. */
+      readonly facts: TableFacts;
+      /** Side-table mode alone: the side table's columns (none before the install), what is bound to the view. */
       readonly side: SideCatalog | undefined;
       /** Change Tracking as it is set now, read only for a target with that capture. */
       readonly tracking: TrackingFacts | undefined;
@@ -165,7 +169,8 @@ type InstallCatalog =
 /** What side-table mode reads besides. */
 type SideCatalog = {
   readonly columns: readonly CatalogColumn[];
-  readonly facts: SideFacts;
+  /** The objects bound to the view with schemabinding, as `schema.name`. */
+  readonly bound: readonly string[];
 };
 
 /** The catalog of a table that is there. */
@@ -268,19 +273,30 @@ function takenSide(
 /** SQL Server 2016's build of Service Pack 1, the first with `create or alter view`. */
 const CREATE_OR_ALTER_BUILD = 4001;
 
+/** What a memory-optimized table is refused with, in both modes. */
+const MEMORY_OPTIMIZED_FIX =
+  "point the source at a disk-based table (a view of a memory-optimized table cannot carry a trigger either)";
+
 /**
- * What side-table mode needs of the server and the table that inline mode does not: `create or
- * alter view` (SQL Server 2016 SP1; Azure SQL has it, and every later version), and a disk-based
- * table, since SQL Server takes no foreign key between a memory-optimized table and a disk-based one.
+ * What the server and the table must be for the mode: in side-table mode `create or alter view`
+ * (SQL Server 2016 SP1; Azure SQL has it, and every later version); in both modes a disk-based
+ * table, since a memory-optimized one takes only natively compiled triggers and no Change Tracking
+ * (both refused by SQL Server 2022 in the db suite's words: "Triggers on memory-optimized tables
+ * must use WITH NATIVE_COMPILATION", "The feature 'CHANGE_TRACKING' is not supported with memory
+ * optimized tables"), and no foreign key joins it to a disk-based side table. Otherwise an inline
+ * install would meet it only at run time, the trigger's creation failing and the migrate rolling
+ * back.
  */
-function sideRefusal(
+function storageRefusal(
   names: TableNames,
   server: ServerFacts,
-  facts: SideFacts,
+  facts: TableFacts,
+  side: boolean,
 ): Refusal | undefined {
   const azure =
     server.edition === AZURE_SQL_DATABASE || server.edition === AZURE_SQL_MANAGED_INSTANCE;
   if (
+    side &&
     !azure &&
     server.majorVersion === 13 &&
     (facts.build === null || facts.build < CREATE_OR_ALTER_BUILD)
@@ -291,14 +307,20 @@ function sideRefusal(
       fix: 'install SQL Server 2016 Service Pack 1 or a later update on the server, or keep storage "inline" for the source in facetdb.config.ts',
     };
   }
-  if (facts.memoryOptimized) {
-    return {
-      code: "memory-optimized",
-      message: `${names.label} is a memory-optimized table: SQL Server takes no foreign key between it and the disk-based table ${names.sideLabel} that keeps its answers, and a memory-optimized table takes only natively compiled triggers, so FacetDB could not watch it in either mode`,
-      fix: "point the source at a disk-based table (a view of a memory-optimized table cannot carry a trigger either)",
-    };
+  if (!facts.memoryOptimized) {
+    return undefined;
   }
-  return undefined;
+  return side
+    ? {
+        code: "memory-optimized",
+        message: `${names.label} is a memory-optimized table: SQL Server takes no foreign key between it and the disk-based table ${names.sideLabel} that keeps its answers, and a memory-optimized table takes only natively compiled triggers, so FacetDB could not watch it in either mode`,
+        fix: MEMORY_OPTIMIZED_FIX,
+      }
+    : {
+        code: "memory-optimized",
+        message: `${names.label} is a memory-optimized table: a memory-optimized table takes only natively compiled triggers, which FacetDB's trigger is not, and no Change Tracking, so FacetDB could not watch it in either mode`,
+        fix: MEMORY_OPTIMIZED_FIX,
+      };
 }
 
 /**
@@ -399,11 +421,9 @@ function check(
     );
   }
   const { side } = catalog;
-  if (side !== undefined) {
-    const refusal = sideRefusal(names, server, side.facts);
-    if (refusal !== undefined) {
-      return { refusal };
-    }
+  const storage = storageRefusal(names, server, catalog.facts, side !== undefined);
+  if (storage !== undefined) {
+    return { refusal: storage };
   }
   // Another project's install first: its columns would read as a question's type changed here.
   const claim = catalog.marker?.find(
@@ -445,6 +465,18 @@ function check(
       "list the columns it is computed from in the source's read list instead",
     );
   }
+  // A rowversion is set anew by every update of the row, FacetDB's own write of an answer included:
+  // the hash `write` compares would never match, and the record would be asked again forever at the
+  // user's cost. `sys.types` names it `timestamp` (proven on SQL Server 2022: a column declared
+  // rowversion reads back as that).
+  const versioned = state.filter((name) => byName.get(name)?.type === "timestamp");
+  if (versioned.length > 0) {
+    return refuse(
+      "state-column",
+      `${label}: the state field ${versioned.join(", ")} is a rowversion column, which SQL Server sets anew on every update of the row, whatever the update changed (FacetDB's own write of an answer included, when the answers are on the table), so the state FacetDB answered would stop matching the row's at once, and FacetDB would ask about the record again and again`,
+      "remove it from the source's read list in facetdb.config.ts, and list the columns the model reads instead",
+    );
+  }
   // One storage per table: the other mode's answers would be two copies, and in side-table mode an
   // inline install's columns would be two columns of one name in the view.
   const inline = columns.filter((column) => column.marked).map((column) => column.name);
@@ -474,6 +506,24 @@ function check(
       "rename the question in facetdb.config.ts, or rename the column",
     );
   }
+  // The view shows every answer column of the side table, a removed question's too until `migrate
+  // --prune` drops it: an application column added later under that name would be a second
+  // column of one name in the view, and `create or alter view` fails (error 4506).
+  const kept =
+    side === undefined || sideTableOf(catalog.objects, names) === undefined
+      ? []
+      : answerColumnsOf(side.columns, keyName)
+          .map((column) => column.name)
+          .filter((name) => !ownedNames.has(name) && byName.has(name));
+  if (kept.length > 0) {
+    const them = kept.join(", ");
+    const one = kept.length === 1;
+    return refuse(
+      "column-collision",
+      `${label} has a column named ${them}, and ${names.sideLabel} still keeps FacetDB's column${one ? "" : "s"} of that name for a question no longer in the set (kept, with ${one ? "its" : "their"} answers, until facetdb migrate --prune); ${names.viewLabel} shows the table's columns beside FacetDB's and cannot show two of one name`,
+      `drop FacetDB's ${them} with facetdb migrate --prune, which runs while the name is free: rename the application's column for that run, run facetdb migrate --prune, then give the column its name back and run facetdb migrate; or rename the application's column for good`,
+    );
+  }
   // Where FacetDB's columns are: on the table, or in the side table.
   const stored =
     side === undefined ? byName : new Map(side.columns.map((column) => [column.name, column]));
@@ -498,6 +548,13 @@ function check(
       `${taken.name} already exists and is not FacetDB's ${taken.role}`,
       `rename that object, or keep FacetDB on another table: ${taken.name} is the name FacetDB gives its ${taken.role}`,
     );
+  }
+  const bound =
+    side === undefined || viewOf(catalog.objects, names) === undefined
+      ? undefined
+      : boundViewRefusal(names, side.bound);
+  if (bound !== undefined) {
+    return { refusal: bound };
   }
   // The trigger runs as the table's owner, and writes FacetDB's queue in dbo with its rights;
   // Change Tracking runs nothing as anyone, the worker queues with its own rights.
@@ -989,11 +1046,12 @@ async function inspect(
       marker: await readMarker(query, names, objects),
       worker: await readWorker(query, server),
       grants: await readGrants(query, names),
+      facts: await readTableFacts(query, names),
       side:
         storage === "side-table"
           ? {
               columns: await readColumns(query, names.schema, names.sideTable),
-              facts: await readSideFacts(query, names),
+              bound: await readBoundToView(query, names),
             }
           : undefined,
       tracking: capture === "change-tracking" ? await readTracking(query, names) : undefined,

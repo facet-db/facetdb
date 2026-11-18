@@ -1,5 +1,5 @@
-import { type PlanStatement, REVIEWED_COLUMN, STATUS_COLUMN } from "@facetdb/core";
-import { quoteName, quoteString } from "../sql/index.ts";
+import { type PlanStatement, REVIEWED_COLUMN, type Refusal, STATUS_COLUMN } from "@facetdb/core";
+import { type MssqlQuery, quoteName, quoteString } from "../sql/index.ts";
 import { type CatalogColumn, columnType } from "./catalog.ts";
 import { COLUMN_MARK, type OwnedColumn, sourceStatement, type TableNames } from "./objects.ts";
 
@@ -17,8 +17,9 @@ import { COLUMN_MARK, type OwnedColumn, sourceStatement, type TableNames } from 
  * where `no action` would fail the application's update. The cost, which the plan's notes say: a
  * table a foreign key references cannot be truncated (error 4712) or dropped (error 3726) until
  * uninstall takes the side table away. SQL Server takes no foreign key between a memory-optimized
- * table and a disk-based one; install refuses a memory-optimized table in this mode (it could not
- * carry the trigger either: it takes only natively compiled ones).
+ * table and a disk-based one; install refuses a memory-optimized table in this mode as in the
+ * inline one (it could not carry the trigger either: it takes only natively compiled ones; nor
+ * Change Tracking).
  *
  * Both objects carry FacetDB's extended property, as its columns do inline: a later install adopts
  * them, uninstall drops them, and an object of either name without it is refused, never replaced.
@@ -161,6 +162,57 @@ export function sameView(stored: string, wanted: string): boolean {
       .trimEnd()
       .replace(/^create\s+(or\s+alter\s+)?view\s+/i, "");
   return body(stored) === body(wanted);
+}
+
+/**
+ * The objects bound to the view with schemabinding, `@p1` the view as `[schema].[view]`: views,
+ * functions and security policies of the application's, each once (the catalog lists a reference
+ * per column it reads). FacetDB makes its view without schemabinding, and SQL Server binds nothing
+ * to a view that has none (error 4513, proven on SQL Server 2022), so one is there only after the
+ * application made the view again with schemabinding; then the next `create or alter view` fails
+ * (error 3729), and migrate makes the view again whenever its stored text differs from FacetDB's,
+ * as that one's does. The plan refuses before any statement runs instead.
+ */
+export const BOUND_TO_VIEW_QUERY = `select distinct object_schema_name(d.referencing_id) as dependent_schema,
+       object_name(d.referencing_id) as dependent_name
+  from sys.sql_expression_dependencies d
+ where d.referenced_id = object_id(@p1, N'V')
+   and d.referencing_class = 1
+   and d.is_schema_bound_reference = 1
+ order by 1, 2`;
+
+/** What is bound to the view with schemabinding, as `schema.name`; none when there is no view. */
+export async function readBoundToView(
+  query: MssqlQuery,
+  names: TableNames,
+): Promise<readonly string[]> {
+  return (await query(BOUND_TO_VIEW_QUERY, [names.viewRelation])).map((row) => {
+    const schema = row["dependent_schema"];
+    const name = row["dependent_name"];
+    if (typeof schema !== "string" || typeof name !== "string") {
+      throw new Error(
+        `the catalog named an object bound to ${names.viewLabel} as ${String(schema)}.${String(name)}, not as text`,
+      );
+    }
+    return `${schema}.${name}`;
+  });
+}
+
+/**
+ * Why install must not make the view again: objects bound to it with schemabinding (error 3729 at
+ * `create or alter view`), as the Postgres engine refuses the views that depend on its own.
+ */
+export function boundViewRefusal(names: TableNames, bound: readonly string[]): Refusal | undefined {
+  if (bound.length === 0) {
+    return undefined;
+  }
+  const them = bound.join(", ");
+  const one = bound.length === 1;
+  return {
+    code: "view-bound",
+    message: `${them} ${one ? "is" : "are"} bound to ${names.viewLabel} with schemabinding, so SQL Server refuses to make the view again (error 3729), as facetdb migrate does to follow ${names.label}'s columns and the questions; FacetDB makes ${names.viewLabel} without schemabinding, so that the application's own changes to ${names.label} are never refused because of it`,
+    fix: `drop ${them}, run facetdb migrate (it makes ${names.viewLabel} again, without schemabinding), then make ${one ? "it" : "them"} again without schemabinding, or bound to ${names.label} and ${names.sideLabel} rather than to the view`,
+  };
 }
 
 /** The side table's columns but its key, in the table's order: what FacetDB keeps there. */

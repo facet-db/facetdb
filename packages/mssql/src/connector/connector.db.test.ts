@@ -8,11 +8,11 @@ import type {
   StateValue,
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createMssqlEngine } from "../engine/index.ts";
 import { createInstaller, JOBS_TABLE, WORKER_USER } from "../install/index.ts";
 import { connectMssql, type MssqlClient, type MssqlQuery, type MssqlRow } from "../sql/index.ts";
-import { skipUnless, testServerUrl } from "../testing/index.ts";
+import { dropScratch, skipUnless, testServerUrl } from "../testing/index.ts";
 import {
   CLAIM_LEASE_MS,
   connectMssqlPool,
@@ -330,6 +330,10 @@ describe.skipIf(skipUnless("MSSQL_URL"))("the connector on MSSQL_URL", () => {
     for (const made of worlds.splice(0)) {
       await made.close();
     }
+  });
+  // The shared server keeps nothing of this suite: its database and the worker's login.
+  afterAll(async () => {
+    await dropScratch(testServerUrl("MSSQL_URL"), [SCRATCH]);
   });
 
   async function world(

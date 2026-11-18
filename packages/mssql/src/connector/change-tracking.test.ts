@@ -32,6 +32,7 @@ import {
   createMssqlConnector,
   type MssqlConnector,
   POLLER_LOCK,
+  POLLER_LOCK_HELD,
   pollerLock,
   VERSION_SAVE_MS,
   versionRun,
@@ -191,6 +192,51 @@ describe("the install with capture: change-tracking", () => {
     ).toMatchObject({ ok: false, refusal: { code: "side-table" } });
   });
 
+  // Refused before any statement, in the trigger capture's words.
+  it("refuses a rowversion state field and a memory-optimized table, before any statement", async () => {
+    const fresh = freshWorld(SQL_SERVER);
+    const listingsTable = fresh.tables["dbo.listings"];
+    if (listingsTable === undefined) throw new Error("no listings");
+    const versioned: World = {
+      ...fresh,
+      tables: {
+        "dbo.listings": {
+          ...listingsTable,
+          columns: [...listingsTable.columns, typed("row_version", "timestamp")],
+        },
+      },
+    };
+    const reading: EngineTarget = {
+      ...TRACKED,
+      questionSet: { ...TRACKED.questionSet, read: ["title", "row_version"] },
+    };
+    const { client, installer } = planner(versioned);
+    const refused = await installer.planInstall(reading, ADMIN, {
+      ...deps(new FakeClock(START)),
+      workerPassword: "a long password",
+    });
+    expect(refused).toMatchObject({
+      ok: false,
+      refusal: {
+        code: "state-column",
+        message: expect.stringContaining("the state field row_version is a rowversion column"),
+        fix: "remove it from the source's read list in facetdb.config.ts, and list the columns the model reads instead",
+      },
+    });
+    expect(client.transactions.size).toBe(0);
+    const memory: World = {
+      ...fresh,
+      tables: { "dbo.listings": { ...listingsTable, memoryOptimized: true } },
+    };
+    expect(await planOf(memory)).toMatchObject({
+      ok: false,
+      refusal: {
+        code: "memory-optimized",
+        message: expect.stringContaining("and no Change Tracking, so FacetDB could not watch it"),
+      },
+    });
+  });
+
   it("the trigger capture reads nothing of Change Tracking", async () => {
     const { client, installer } = planner(freshWorld(SQL_SERVER));
     await installer.planInstall(LISTINGS, ADMIN, {
@@ -337,10 +383,15 @@ class Tracked {
    * stored version reads it at the start, before the pages and after them.
    */
   minAfter: string | undefined;
-  /** An error the next queuing statement fails with. */
+  /** An error the next queuing statement fails with (after `failQueueSkip` more succeed). */
   failQueue: Error | undefined;
+  failQueueSkip = 0;
   /** Whether this process's session gets the poller's lock. */
   polls = true;
+  /** The answers of the next checks before a queuing transaction; `polls` once they run out. */
+  checks: boolean[] = [];
+  /** The lock statement whose next run fails, and with what. */
+  lockFails: { readonly on: "take" | "check"; readonly error: Error } | undefined;
   /** Each changed key's `sys_change_version`: 9 when absent. */
   readonly versionOf = new Map<string, string>();
   /** The lines the connector said, whether it polls or claims only. */
@@ -356,8 +407,18 @@ class Tracked {
     this.client = recordingClient({
       fail: (text) => {
         if (text.startsWith(QUEUE) && this.failQueue !== undefined) {
+          if (this.failQueueSkip > 0) {
+            this.failQueueSkip -= 1;
+            return undefined;
+          }
           const error = this.failQueue;
           this.failQueue = undefined;
+          return error;
+        }
+        const lockText = { take: POLLER_LOCK, check: POLLER_LOCK_HELD };
+        if (this.lockFails !== undefined && text === lockText[this.lockFails.on]) {
+          const { error } = this.lockFails;
+          this.lockFails = undefined;
           return error;
         }
         return undefined;
@@ -369,6 +430,8 @@ class Tracked {
           return [{ now: this.now, min }];
         }
         if (text === POLLER_LOCK) return [{ held: this.polls ? 1 : 0 }];
+        if (text === POLLER_LOCK_HELD)
+          return [{ held: (this.checks.shift() ?? this.polls) ? 1 : 0 }];
         if (text.startsWith(QUEUE)) {
           // The keys of the statement this database's `held` many rows of are taken by.
           const keys = params.slice(1).filter((_, index) => index % 3 === 0);
@@ -804,5 +867,236 @@ describe("the poll watch runs with capture: change-tracking", () => {
     await connector.tracked?.poll();
     expect(db.queued()[3]?.[5]).toBe(db.hashOf("2"));
     expect(db.queued()[3]?.[6]).toBe(true);
+  });
+});
+
+/** As tedious reports a connection the server ended (`kill`): the driver's code, no server number. */
+function socketLost(): Error {
+  return Object.assign(new Error("Connection lost - socket hang up"), { code: "ESOCKET" });
+}
+
+/** `count` changed rows, keys 1 to `count`, none answered yet: more than one queuing chunk past 500. */
+function manyChanges(db: Tracked, count: number): readonly string[] {
+  const keys = Array.from({ length: count }, (_, index) => String(index + 1));
+  db.changes = keys;
+  for (const key of keys) {
+    db.rows.set(key, { title: `Listing ${key}`, description: "d", hash: null });
+  }
+  return keys;
+}
+
+/** Whether each key of a queuing statement's parameters may have its claim cleared, in order. */
+function clears(params: readonly unknown[] | undefined): readonly unknown[] {
+  return (params ?? []).filter((_, index) => index > 0 && index % 3 === 0);
+}
+
+// The pass runs on the pool while the lock lives on a session of its own.
+describe("the poller's lock through a pass", () => {
+  const CLAIMING =
+    "listings: claiming only: another worker polls Change Tracking for dbo.listings; this one takes over if it stops";
+  const POLLS = "listings: this worker polls Change Tracking for dbo.listings";
+  const AGAIN =
+    "listings: this worker polls Change Tracking for dbo.listings again: it took its lock back";
+
+  it("checks the lock on its session right before each queuing transaction, the reconcile's too", async () => {
+    const db = new Tracked();
+    db.cursors.saved.set(RUN, { cursor: "8", done: false });
+    manyChanges(db, 600);
+    const connector = await db.connector();
+    await connector.tracked?.poll();
+    const order = db.client.statements
+      .map((statement) => statement.text)
+      .filter((text) => text === POLLER_LOCK_HELD || text.startsWith(QUEUE))
+      .map((text) => (text === POLLER_LOCK_HELD ? "check" : "queue"));
+    expect(order).toEqual(["check", "queue", "check", "queue"]);
+    expect(db.statementsLike(POLLER_LOCK_HELD)[0]?.params).toEqual(["facetdb:ct:dbo.listings"]);
+    // The reconcile queues through the same door.
+    const lost = new Tracked();
+    lost.cursors.saved.set(RUN, { cursor: "not a version", done: false });
+    lost.rows.set("1", { title: "Bike", description: "Red", hash: null });
+    await (await lost.connector()).tracked?.poll();
+    expect(lost.statementsLike(POLLER_LOCK_HELD)).toHaveLength(1);
+    expect(lost.queued()).toHaveLength(1);
+  });
+
+  it("stops queuing when the lock is gone in the middle of a pass, says so, stores nothing, and takes the lock back later", async () => {
+    const db = new Tracked();
+    db.cursors.saved.set(RUN, { cursor: "8", done: false });
+    manyChanges(db, 600);
+    // The first chunk's check finds the lock, the second's does not.
+    db.checks = [true, false];
+    const connector = await db.connector();
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(db.queued()).toHaveLength(1);
+    expect(clears(db.queued()[0])).toHaveLength(500);
+    expect(db.cursors.saved.get(RUN)).toEqual({ cursor: "8", done: false });
+    expect(connector.tracked?.polling()).toBe(false);
+    expect(db.notes).toEqual([
+      POLLS,
+      "listings: this worker stopped queuing the changes of dbo.listings in the middle of a pass: its session no longer holds the lock on polling Change Tracking, and another worker may poll now; what it queued stays, its version is not stored, and it asks for the lock again at the next tick",
+    ]);
+
+    // Another worker holds it at the next tick; then it comes free and this one polls again, from
+    // the stored version, every change read again (at least once).
+    db.polls = false;
+    await connector.tracked?.poll();
+    expect(db.queued()).toHaveLength(1);
+    db.polls = true;
+    await connector.tracked?.poll();
+    expect(connector.tracked?.polling()).toBe(true);
+    expect(db.statementsLike(CHANGES).map((statement) => statement.params[0])).toEqual(["8", "8"]);
+    expect(db.queued()).toHaveLength(3);
+    expect(db.cursors.saved.get(RUN)).toEqual({ cursor: "10", done: false });
+    // Another worker held the lock in between, so this one takes over from it.
+    expect(db.notes.slice(2)).toEqual([
+      CLAIMING,
+      "listings: this worker takes over polling Change Tracking for dbo.listings: the worker that polled it stopped",
+    ]);
+  });
+
+  it("remembers each committed chunk as seen: a later chunk's lost deadlock leaves the first chunk's claims alone at the next tick", async () => {
+    const db = new Tracked();
+    db.cursors.saved.set(RUN, { cursor: "8", done: false });
+    manyChanges(db, 600);
+    db.failQueue = serverError("Transaction was deadlocked on lock resources", 1205);
+    db.failQueueSkip = 1;
+    const connector = await db.connector();
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(db.client.transactions.get(1)).toBe("committed");
+    expect(db.client.transactions.get(2)).toBe("rolled back");
+    await connector.tracked?.poll();
+    const [, , again, rest] = db.queued();
+    // The first 500 were queued and their claims cleared at the first pass: never again.
+    expect(new Set(clears(again))).toEqual(new Set([false]));
+    expect(clears(again)).toHaveLength(500);
+    // The 100 the deadlock rolled back are a first sight still.
+    expect(new Set(clears(rest))).toEqual(new Set([true]));
+    expect(clears(rest)).toHaveLength(100);
+    expect(db.cursors.saved.get(RUN)).toEqual({ cursor: "10", done: false });
+  });
+
+  it("reads a lock connection the server dropped as not held for that tick, then takes the lock again on a new one, the watch going on", async () => {
+    const db = new Tracked();
+    db.changes = ["1"];
+    db.rows.set("1", { title: "Bike", description: "Red", hash: null });
+    const connector = await db.connector();
+    await connector.tracked?.poll();
+    expect(db.queued()).toHaveLength(1);
+
+    db.lockFails = { on: "take", error: socketLost() };
+    db.rows.set("1", { title: "Bike", description: "Blue", hash: null });
+    db.now = "11";
+    const reads = db.statementsLike(VERSIONS).length;
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(connector.tracked?.polling()).toBe(false);
+    expect(db.statementsLike(VERSIONS)).toHaveLength(reads);
+
+    await connector.tracked?.poll();
+    expect(connector.tracked?.polling()).toBe(true);
+    expect(db.queued()).toHaveLength(2);
+    expect(db.notes).toEqual([
+      POLLS,
+      "listings: the connection that held this worker's lock on polling Change Tracking for dbo.listings was lost (Connection lost - socket hang up); this worker claims only for this tick and asks for the lock again on a new connection at the next",
+      AGAIN,
+    ]);
+  });
+
+  it("stops a pass whose lock connection was dropped in its middle, and ends the watch on a server's error from the lock's statement", async () => {
+    const db = new Tracked();
+    db.cursors.saved.set(RUN, { cursor: "8", done: false });
+    manyChanges(db, 600);
+    // The lock was taken at the tick's start; its connection is gone by the first chunk's check.
+    db.lockFails = { on: "check", error: socketLost() };
+    const connector = await db.connector();
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(db.queued()).toHaveLength(0);
+    expect(connector.tracked?.polling()).toBe(false);
+    expect(db.notes.at(-1)).toBe(
+      "listings: this worker stopped queuing the changes of dbo.listings in the middle of a pass: the connection that held its lock on polling Change Tracking was lost (Connection lost - socket hang up), and another worker may poll now; what it queued stays, its version is not stored, and it asks for the lock again at the next tick",
+    );
+
+    const denied = new Tracked();
+    denied.lockFails = {
+      on: "take",
+      error: serverError("The EXECUTE permission was denied on the object 'sp_getapplock'.", 229),
+    };
+    await expect((await denied.connector()).tracked?.poll()).rejects.toThrow(
+      "The EXECUTE permission was denied",
+    );
+  });
+
+  // What the lock session's error means decides between "not held" and the end.
+  it("reads the socket-class errors as a dropped connection, and ends the watch in words on a refused login", async () => {
+    for (const code of ["ESOCKET", "ECONNRESET", "ETIMEOUT"]) {
+      const db = new Tracked();
+      db.lockFails = {
+        on: "take",
+        error: Object.assign(new Error(`the driver said ${code}`), { code }),
+      };
+      const connector = await db.connector();
+      await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+      expect(connector.tracked?.polling()).toBe(false);
+      expect(db.notes.at(-1)).toContain(`was lost (the driver said ${code})`);
+      await connector.tracked?.poll();
+      expect(connector.tracked?.polling()).toBe(true);
+    }
+    // A disabled login or a changed password, met on the reconnect: every tick would meet it.
+    const db = new Tracked();
+    db.lockFails = {
+      on: "take",
+      error: Object.assign(new Error("Login failed for user 'facetdb_worker'."), {
+        code: "ELOGIN",
+      }),
+    };
+    const connector = await db.connector();
+    await expect(connector.tracked?.poll()).rejects.toThrow(
+      "listings: the worker login could not log in again on the connection that holds the lock on polling Change Tracking for dbo.listings (Login failed for user 'facetdb_worker'.); the login may be disabled or its password changed: check the login and the password in LISTINGS_URL, then start the worker again",
+    );
+    expect(db.notes.some((line) => line.includes("was lost"))).toBe(false);
+  });
+
+  it("reads a server error of severity 20 or above as a dropped connection, one below it as the end of the watch", async () => {
+    // A kill while the lock's statement runs: 596, severity 21, among the server's errors for the
+    // statement, which tedious hands over as one AggregateError (serverFailure keeps the severity).
+    const killed = new Tracked();
+    killed.cursors.saved.set(RUN, { cursor: "8", done: false });
+    manyChanges(killed, 600);
+    killed.lockFails = {
+      on: "check",
+      error: new AggregateError([
+        Object.assign(
+          serverError(
+            "Cannot continue the execution because the session is in the kill state.",
+            596,
+          ),
+          { class: 21, code: "EREQUEST" },
+        ),
+        Object.assign(serverError("A severe error occurred on the current command.", 0), {
+          class: 11,
+          code: "EREQUEST",
+        }),
+      ]),
+    };
+    const connector = await killed.connector();
+    await expect(connector.tracked?.poll()).resolves.toBeUndefined();
+    expect(killed.queued()).toHaveLength(0);
+    expect(killed.notes.at(-1)).toContain(
+      "the connection that held its lock on polling Change Tracking was lost (Cannot continue the execution because the session is in the kill state. A severe error occurred on the current command.)",
+    );
+    await connector.tracked?.poll();
+    expect(connector.tracked?.polling()).toBe(true);
+    expect(killed.queued()).toHaveLength(2);
+
+    const refused = new Tracked();
+    refused.lockFails = {
+      on: "take",
+      error: Object.assign(
+        serverError("The EXECUTE permission was denied on the object 'sp_getapplock'.", 229),
+        { class: 14, code: "EREQUEST" },
+      ),
+    };
+    await expect((await refused.connector()).tracked?.poll()).rejects.toThrow(
+      "The EXECUTE permission was denied",
+    );
   });
 });
