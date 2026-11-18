@@ -31,6 +31,7 @@ export type {
   EngineTarget,
   InstallOptions,
   KeptObject,
+  KeyText,
   ObjectKind,
   OpenConnector,
   OpenOptions,

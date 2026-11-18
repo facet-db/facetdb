@@ -1,7 +1,9 @@
-import { FakeClock } from "@facetdb/core/testing";
+import type { KeyText, RecordDecision } from "@facetdb/core";
+import { FakeClock, FakeConnector, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
-import { runInProcess } from "../program.ts";
+import { lazyEngine } from "../engines.ts";
+import { type EngineEntry, runInProcess } from "../program.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -98,6 +100,7 @@ function run(
   config: ProjectConfig,
   env: Record<string, string> = { DATABASE_URL: "postgres://localhost:5432/app" },
   connect: SqlConnect = world.connect,
+  engines: readonly EngineEntry[] = postgresEngines(connect),
 ) {
   return runInProcess(
     argv,
@@ -105,7 +108,7 @@ function run(
       projectDir: PROJECT_DIR,
       env,
       loadConfig: () => Promise.resolve(config),
-      engines: postgresEngines(connect),
+      engines,
       connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: (options) => {
@@ -380,5 +383,129 @@ describe("facetdb explain keeps the worker's password out of the clear", () => {
     );
     expect(result.stderr).not.toContain("without TLS");
     expect(storeAsked).toEqual([true]);
+  });
+});
+
+describe("facetdb explain on an engine whose keys carry a type tag", () => {
+  /** The key forms of MongoDB's connector: `oid:<hex>` for an ObjectId, `n:<number>` for a number. */
+  const HEX = "65f1a2b3c4d5e6f708192a3b";
+  const OBJECT_KEY = `oid:${HEX}`;
+  const NUMBER_KEY = "n:1";
+  const MONGO_URL = "mongodb://facetdb_worker:worker-password@localhost:27017/app";
+  const FORM = "the document's _id as you write it";
+
+  /** A handwritten key text with MongoDB's rule: 24 hex an ObjectId, digits a number. */
+  const tagged: KeyText = {
+    toText: (key) => key.replace(/^(?:oid|n):/, ""),
+    fromText: (text) =>
+      /^[0-9a-f]{24}$/.test(text) ? `oid:${text}` : /^[0-9]+$/.test(text) ? `n:${text}` : text,
+    form: FORM,
+  };
+
+  const mongoConfig: ProjectConfig = facetdb({
+    model: "jev-1.14.0",
+    sources: [
+      {
+        name: "listings",
+        database: MONGO_URL,
+        table: "listings",
+        read: ["title"],
+        questions: { is_scam: noul(FIRST_WORDING) },
+      },
+    ],
+  });
+
+  const decided: RecordDecision = {
+    decisions: { is_scam: { kind: "decided", value: false, probabilityOrConfidence: 0.97 } },
+    status: "done",
+  };
+
+  /** The fake MongoDB: both documents answered, their decisions stored, their log in the store. */
+  async function mongoWorld(): Promise<readonly EngineEntry[]> {
+    const database = new FakeDatabase({ fields: ["title"] });
+    database.install();
+    database.edit(OBJECT_KEY, { title: "A car" });
+    database.edit(NUMBER_KEY, { title: "A flat" });
+    const writer = new FakeConnector(database);
+    for (const row of (await writer.read([OBJECT_KEY, NUMBER_KEY])).rows) {
+      expect((await writer.write(row.key, decided, row.hash)).written).toBe(true);
+    }
+    await store.questionSets.record(LOG_ID, setOf(mongoConfig));
+    for (const key of [OBJECT_KEY, NUMBER_KEY]) {
+      await store.log(LOG_ID).appendAnswer({
+        kind: "answer",
+        key,
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash: `hash-${key}`,
+        answers: { is_scam: { type: "noul", probability: 0.03 } },
+        usage: { inputTokens: 100, outputTokens: 5 },
+        at: new Date("2026-11-04T09:00:00Z"),
+      });
+    }
+    const engine = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      database,
+      keyText: tagged,
+    });
+    return [lazyEngine("mongodb", () => Promise.resolve(engine))];
+  }
+
+  function explain(argv: readonly string[], engines: readonly EngineEntry[]) {
+    return run(
+      ["explain", "listings", ...argv],
+      mongoConfig,
+      { DATABASE_URL: "postgres://localhost:5432/app" },
+      world.connect,
+      engines,
+    );
+  }
+
+  it("finds an ObjectId typed as its 24 hex characters, and prints it so", async () => {
+    const engines = await mongoWorld();
+
+    const result = await explain([HEX], engines);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(`History of record ${HEX} of "listings", oldest first:`);
+    expect(result.stdout).toContain(`    "${FIRST_WORDING}" 3% likely yes → no`);
+    // The current state was read with the tagged key: the record's stored decision, found.
+    expect(result.stdout).toContain("Now: is_scam: no · status: done · reviewed: no");
+    expect(result.stdout).not.toContain("oid:");
+  });
+
+  it("finds a number typed bare, and prints it bare", async () => {
+    const engines = await mongoWorld();
+
+    const result = await explain(["1"], engines);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('History of record 1 of "listings", oldest first:');
+    expect(result.stdout).toContain("Now: is_scam: no · status: done · reviewed: no");
+    expect(result.stdout).not.toContain("n:1");
+
+    const json = await explain(["1", "--json"], engines);
+    expect(JSON.parse(json.stdout)).toMatchObject({ ok: true, key: "1", current: { found: true } });
+  });
+
+  it("still finds the tagged form typed as written, and prints the _id as the user writes it", async () => {
+    const engines = await mongoWorld();
+
+    const result = await explain([OBJECT_KEY], engines);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(`History of record ${HEX} of "listings"`);
+  });
+
+  it("says how a key is written when nothing is found, in the engine's words", async () => {
+    const engines = await mongoWorld();
+
+    const result = await explain(["2"], engines);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('FacetDB has no history for record 2 of "listings".');
+    expect(result.stdout).toContain(`Then check the key: it is ${FORM}.`);
+    expect(result.stdout).not.toContain("primary key, as text");
   });
 });

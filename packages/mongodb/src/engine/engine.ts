@@ -1,7 +1,9 @@
-import type { CursorStore, DatabaseEngine } from "@facetdb/core";
+import type { CursorStore, DatabaseEngine, KeyText } from "@facetdb/core";
 import {
   connectWorker,
   createMongoConnector,
+  keyFromText,
+  keyToText,
   MONGO_CAPABILITIES,
   type WorkerConnect,
   workerUrlRefusal,
@@ -31,6 +33,16 @@ import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
 
 /** How the CLI names this engine (`DatabaseEngine.name`). */
 export const ENGINE_NAME = "mongodb";
+
+/**
+ * A document's key on the terminal: the `_id` as the user writes it, never the tagged key the store
+ * and the queue hold (connector/keys.ts says the rule).
+ */
+export const MONGO_KEY_TEXT: KeyText = {
+  toText: keyToText,
+  fromText: keyFromText,
+  form: "the document's _id as you write it (the 24 hex characters of an ObjectId, a number as its digits, a string as itself; a string _id that looks like an ObjectId or a number is written s:<id>)",
+};
 
 /** The store's cursors for a connector, and how to let go of what was opened for them. */
 export type OpenedCursors = {
@@ -94,6 +106,7 @@ export function createMongoEngine(options: MongoEngineOptions = {}): DatabaseEng
     name: ENGINE_NAME,
     schemes: ["mongodb", "mongodb+srv"],
     capabilities: MONGO_CAPABILITIES,
+    keyText: MONGO_KEY_TEXT,
     checks: DOCTOR_CHECKS,
     planInstall: (target, url, installOptions) => planInstall(connect, target, url, installOptions),
     planUninstall: (target, url, uninstallOptions) =>

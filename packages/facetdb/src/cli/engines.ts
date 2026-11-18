@@ -2,12 +2,14 @@ import {
   type DatabaseEngine,
   EngineRefusal,
   type EngineTarget,
+  type KeyText,
   type OpenConnector,
   type OpenOptions,
+  type RecordKey,
   type Refusal,
   type RunResult,
 } from "@facetdb/core";
-import type { ConnectorChoice } from "../config/index.ts";
+import type { ConnectorChoice, SourceConfig } from "../config/index.ts";
 import { CliError, type EngineEntry } from "./program.ts";
 
 /**
@@ -240,6 +242,30 @@ export async function engineFor(
       : `the connection string is ${database.name}'s (${scheme}:), and no ${database.name} engine is registered here; the engines registered here read ${registered(entries)}`,
     `use a connection string one of those engines reads; the databases FacetDB connects to, and the scheme each one's string starts with, are at ${DATABASES_PAGE}`,
   );
+}
+
+/**
+ * How a source's keys are written on the terminal: its engine's `keyText` (MongoDB's `_id` as the
+ * user writes it), or undefined where a key is its own text (the SQL engines, the polling engine,
+ * an API source). For a command that reads the store only (`export`): nothing connects, and a
+ * source whose connection string is unset here, or names no engine registered here, keeps its keys
+ * as stored rather than stopping a read that never needed its database (export then says so on
+ * stderr, naming the variable to set).
+ */
+export async function keyTextFor(
+  entries: readonly EngineEntry[],
+  source: Pick<SourceConfig, "table" | "database" | "connector">,
+): Promise<KeyText | undefined> {
+  const url = source.database;
+  if (source.table === undefined || url === undefined || source.connector === "polling") {
+    return undefined;
+  }
+  return readsUrl(entries, url) ? (await engineFor(entries, url)).keyText : undefined;
+}
+
+/** A key as the terminal shows it: through the engine's `keyText` when it has one. */
+export function keyWords(keyText: KeyText | undefined, key: RecordKey): string {
+  return keyText === undefined ? key : keyText.toText(key);
 }
 
 /** Whether a connection string is a Postgres one: the store's kind, and the store-sharing kind. */

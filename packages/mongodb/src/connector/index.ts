@@ -25,7 +25,9 @@ export {
 export {
   type DocumentId,
   idOf,
+  keyFromText,
   keyOf,
+  keyToText,
   stateOf,
   stateProjection,
   stateText,

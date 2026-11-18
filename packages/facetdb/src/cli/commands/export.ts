@@ -10,6 +10,7 @@ import {
   type QuestionSet,
   resolveThresholds,
 } from "@facetdb/core";
+import { keyTextFor, keyWords } from "../engines.ts";
 import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeSourceId } from "../store-door.ts";
 import {
@@ -17,6 +18,7 @@ import {
   loadProjectConfig,
   projectRef,
   savedQuestionSets,
+  variableOf,
 } from "./database.ts";
 
 /**
@@ -111,12 +113,15 @@ function humanWords(entry: HumanEntry): string {
   return typeof entry.value === "boolean" ? (entry.value ? "yes" : "no") : entry.value;
 }
 
+/** A log row's key as the user writes it: the engine's form (MongoDB's `_id`), else the key. */
+type KeyShown = (key: string) => string;
+
 /** One JSON object per log row, the answers nested per question. */
-function jsonOf(entry: LogEntry, versions: Versions): string {
+function jsonOf(entry: LogEntry, versions: Versions, shown: KeyShown): string {
   const common = {
     time: entry.at.toISOString(),
     kind: entry.kind,
-    record_key: entry.key,
+    record_key: shown(entry.key),
     version: entry.version,
     state_hash: entry.stateHash,
   };
@@ -165,14 +170,14 @@ function csvLine(fields: readonly (string | number | null)[]): string {
 }
 
 /** One line per question per log row. */
-function csvOf(entry: LogEntry, versions: Versions): string[] {
+function csvOf(entry: LogEntry, versions: Versions, shown: KeyShown): string[] {
   const time = entry.at.toISOString();
   if (entry.kind === "human") {
     return [
       csvLine([
         time,
         entry.kind,
-        entry.key,
+        shown(entry.key),
         entry.version,
         "",
         entry.question,
@@ -190,7 +195,7 @@ function csvOf(entry: LogEntry, versions: Versions): string[] {
     return csvLine([
       time,
       entry.kind,
-      entry.key,
+      shown(entry.key),
       entry.version,
       entry.model,
       name,
@@ -275,6 +280,18 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
     // The store only: the log is never read from, nor needs, the source's own database.
     const allowInsecure = options.allowInsecure === true;
     requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
+    // The key column as the user writes the key: the store keeps MongoDB's tagged key, `n:1`, and
+    // the export says `1`, as `explain` reads it. The engine is found, never opened.
+    const keyText = await keyTextFor(deps.engines, source);
+    const shown: KeyShown = (key) => keyWords(keyText, key);
+    // Without the source's connection string its engine is unknown here: say which form the keys
+    // take, so the two forms are never told apart in silence (stderr: stdout may be the data).
+    if (source.table !== undefined && (source.database ?? "") === "") {
+      const variable = variableOf(source);
+      deps.io.stderr(
+        `note: ${variable} is not set here, so export cannot tell which database "${source.name}" is on and writes each record_key as the FacetDB store keeps it: the same as you type it on every database but MongoDB, whose keys then read oid:<hex> and n:<number>. Set ${variable} to export MongoDB keys as you write them.\n`,
+      );
+    }
 
     const store = await deps.store({ allowInsecure });
     // The log is kept under the project-scoped id, never the bare source name.
@@ -313,11 +330,11 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
           }
           for (const entry of page.entries) {
             if (format === "csv") {
-              for (const line of csvOf(entry, versions)) {
+              for (const line of csvOf(entry, versions, shown)) {
                 emit(line);
               }
             } else {
-              emit(`${jsonOf(entry, versions)}\n`);
+              emit(`${jsonOf(entry, versions, shown)}\n`);
             }
           }
         }

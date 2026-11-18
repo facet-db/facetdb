@@ -1,7 +1,8 @@
-import { FakeClock } from "@facetdb/core/testing";
+import { FakeClock, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, score } from "../../config/index.ts";
-import { runInProcess } from "../program.ts";
+import { lazyEngine } from "../engines.ts";
+import { type EngineEntry, runInProcess } from "../program.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -78,14 +79,19 @@ afterEach(async () => {
   await resetPgliteWorld(world);
 });
 
-function run(argv: readonly string[], env: Record<string, string> = defaultEnv()) {
+function run(
+  argv: readonly string[],
+  env: Record<string, string> = defaultEnv(),
+  setup: { readonly config?: ProjectConfig; readonly engines?: readonly EngineEntry[] } = {},
+) {
   const connect: SqlConnect = world.connect;
   return runInProcess(
     argv,
     {
       projectDir: PROJECT_DIR,
       env,
-      loadConfig: () => Promise.resolve(CONFIG),
+      loadConfig: () => Promise.resolve(setup.config ?? CONFIG),
+      ...(setup.engines === undefined ? {} : { engines: setup.engines }),
       connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: () =>
@@ -446,5 +452,108 @@ describe("facetdb export", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain('no log for "tickets" yet');
+  });
+
+  it("writes a tagged-key engine's keys as the user writes them, and never opens its database", async () => {
+    const HEX = "65f1a2b3c4d5e6f708192a3b";
+    const mongoConfig = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: "mongodb://facetdb_worker:worker-password@source.invalid:27017/app",
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+    const mongo = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      keyText: {
+        toText: (key) => key.replace(/^(?:oid|n):/, ""),
+        fromText: (text) => text,
+        form: "the document's _id as you write it",
+      },
+    });
+    await store.questionSets.record(LOG_ID, setOf(mongoConfig));
+    const log = store.log(LOG_ID);
+    for (const [key, at, stateHash] of [
+      [`oid:${HEX}`, "2026-11-04T09:00:00Z", "hash-car"],
+      ["n:1", "2026-11-04T09:01:00Z", "hash-flat"],
+    ] as const) {
+      await log.appendAnswer({
+        kind: "answer",
+        key,
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash,
+        answers: { is_scam: { type: "noul", probability: 0.03 } },
+        usage: { inputTokens: 100, outputTokens: 5 },
+        at: new Date(at),
+      });
+    }
+    await log.appendHuman({
+      kind: "human",
+      key: "n:1",
+      question: "is_scam",
+      value: true,
+      reviewer: "ana@example.com",
+      stateHash: "hash-flat",
+      version: 1,
+      at: new Date("2026-11-04T09:02:00Z"),
+    });
+    const setup = {
+      config: mongoConfig,
+      engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+    };
+
+    const jsonl = await run(["export", "--source", "listings"], defaultEnv(), setup);
+    const csv = await run(
+      ["export", "--source", "listings", "--format", "csv"],
+      defaultEnv(),
+      setup,
+    );
+
+    expect(jsonl.code).toBe(0);
+    expect(
+      jsonl.stdout
+        .trim()
+        .split("\n")
+        .map((line) => (JSON.parse(line) as { record_key: string }).record_key),
+    ).toEqual([HEX, "1", "1"]);
+    expect(csv.code).toBe(0);
+    expect(
+      parseCsv(csv.stdout)
+        .slice(1)
+        .map((record) => record[2]),
+    ).toEqual([HEX, "1", "1"]);
+    expect(`${jsonl.stdout}${csv.stdout}`).not.toMatch(/oid:|n:1/);
+    expect(mongo.opened).toEqual([]);
+    // With the source's connection string set, nothing is said about the keys' form.
+    expect(jsonl.stderr).not.toContain("record_key");
+  });
+
+  it("says on stderr which form the keys take when the source's connection string is unset here", async () => {
+    await seed();
+    // What the loader makes of `database: process.env.LISTINGS_URL` with LISTINGS_URL unset.
+    const unset: ProjectConfig = {
+      ...CONFIG,
+      sources: CONFIG.sources.map(({ database: _database, ...source }) => ({
+        ...source,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+
+    const result = await run(["export", "--source", "listings"], defaultEnv(), { config: unset });
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain(
+      'note: LISTINGS_URL is not set here, so export cannot tell which database "listings" is on and writes each record_key as the FacetDB store keeps it',
+    );
+    expect(result.stderr).toContain("Set LISTINGS_URL to export MongoDB keys as you write them.");
+    // The rows themselves are unchanged, on stdout.
+    expect(result.stdout.trim().split("\n")).toHaveLength(3);
   });
 });

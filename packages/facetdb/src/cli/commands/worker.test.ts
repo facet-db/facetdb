@@ -1,12 +1,12 @@
 import { type Clock, DEFAULT_WORKER_LIMITS } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
+import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { engineFor, openConnector } from "../engines.ts";
+import { engineFor, lazyEngine, openConnector } from "../engines.ts";
 import { sharePools } from "../pools.ts";
-import type { HttpHandler } from "../program.ts";
+import type { EngineEntry, HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
 import {
   createPgliteWorld,
@@ -146,6 +146,8 @@ function run(
      * over the client the command hands it, as `facetdb worker` opens it, not the test's own.
      */
     readonly record?: string[];
+    /** The engines registered; the Postgres engine over the test's driver when absent. */
+    readonly engines?: readonly EngineEntry[];
   } = {},
 ) {
   const { record } = options;
@@ -184,7 +186,7 @@ function run(
         TYPESAFE_API_KEY: "ts-test-key",
       },
       loadConfig: () => Promise.resolve(options.config ?? config),
-      engines: postgresEngines(connect),
+      engines: options.engines ?? postgresEngines(connect),
       connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: (storeOptions) => {
@@ -464,6 +466,77 @@ describe("facetdb worker", () => {
     expect(await listing("r1")).toMatchObject({ is_scam: false, facetdb_status: "done" });
     const jobs = await world.client.query("select count(*)::int as n from facetdb.jobs");
     expect(jobs[0]?.["n"]).toBe(0);
+  });
+
+  describe("on an engine whose keys carry a type tag", () => {
+    const HEX = "65f1a2b3c4d5e6f708192a3b";
+
+    /** A fake MongoDB with an ObjectId and a number document queued, and the worker's options. */
+    function mongoWorld() {
+      const database = new FakeDatabase({ fields: ["title"] });
+      database.install();
+      database.edit(`oid:${HEX}`, { title: "A red car" });
+      database.edit("n:1", { title: "A flat" });
+      const mongo = new FakeEngine({
+        name: "mongodb",
+        schemes: ["mongodb", "mongodb+srv"],
+        database,
+        keyText: {
+          toText: (key) => key.replace(/^(?:oid|n):/, ""),
+          fromText: (text) => text,
+          form: "the document's _id as you write it",
+        },
+      });
+      const mongoConfig = facetdb({
+        model: "jev-1.14.0",
+        sources: [
+          {
+            name: "listings",
+            database: "mongodb://facetdb_worker:worker-password@localhost:27017/app",
+            table: "listings",
+            read: ["title"],
+            questions: { is_scam: noul("Is this listing a scam?") },
+          },
+        ],
+      });
+      return {
+        database,
+        options: {
+          config: mongoConfig,
+          engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+        },
+      };
+    }
+
+    it("prints its keys as the user writes them in the answered lines, never its tags", async () => {
+      const { database, options } = mongoWorld();
+
+      const first = await run(["worker", "--once", "--no-http"], options);
+
+      expect(first.code).toBe(0);
+      expect(first.stdout).toMatch(new RegExp(`listings: answered (${HEX}, 1|1, ${HEX})\\n`));
+      // Queued again at the same state: the already-answered line speaks the same form.
+      database.queue("n:1");
+      const again = await run(["worker", "--once", "--no-http"], options);
+      expect(again.stdout).toContain(
+        "listings: already answered 1 at this state, so the model was not asked again",
+      );
+      expect(`${first.stdout}${again.stdout}`).not.toMatch(/oid:|n:1/);
+    });
+
+    it("names a record that failed by the key as the user writes it", async () => {
+      const { options } = mongoWorld();
+      // The first call's answer does not parse: that record fails at the model call.
+      provider = createFakeProvider({
+        defaults: { noul: 0.01 },
+        failures: { 0: { kind: "malformed" } },
+      });
+
+      const result = await run(["worker", "--once", "--no-http"], options);
+
+      expect(result.stdout).toMatch(new RegExp(`listings: (${HEX}|1) failed at ask: .+`));
+      expect(result.stdout).not.toMatch(/oid:|n:1/);
+    });
   });
 
   it("--once names the decision log when the lookup of a batch's prior answers fails", async () => {

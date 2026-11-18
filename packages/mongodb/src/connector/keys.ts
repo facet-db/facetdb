@@ -100,6 +100,75 @@ export function idOf(key: RecordKey): DocumentId | undefined {
   return id !== undefined && keyOf(id) === key ? id : undefined;
 }
 
+/**
+ * Keys on the terminal. The tagged key above is the store's and the queue's; a person reads and
+ * types the `_id` itself: `facetdb explain listings 65f1a2b3c4d5e6f708192a3b` for an ObjectId,
+ * `facetdb explain listings 1` for a number, `listing-42` for a string. The install's marker does
+ * not record a collection's `_id` type, so the text alone decides, by one rule: 24 hex characters
+ * are an ObjectId, a number in its own form (`1`, `-2.5`, never `042` or `1.50`) is a number,
+ * anything else is a string. A string `_id` that the rule would read as an ObjectId or a number
+ * (`"1"`, a 24-hex string) prints with the one escape, `s:1`, so whatever FacetDB prints reads back
+ * as the document it named. The tagged form typed as written still works (`oid:…`, `n:1`, `s:…`),
+ * so a script written before this keeps finding its records.
+ */
+
+/**
+ * A number as typed: an optional minus, an integer part without a leading zero, a fraction, and the
+ * negative exponent JavaScript prints below 1e-6 (`1e-7`, `5e-324`). A positive exponent never
+ * appears: JavaScript prints one only from 1e21, past the 2^53 a key's number stays within.
+ */
+const DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:e-[0-9]+)?$/;
+/** 24 hex characters as typed, either case: an ObjectId's hex. */
+const TYPED_HEX = /^[0-9a-f]{24}$/i;
+
+/** A string `_id`'s key: itself, or `s:` before it when it would read as a tag. */
+function stringKey(id: string): RecordKey {
+  return TAGGED.test(id) ? `${STRING}${id}` : id;
+}
+
+/**
+ * The key a user's text names, by the rule above: 24 hex characters an ObjectId, a number in its
+ * own form a number, anything else a string; a tagged key that names a document as written
+ * (`oid:<hex>`, `n:1`), and `s:<string>` the string after it. A tag-like text that names no
+ * document (`n:042`, `oid:x`) is the string it spells, as `keyOf` keys that string.
+ */
+export function keyFromText(text: string): RecordKey {
+  if (text.startsWith(STRING)) {
+    return stringKey(text.slice(STRING.length));
+  }
+  if (TAGGED.test(text)) {
+    return idOf(text) === undefined ? stringKey(text) : text;
+  }
+  if (TYPED_HEX.test(text)) {
+    return `${OBJECT_ID}${text.toLowerCase()}`;
+  }
+  if (DECIMAL.test(text) && numberText(Number(text)) === text) {
+    return `${NUMBER}${text}`;
+  }
+  return text;
+}
+
+/**
+ * A key as its user writes the `_id`: an ObjectId's 24 hex characters, a number's digits, a string
+ * itself, or `s:<string>` for a string `keyFromText` would read as something else, so
+ * `keyFromText(keyToText(key))` is `key` for every key `keyOf` writes. The empty string prints as
+ * `s:`, so a log line never ends on nothing. A text in no written form (no connector hands one
+ * out) is shown as it is.
+ */
+export function keyToText(key: RecordKey): string {
+  const id = idOf(key);
+  if (id === undefined) {
+    return key;
+  }
+  if (id instanceof ObjectId) {
+    return id.toHexString();
+  }
+  if (typeof id === "number") {
+    return key.slice(NUMBER.length);
+  }
+  return id !== "" && keyFromText(id) === key ? id : `${STRING}${id}`;
+}
+
 /** A value as canonical JSON's value: the rules of `stateText`, inside an array or a document. */
 function canonical(value: unknown): unknown {
   if (value === null || value === undefined) {

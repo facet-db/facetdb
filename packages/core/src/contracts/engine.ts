@@ -1,7 +1,7 @@
 import type { QuestionSet } from "../questions/index.ts";
 import type { OnChange } from "../records/index.ts";
 import type { Clock } from "./clock.ts";
-import type { Capabilities, Connector } from "./connector.ts";
+import type { Capabilities, Connector, RecordKey } from "./connector.ts";
 
 /**
  * The database engine contract (anyone can add a database by implementing it): what one database
@@ -372,6 +372,22 @@ export type OpenConnector = Connector & {
 };
 
 /**
+ * A record key as its user writes it, for an engine whose keys carry a type tag (MongoDB keys an
+ * ObjectId `oid:<hex>` and a number `n:<number>`, so one key never names two documents). The tagged
+ * key stays what the store, the queue and the log hold; the CLI prints a key through `toText` and
+ * reads a typed one through `fromText`, so `facetdb explain listings 1` finds what the worker
+ * logged as `listings: answered 1`. `fromText(toText(key))` is `key` for every key.
+ */
+export type KeyText = {
+  /** The key as the user writes it: `oid:65f1…` is `65f1…`, `n:1` is `1`. */
+  toText(key: RecordKey): string;
+  /** The key the user's text names: what `toText` printed, or the tagged key itself as written. */
+  fromText(text: string): RecordKey;
+  /** How a key is written, in words, for the hint a lookup that found nothing gives. */
+  readonly form: string;
+};
+
+/**
  * One database FacetDB installs on and reads from. The composition root makes each engine with its
  * own driver; the CLI calls engines and nothing else of a database.
  */
@@ -382,6 +398,11 @@ export type DatabaseEngine = {
   readonly schemes: readonly string[];
   /** What its databases can do; the connector `open` hands out declares the same. */
   readonly capabilities: Capabilities;
+  /**
+   * How its keys are written on the terminal, when that is not the key itself. Absent for the SQL
+   * engines: their key is the primary key as text already.
+   */
+  readonly keyText?: KeyText;
   /** The checks `doctor` runs, in order, and what each looks at: `doctor --dry-run` lists them. */
   readonly checks: readonly { readonly name: string; readonly looksAt: string }[];
   /**

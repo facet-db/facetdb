@@ -7,6 +7,7 @@ import {
   EngineRefusal,
   type EngineTarget,
   type InstallOptions,
+  type KeyText,
   type OpenConnector,
   type OpenOptions,
   type PlanResult,
@@ -45,6 +46,8 @@ export type FakeEngineOptions = {
   readonly doctor?: (target: EngineTarget) => readonly DoctorCheck[];
   /** The database `open` hands connectors over; `open` rejects without one. */
   readonly database?: FakeDatabase;
+  /** How its keys are written on the terminal (a tagged-key engine's); absent, keys are text. */
+  readonly keyText?: KeyText;
 };
 
 /** One `run` as the fake saw it. */
@@ -141,6 +144,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly schemes: readonly string[];
   readonly capabilities: Capabilities;
   readonly checks: DatabaseEngine["checks"];
+  readonly keyText?: KeyText;
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
   readonly #plans: FakePlans;
@@ -160,6 +164,9 @@ export class FakeEngine implements DatabaseEngine {
     this.#lastOfRun = options.lastOfRun ?? (() => true);
     this.#doctor = options.doctor ?? (() => []);
     this.#database = options.database;
+    if (options.keyText !== undefined) {
+      this.keyText = options.keyText;
+    }
   }
 
   /** The next run stops at statement `at`, an index into its plan's statements. */

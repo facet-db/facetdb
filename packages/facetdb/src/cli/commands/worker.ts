@@ -4,6 +4,7 @@ import {
   createAlerts,
   createWorker,
   DEFAULT_WORKER_LIMITS,
+  type KeyText,
   type ModelProvider,
   type OpenConnector,
   type PassReport,
@@ -28,7 +29,7 @@ import {
 } from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
-import { engineFor, openConnector, requireUsableUrl } from "../engines.ts";
+import { engineFor, keyWords, openConnector, requireUsableUrl } from "../engines.ts";
 import {
   CliError,
   type CommandContext,
@@ -108,6 +109,11 @@ export type WorkerParts = {
     source: SourceConfig,
     options: { readonly workerId: string; readonly maxConnections: number },
   ) => Promise<OpenConnector>;
+  /**
+   * How a table source's keys are written in the log lines: its engine's `keyText`, so MongoDB's
+   * `n:1` prints `answered 1`. Absent, or undefined for a source, keys print as they are.
+   */
+  readonly keyTextOf?: (source: SourceConfig) => KeyText | undefined;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
 };
@@ -158,6 +164,8 @@ const NO_REVIEW_CARDS: ReviewQueue = { withdraw: () => Promise.resolve() };
 type Running = {
   readonly source: string;
   readonly worker: Worker;
+  /** How its keys print; undefined where a key is its own text. */
+  readonly keyText: KeyText | undefined;
   close(): Promise<void>;
   answered: number;
   /** Queued again at a state already answered under this version: written again, no model call. */
@@ -262,6 +270,7 @@ export async function runWorkers(
         running.push({
           source: source.name,
           worker,
+          keyText: undefined,
           close: () => Promise.resolve(),
           answered: 0,
           alreadyAnswered: 0,
@@ -284,6 +293,7 @@ export async function runWorkers(
       running.push({
         source: source.name,
         worker: workerFor(source, connector, true),
+        keyText: parts.keyTextOf?.(source),
         close: () => connector.close(),
         answered: 0,
         alreadyAnswered: 0,
@@ -350,12 +360,15 @@ export async function runWorkers(
       entry.answered += report.written.length + report.skipped.length;
       entry.alreadyAnswered += report.alreadyAnswered.length;
       entry.failed += report.failures.length;
+      // Keys as the user writes them, the form `explain` reads back.
+      const shown = (keys: readonly string[]) =>
+        keys.map((key) => keyWords(entry.keyText, key)).join(", ");
       if (report.written.length > 0) {
-        print(`${entry.source}: answered ${report.written.join(", ")}`);
+        print(`${entry.source}: answered ${shown(report.written)}`);
       }
       if (report.alreadyAnswered.length > 0) {
         print(
-          `${entry.source}: already answered ${report.alreadyAnswered.join(", ")} at this state, so the model was not asked again`,
+          `${entry.source}: already answered ${shown(report.alreadyAnswered)} at this state, so the model was not asked again`,
         );
       }
       for (const failure of report.failures) {
@@ -364,7 +377,7 @@ export async function runWorkers(
         print(
           failure.stage === "log"
             ? `${entry.source}: the decision log could not be read: ${message}`
-            : `${entry.source}: ${failure.key ?? "the pass"} failed at ${failure.stage}: ${message}`,
+            : `${entry.source}: ${failure.key === null ? "the pass" : keyWords(entry.keyText, failure.key)} failed at ${failure.stage}: ${message}`,
         );
       }
     };
@@ -529,7 +542,10 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     }
     const tables = new Map<
       string,
-      { readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector> }
+      {
+        readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector>;
+        readonly keyText: KeyText | undefined;
+      }
     >();
     for (const source of config.sources) {
       if (source.table === undefined) {
@@ -544,6 +560,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       requireUsableUrl(engine, target, url, allowInsecure);
       const storeShared = storeSharedFor(deps.env, source);
       tables.set(source.name, {
+        keyText: engine.keyText,
         open: (workerId, maxConnections) =>
           openConnector(engine, target, url, {
             clock: deps.clock,
@@ -575,6 +592,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
             }
             return table.open(open.workerId, open.maxConnections);
           },
+          keyTextOf: (source) => tables.get(source.name)?.keyText,
           provider: deps.provider(config),
         });
       } finally {

@@ -3,6 +3,7 @@ export { atLeast, DOCTOR_CHECKS, doctorChecks, MINIMUM_MONGODB } from "./doctor.
 export {
   createMongoEngine,
   ENGINE_NAME,
+  MONGO_KEY_TEXT,
   type MongoEngineOptions,
   mongoEngine,
   type OpenCursors,

@@ -17,7 +17,7 @@ import {
   resolveThresholds,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
-import { engineFor, openConnector, requireUsableUrl } from "../engines.ts";
+import { engineFor, keyWords, openConnector, requireUsableUrl } from "../engines.ts";
 import {
   CliError,
   defineCommand,
@@ -43,7 +43,9 @@ import {
  * version it ran under, read from the store's saved versions, never from today's config: the
  * history says what was asked then. The record as it stands now is its connector's `current`: the
  * engine's for a table source, the store's for an API source. It writes nothing; the decision log
- * is append-only.
+ * is append-only. The key is taken and printed as the user writes it: through the engine's
+ * `keyText` where its keys carry a type tag (MongoDB: `explain listings 1` reads the key `n:1`), as
+ * typed everywhere else.
  */
 
 type ExplainOptions = {
@@ -283,8 +285,8 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, args, deps, print }) => {
-    const [sourceName, key] = args;
-    if (sourceName === undefined || key === undefined) {
+    const [sourceName, typed] = args;
+    if (sourceName === undefined || typed === undefined) {
       throw new CliError(
         "usage",
         "explain needs a source and a record key",
@@ -304,9 +306,9 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     }
     if (options.dryRun) {
       print(
-        `Dry run: would read the history of record ${key} of ${source.name} from the FacetDB store. Nothing is written by explain, with or without --dry-run.`,
+        `Dry run: would read the history of record ${typed} of ${source.name} from the FacetDB store. Nothing is written by explain, with or without --dry-run.`,
       );
-      return { ok: true, dryRun: true, source: source.name, key };
+      return { ok: true, dryRun: true, source: source.name, key: typed };
     }
 
     const url = deps.env["DATABASE_URL"];
@@ -326,6 +328,11 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
       source.table === undefined
         ? undefined
         : await tableRead(deps.engines, config, source, project, allowInsecure);
+    // The key as the store and the connector hold it, read from the key as the user wrote it; and
+    // the form every line prints it in (MongoDB: `1` for `n:1`, the hex for `oid:<hex>`).
+    const keyText = table?.engine.keyText;
+    const key = keyText === undefined ? typed : keyText.fromText(typed);
+    const shown = keyWords(keyText, key);
     const store = await deps.store({ allowInsecure });
     const sourceId = storeSourceId(project.id, source.name);
     let history: readonly LogEntry[];
@@ -347,11 +354,11 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     }
     if (state === undefined) {
       print(
-        `FacetDB has no history for record ${key} of "${source.name}".\n` +
+        `FacetDB has no history for record ${shown} of "${source.name}".\n` +
           `Is the source right? The sources in the config are: ${config.sources.map((candidate) => candidate.name).join(", ")}.\n` +
-          "Has the worker run? Start it with facetdb worker, or answer existing rows with facetdb backfill. Then check the key: it is the table's primary key, as text.",
+          `Has the worker run? Start it with facetdb worker, or answer existing rows with facetdb backfill. Then check the key: it is ${keyText?.form ?? "the table's primary key, as text"}.`,
       );
-      return { ok: true, source: source.name, key, entries: [] };
+      return { ok: true, source: source.name, key: shown, entries: [] };
     }
 
     const versions = await savedQuestionSets(deps, url, sourceId, [
@@ -363,13 +370,13 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
         : explainHuman(entry, versions.get(entry.version)),
     );
 
-    print(`History of record ${key} of "${source.name}", oldest first:`);
+    print(`History of record ${shown} of "${source.name}", oldest first:`);
     for (const entry of entries) {
       for (const line of lineOf(entry)) {
         print(line);
       }
     }
     print(stateLine(state));
-    return { ok: true, source: source.name, key, entries, current: state };
+    return { ok: true, source: source.name, key: shown, entries, current: state };
   },
 });
