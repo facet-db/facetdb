@@ -19,6 +19,8 @@ import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/da
 import { COMMANDS } from "./commands/index.ts";
 import { diskEmbedded } from "./embedded.ts";
 import { engineFor, lazyEngine, openConnector } from "./engines.ts";
+import { diskExamples } from "./examples.ts";
+import { pipedAnswers } from "./piped.ts";
 import { sharePools } from "./pools.ts";
 import {
   type CliDeps,
@@ -41,7 +43,9 @@ import { requireStoreUrl, storeSharedFor } from "./store-door.ts";
  * Postgres engine over the same driver and pools as the store, judged with the environment's
  * `PGHOST`, and the polling engine `connector: "polling"` picks over the Postgres dialect, the same
  * driver and the same `PGHOST`, the SQLite engine over node:sqlite, the MySQL engine over mysql2
- * and the SQL Server engine over tedious; other engines append theirs.
+ * and the SQL Server engine over tedious, and the MongoDB, libSQL, Oracle and CockroachDB engines
+ * below; `init
+ * --example` reads the package's own example projects from the disk.
  */
 
 const clock: Clock = {
@@ -113,6 +117,33 @@ function diskWorkspace(
   };
 }
 
+/**
+ * Questions with no terminal: each takes the next line of standard input, in the order a terminal
+ * would ask (`printf 'url\ntable\nyes\n' | facetdb init`); the question still goes to stderr, so a
+ * log shows what each line answered. An input that ends before an answer is an error that says
+ * which flag answers it instead.
+ */
+function pipedIo(): Pick<CliIo, "prompt" | "answerable"> {
+  const piped = pipedAnswers(process.stdin);
+  return {
+    prompt: async (question) => {
+      process.stderr.write(question);
+      const answer = await piped.next();
+      if (answer === undefined) {
+        process.stderr.write("\n");
+        throw new CliError(
+          "no-answer",
+          `standard input ended before an answer to: ${question.trim()}`,
+          "give the answer as a flag (facetdb <command> --help lists them), add a line for it to what you pipe in, or run the command at a terminal",
+        );
+      }
+      process.stderr.write("\n");
+      return answer;
+    },
+    answerable: () => piped.left(),
+  };
+}
+
 function processIo(): CliIo {
   return {
     stdout: (text) => {
@@ -121,7 +152,9 @@ function processIo(): CliIo {
     stderr: (text) => {
       process.stderr.write(text);
     },
-    prompt,
+    ...(process.stdin.isTTY === true
+      ? { prompt, answerable: () => Promise.resolve(true) }
+      : pipedIo()),
   };
 }
 
@@ -274,6 +307,7 @@ export function processDeps(): CliDeps {
     abortAfter: (ms) => AbortSignal.timeout(ms),
     random: Math.random,
     embedded: diskEmbedded,
+    examples: diskExamples,
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.

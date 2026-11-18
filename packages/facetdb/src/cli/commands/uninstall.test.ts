@@ -112,6 +112,7 @@ async function runSeeingPrompts(
             ? Promise.reject(new Error(`unexpected prompt: ${question}`))
             : Promise.resolve(answer);
         },
+        answerable: () => Promise.resolve(true),
       },
       projectDir: PROJECT_DIR,
       env: {},
@@ -141,6 +142,7 @@ async function runSeeingPrompts(
         throw new Error("no random numbers");
       },
       embedded: { open: unused, wipe: unused },
+      examples: { read: unused },
     },
     COMMANDS,
   );

@@ -20,23 +20,94 @@ import { CliError, type EngineEntry } from "./program.ts";
  * connection string: it may carry a password.
  */
 
-/** Every database FacetDB connects to: its engine's key and schemes. */
-const DATABASES: readonly {
+/** A database FacetDB connects to, as the CLI's words name it. */
+export type KnownDatabase = {
   /** The key its engine is registered under in `CliDeps.engines`. */
   readonly key: string;
   readonly name: string;
   readonly schemes: readonly string[];
   /** Whether it is a SQL database, which the polling connector can scan. */
   readonly sql: boolean;
-}[] = [
-  { key: "postgres", name: "Postgres", schemes: ["postgres", "postgresql"], sql: true },
-  { key: "mysql", name: "MySQL or MariaDB", schemes: ["mysql", "mariadb"], sql: true },
-  { key: "mssql", name: "SQL Server", schemes: ["mssql", "sqlserver"], sql: true },
-  { key: "sqlite", name: "SQLite", schemes: ["sqlite", "file"], sql: true },
-  { key: "libsql", name: "libSQL", schemes: ["libsql"], sql: true },
-  { key: "mongodb", name: "MongoDB", schemes: ["mongodb", "mongodb+srv"], sql: false },
-  { key: "cockroachdb", name: "CockroachDB", schemes: ["cockroachdb"], sql: true },
-  { key: "oracle", name: "Oracle", schemes: ["oracle"], sql: true },
+  /**
+   * The worker's connection string as init and doctor show its shape: the login the install
+   * creates, a placeholder for its password, and the TLS parameter the engine reads.
+   */
+  readonly workerUrl: string;
+  /** Whether its trigger engine keeps answers in a side table (`storage: "side-table"`). */
+  readonly sideTable: boolean;
+};
+
+/** Every database FacetDB connects to: its engine's key and schemes. */
+const DATABASES: readonly KnownDatabase[] = [
+  {
+    key: "postgres",
+    name: "Postgres",
+    schemes: ["postgres", "postgresql"],
+    sql: true,
+    sideTable: true,
+    workerUrl:
+      "postgres://facetdb_worker:<a long random password>@<host>:5432/<database>?sslmode=require",
+  },
+  {
+    key: "mysql",
+    name: "MySQL or MariaDB",
+    schemes: ["mysql", "mariadb"],
+    sql: true,
+    sideTable: true,
+    workerUrl:
+      'mysql://facetdb_worker:<a long random password>@<host>:3306/<database>?ssl={"rejectUnauthorized":true}',
+  },
+  {
+    key: "mssql",
+    name: "SQL Server",
+    schemes: ["mssql", "sqlserver"],
+    sql: true,
+    sideTable: true,
+    workerUrl: "mssql://facetdb_worker:<a long random password>@<host>:1433/<database>",
+  },
+  {
+    key: "sqlite",
+    name: "SQLite",
+    schemes: ["sqlite", "file"],
+    sql: true,
+    sideTable: false,
+    workerUrl: "sqlite:///absolute/path/to/app.db",
+  },
+  {
+    key: "libsql",
+    name: "libSQL",
+    schemes: ["libsql"],
+    sql: true,
+    sideTable: false,
+    workerUrl: "libsql://<database>-<organization>.turso.io",
+  },
+  {
+    key: "mongodb",
+    name: "MongoDB",
+    schemes: ["mongodb", "mongodb+srv"],
+    sql: false,
+    sideTable: false,
+    workerUrl:
+      "mongodb://facetdb_worker:<a long random password>@<host>:27017/<database>?replicaSet=rs0",
+  },
+  {
+    key: "cockroachdb",
+    name: "CockroachDB",
+    schemes: ["cockroachdb"],
+    sql: true,
+    sideTable: false,
+    workerUrl:
+      "cockroachdb://facetdb_worker:<a long random password>@<host>:26257/<database>?sslmode=verify-full",
+  },
+  {
+    key: "oracle",
+    name: "Oracle",
+    schemes: ["oracle"],
+    sql: true,
+    sideTable: false,
+    workerUrl:
+      "oracle://facetdb_worker:<a long random password>@<host>:2484/<service>?protocol=tcps",
+  },
 ];
 
 /**
@@ -83,7 +154,7 @@ export function schemeOf(url: string): string | undefined {
 }
 
 /** The database a connection string's scheme names, from the static table; nothing is loaded. */
-function databaseOf(url: string): (typeof DATABASES)[number] | undefined {
+export function databaseOf(url: string): KnownDatabase | undefined {
   const scheme = schemeOf(url);
   return scheme === undefined
     ? undefined

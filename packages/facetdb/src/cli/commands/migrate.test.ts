@@ -186,6 +186,7 @@ async function runSeeingPrompts(
             ? Promise.reject(new Error(`unexpected prompt: ${question}`))
             : Promise.resolve(answer);
         },
+        answerable: () => Promise.resolve(true),
       },
       projectDir: PROJECT_DIR,
       env: {},
@@ -218,6 +219,7 @@ async function runSeeingPrompts(
         open: () => Promise.reject(new Error("no embedded database")),
         wipe: () => Promise.reject(new Error("no embedded database")),
       },
+      examples: { read: () => Promise.reject(new Error("no example projects")) },
     },
     COMMANDS,
   );

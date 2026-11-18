@@ -108,7 +108,12 @@ describe("the facetdb program", () => {
   it("registers migrate and uninstall, each with --dry-run and --json", () => {
     const program = createProgram(
       {
-        io: { stdout: () => undefined, stderr: () => undefined, prompt: () => Promise.resolve("") },
+        io: {
+          stdout: () => undefined,
+          stderr: () => undefined,
+          prompt: () => Promise.resolve(""),
+          answerable: () => Promise.resolve(true),
+        },
         projectDir: "/work/app",
         env: {},
         loadConfig: () => Promise.resolve(config),
@@ -140,6 +145,7 @@ describe("the facetdb program", () => {
           open: () => Promise.reject(new Error("unused")),
           wipe: () => Promise.reject(new Error("unused")),
         },
+        examples: { read: () => Promise.reject(new Error("unused")) },
       },
       COMMANDS,
       { code: 0 },

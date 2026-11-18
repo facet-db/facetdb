@@ -1,10 +1,11 @@
 import type { DatabaseEngine, DoctorCheck, Question } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { engineFor } from "../engines.ts";
+import { DATABASES_PAGE, databaseOf, engineFor } from "../engines.ts";
 import {
   type CliDeps,
   CliError,
   defineCommand,
+  docsLink,
   type EngineEntry,
   plainMessage,
 } from "../program.ts";
@@ -37,9 +38,12 @@ import {
  * the store by the store door. When the store is the one table source's own database, or
  * `DATABASE_URL` names none, the report is today's eight lines; with the store in another database,
  * or several table sources, the lines come in a `source <name>:` group per source and a `store:`
- * group (the store reachable and current, its pooler, the worker's heartbeat, the secret). A check
- * that cannot run because an earlier one failed is skipped, not reported as a second failure.
- * Nothing here changes a database or the store.
+ * group (the store reachable and current, its pooler, the worker's heartbeat, the secret). A
+ * source's checks come after one `engine:` line naming the engine that checked it, the database its
+ * scheme names and the server's version where the engine read one; each check prints under its
+ * engine's own name, and each fix ends with the page about that check. A check that cannot run
+ * because an earlier one failed is skipped, not reported as a second failure. Nothing here changes
+ * a database or the store.
  */
 
 type DoctorOptions = {
@@ -48,8 +52,23 @@ type DoctorOptions = {
   readonly allowInsecure?: boolean;
 };
 
-/** `warn` is something to know that is not a failure: it is not counted and the exit code stays 0. */
-export type CheckStatus = "ok" | "fail" | "skip" | "warn";
+/**
+ * `warn` is something to know that is not a failure: it is not counted and the exit code stays 0.
+ * `info` is the `engine:` line before a source's checks: never a check, never counted.
+ */
+export type CheckStatus = "ok" | "fail" | "skip" | "warn" | "info";
+
+/** Which engine checked a source, as the `engine:` line says it and `--json` carries it. */
+export type EngineReport = {
+  /** The source it serves. */
+  readonly source: string;
+  /** The engine's own name: `postgres`, `mysql`, `polling`. */
+  readonly name: string;
+  /** The database the connection string's scheme names: `MySQL or MariaDB`. */
+  readonly database: string;
+  /** The server's version as the engine's own version check read it, when it has one and it passed. */
+  readonly version?: string;
+};
 
 export type CheckResult = {
   readonly status: CheckStatus;
@@ -64,6 +83,8 @@ export type CheckLine = CheckResult & {
   readonly label: string;
   /** The group it is printed under: `source <name>` or `store`; none in the eight-line report. */
   readonly group?: string;
+  /** On the `engine:` line only: what it says, as data. */
+  readonly engine?: EngineReport;
 };
 
 /** What a check may touch: the command's dependencies and options. */
@@ -107,8 +128,49 @@ const SECRET = {
 /** The store group's own check: the store reachable and at this FacetDB's schema version. */
 const STORE_LABEL = "store";
 
-/** The worker's connection string, as the words show its shape (Postgres's, for now). */
-const WORKER_URL_SHAPE = `postgres://${WORKER_LOGIN}:<a long random password>@<host>/<database>`;
+/**
+ * The worker's connection string when the source has none to read its database from: Postgres's
+ * shape, the store's kind, and the page with every other database's.
+ */
+const WORKER_URL_SHAPE = `postgres://${WORKER_LOGIN}:<a long random password>@<host>/<database>, or the worker's connection string for your database in the shape ${DATABASES_PAGE} shows`;
+
+/**
+ * The checks whose passing detail is the server's version as the engine read it (`MySQL 8.4.3`,
+ * `SQL Server 2022 (16)`, `MongoDB 7.0.14`, `SQLite 3.46.1`): the `engine:` line repeats it.
+ */
+const VERSION_CHECKS: ReadonlySet<string> = new Set(["version", "sqlite"]);
+
+/** The `engine:` line of a source, from its engine, its connection string and its checks. */
+function engineLine(
+  engine: DatabaseEngine,
+  source: SourceConfig,
+  url: string,
+  checks: readonly DoctorCheck[],
+  group?: string,
+): CheckLine {
+  const database = databaseOf(url)?.name ?? engine.name;
+  const version = checks.find(
+    (check) => VERSION_CHECKS.has(check.name) && (check.status === "ok" || check.status === "warn"),
+  )?.detail;
+  const how = [
+    ...(source.connector === undefined ? [] : [`connector: "${source.connector}"`]),
+    ...(source.capture === undefined ? [] : [`capture: "${source.capture}"`]),
+  ];
+  const report: EngineReport = {
+    source: source.name,
+    name: engine.name,
+    database,
+    ...(version === undefined ? {} : { version }),
+  };
+  return {
+    id: "engine",
+    label: "engine",
+    status: "info",
+    detail: `${engine.name}, for ${database}${how.length === 0 ? "" : ` (${how.join(", ")})`}${version === undefined ? "" : `; the server is ${version}`}`,
+    engine: report,
+    ...(group === undefined ? {} : { group }),
+  };
+}
 
 function line(
   entry: { readonly id: string; readonly label: string },
@@ -279,11 +341,22 @@ async function sourceLines(
 ): Promise<{ readonly lines: readonly CheckLine[]; readonly worker?: CheckLine }> {
   const { deps, options } = environment;
   const { source, url } = table;
-  const failed = (result: CheckResult) => ({
+  // The checks a failure here leaves unrun: the engine's own names once it is known, else the
+  // Postgres engine's, the names of the eight-line report.
+  const failed = (result: CheckResult, engine?: DatabaseEngine) => ({
     lines: [
       line({ id: "database", label: "database" }, result, group),
-      ...["pooler", "install"].map((id) =>
-        line({ id, label: id }, skip("not checked: the database check did not pass"), group),
+      ...(engine === undefined
+        ? ["pooler", "install"]
+        : engine.checks
+            .map((check) => check.name)
+            .filter((name) => name !== "database" && name !== "worker")
+      ).map((id) =>
+        line(
+          { id, label: labelOf(id) },
+          skip("not checked: the database check did not pass"),
+          group,
+        ),
       ),
     ],
   });
@@ -296,14 +369,20 @@ async function sourceLines(
       ),
     );
   }
+  // Loaded first, so a refusal below names the engine's own checks as the ones left unrun.
+  let resolved: { readonly engine: DatabaseEngine } | { readonly error: unknown };
+  try {
+    resolved = { engine: await engineFor(deps.engines, url, source.connector) };
+  } catch (error) {
+    resolved = { error };
+  }
+  const known = "engine" in resolved ? resolved.engine : undefined;
   const misuse = storeVariableMisuse(source, url) ?? pollingStoreClash(deps.env, source, url);
   if (misuse !== undefined) {
-    return failed(fail(misuse.message, misuse.fix));
+    return failed(fail(misuse.message, misuse.fix), known);
   }
-  let engine: DatabaseEngine;
-  try {
-    engine = await engineFor(deps.engines, url, source.connector);
-  } catch (error) {
+  if (!("engine" in resolved)) {
+    const { error } = resolved;
     // A scheme no engine here reads, or polling before its engine: the database check's failure.
     if (error instanceof CliError) {
       return failed(fail(`"${source.name}": ${error.message}`, error.fix));
@@ -316,6 +395,7 @@ async function sourceLines(
       ),
     );
   }
+  const { engine } = resolved;
   const target = engineTarget(
     config,
     { source, ...splitTable(source.table ?? "") },
@@ -328,9 +408,19 @@ async function sourceLines(
   });
   const worker = checks.find((check) => check.name === "worker" && check.status !== "skip");
   return {
-    lines: checks
-      .filter((check) => check.name !== "worker")
-      .map((check) => fromCheck(check, scrub, group)),
+    lines: [
+      // The version it repeats is a check's detail, scrubbed as every engine word is.
+      engineLine(
+        engine,
+        source,
+        url,
+        checks.map((check) => ({ ...check, detail: scrub(check.detail) })),
+        group,
+      ),
+      ...checks
+        .filter((check) => check.name !== "worker")
+        .map((check) => fromCheck(check, scrub, group)),
+    ],
     ...(worker === undefined ? {} : { worker: fromCheck(worker, scrub, group) }),
   };
 }
@@ -449,11 +539,18 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
   return lines;
 }
 
-const MARKS: Record<CheckStatus, string> = { ok: "ok  ", fail: "FAIL", skip: "skip", warn: "warn" };
+const MARKS: Record<CheckStatus, string> = {
+  ok: "ok  ",
+  fail: "FAIL",
+  skip: "skip",
+  warn: "warn",
+  info: "    ",
+};
 
+/** One printed line; a fix ends with the page about that check. */
 function render(entry: CheckLine): string {
   const mark = MARKS[entry.status];
-  return `${mark}  ${entry.label}: ${entry.detail}${entry.fix === undefined ? "" : ` Fix: ${entry.fix}.`}`;
+  return `${mark}  ${entry.label}: ${entry.detail}${entry.fix === undefined ? "" : ` Fix: ${entry.fix}. See ${docsLink(`doctor-${entry.id}`)}`}`;
 }
 
 /**
@@ -527,12 +624,21 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
     }
     const failing = lines.filter((entry) => entry.status === "fail");
     const first = failing[0];
-    // A warning is a note under a check, not a check: it is in neither total, nor in `checks`.
-    const checks = lines.filter((entry) => entry.status !== "warn");
+    // A warning is a note under a check, not a check: it is in neither total, nor in `checks`;
+    // nor is an `engine:` line, which `engines` carries (and `engine`, when one source has one).
+    const checks = lines.filter((entry) => entry.status !== "warn" && entry.status !== "info");
     const warnings = lines.filter((entry) => entry.status === "warn");
+    const engines = lines.flatMap((entry) => (entry.engine === undefined ? [] : [entry.engine]));
+    const [engine] = engines;
+    const reported = {
+      checks,
+      warnings,
+      engines,
+      ...(engine === undefined || engines.length > 1 ? {} : { engine }),
+    };
     if (first === undefined) {
       print(`All ${checks.length} checks passed.`);
-      return { ok: true, checks, warnings };
+      return { ok: true, ...reported };
     }
     print(`${failing.length} of ${checks.length} checks failed.`);
     throw new CliError(
@@ -540,7 +646,7 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
       `the ${first.label} check failed: ${first.detail}`,
       first.fix ?? "",
       undefined,
-      { checks, warnings },
+      reported,
     );
   },
 });

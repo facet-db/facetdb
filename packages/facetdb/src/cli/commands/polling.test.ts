@@ -301,7 +301,7 @@ describe('facetdb doctor with connector: "polling"', () => {
     });
     expect(result.code, result.stdout + result.stderr).toBe(0);
     expect(result.stdout).toContain(
-      "source listings:\nok    database: logged in as facetdb_worker: listings on localhost:5432/app (round trip 0 ms)\nok    pooler:",
+      'source listings:\n      engine: polling, for Postgres (connector: "polling")\nok    database: logged in as facetdb_worker: listings on localhost:5432/app (round trip 0 ms)\nok    pooler:',
     );
     expect(result.stdout).toContain(
       "ok    install: the answer columns and facetdb_state_hash are in place; FacetDB polls public.listings every 10 seconds by updated_at; no trigger\n",

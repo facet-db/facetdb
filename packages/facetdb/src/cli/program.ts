@@ -100,6 +100,12 @@ export type CliIo = {
   readonly stderr: (text: string) => void;
   /** Asks one question on the terminal and returns the answer; `secret` hides what is typed. */
   readonly prompt: (question: string, options?: { readonly secret?: boolean }) => Promise<string>;
+  /**
+   * Whether a question asked now gets an answer: always at a terminal; on a pipe (a script, CI, a
+   * coding agent), while a line is left to read, the answers taken in the order a terminal asks.
+   * A question with a safe default takes it, and says so, when none will come.
+   */
+  readonly answerable: () => Promise<boolean>;
 };
 
 /**
@@ -179,6 +185,8 @@ export type CliDeps = {
   readonly random: () => number;
   /** The embedded Postgres of `facetdb dev`, kept in a directory of the project. */
   readonly embedded: EmbeddedDatabases;
+  /** The example projects `facetdb init --example` copies into the project. */
+  readonly examples: ExampleShelf;
 };
 
 /** One request in, one response out: the shape of a Hono app's `fetch`. */
@@ -218,6 +226,18 @@ export type EmbeddedDatabases = {
   open(dir: string): Promise<EmbeddedDatabase>;
   /** Deletes the directory and everything in it; a missing one is fine. */
   wipe(dir: string): Promise<void>;
+};
+
+/** One file of an example project: its path inside the example's directory, and its text. */
+export type ExampleFile = { readonly path: string; readonly text: string };
+
+/**
+ * The example projects the facetdb package ships under `examples/` (`facetdb init --example`):
+ * the composition root reads the package's own directory, a test may pass the same reader.
+ */
+export type ExampleShelf = {
+  /** The files of the example in `directory` (`listings-mysql`), sorted by path; none when absent. */
+  read(directory: string): Promise<readonly ExampleFile[]>;
 };
 
 /** What `CliDeps.backfill` hands the command: the engine's dependencies, and how to let go of them. */
@@ -426,18 +446,22 @@ type OptionalInTests =
   | "webhookFetch"
   | "abortAfter"
   | "random"
-  | "embedded";
+  | "embedded"
+  | "examples";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
  * output. `answers` are what a user types at each prompt, in order; a prompt with none left fails
- * the run, so a test notices a question it did not expect.
+ * the run, so a test notices a question it did not expect. `interactive: false` is a run with no
+ * terminal (a script piping `answers`, none left once they are read); a run is at a terminal
+ * unless it says so.
  */
 export async function runInProcess(
   argv: readonly string[],
   deps: Omit<CliDeps, "io" | OptionalInTests> &
     Partial<Pick<CliDeps, OptionalInTests>> & {
       readonly answers?: readonly string[];
+      readonly interactive?: boolean;
     },
   commands: readonly RegisteredCommand[],
 ): Promise<CapturedRun> {
@@ -459,8 +483,9 @@ export async function runInProcess(
         ? Promise.reject(new Error(`unexpected prompt: ${question}`))
         : Promise.resolve(answer);
     },
+    answerable: () => Promise.resolve((deps.interactive ?? true) || answers.length > 0),
   };
-  const { answers: _answers, ...rest } = deps;
+  const { answers: _answers, interactive: _interactive, ...rest } = deps;
   const code = await runProgram(
     argv,
     {
@@ -498,6 +523,9 @@ export async function runInProcess(
       embedded: {
         open: () => Promise.reject(new Error("this test gave the command no embedded database")),
         wipe: () => Promise.reject(new Error("this test gave the command no embedded database")),
+      },
+      examples: {
+        read: () => Promise.reject(new Error("this test gave the command no example projects")),
       },
       ...rest,
       io,

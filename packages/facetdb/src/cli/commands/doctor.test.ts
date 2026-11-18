@@ -1,5 +1,5 @@
-import { HEARTBEAT_LOSS_MS } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
+import { type DoctorCheck, HEARTBEAT_LOSS_MS } from "@facetdb/core";
+import { FakeClock, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -231,6 +231,7 @@ describe("facetdb doctor, when everything is in place", () => {
       printed.slice(0, -1).map((text) => text.slice(0, 6) + text.slice(6).split(":")[0]),
     ).toEqual([
       "ok    config",
+      "      engine",
       "ok    database",
       "ok    pooler",
       "ok    install",
@@ -239,6 +240,8 @@ describe("facetdb doctor, when everything is in place", () => {
       "ok    model reachable",
       "ok    FACETDB_SECRET",
     ]);
+    // The engine's line names it before its checks, and is no check of its own.
+    expect(printed[1]).toBe("      engine: postgres, for Postgres");
     expect(printed.at(-1)).toBe("All 8 checks passed.");
     expect(lineFor(result.stdout, "worker heartbeat")).toContain("30 seconds ago");
     expect(lineFor(result.stdout, "database")).toContain(`logged in as ${WORKER_ROLE}`);
@@ -413,6 +416,10 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
       'LISTINGS_URL is not set, so "listings" has no database to connect to',
     );
     expect(lineFor(result.stdout, "database")).toContain("Fix: set LISTINGS_URL to postgres://");
+    // The engine is not known without a connection string: the page shows every database's shape.
+    expect(lineFor(result.stdout, "database")).toContain(
+      "or the worker's connection string for your database in the shape https://docs.facetdb.dev/databases shows",
+    );
   });
 
   describe("install", () => {
@@ -1032,6 +1039,7 @@ describe("facetdb doctor with the store in its own database", () => {
       "ok    model key",
       "ok    model reachable",
       "source listings:",
+      "      engine",
       "ok    database",
       "ok    pooler",
       "ok    install",
@@ -1045,7 +1053,7 @@ describe("facetdb doctor with the store in its own database", () => {
     expect(lineFor(result.stdout, "store")).toMatch(
       /^ok {4}store: the FacetDB store on localhost:5432\/facetdb is reachable and current \(schema version \d+\)$/,
     );
-    expect(printed[9]).toBe(
+    expect(printed[10]).toBe(
       "ok    pooler: prepared statements stay on one server session on the store (a direct connection or a session pooler)",
     );
     expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
@@ -1124,12 +1132,13 @@ describe("facetdb doctor with the store in its own database", () => {
     const printed = lines(result.stdout);
     const ordersGroup = printed.slice(printed.indexOf("source orders:"));
     expect(ordersGroup[1]).toBe(
-      `FAIL  database: "orders": the engine for its database could not be loaded: Cannot find module 'tedious' Fix: reinstall facetdb with its dependencies (npm install facetdb), then run facetdb doctor again.`,
+      `FAIL  database: "orders": the engine for its database could not be loaded: Cannot find module 'tedious' Fix: reinstall facetdb with its dependencies (npm install facetdb), then run facetdb doctor again. See https://docs.facetdb.dev/fix/doctor-database`,
     );
     expect(ordersGroup[2]).toMatch(/^skip {2}pooler/);
     // The other source and the store are still checked.
     const listingsGroup = printed.slice(printed.indexOf("source listings:"));
-    expect(listingsGroup.slice(1, 4).every((text) => text.startsWith("ok"))).toBe(true);
+    expect(listingsGroup[1]).toBe("      engine: postgres, for Postgres");
+    expect(listingsGroup.slice(2, 5).every((text) => text.startsWith("ok"))).toBe(true);
     expect(lineFor(result.stdout, "store")).toMatch(/^ok/);
     expect(result.stdout + result.stderr).not.toContain("s3cret-mssql");
   });
@@ -1254,5 +1263,163 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
     expect(result.stdout).toContain("8. FACETDB_SECRET:");
     expect(result.stdout).toContain("Dry run: nothing was checked.");
     expect(provider.callCount).toBe(0);
+  });
+});
+
+describe("facetdb doctor names each source's engine, then its checks under their own names", () => {
+  const MYSQL_URL = "mysql://facetdb_worker:s3cret-mysql@localhost:3306/shop";
+  const MONGO_URL = "mongodb://facetdb_worker:s3cret-mongo@localhost:27017/shop?replicaSet=rs0";
+  const MYSQL_CHECKS: readonly DoctorCheck[] = [
+    { name: "database", status: "ok", detail: '"orders" on localhost:3306/shop: 1 ms away' },
+    { name: "version", status: "ok", detail: "MySQL 8.4.3" },
+    { name: "install", status: "ok", detail: "the columns, facetdb_jobs and the triggers" },
+    { name: "grants", status: "ok", detail: "facetdb_worker holds what it needs" },
+    { name: "queue", status: "ok", detail: "no job waiting" },
+  ];
+  const MONGO_CHECKS: readonly DoctorCheck[] = [
+    { name: "database", status: "ok", detail: '"events" on localhost:27017/shop: 1 ms away' },
+    { name: "version", status: "ok", detail: "MongoDB 7.0.14" },
+    { name: "replica-set", status: "ok", detail: "rs0, so change streams run" },
+    { name: "login", status: "ok", detail: "facetdb_worker holds facetdb_worker_events" },
+    { name: "install", status: "ok", detail: "the marker, facetdb_jobs and its indexes" },
+    { name: "oplog", status: "ok", detail: "the oplog holds 3 days" },
+    { name: "queue", status: "ok", detail: "no job waiting" },
+  ];
+
+  /** An engine as main.ts registers it, over core's fake engine with the given doctor report. */
+  function fakeEngine(
+    key: string,
+    schemes: readonly string[],
+    checks: readonly DoctorCheck[],
+  ): EngineEntry {
+    return {
+      key,
+      load: () =>
+        Promise.resolve(
+          new FakeEngine({
+            name: key,
+            schemes,
+            checks: checks.map((check) => ({ name: check.name, looksAt: `checks ${check.name}` })),
+            doctor: () => checks,
+          }),
+        ),
+    };
+  }
+
+  const orders = configWith({ name: "orders", database: MYSQL_URL, table: "orders" });
+  const events = configWith({ name: "events", database: MONGO_URL, table: "events" });
+
+  it("prints an engine line with the server's version first in each source's group, for two engines", async () => {
+    await beat(0);
+    const config: ProjectConfig = { ...orders, sources: [...orders.sources, ...events.sources] };
+    const moreEngines = [
+      fakeEngine("mysql", ["mysql", "mariadb"], MYSQL_CHECKS),
+      fakeEngine("mongodb", ["mongodb", "mongodb+srv"], MONGO_CHECKS),
+    ];
+    const result = await doctor(["--offline"], { config, moreEngines });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    const printed = lines(result.stdout);
+    const group = (name: string) => {
+      const from = printed.indexOf(`source ${name}:`);
+      const rest = printed.slice(from + 1);
+      const end = rest.findIndex((text) => text.endsWith(":") && !text.startsWith(" "));
+      return (end === -1 ? rest : rest.slice(0, end)).map((text) => text.split(":")[0]);
+    };
+    expect(group("orders")).toEqual([
+      "      engine",
+      "ok    database",
+      "ok    version",
+      "ok    install",
+      "ok    grants",
+      "ok    queue",
+    ]);
+    expect(group("events")).toEqual([
+      "      engine",
+      "ok    database",
+      "ok    version",
+      "ok    replica-set",
+      "ok    login",
+      "ok    install",
+      "ok    oplog",
+      "ok    queue",
+    ]);
+    expect(printed).toContain(
+      "      engine: mysql, for MySQL or MariaDB; the server is MySQL 8.4.3",
+    );
+    expect(printed).toContain("      engine: mongodb, for MongoDB; the server is MongoDB 7.0.14");
+    // Two sources' checks, the config, the model's two and the store's four; no engine line counts.
+    expect(printed.at(-1)).toBe("All 19 checks passed.");
+    expect(result.stdout + result.stderr).not.toContain("s3cret");
+
+    const json = await doctor(["--offline", "--json"], { config, moreEngines });
+    const parsed = JSON.parse(json.stdout) as {
+      checks: { id: string; status: string }[];
+      engines: unknown[];
+      engine?: unknown;
+    };
+    expect(parsed.engines).toEqual([
+      { source: "orders", name: "mysql", database: "MySQL or MariaDB", version: "MySQL 8.4.3" },
+      { source: "events", name: "mongodb", database: "MongoDB", version: "MongoDB 7.0.14" },
+    ]);
+    expect(parsed.engine).toBeUndefined();
+    expect(parsed.checks.some((check) => check.id === "engine")).toBe(false);
+  });
+
+  it("--json carries the one source's engine, and a failing check's fix ends with its page", async () => {
+    await beat(0);
+    const failing = MONGO_CHECKS.map((check) =>
+      check.name === "replica-set"
+        ? {
+            name: "replica-set",
+            status: "fail" as const,
+            detail: "the server is a standalone mongod, and change streams need a replica set",
+            fix: "restart mongod with --replSet rs0 and run rs.initiate() once",
+          }
+        : check,
+    );
+    const moreEngines = [fakeEngine("mongodb", ["mongodb", "mongodb+srv"], failing)];
+    const result = await doctor(["--offline"], { config: events, moreEngines });
+    expect(result.code).toBe(1);
+    expect(lineFor(result.stdout, "replica-set")).toBe(
+      "FAIL  replica-set: the server is a standalone mongod, and change streams need a replica set Fix: restart mongod with --replSet rs0 and run rs.initiate() once. See https://docs.facetdb.dev/fix/doctor-replica-set",
+    );
+    expect(result.stderr).toContain("see: https://docs.facetdb.dev/fix/doctor-replica-set");
+
+    const json = await doctor(["--offline", "--json"], { config: events, moreEngines });
+    const parsed = JSON.parse(json.stdout) as {
+      error: { code: string };
+      details: { engine: unknown; engines: unknown[] };
+    };
+    expect(parsed.error.code).toBe("doctor-replica-set");
+    expect(parsed.details.engine).toEqual({
+      source: "events",
+      name: "mongodb",
+      database: "MongoDB",
+      version: "MongoDB 7.0.14",
+    });
+  });
+
+  it("names the engine's own checks as the ones left unrun when the source cannot be checked", async () => {
+    await beat(0);
+    const base = configWith({ name: "orders", database: MYSQL_URL, table: "orders" });
+    const config: ProjectConfig = {
+      ...base,
+      sources: base.sources.map((source) => ({ ...source, databaseEnv: "DATABASE_URL" })),
+    };
+    const result = await doctor(["--offline"], {
+      config,
+      env: { ...goodEnv, DATABASE_URL: MYSQL_URL },
+      moreEngines: [fakeEngine("mysql", ["mysql", "mariadb"], MYSQL_CHECKS)],
+    });
+    expect(result.code).toBe(1);
+    const printed = lines(result.stdout);
+    const from = printed.indexOf("source orders:");
+    expect(printed.slice(from + 1, from + 6).map((text) => text.split(":")[0])).toEqual([
+      "FAIL  database",
+      "skip  version",
+      "skip  install",
+      "skip  grants",
+      "skip  queue",
+    ]);
   });
 });
