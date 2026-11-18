@@ -30,6 +30,9 @@ export type {
   SourceDraft,
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";
+export type { DataServices } from "./data/routes.ts";
+export type { RunsPage, RunsService, RunView } from "./data/runs.ts";
+export { createRunsService, RUNS_PER_PAGE } from "./data/runs.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";

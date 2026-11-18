@@ -155,6 +155,7 @@ async function rig() {
         "check-api",
       ),
       apiKeys: store.apiKeys,
+      runs: store.runs,
     },
     worker: { forRecord: (_project, _name, key) => worker(key) },
     clock,

@@ -116,6 +116,8 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
       link: "https://docs.facetdb.dev/fix/backfill",
     }),
     spending: projectSpending(config, store, alerts, clock, project.id),
+    // Each page that queued or asked a record leaves a row, named as a backfill page.
+    runs: { log: store.runs, source: sourceId },
   };
 }
 

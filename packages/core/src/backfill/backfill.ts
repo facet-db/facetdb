@@ -6,6 +6,7 @@ import type {
   ProviderRequest,
   ProviderResponse,
   ReadRow,
+  RecordDecision,
   RecordKey,
   ScanCursor,
 } from "../contracts/index.ts";
@@ -19,7 +20,7 @@ import {
   estimateRequestTokens,
 } from "../requests/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
-import { DEFAULT_MAX_IN_FLIGHT } from "../worker/index.ts";
+import { DEFAULT_MAX_IN_FLIGHT, errorCount, type RunRecorder } from "../worker/index.ts";
 
 /** Jev charges $0.042 per million input tokens and nothing for output. */
 export const PRICE_PER_MILLION_INPUT_TOKENS = 0.042;
@@ -84,6 +85,11 @@ export type BackfillDeps = {
    * the worker's are. Required: a backfill built without one would run uncapped.
    */
   readonly spending: SpendingGate;
+  /**
+   * The run log: a row per page that queued or asked at least one record, named as a backfill page
+   * of the source. Optional so a dry run, which opens no store, writes none.
+   */
+  readonly runs?: RunRecorder;
 };
 
 /** The states `estimate` reads, and how many records they stand for. */
@@ -331,6 +337,10 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     // `false` would be narrowed to the literal and every later read read as always false.
     let paused = false as boolean;
 
+    /** The page in hand's input tokens and records written for review, for its run row. */
+    let pageTokens = 0;
+    let pageToReview = 0;
+
     /** One record of an added-question run; `prior` is its latest answer from the page's lookup. */
     async function settle(
       row: ReadRow,
@@ -431,6 +441,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         let response: ProviderResponse;
         try {
           response = await worker.ask(request);
+          pageTokens += response.usage.inputTokens;
           await countSpend(row, response.usage.inputTokens);
         } finally {
           // Counted (or failed) by now: the reservation gives way to the count, or to nothing.
@@ -454,11 +465,16 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           usage: response.usage,
           at: new Date(clock.now()),
         };
-        const result = await recordAnswer(entry, questionSet, log, (key, decision, hash) =>
-          connector.write(key, decision, hash),
-        );
+        const writes: RecordDecision[] = [];
+        const result = await recordAnswer(entry, questionSet, log, (key, decision, hash) => {
+          writes.push(decision);
+          return connector.write(key, decision, hash);
+        });
         written = result.written;
         (written ? report.answered : report.discarded).push(row.key);
+        if (written && writes[0]?.status === "needs_review") {
+          pageToReview += 1;
+        }
       } finally {
         await settleClaim(row, written);
       }
@@ -520,13 +536,67 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       await Promise.all(Array.from({ length: Math.min(maxInFlight, rows.length) }, lane));
     }
 
+    /** Where the report's lists stood when a page began: what follows is that page's. */
+    type PageMark = {
+      readonly startedAtMs: number;
+      readonly enqueued: number;
+      readonly answered: number;
+      readonly discarded: number;
+      readonly failures: number;
+    };
+
+    /**
+     * A page that queued or asked at least one record leaves a row in the run log, named as a
+     * backfill page of the source. A whole-set page only queues: the worker's passes answer those
+     * records and write their own rows. A run log that cannot be written fails the run before the
+     * page's cursor is saved, so the next run takes the page again and skips what was answered.
+     */
+    async function logPage(recorder: RunRecorder, mark: PageMark): Promise<void> {
+      const failures = report.failures.slice(mark.failures);
+      const answered = report.answered.slice(mark.answered);
+      const discarded = report.discarded.slice(mark.discarded);
+      const claimed = new Set([
+        ...report.enqueued.slice(mark.enqueued),
+        ...answered,
+        ...discarded,
+        ...failures.map((failure) => failure.key),
+      ]).size;
+      if (claimed === 0) {
+        return;
+      }
+      await recorder.log.record({
+        source: recorder.source,
+        kind: "backfill",
+        startedAt: new Date(mark.startedAtMs),
+        endedAt: new Date(clock.now()),
+        claimed,
+        answered: answered.length - pageToReview,
+        toReview: pageToReview,
+        errors: errorCount(failures, []),
+        discarded: discarded.length,
+        tokens: pageTokens,
+      });
+    }
+
     let cursor = start;
     do {
+      const mark: PageMark = {
+        startedAtMs: clock.now(),
+        enqueued: report.enqueued.length,
+        answered: report.answered.length,
+        discarded: report.discarded.length,
+        failures: report.failures.length,
+      };
+      pageTokens = 0;
+      pageToReview = 0;
       const page = await connector.scan(cursor);
       const priors = await lookUpPage(page.rows);
       // A failed lookup is reported as the page's failure: nothing of it is queued or asked.
       if (priors !== undefined) {
         await settlePage(page.rows, priors);
+      }
+      if (deps.runs !== undefined) {
+        await logPage(deps.runs, mark);
       }
       if (report.failures.length > 0) {
         // Not saved: the next run starts this page again and skips what was answered.

@@ -21,6 +21,7 @@ import { createDecisionLog } from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
 import { createReviewQueue } from "./reviews.ts";
 import { integer, text, toMs } from "./rows.ts";
+import { createRunStore, type RunStore } from "./runs.ts";
 import { migrateStore } from "./schema.ts";
 import {
   type ApiKeyStore,
@@ -77,6 +78,8 @@ export type Store = {
   readonly reviews: ReviewQueue;
   /** The open-source studio's reviewer accounts (`facetdb users`; the worker login only reads them). */
   readonly users: UsersStore;
+  /** The run log: the worker's rows and prune, and the page the dashboard reads. */
+  readonly runs: RunStore;
   /** Registers a project; registering it again changes nothing. */
   ensureProject(project: { readonly id: string; readonly name: string }): Promise<void>;
   /**
@@ -235,6 +238,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
       apiKeys: createApiKeyStore(client),
       reviews: createReviewQueue(client),
       users: createUsersStore(client, options.warn),
+      runs: createRunStore(client),
 
       async ensureProject(project) {
         await client.query(

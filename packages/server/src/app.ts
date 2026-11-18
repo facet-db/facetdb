@@ -5,6 +5,7 @@ import { checkRoute } from "./check/route.ts";
 import type { CheckService } from "./check/service.ts";
 import { configRoutes } from "./config/routes.ts";
 import type { ConfigService } from "./config/service.ts";
+import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
 
 /** The path prefix of every endpoint; a breaking change makes a new one beside it. */
@@ -15,6 +16,8 @@ export type AppDeps = {
   readonly check: CheckService;
   /** The project JSON, a draft's validation and the live preview (the studio's config door). */
   readonly config: ConfigService;
+  /** The read endpoints behind the dashboard's pages: the run log first. */
+  readonly data: DataServices;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;
 };
@@ -39,6 +42,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.route(`/${API_VERSION}/check`, checkRoute(deps.check));
   // Behind the API key for now; reviewer sessions join them with the studio's accounts.
   app.route(`/${API_VERSION}`, configRoutes(deps.config));
+  app.route(`/${API_VERSION}`, dataRoutes(deps.data));
 
   app.notFound((c) =>
     c.json(

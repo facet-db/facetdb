@@ -17,6 +17,14 @@ export {
 } from "./resume-rows.ts";
 export { createReviewQueue, rebuildReviewQueue, rebuildStoreReviewQueue } from "./reviews.ts";
 export {
+  BACKFILL_RUN_MARK,
+  createRunStore,
+  type RunStore,
+  type RunsQuery,
+  type RunsReader,
+  type StoredRun,
+} from "./runs.ts";
+export {
   migrateStore,
   PROJECTS_TABLE_SQL,
   rekeyNotes,

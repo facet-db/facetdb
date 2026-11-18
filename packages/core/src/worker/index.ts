@@ -1,5 +1,12 @@
 export type { ActionStep } from "./action-pipeline.ts";
 export { conditionHolds, configureAction } from "./action-pipeline.ts";
+export type { Run, RunKind, RunLog, RunRecorder } from "./run-log.ts";
+export {
+  errorCount,
+  RUN_LOG_PRUNE_EVERY_MS,
+  RUN_LOG_RETENTION_MS,
+  runOfPass,
+} from "./run-log.ts";
 export type {
   FailureStage,
   HumanDecisionNotice,

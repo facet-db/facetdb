@@ -21,6 +21,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
 import type { ConfigService } from "../config/service.ts";
+import type { DataServices } from "../data/routes.ts";
 import { CHECK_POLL_MS, CHECK_WAIT_MS, createCheckService } from "./service.ts";
 import { createCheckStore } from "./store.ts";
 import { onlyRecord } from "./target.ts";
@@ -40,6 +41,11 @@ const NO_CONFIG: ConfigService = {
     throw new Error("these tests validate no draft");
   },
   preview: () => Promise.reject(new Error("these tests preview nothing")),
+};
+
+/** Nor are the dashboard's read endpoints: any call to them fails the test. */
+const NO_DATA: DataServices = {
+  runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
 };
 
 const UNLIMITED: SpendingGate = {
@@ -195,6 +201,7 @@ async function rig(
     keys,
     check,
     config: NO_CONFIG,
+    data: NO_DATA,
     newRequestId: () => {
       requestCount += 1;
       return `req-${requestCount}`;
@@ -561,6 +568,7 @@ describe("the error shape", () => {
         check: () => Promise.reject(new Error(`boom: ${CHARGED}`)),
       },
       config: NO_CONFIG,
+      data: NO_DATA,
       newRequestId: () => "req-x",
     });
     const response = await broken.request("/v1/check", {

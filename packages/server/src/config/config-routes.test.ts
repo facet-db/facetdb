@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
+import type { DataServices } from "../data/routes.ts";
 import {
   createConfigService,
   type DraftCheck,
@@ -49,6 +50,10 @@ const keys: ApiKeys = {
 
 const NO_CHECK: CheckService = {
   check: () => Promise.reject(new Error("these tests make no check call")),
+};
+
+const NO_DATA: DataServices = {
+  runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
 };
 
 const scam: Question = {
@@ -238,6 +243,7 @@ function rig(
       config: door,
       preview: (source) => (source === "listings" ? running : undefined),
     }),
+    data: NO_DATA,
     newRequestId: () => "req-1",
   });
 

@@ -20,6 +20,7 @@ import { createCheckService } from "../check/service.ts";
 import { createCheckStore } from "../check/store.ts";
 import { onlyRecord } from "../check/target.ts";
 import type { ConfigService } from "../config/service.ts";
+import type { DataServices } from "../data/routes.ts";
 import { createWebhookAction, type WebhookPayload } from "./action.ts";
 import {
   ALERT_NOT_RAISED,
@@ -52,6 +53,11 @@ const NO_CONFIG: ConfigService = {
     throw new Error("these tests validate no draft");
   },
   preview: () => Promise.reject(new Error("these tests preview nothing")),
+};
+
+/** Nor are the dashboard's read endpoints: any call to them fails the test. */
+const NO_DATA: DataServices = {
+  runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
 };
 
 const UNLIMITED: SpendingGate = {
@@ -327,6 +333,7 @@ async function rig() {
       retryAfterSeconds: 30,
     }),
     config: NO_CONFIG,
+    data: NO_DATA,
     newRequestId: () => "req-1",
   });
   const { secret } = await keys.create(PROJECT, "test");

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Clock } from "@facetdb/core";
-import type { ApiKeyStore } from "@facetdb/postgres";
+import type { ApiKeyStore, RunsReader } from "@facetdb/postgres";
 import type { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { createApiKeys } from "./auth/api-keys.ts";
@@ -11,10 +11,14 @@ import {
   type PreviewSource,
   type ProjectConfigDoor,
 } from "./config/service.ts";
+import { createRunsService } from "./data/runs.ts";
 
 export type ServerDeps = {
-  /** The API keys and the API sources' records and queues, from the FacetDB store. */
-  readonly store: CheckStore & { readonly apiKeys: ApiKeyStore };
+  /**
+   * The API keys, the API sources' records and queues, and the run log's read side (the dashboard's
+   * run log), from the FacetDB store.
+   */
+  readonly store: CheckStore & { readonly apiKeys: ApiKeyStore; readonly runs: RunsReader };
   /** The workers that answer each API source's queue. */
   readonly worker: CheckWorkers;
   readonly clock: Clock;
@@ -47,6 +51,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       retryAfterSeconds: deps.retryAfterSeconds,
     }),
     config: createConfigService({ config: deps.config, preview: deps.preview }),
+    data: { runs: createRunsService({ reader: deps.store.runs }) },
     newRequestId: randomUUID,
   });
 }

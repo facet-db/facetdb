@@ -718,6 +718,38 @@ describe("facetdb worker", () => {
     expect(await listing("r1")).toMatchObject({ is_scam: false, facetdb_status: "done" });
   });
 
+  it("logs each pass that claimed a record in the run log and serves it newest first", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+
+    const result = await run(["worker", "--once"]);
+
+    expect(result.code, result.stderr).toBe(0);
+    const { secret } = await store.apiKeys.create(projectRef(PROJECT_DIR).id, "studio");
+    const [listener] = served;
+    const response = await listener?.handler(
+      new Request("http://localhost/v1/runs?source=listings", {
+        headers: { authorization: `Bearer ${secret}` },
+      }),
+    );
+    expect(response?.status).toBe(200);
+    // One pass claimed r1 and answered it; the pass that found the queue empty wrote no row.
+    expect(await response?.json()).toMatchObject({
+      runs: [
+        {
+          source: "listings",
+          kind: "pass",
+          claimed: 1,
+          answered: 1,
+          toReview: 0,
+          errors: 0,
+          discarded: 0,
+        },
+      ],
+      page: 1,
+      more: false,
+    });
+  });
+
   it("--port binds the given port, and refuses one that is not a port", async () => {
     const ok = await run(["worker", "--once", "--port", "8080"]);
     expect(ok.code).toBe(0);

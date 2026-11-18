@@ -25,6 +25,12 @@ import { checkStateSize, estimateRequestTokens, estimateTokens } from "../reques
 import { reviewEntryOf, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import type { ActionStep } from "./action-pipeline.ts";
+import {
+  RUN_LOG_PRUNE_EVERY_MS,
+  RUN_LOG_RETENTION_MS,
+  type RunRecorder,
+  runOfPass,
+} from "./run-log.ts";
 
 // The batch, the in-flight cap and the poll.
 export const DEFAULT_CLAIM_BATCH = 20;
@@ -98,6 +104,11 @@ export type WorkerDeps = {
    * that wants no cap passes an explicit unlimited gate.
    */
   readonly spending: SpendingGate;
+  /**
+   * The run log: a row after every pass that claimed a record, and the hourly prune of rows older
+   * than 30 days. Optional so a check call's one-record worker writes no row of its own.
+   */
+  readonly runs?: RunRecorder;
 };
 
 /**
@@ -105,9 +116,10 @@ export type WorkerDeps = {
  * alerts module (a failed alert never changes what happened to the record), or the spending cap
  * (an unreadable cap claims nothing; an uncounted answer is still written and reported). `log` is
  * the pass reading a batch's prior answers from the decision log, which failed: the whole batch
- * went back to the queue (`key` is null).
+ * went back to the queue (`key` is null). `runs` is the run log's row or prune, which failed after
+ * the pass settled its records (`key` is null).
  */
-export type FailureStage = "ask" | "record" | "action" | "alert" | "spending" | "log";
+export type FailureStage = "ask" | "record" | "action" | "alert" | "spending" | "log" | "runs";
 
 export type RecordFailure = {
   readonly key: RecordKey | null;
@@ -155,6 +167,10 @@ export type PassReport = {
   /** Held records queued again, on their 5-minute schedule or because the model came back. */
   readonly requeued: readonly RecordKey[];
   readonly failures: readonly RecordFailure[];
+  /** Of `written`, the records written with at least one question left to a person. */
+  readonly toReview: readonly RecordKey[];
+  /** Input tokens of the model's answers in this pass, as their usage reported them. */
+  readonly tokens: number;
 };
 
 /** A person decided a question: the reviewer's write already landed, now the actions run again. */
@@ -560,6 +576,7 @@ export function createWorker(deps: WorkerDeps): Worker {
       }
       // Paid for: the reservation gives way to the count, in one store call.
       await countSpend(report, row.key, reservation, response.usage.inputTokens);
+      report.tokens += response.usage.inputTokens;
       await tell(report, row.key, (signals) => signals.modelCall(true));
       await requeue(report, outage?.succeeded(row.key) ?? []);
 
@@ -596,6 +613,9 @@ export function createWorker(deps: WorkerDeps): Worker {
       }
       await followReview(row, written, entry);
       report.written.push(row.key);
+      if (written.status === "needs_review") {
+        report.toReview.push(row.key);
+      }
 
       // The write above is the default action; the rest follow it.
       report.failures.push(...(await runActions(row, written.status, written.decisions, entry.at)));
@@ -606,7 +626,49 @@ export function createWorker(deps: WorkerDeps): Worker {
     }
   }
 
+  /** When this worker last pruned the run log; undefined until its first pass. */
+  let prunedAtMs: number | undefined;
+
+  /**
+   * A pass that claimed at least one record leaves a row in the run log, and once an hour the
+   * worker prunes the rows older than 30 days. Both come after the records are settled, so a run
+   * log that cannot be written is a failure of the pass, never of a record.
+   */
+  async function logRun(
+    recorder: RunRecorder,
+    report: MutablePass,
+    startedAtMs: number,
+  ): Promise<void> {
+    const endedAtMs = clock.now();
+    if (report.claimed > 0) {
+      try {
+        await recorder.log.record(runOfPass(recorder.source, report, startedAtMs, endedAtMs));
+      } catch (error) {
+        report.failures.push({ key: null, stage: "runs", error });
+      }
+    }
+    if (prunedAtMs !== undefined && endedAtMs - prunedAtMs < RUN_LOG_PRUNE_EVERY_MS) {
+      return;
+    }
+    // Taken before the delete: a prune that fails is tried again in an hour, not on every pass.
+    prunedAtMs = endedAtMs;
+    try {
+      await recorder.log.prune(new Date(endedAtMs - RUN_LOG_RETENTION_MS));
+    } catch (error) {
+      report.failures.push({ key: null, stage: "runs", error });
+    }
+  }
+
   async function runOnce(): Promise<PassReport> {
+    const startedAtMs = clock.now();
+    const report = await takeBatch();
+    if (deps.runs !== undefined) {
+      await logRun(deps.runs, report, startedAtMs);
+    }
+    return report;
+  }
+
+  async function takeBatch(): Promise<MutablePass> {
     const report = newPass(0);
     // A held record is asked again every 5 minutes while the model is down.
     await requeue(report, outage?.due() ?? []);
@@ -757,6 +819,8 @@ function newPass(claimed: number): MutablePass {
     held: [],
     requeued: [],
     failures: [],
+    toReview: [],
+    tokens: 0,
   };
 }
 

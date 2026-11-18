@@ -238,6 +238,8 @@ export async function runWorkers(
               link: "https://docs.facetdb.dev/fix/worker",
             }),
             outage: createOutagePolicy({ onOutage: source.onOutage, clock }),
+            // The loop's passes fill the run log; a check call's one record is not a pass.
+            runs: { log: store.runs, source: idOf(source) },
           }
         : {}),
       spending,
@@ -340,6 +342,7 @@ export async function runWorkers(
             workerId,
           ),
           apiKeys: store.apiKeys,
+          runs: store.runs,
         },
         worker: {
           forRecord: (projectId, name, key) => {
