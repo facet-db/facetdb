@@ -1,4 +1,4 @@
-import { PREVIEW_DEFAULT_LIMIT } from "@facetdb/core";
+import { PREVIEW_DEFAULT_LIMIT, TEST_DEFAULT_SAMPLE, TEST_MAX_SAMPLE } from "@facetdb/core";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
@@ -20,6 +20,13 @@ const validateBody = z.strictObject({ source: draftSource });
 const previewBody = z.strictObject({
   source: draftSource,
   limit: z.number().int().min(1).max(PREVIEW_MAX_LIMIT).default(PREVIEW_DEFAULT_LIMIT),
+});
+
+const testBody = z.strictObject({
+  source: draftSource,
+  sample: z.number().int().min(1).max(TEST_MAX_SAMPLE).default(TEST_DEFAULT_SAMPLE),
+  // The cost first: true reads the records and answers with the estimate alone.
+  estimate: z.boolean().default(false),
 });
 
 const DRAFT_SHAPE =
@@ -52,9 +59,9 @@ function issuesInWords(issues: readonly DraftIssue[]): string {
 }
 
 /**
- * `GET /v1/config`, `POST /v1/config/validate` and `POST /v1/preview`: parse, one service call, map
- * the result; the API key was checked by the middleware. Nothing here reads a file, a database or
- * the model.
+ * `GET /v1/config`, `POST /v1/config/validate`, `POST /v1/preview` and `POST /v1/test`: parse, one
+ * service call, map the result; the API key was checked by the middleware. Nothing here reads a
+ * file, a database or the model.
  */
 export function configRoutes(service: ConfigService): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
@@ -123,6 +130,63 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
           "model_unavailable",
           `The model did not answer for row ${outcome.key}: ${outcome.reason}. Nothing was written.`,
           "Preview again in a minute; if it keeps failing, run facetdb doctor to check the model key and the connection.",
+        );
+    }
+  });
+
+  // The draft against the version in force: the newest records and every record a person decided.
+  // `"estimate": true` is the cost first: it reads the records and answers with the estimate, the
+  // model not called.
+  route.post("/test", async (c) => {
+    const body = await parsed(
+      testBody,
+      c.req,
+      `Send ${DRAFT_SHAPE}, "sample" (1 to ${TEST_MAX_SAMPLE} records) if not ${TEST_DEFAULT_SAMPLE}, and "estimate": true to price the test without running it.`,
+    );
+    const outcome = await service.test(c.get("projectId"), body.source, {
+      sample: body.sample,
+      estimateOnly: body.estimate,
+    });
+    switch (outcome.kind) {
+      case "estimated":
+        return c.json({ estimate: outcome.estimate, warnings: outcome.warnings });
+      case "tested": {
+        const { kind: _kind, ...result } = outcome.result;
+        return c.json({ ...result, warnings: outcome.warnings });
+      }
+      case "unknown_project":
+        throw unknownProject();
+      case "invalid":
+        throw new ApiError(
+          400,
+          "invalid_draft",
+          `The draft has problems: ${issuesInWords(outcome.issues)}.`,
+          "Fix each field named (POST /v1/config/validate lists them by path), then test again.",
+        );
+      case "unknown_source":
+        throw new ApiError(
+          404,
+          "unknown_source",
+          `This worker runs no source called "${outcome.source}", so there are no records to test.`,
+          "Test a source listed by GET /v1/config, or add the source to facetdb.config.ts and restart facetdb worker.",
+        );
+      case "fields_differ":
+        throw new ApiError(
+          400,
+          "fields_differ",
+          `The draft reads state fields of "${outcome.source}" that the worker does not read, or filters with another where, so its records cannot be shown to the model as it would see them.`,
+          "Test with fields the source already reads and its current where; to try others, edit facetdb.config.ts and run facetdb test.",
+        );
+      case "capped":
+        throw new ApiError(429, "spending_cap_reached", outcome.message, outcome.fix, {
+          "retry-after": String(outcome.retryAfterSeconds),
+        });
+      case "model_failed":
+        throw new ApiError(
+          503,
+          "model_unavailable",
+          `The model did not answer for record ${outcome.key}: ${outcome.reason}. Nothing was written, and the test has no result.`,
+          "Test again in a minute; if it keeps failing, run facetdb doctor to check the model key and the connection.",
         );
     }
   });

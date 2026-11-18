@@ -3,6 +3,7 @@ import {
   type Connector,
   createAlerts,
   createPreviewService,
+  createQuestionTestService,
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type KeyText,
@@ -173,8 +174,8 @@ export function parsePort(text: string): number {
 type Running = {
   readonly source: string;
   readonly worker: Worker;
-  /** What the studio's preview reads the newest rows through (`scan` only). */
-  readonly connector: Pick<Connector, "scan">;
+  /** What the studio's preview and test read through: `scan` for the newest rows, `read` for the reviewed ones. */
+  readonly connector: Pick<Connector, "scan" | "read">;
   /** How its keys print; undefined where a key is its own text. */
   readonly keyText: KeyText | undefined;
   close(): Promise<void>;
@@ -407,6 +408,8 @@ export async function runWorkers(
           if (source === undefined || entry === undefined) {
             return undefined;
           }
+          const maxStateTokens =
+            source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens };
           return {
             read: source.read,
             where: source.where,
@@ -417,10 +420,20 @@ export async function runWorkers(
               spending,
               log: (line) => print(`${name}: preview: ${line}`),
               clock,
-              ...(source.maxStateTokens === undefined
-                ? {}
-                : { maxStateTokens: source.maxStateTokens }),
+              ...maxStateTokens,
             }).preview,
+            // The test's "now" is what this worker runs; its reviewed records and the answers they
+            // were given are in the source's log.
+            current: questionSetOf(config, source),
+            testQuestionSet: createQuestionTestService({
+              connector: entry.connector,
+              decisions: store.log(idOf(source)),
+              provider,
+              spending,
+              note: (line) => print(`${name}: test: ${line}`),
+              clock,
+              ...maxStateTokens,
+            }).testQuestionSet,
           };
         },
         // The Decisions page and the why page read the store's log: the same history `facetdb

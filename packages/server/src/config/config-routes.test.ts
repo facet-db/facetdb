@@ -1,5 +1,6 @@
 import {
   createPreviewService,
+  createQuestionTestService,
   createSpending,
   type KeyText,
   type ModelProvider,
@@ -9,8 +10,9 @@ import {
   type QuestionSet,
   type SpendingGate,
   spendingGate,
+  stateHash,
 } from "@facetdb/core";
-import { FakeClock, FakeConnector, FakeDatabase } from "@facetdb/core/testing";
+import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
@@ -215,7 +217,7 @@ function projectGate(used: number): SpendingGate {
   );
 }
 
-function rig(
+async function rig(
   options: {
     readonly used?: number;
     /** The source's `where` as its SQL would judge a row: true leaves it out. */
@@ -230,17 +232,57 @@ function rig(
     database.edit(`oid:${n}`, { title: `Listing ${n}` });
   }
   const provider = new ScriptedProvider();
+  // What the version in force answered, and the one record a person decided (oid:1: not a scam).
+  const log = new FakeDecisionLog();
+  for (const [key, probability] of [
+    ["oid:1", 0.02],
+    ["oid:2", 0.02],
+    ["oid:3", 0.5],
+  ] as const) {
+    await log.appendAnswer({
+      kind: "answer",
+      key,
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: stateHash(["title"], { title: `Listing ${key.slice(4)}` }),
+      answers: { is_scam: { type: "noul", probability } },
+      usage: { inputTokens: 100, outputTokens: 2 },
+      at: new Date(Date.UTC(2026, 10, 5)),
+    });
+  }
+  await log.appendHuman({
+    kind: "human",
+    key: "oid:1",
+    question: "is_scam",
+    value: false,
+    reviewer: "maya",
+    stateHash: stateHash(["title"], { title: "Listing 1" }),
+    version: 1,
+    at: new Date(Date.UTC(2026, 10, 5)),
+  });
+  const gate = projectGate(options.used ?? 0);
+  const clock = new FakeClock(Date.UTC(2026, 10, 5));
+  const connector = new FakeConnector(database);
   const running: PreviewSource = {
     read: RUNNING.read,
     where: undefined,
     keyText: tagged,
     preview: createPreviewService({
-      connector: new FakeConnector(database),
+      connector,
       provider,
-      spending: projectGate(options.used ?? 0),
+      spending: gate,
       log: () => undefined,
-      clock: new FakeClock(Date.UTC(2026, 10, 5)),
+      clock,
     }).preview,
+    current: RUNNING,
+    testQuestionSet: createQuestionTestService({
+      connector,
+      decisions: log,
+      provider,
+      spending: gate,
+      note: () => undefined,
+      clock,
+    }).testQuestionSet,
   };
   const app = createApp({
     keys,
@@ -282,11 +324,12 @@ function rig(
 
 describe("the config routes", () => {
   it("refuse every request without a valid API key, in the one error shape", async () => {
-    const t = rig();
+    const t = await rig();
     for (const [method, path] of [
       ["GET", "/v1/config"],
       ["POST", "/v1/config/validate"],
       ["POST", "/v1/preview"],
+      ["POST", "/v1/test"],
     ] as const) {
       const response = await t.call(method, path, { source: { name: "listings" } }, null);
       expect(response.status).toBe(401);
@@ -298,7 +341,7 @@ describe("the config routes", () => {
   });
 
   it("GET /v1/config returns the project JSON of the loader's export", async () => {
-    const t = rig();
+    const t = await rig();
     const response = await t.call("GET", "/v1/config");
 
     expect(response.status).toBe(200);
@@ -306,11 +349,12 @@ describe("the config routes", () => {
   });
 
   it("shows nothing of the project to a key of another project in the same store", async () => {
-    const t = rig();
+    const t = await rig();
     for (const [method, path] of [
       ["GET", "/v1/config"],
       ["POST", "/v1/config/validate"],
       ["POST", "/v1/preview"],
+      ["POST", "/v1/test"],
     ] as const) {
       const response = await t.call(method, path, { source: { name: "listings" } }, OTHER_KEY);
       expect(response.status).toBe(404);
@@ -320,7 +364,7 @@ describe("the config routes", () => {
   });
 
   it("POST /v1/config/validate answers a valid draft with its wording warnings in the CLI's shape", async () => {
-    const t = rig();
+    const t = await rig();
     const response = await t.call("POST", "/v1/config/validate", {
       source: { name: "listings", instructions: "how many scams are there?" },
     });
@@ -342,7 +386,7 @@ describe("the config routes", () => {
   });
 
   it("POST /v1/config/validate answers a broken draft with the loader's errors at their field paths", async () => {
-    const t = rig();
+    const t = await rig();
     const response = await t.call("POST", "/v1/config/validate", {
       source: { name: "listings", thresholds: { is_scam: { yesAbove: 1.5 } } },
     });
@@ -361,7 +405,7 @@ describe("the config routes", () => {
   });
 
   it("refuses a body that is not JSON or not a draft, saying what to send", async () => {
-    const t = rig();
+    const t = await rig();
     const notJson = await t.call("POST", "/v1/config/validate", "{not json");
     expect(notJson.status).toBe(400);
     expect(notJson.json).toMatchObject({ error: { code: "invalid_json" } });
@@ -382,7 +426,7 @@ describe("the config routes", () => {
   });
 
   it("POST /v1/preview answers the newest rows of the draft with every probability, the decisions and the cost", async () => {
-    const t = rig();
+    const t = await rig();
     const response = await t.call("POST", "/v1/preview", { source: { name: "listings" } });
 
     expect(response.status).toBe(200);
@@ -415,7 +459,7 @@ describe("the config routes", () => {
   });
 
   it("previews the draft's thresholds, not the running ones, and honours the limit", async () => {
-    const t = rig();
+    const t = await rig();
     const response = await t.call("POST", "/v1/preview", {
       source: { name: "listings", thresholds: { is_scam: { yesAbove: 0.5 } } },
       limit: 1,
@@ -431,7 +475,7 @@ describe("the config routes", () => {
   });
 
   it("refuses a broken draft, a source the worker does not run and other fields, without a model call", async () => {
-    const t = rig();
+    const t = await rig();
     const broken = await t.call("POST", "/v1/preview", {
       source: { name: "listings", thresholds: { is_scam: { yesAbove: 1.5 } } },
     });
@@ -456,7 +500,7 @@ describe("the config routes", () => {
   });
 
   it("answers a row the where filter leaves out with its key and reason only, never its state", async () => {
-    const t = rig({ excludes: (state) => state["title"] === "Listing 3" });
+    const t = await rig({ excludes: (state) => state["title"] === "Listing 3" });
     const response = await t.call("POST", "/v1/preview", { source: { name: "listings" } });
 
     expect(response.status).toBe(200);
@@ -470,7 +514,7 @@ describe("the config routes", () => {
   });
 
   it("returns the cap's words when the project's cap is already reached, without calling the model", async () => {
-    const t = rig({ used: 5000 });
+    const t = await rig({ used: 5000 });
     const response = await t.call("POST", "/v1/preview", { source: { name: "listings" } });
 
     expect(response.status).toBe(429);
@@ -488,7 +532,7 @@ describe("the config routes", () => {
   });
 
   it("answers a failed model call with 503, naming the row as the user writes it", async () => {
-    const t = rig();
+    const t = await rig();
     t.provider.down = true;
     const response = await t.call("POST", "/v1/preview", { source: { name: "listings" } });
 
@@ -501,5 +545,114 @@ describe("the config routes", () => {
       },
     });
     expect(JSON.stringify(response.json)).not.toContain("oid:");
+  });
+});
+
+describe("POST /v1/test", () => {
+  const LOOSER = { name: "listings", thresholds: { is_scam: { yesAbove: 0.5 } } };
+
+  it("prices the test first and calls the model only when told to run", async () => {
+    const t = await rig();
+    const response = await t.call("POST", "/v1/test", { source: LOOSER, estimate: true });
+
+    expect(response.status).toBe(200);
+    expect(response.json).toEqual({
+      estimate: {
+        sampleRecords: 3,
+        reviewedRecords: 1,
+        requests: 3,
+        inputTokens: expect.any(Number),
+        dollars: expect.any(Number),
+      },
+      warnings: [],
+    });
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
+  it("answers per question what would change and how agreement with reviewers moves", async () => {
+    const t = await rig();
+    const response = await t.call("POST", "/v1/test", { source: LOOSER });
+
+    expect(response.status).toBe(200);
+    // Listing 3 was unsure at 50% under 70% / 30% and is a yes at 58% over the draft's 50%;
+    // Listing 1 is a person's (no), which the draft agrees with, as the version in force did.
+    expect(response.json).toMatchObject({
+      sample: { records: 3, asked: 3 },
+      reviewed: { records: 1, asked: 1 },
+      removed: [],
+      questions: [
+        {
+          question: "is_scam",
+          comparison: "compared",
+          compared: 2,
+          changed: 1,
+          toDecided: 1,
+          toReview: 0,
+          toAnotherValue: 0,
+          keptForPeople: 1,
+          agreement: {
+            kind: "measured",
+            records: 1,
+            now: { agreed: 1, disagreed: 0, unsure: 0, rate: 1 },
+            draft: { agreed: 1, disagreed: 0, unsure: 0, rate: 1 },
+          },
+        },
+      ],
+      cost: { inputTokens: 300 },
+      estimate: { requests: 3 },
+      warnings: [],
+    });
+    expect(response.json).not.toHaveProperty("kind");
+    // No key and no state in the result: counts only.
+    expect(JSON.stringify(response.json)).not.toContain("Listing");
+    expect(JSON.stringify(response.json)).not.toContain("oid:");
+    for (const [key] of t.database.rows.entries()) {
+      expect(t.database.decisionOf(key)).toBeNull();
+    }
+  });
+
+  it("refuses a sample outside 1 to 1,000, a broken draft, an unknown source and other fields without a model call", async () => {
+    const t = await rig();
+    const tooMany = await t.call("POST", "/v1/test", { source: LOOSER, sample: 1001 });
+    expect(tooMany.status).toBe(400);
+    expect(tooMany.json).toMatchObject({ error: { code: "invalid_request" } });
+
+    const broken = await t.call("POST", "/v1/test", {
+      source: { name: "listings", thresholds: { is_scam: { yesAbove: 1.5 } } },
+    });
+    expect(broken.status).toBe(400);
+    expect(broken.json).toMatchObject({ error: { code: "invalid_draft" } });
+
+    const unknown = await t.call("POST", "/v1/test", { source: { name: "orders" } });
+    expect(unknown.status).toBe(404);
+    expect(unknown.json).toMatchObject({ error: { code: "unknown_source" } });
+
+    const other = await t.call("POST", "/v1/test", {
+      source: { name: "listings", read: ["title", "body"] },
+    });
+    expect(other.status).toBe(400);
+    expect(other.json).toMatchObject({ error: { code: "fields_differ" } });
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
+  it("returns the cap's words when the cap is already reached, and 503 naming the record when the model fails", async () => {
+    const capped = await rig({ used: 5000 });
+    const refused = await capped.call("POST", "/v1/test", { source: LOOSER });
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe(String(26 * 24 * 60 * 60));
+    expect(refused.json).toMatchObject({ error: { code: "spending_cap_reached" } });
+    expect(capped.provider.requests).toHaveLength(0);
+
+    const down = await rig();
+    down.provider.down = true;
+    const failed = await down.call("POST", "/v1/test", { source: LOOSER });
+    expect(failed.status).toBe(503);
+    expect(failed.json).toMatchObject({
+      error: {
+        code: "model_unavailable",
+        message: expect.stringContaining("the model answered 503"),
+      },
+    });
+    expect(JSON.stringify(failed.json)).not.toContain("oid:");
   });
 });

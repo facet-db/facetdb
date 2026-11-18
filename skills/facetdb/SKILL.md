@@ -148,6 +148,7 @@ invocation.
 | `facetdb init` | Creates the config file, asks for the database connection and what that engine needs (the store URL for a non-Postgres source, a MongoDB replica set, SQL Server's contained user, Oracle's service and schema), asks whether the host forbids triggers (`--triggers allowed|forbidden` in a script), recommends side-table mode when it finds Prisma or Drizzle, and prints the skill install commands; `facetdb init --example listings --engine <engine>` copies a ready example (config, seed, steps) for any of the nine engines |
 | `facetdb doctor` | Checks the connection, permissions, trigger, worker and model key, and says what is wrong (`--offline` skips the model) |
 | `facetdb preview` | Answers the most recent rows in the terminal and changes nothing in the database |
+| `facetdb test` | Runs the draft in facetdb.config.ts, as it stands on disk, on the newest records (`--sample`, 1,000 at most) and on every record a person decided, against the version the store keeps in force: prints the cost first and asks (`--yes`), then per question how many answers would change, how many move between unsure and decided, and how agreement with reviewers moves (no number when nobody decided that question). It changes nothing; the next steps are to commit the file and restart the worker, and `facetdb backfill` to re-answer existing records (`--sample`, `--source`, `--yes`, `--json`) |
 | `facetdb migrate` | Installs every source: answer columns, jobs table, change capture. Prints the SQL first (`--yes`, `--source`, `--prune`) |
 | `facetdb backfill` | Answers every existing row, paced and resumable, after showing the cost estimate (`--dry-run`, `--pace`, `--question`, `--yes`) |
 | `facetdb explain` | Prints one record's full history in words: every answer and every human decision (`facetdb explain <source> <key>`) |
@@ -222,9 +223,10 @@ you do it, because it changes what the existing decisions mean.
 
 Run `facetdb preview` before you save a change to a question's wording, options or state fields:
 it answers the most recent rows without writing anything, so the user sees the effect on real data.
-Run `facetdb doctor` when something does not work, before guessing at a cause. Once `facetdb test`
-ships, run it too: it runs the current questions against a sample and every reviewed
-row and prints what would change. Until then, preview is the check.
+Run `facetdb doctor` when something does not work, before guessing at a cause. Then run
+`facetdb test`: it runs the draft in facetdb.config.ts against the newest records and every record
+a person decided, shows the cost first, and prints per question what would change and how agreement
+with reviewers moves. It writes nothing; to use the draft, commit the file and restart the worker.
 
 ## The check API
 

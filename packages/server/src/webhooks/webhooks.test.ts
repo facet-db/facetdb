@@ -53,6 +53,7 @@ const NO_CONFIG: ConfigService = {
     throw new Error("these tests validate no draft");
   },
   preview: () => Promise.reject(new Error("these tests preview nothing")),
+  test: () => Promise.reject(new Error("these tests test nothing")),
 };
 
 /** Nor are the dashboard's read endpoints: any call to them fails the test. */

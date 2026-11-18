@@ -56,6 +56,8 @@ export type PreviewDeps = {
   readonly maxStateTokens?: number;
   /** Read only when the cap is reached, for the seconds until the month resets. */
   readonly clock: Clock;
+  /** Requests in flight at once; absent, `PREVIEW_IN_FLIGHT`. A test of a thousand rows asks for more. */
+  readonly inFlight?: number;
 };
 
 /** Why a row was shown but not asked. */
@@ -147,6 +149,12 @@ export class PreviewModelError extends Error {
 export type PreviewService = {
   /** The newest `limit` rows answered under `questionSet`; writes nothing. */
   preview(questionSet: QuestionSet, limit: number): Promise<PreviewResult>;
+  /**
+   * The same service over rows the caller already read (`facetdb test` asks the draft about the
+   * newest rows and about older reviewed ones): the cap check, the skips, the admission per request
+   * and the cost are the preview's, only the scan is the caller's.
+   */
+  previewRows(questionSet: QuestionSet, rows: readonly ReadRow[]): Promise<PreviewResult>;
 };
 
 /** The cap's words: what happened and what to do. */
@@ -157,7 +165,7 @@ export const PREVIEW_CAPPED = {
 } as const;
 
 /** Reads pages of `scan`, newest first, until `limit` rows or the last page. */
-async function newestRows(
+export async function newestRows(
   connector: Pick<Connector, "scan">,
   limit: number,
 ): Promise<readonly ReadRow[]> {
@@ -168,6 +176,34 @@ async function newestRows(
     rows.push(...page.rows);
   }
   return rows.slice(0, limit);
+}
+
+/**
+ * What the preview does with one row before it spends anything: leaves it out and says why, or asks
+ * it, with the request and its estimated tokens (what the spending gate reserves). `facetdb test`
+ * prices its run with the same call, so its estimate counts exactly the rows the run will ask.
+ */
+export function askFor(
+  questionSet: QuestionSet,
+  row: ReadRow,
+  maxStateTokens: number | undefined,
+):
+  | { readonly kind: "skip"; readonly reason: Exclude<PreviewSkipReason, "spending-cap"> }
+  | { readonly kind: "ask"; readonly request: ProviderRequest; readonly requestTokens: number } {
+  const skip = shouldSkip(questionSet.read, row.state, { filterExcluded: row.excluded });
+  if (skip.skip) {
+    return { kind: "skip", reason: skip.reason };
+  }
+  const request: ProviderRequest = {
+    model: questionSet.model,
+    state: row.state,
+    questions: questionSet.questions,
+  };
+  const requestTokens = estimateRequestTokens(request);
+  if (checkStateSize(requestTokens, maxStateTokens).kind === "refuse") {
+    return { kind: "skip", reason: "too-large" };
+  }
+  return { kind: "ask", request, requestTokens };
 }
 
 /** Runs `work` over `items`, `width` at a time, keeping their order; throws once a chunk settled. */
@@ -216,19 +252,11 @@ export function createPreviewService(deps: PreviewDeps): PreviewService {
 
   async function previewRow(questionSet: QuestionSet, row: ReadRow): Promise<PreviewRow> {
     const { key, state } = row;
-    const skip = shouldSkip(questionSet.read, state, { filterExcluded: row.excluded });
-    if (skip.skip) {
-      return { key, kind: "skipped", reason: skip.reason };
+    const plan = askFor(questionSet, row, deps.maxStateTokens);
+    if (plan.kind === "skip") {
+      return { key, kind: "skipped", reason: plan.reason };
     }
-    const request: ProviderRequest = {
-      model: questionSet.model,
-      state,
-      questions: questionSet.questions,
-    };
-    const requestTokens = estimateRequestTokens(request);
-    if (checkStateSize(requestTokens, deps.maxStateTokens).kind === "refuse") {
-      return { key, kind: "skipped", reason: "too-large" };
-    }
+    const { request, requestTokens } = plan;
     // Admitted per request, as the worker admits, so a preview cannot carry a project past its cap;
     // the reservation holds the estimate until the answer is counted.
     const reservation = await spending.admit(requestTokens, alertFailed);
@@ -275,18 +303,40 @@ export function createPreviewService(deps: PreviewDeps): PreviewService {
     };
   }
 
+  /** The cap's words when the project is paused, else undefined: nothing is read or asked then. */
+  async function pausedResult(): Promise<PreviewResult | undefined> {
+    if (await spending.allowsWork(alertFailed)) {
+      return undefined;
+    }
+    const now = deps.clock.now();
+    return {
+      kind: "capped",
+      ...PREVIEW_CAPPED,
+      retryAfterSeconds: Math.ceil((nextMonthOf(now) - now) / 1000),
+    };
+  }
+
   async function preview(questionSet: QuestionSet, limit: number): Promise<PreviewResult> {
     // A paused project reads nothing and asks nothing: the cap's words instead.
-    if (!(await spending.allowsWork(alertFailed))) {
-      const now = deps.clock.now();
-      return {
-        kind: "capped",
-        ...PREVIEW_CAPPED,
-        retryAfterSeconds: Math.ceil((nextMonthOf(now) - now) / 1000),
-      };
+    const paused = await pausedResult();
+    if (paused !== undefined) {
+      return paused;
     }
-    const rows = await newestRows(connector, limit);
-    const previewed = await inChunks(rows, PREVIEW_IN_FLIGHT, (row) =>
+    return answered(questionSet, await newestRows(connector, limit));
+  }
+
+  async function previewRows(
+    questionSet: QuestionSet,
+    rows: readonly ReadRow[],
+  ): Promise<PreviewResult> {
+    return (await pausedResult()) ?? answered(questionSet, rows);
+  }
+
+  async function answered(
+    questionSet: QuestionSet,
+    rows: readonly ReadRow[],
+  ): Promise<PreviewResult> {
+    const previewed = await inChunks(rows, deps.inFlight ?? PREVIEW_IN_FLIGHT, (row) =>
       previewRow(questionSet, row),
     );
     let inputTokens = 0;
@@ -313,5 +363,5 @@ export function createPreviewService(deps: PreviewDeps): PreviewService {
     };
   }
 
-  return { preview };
+  return { preview, previewRows };
 }

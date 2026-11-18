@@ -4,6 +4,11 @@ import {
   type PreviewResult,
   type PreviewRow,
   type QuestionSet,
+  QuestionTestFieldsError,
+  type QuestionTestPlan,
+  type QuestionTestResult,
+  type QuestionTestService,
+  type TestEstimate,
 } from "@facetdb/core";
 
 /**
@@ -57,6 +62,10 @@ export type PreviewSource = {
   /** How its keys are written for a person (MongoDB's `65f1…`); undefined where a key is its own text. */
   readonly keyText: KeyText | undefined;
   preview(questionSet: QuestionSet, limit: number): Promise<PreviewResult>;
+  /** The question set the worker runs this source with: the "now" side of a test (`facetdb test`). */
+  readonly current: QuestionSet;
+  /** A draft tested against `current` on this source's newest and reviewed records. */
+  readonly testQuestionSet: QuestionTestService["testQuestionSet"];
 };
 
 export type ConfigOutcome<Value> =
@@ -92,10 +101,35 @@ export type PreviewOutcome =
     }
   | { readonly kind: "model_failed"; readonly key: string; readonly reason: string };
 
+/** How a draft's test went; each refusal is the preview's, since the test asks the model the same way. */
+export type TestOutcome =
+  | {
+      /** Only the estimate was asked for: the records read, the model not called. */
+      readonly kind: "estimated";
+      readonly estimate: TestEstimate;
+      readonly warnings: readonly DraftWarning[];
+    }
+  | {
+      readonly kind: "tested";
+      readonly result: Extract<QuestionTestResult, { kind: "tested" }>;
+      readonly warnings: readonly DraftWarning[];
+    }
+  | { readonly kind: "unknown_project" }
+  | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
+  | { readonly kind: "unknown_source"; readonly source: string }
+  | { readonly kind: "fields_differ"; readonly source: string }
+  | Extract<PreviewOutcome, { readonly kind: "capped" | "model_failed" }>;
+
 export type ConfigService = {
   json(projectId: string): ConfigOutcome<unknown>;
   validate(projectId: string, draft: SourceDraft): ConfigOutcome<ValidateOutcome>;
   preview(projectId: string, draft: SourceDraft, limit: number): Promise<PreviewOutcome>;
+  /** With `estimateOnly`, reads the records and prices the run without calling the model. */
+  test(
+    projectId: string,
+    draft: SourceDraft,
+    options: { readonly sample: number; readonly estimateOnly: boolean },
+  ): Promise<TestOutcome>;
 };
 
 export type ConfigServiceDeps = {
@@ -111,6 +145,19 @@ function sameFields(
   return (
     questionSet.read.length === source.read.length &&
     questionSet.read.every((field, index) => field === source.read[index]) &&
+    questionSet.where === source.where
+  );
+}
+
+/**
+ * What a test needs of the source's connector: every field the draft reads is among the fields the
+ * worker opened it with (the current version's hash is the running source's own), and the same
+ * `where`, since the connector judges it. A draft that reads fewer fields is fine: the model is
+ * shown only the draft's.
+ */
+function testableOn(questionSet: QuestionSet, source: PreviewSource): boolean {
+  return (
+    questionSet.read.every((field) => source.read.includes(field)) &&
     questionSet.where === source.where
   );
 }
@@ -186,6 +233,61 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
         cost: result.cost,
         warnings: check.warnings,
       };
+    },
+
+    async test(projectId, draft, options) {
+      if (!ours(projectId)) {
+        return { kind: "unknown_project" };
+      }
+      const check = config.validate(draft);
+      if (!check.ok) {
+        return { kind: "invalid", issues: check.issues };
+      }
+      const source = deps.preview(draft.name);
+      if (source === undefined) {
+        return { kind: "unknown_source", source: draft.name };
+      }
+      if (!testableOn(check.questionSet, source)) {
+        return { kind: "fields_differ", source: draft.name };
+      }
+      try {
+        let plan: QuestionTestPlan;
+        try {
+          plan = await source.testQuestionSet({
+            current: source.current,
+            draft: check.questionSet,
+            sample: options.sample,
+            reviewed: true,
+          });
+        } catch (error) {
+          if (error instanceof QuestionTestFieldsError) {
+            return { kind: "fields_differ", source: draft.name };
+          }
+          throw error;
+        }
+        if (options.estimateOnly) {
+          return { kind: "estimated", estimate: plan.estimate, warnings: check.warnings };
+        }
+        const result = await plan.run();
+        if (result.kind === "capped") {
+          return {
+            kind: "capped",
+            message: result.message,
+            fix: result.fix,
+            retryAfterSeconds: result.retryAfterSeconds,
+          };
+        }
+        return { kind: "tested", result, warnings: check.warnings };
+      } catch (error) {
+        if (error instanceof PreviewModelError) {
+          return {
+            kind: "model_failed",
+            key: source.keyText?.toText(error.key) ?? error.key,
+            reason: error.message,
+          };
+        }
+        throw error;
+      }
     },
   };
 }

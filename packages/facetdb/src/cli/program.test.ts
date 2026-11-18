@@ -159,6 +159,7 @@ describe("the facetdb program", () => {
       "migrate",
       "uninstall",
       "preview",
+      "test",
       "backfill",
       "explain",
       "export",
