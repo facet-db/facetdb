@@ -73,22 +73,31 @@ function unmarkedNote(table: string, projectId: string, then: "marks" | "uninsta
     : `${table} carries no project mark (a polling install from before FacetDB marked one), so it is uninstalled as project ${projectId}'s`;
 }
 
-/** How often the worker reads the table, by the column it found or by the hourly full scan. */
+/** How the worker reads the table, by its column or by the hourly full scan, said in the config's terms when it chose. */
+function pollingWay(table: string, lastChanged: LastChanged): string {
+  if (lastChanged.column !== undefined) {
+    const named = lastChanged.named === true ? ", the column lastChanged names" : "";
+    return `FacetDB polls ${table} every ${POLL_INTERVAL_MS / 1000} seconds by ${lastChanged.column}${named}`;
+  }
+  const chosen = lastChanged.chosen === true ? ", as lastChanged: false says" : "";
+  return `FacetDB reads ${table} whole every hour${chosen}`;
+}
+
+/** How often the worker reads the table, by the column it polls by or by the hourly full scan. */
 export function pollingWords(table: string, lastChanged: LastChanged): string {
-  return lastChanged.column === undefined
-    ? `FacetDB reads ${table} whole every hour; no trigger`
-    : `FacetDB polls ${table} every ${POLL_INTERVAL_MS / 1000} seconds by ${lastChanged.column}; no trigger`;
+  return `${pollingWay(table, lastChanged)}; no trigger`;
 }
 
 /**
  * Why the worker falls back to the hourly full scan ("without one, a full scan every hour, with a
- * warning"), and how to get the 10-second poll; undefined with a column.
+ * warning"), and how to get the 10-second poll; undefined with a column, and when the config chose
+ * the scan (`lastChanged: false`): nothing to warn of then.
  */
 export function hourlyScan(
   table: string,
   lastChanged: LastChanged,
 ): { readonly detail: string; readonly fix: string } | undefined {
-  if (lastChanged.column !== undefined) {
+  if (lastChanged.column !== undefined || lastChanged.chosen === true) {
     return undefined;
   }
   const seconds = POLL_INTERVAL_MS / 1000;
@@ -121,13 +130,28 @@ export function unreadColumn(found: PollingTable): Refusal | undefined {
 }
 
 /**
- * What the polling depends on when a column is found: the application keeps it current. Set on
+ * What the polling depends on when it has a column: the application keeps it current. Set on
  * insert only, it stops change detection silently, which no catalog read can tell; said at migrate.
+ * When the config chose the hourly scan, what that costs and how to poll instead. Undefined for the
+ * scan nothing chose: the hourly-scan warning says it then.
  */
-function columnKept(table: string, lastChanged: LastChanged): string | undefined {
-  return lastChanged.column === undefined
-    ? undefined
-    : `FacetDB polls ${table} every ${POLL_INTERVAL_MS / 1000} seconds by ${lastChanged.column}: the application must set ${lastChanged.column} on every insert and every update, or a change it makes is never noticed`;
+function pollingNote(table: string, lastChanged: LastChanged): string | undefined {
+  const way = pollingWay(table, lastChanged);
+  if (lastChanged.column !== undefined) {
+    return `${way}: the application must set ${lastChanged.column} on every insert and every update, or a change it makes is never noticed`;
+  }
+  return lastChanged.chosen === true
+    ? `${way}, so a change is noticed within the hour; name in lastChanged a column holding a time, NOT NULL, that the application sets on every insert and every update, and FacetDB polls it every ${POLL_INTERVAL_MS / 1000} seconds`
+    : undefined;
+}
+
+/**
+ * Why the column the config's `lastChanged` names cannot be polled by, as a plan's refusal: the
+ * table's catalog says so before any statement is planned.
+ */
+export function lastChangedRefused(found: PollingTable): PlanResult | undefined {
+  const refusal = found.lastChangedRefusal;
+  return refusal === undefined ? undefined : { ok: false, refusal };
 }
 
 /** Why the worker login stays after an uninstall, in the trigger engine's words for one login. */
@@ -188,7 +212,7 @@ export function installPlan(
   const present = new Set(found.facts.columns.map((column) => column.name));
   const rights = workerColumns(target, key, found);
   const scan = hourlyScan(label, found.lastChanged);
-  const kept = columnKept(label, found.lastChanged);
+  const kept = pollingNote(label, found.lastChanged);
   return {
     statements: sourceStatements(
       withHeader(dialect, table, [

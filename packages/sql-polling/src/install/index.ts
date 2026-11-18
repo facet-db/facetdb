@@ -13,10 +13,12 @@ export {
   revokedColumns,
 } from "./prune.ts";
 export {
+  LAST_CHANGED_CODE,
   LAST_CHANGED_NAMES,
   type LastChanged,
   labelOf,
   lastChangedOf,
+  namedLastChanged,
   type PollingTable,
   readTable,
   tableOf,

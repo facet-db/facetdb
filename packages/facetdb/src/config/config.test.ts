@@ -308,6 +308,56 @@ describe("the example config", () => {
     }
   });
 
+  it("carries lastChanged, a column's name or false: the JSON export, the config file and the import keep it, and its absence is the guess by name", async () => {
+    const polled = (lastChanged?: string | false) => {
+      const config = facetdb({
+        model: "jev-1.14.0",
+        sources: [
+          {
+            name: "listings",
+            database: CONNECTION,
+            connector: "polling",
+            table: "listings",
+            ...(lastChanged === undefined ? {} : { lastChanged }),
+            read: ["title"],
+            questions: { is_scam: noul("Is this listing a scam?") },
+          },
+        ],
+      });
+      const source = config.sources[0];
+      if (source === undefined) throw new Error("fixture has a source");
+      const parsed = parseProjectConfig({
+        ...config,
+        sources: [{ ...source, databaseEnv: "DATABASE_URL" }],
+      });
+      if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
+      return parsed.config;
+    };
+    for (const lastChanged of ["changed_on", "CHANGED_ON", false] as const) {
+      const config = polled(lastChanged);
+      expect(config.sources[0]?.lastChanged).toBe(lastChanged);
+      const json = toProjectJson(config);
+      expect(json.sources[0]?.lastChanged).toBe(lastChanged);
+      expect(toProjectJson(fromProjectJson(json, env()))).toEqual(json);
+      const file = configFileSource(config);
+      expect(file).toContain(
+        `table: "listings",\n      lastChanged: ${JSON.stringify(lastChanged)},\n`,
+      );
+      // The file the export writes loads back to the same project, lastChanged and all.
+      const dir = await scratchDir();
+      await mkdir(join(dir, "node_modules"));
+      await symlink(packageDir, join(dir, "node_modules", "facetdb"));
+      await writeFile(join(dir, "facetdb.config.ts"), file);
+      const { config: reloaded } = await load(dir);
+      expect(toProjectJson(reloaded)).toEqual(json);
+    }
+    // Absent, the polling engine looks for an updated_at by name: nothing is written.
+    const absent = polled();
+    expect(absent.sources[0]).not.toHaveProperty("lastChanged");
+    expect(toProjectJson(absent).sources[0]).not.toHaveProperty("lastChanged");
+    expect(configFileSource(absent)).not.toContain("lastChanged");
+  });
+
   it("refuses to export a connection string it cannot name a variable for", () => {
     const config = facetdb({
       model: "jev-1.14.0",
@@ -729,6 +779,51 @@ describe("what the schema refuses", () => {
     expect(onApi).toMatchObject({ ok: false });
     if (!onApi.ok) {
       expect(onApi.issues.map((issue) => issue.path)).toEqual(["sources[0].capture"]);
+    }
+  });
+
+  it("refuses a lastChanged that is not a column's name or false, and lastChanged on an API source", () => {
+    const rule =
+      'sources[0].lastChanged: lastChanged names the column the application sets on every insert and every update, such as "changed_on" (letters, digits, underscores and dollar signs, starting with a letter or an underscore), or is false to read the whole table every hour; for a column named otherwise, rename the column, or write lastChanged: false for the hourly scan';
+    const json = toProjectJson(facetdb(valid()));
+    const issuesOf = (lastChanged: unknown) =>
+      messagesOf(() =>
+        fromProjectJson(
+          {
+            ...json,
+            sources: [
+              {
+                ...json.sources[0],
+                api: false,
+                table: "listings",
+                database: { env: "DATABASE_URL" },
+                lastChanged,
+              },
+            ],
+          },
+          env(),
+        ),
+      );
+    for (const wrong of [
+      "",
+      "changed on",
+      "updated_at; drop table listings",
+      "1st",
+      true,
+      3,
+      null,
+    ]) {
+      expect(issuesOf(wrong), String(wrong)).toEqual([rule]);
+    }
+    expect(issuesOf("changed_on")).toEqual([]);
+    expect(issuesOf("_Changed$On")).toEqual([]);
+    expect(issuesOf(false)).toEqual([]);
+    const onApi = parseProjectConfig(facetdb(valid({ lastChanged: "changed_on" })));
+    expect(onApi).toMatchObject({ ok: false });
+    if (!onApi.ok) {
+      expect(onApi.issues.map((issue) => `${issue.path}: ${issue.message}`)).toEqual([
+        "sources[0].lastChanged: an API source has no lastChanged: your code sends its records to /v1/check; remove lastChanged, or drop api: true to read a table",
+      ]);
     }
   });
 

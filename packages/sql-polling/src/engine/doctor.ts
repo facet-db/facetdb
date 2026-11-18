@@ -8,10 +8,12 @@ import { databaseLabel, plainMessage, subjectOf, urlProblem } from "./urls.ts";
  * `facetdb doctor`'s checks of a polling source, under the names and in the words of the Postgres
  * trigger engine's where the two check the same thing: the connection, the login and the round trip
  * (with the distance as a warning of its own), the pooler where the dialect's driver prepares
- * statements, and the install in the catalog, which says the source polls ("polls every 10 seconds;
- * no trigger") and warns, on a line of its own, when the table has no column to poll by and is read
- * whole every hour. The worker's heartbeat is in the store, which the CLI's store door checks.
- * Nothing is changed.
+ * statements, and the install in the catalog, which says the source polls ("polls every 10 seconds
+ * by updated_at; no trigger", or "reads whole every hour") and, on a polling line of its own, warns
+ * when the table has no column to poll by and the config did not choose the hourly scan
+ * (`lastChanged: false`), or fails when the column the config's `lastChanged` names cannot be
+ * polled by. The worker's heartbeat is in the store, which the CLI's store door checks. Nothing is
+ * changed.
  */
 
 /** The checks, in order, and what each looks at: what `doctor --dry-run` lists. */
@@ -207,7 +209,11 @@ async function poolerCheck(
 
 const REINSTALL = "run facetdb migrate: it prints the SQL first and installs what is missing";
 
-/** The install check, and the hourly-scan warning when the table has no column to poll by. */
+/**
+ * The install check, and the polling line: a warning of the hourly scan when the table has no
+ * column to poll by and the config did not choose the scan, a failure when the column the config's
+ * `lastChanged` names cannot be polled by.
+ */
 async function installCheck(
   dialect: SqlDialect,
   connect: PollingConnect,
@@ -250,12 +256,17 @@ async function installCheck(
         // migrate grants it, and `open` refuses it in the same words.
         ...(unread === undefined ? [] : [unread.message]),
       ];
-      polls = pollingWords(label, found.lastChanged);
+      const unfit = found.lastChangedRefusal;
+      // A column the config's lastChanged names that cannot be polled by fails on the polling
+      // line, in the words migrate and the worker refuse it with: the install is not what is wrong.
+      polls = unfit === undefined ? `; ${pollingWords(label, found.lastChanged)}` : "";
       const scan = hourlyScan(label, found.lastChanged);
       warning =
-        scan === undefined
-          ? undefined
-          : { name: "polling", status: "warn", detail: scan.detail, fix: scan.fix };
+        unfit !== undefined
+          ? { name: "polling", status: "fail", detail: unfit.message, fix: unfit.fix }
+          : scan === undefined
+            ? undefined
+            : { name: "polling", status: "warn", detail: scan.detail, fix: scan.fix };
     }
   } catch (error) {
     const login = dialect.login?.name;
@@ -266,7 +277,7 @@ async function installCheck(
   return {
     check:
       problems.length === 0
-        ? ok("install", `the answer columns and facetdb_state_hash are in place; ${polls}`)
+        ? ok("install", `the answer columns and facetdb_state_hash are in place${polls}`)
         : fail(
             "install",
             problems.map((problem) => `${target.source}: ${problem}`).join("; "),

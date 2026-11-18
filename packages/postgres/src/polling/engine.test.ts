@@ -788,3 +788,117 @@ describe("the trigger engine beside a polling install in the same database", () 
     ]);
   });
 });
+
+describe("a source that names its last-changed column on Postgres (lastChanged)", () => {
+  /** The application's table with the guess's updated_at and the changed_on it really bumps. */
+  async function createWithChangedOn() {
+    await world.client.query(
+      "create table public.listings (id text primary key, title text, description text, updated_at timestamptz not null default now(), changed_on timestamptz not null default now())",
+    );
+  }
+
+  it('lastChanged: "changed_on" polls by it: the note says so, the worker reads it and not updated_at, open polls it with no warning, doctor names it', async () => {
+    await createWithChangedOn();
+    const plan = await migrate({ lastChanged: "changed_on" });
+    expect(plan.notes).toEqual([
+      "FacetDB polls public.listings every 10 seconds by changed_on, the column lastChanged names: the application must set changed_on on every insert and every update, or a change it makes is never noticed",
+    ]);
+    const rights = await workerRights();
+    expect(rights).toContain("SELECT:changed_on");
+    expect(rights).not.toContain("SELECT:updated_at");
+    const connector = await worker.open(target({ lastChanged: "changed_on" }), WORKER_URL, deps);
+    await world.client.query("insert into public.listings (id, title) values ('7', 'a bike')");
+    const sleeps = clock.sleeps.length;
+    const iterator = connector.watch()[Symbol.asyncIterator]();
+    expect(await iterator.next()).toEqual({ done: false, value: ["7"] });
+    await connector.close();
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+    expect(clock.sleeps.slice(sleeps)).toEqual([10_000]);
+    expect(warnings).toEqual([]);
+    const checks = await worker.doctor(target({ lastChanged: "changed_on" }), WORKER_URL, deps);
+    expect(checks.find((check) => check.name === "install")?.detail).toBe(
+      "the answer columns and facetdb_state_hash are in place; FacetDB polls public.listings every 10 seconds by changed_on, the column lastChanged names; no trigger",
+    );
+    expect(checks.some((check) => check.name === "polling")).toBe(false);
+  });
+
+  it("lastChanged: false reads the whole table every hour beside an updated_at: the note says so, and neither the worker nor doctor warns", async () => {
+    await createListings();
+    const plan = await migrate({ lastChanged: false });
+    expect(plan.notes).toEqual([
+      "FacetDB reads public.listings whole every hour, as lastChanged: false says, so a change is noticed within the hour; name in lastChanged a column holding a time, NOT NULL, that the application sets on every insert and every update, and FacetDB polls it every 10 seconds",
+    ]);
+    // No column to poll by: the worker is given no read of updated_at.
+    expect(await workerRights()).not.toContain("SELECT:updated_at");
+    const connector = await worker.open(target({ lastChanged: false }), WORKER_URL, deps);
+    await world.client.query("insert into public.listings (id, title) values ('7', 'a bike')");
+    const sleeps = clock.sleeps.length;
+    const iterator = connector.watch()[Symbol.asyncIterator]();
+    expect(await iterator.next()).toEqual({ done: false, value: ["7"] });
+    await connector.close();
+    expect(await iterator.next()).toEqual({ done: true, value: undefined });
+    expect(clock.sleeps.slice(sleeps)).toEqual([3_600_000]);
+    expect(warnings).toEqual([]);
+    const checks = await worker.doctor(target({ lastChanged: false }), WORKER_URL, deps);
+    expect(checks.map((check) => [check.name, check.status])).toEqual([
+      ["database", "ok"],
+      ["pooler", "ok"],
+      ["install", "ok"],
+      ["worker", "skip"],
+    ]);
+    expect(checks[2]?.detail).toBe(
+      "the answer columns and facetdb_state_hash are in place; FacetDB reads public.listings whole every hour, as lastChanged: false says; no trigger",
+    );
+  });
+
+  it('lastChanged: "nope" is refused before any statement: migrate, then the worker and doctor in the same words', async () => {
+    await createListings();
+    const before = await columns();
+    const refused = await admin.planInstall(target({ lastChanged: "nope" }), ADMIN, {
+      ...deps,
+      workerPassword: PASSWORD,
+    });
+    const refusal = {
+      code: "last-changed-column",
+      message:
+        "public.listings has no column nope, which lastChanged names as the column FacetDB polls by",
+      fix: "name a column of public.listings that holds a time, NOT NULL, set by the application on every insert and every update, in lastChanged, or write lastChanged: false to read the whole table every hour on purpose",
+    };
+    expect(refused).toEqual({ ok: false, refusal });
+    expect(await columns()).toEqual(before);
+    // Installed with the guess, then the config names a column the table lacks.
+    await migrate();
+    await expect(
+      worker.open(target({ lastChanged: "nope" }), WORKER_URL, deps),
+    ).rejects.toMatchObject({ refusal });
+    const checks = await worker.doctor(target({ lastChanged: "nope" }), WORKER_URL, deps);
+    expect(checks.find((check) => check.name === "polling")).toEqual({
+      name: "polling",
+      status: "fail",
+      detail: refusal.message,
+      fix: refusal.fix,
+    });
+  });
+
+  it("refuses a named column that holds no time, and one that may be NULL", async () => {
+    await createListings("nullable");
+    const refusal = async (lastChanged: string) => {
+      const result = await admin.planInstall(target({ lastChanged }), ADMIN, {
+        ...deps,
+        workerPassword: PASSWORD,
+      });
+      return result.ok ? undefined : result.refusal;
+    };
+    expect(await refusal("title")).toEqual({
+      code: "last-changed-column",
+      message:
+        "public.listings's title, which lastChanged names, holds text, not a point in time, so FacetDB cannot tell which rows changed since its last poll",
+      fix: "name a column of public.listings that holds a time (a timestamp or a date), NOT NULL, set by the application on every insert and every update, in lastChanged, or write lastChanged: false to read the whole table every hour on purpose",
+    });
+    expect(await refusal("updated_at")).toMatchObject({
+      code: "last-changed-column",
+      message:
+        "public.listings's updated_at, which lastChanged names, may be NULL, and a row whose updated_at is NULL would never be read again",
+    });
+  });
+});

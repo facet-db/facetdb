@@ -1,4 +1,4 @@
-import { type QuestionSet, STATE_HASH_COLUMN } from "@facetdb/core";
+import { type QuestionSet, type Refusal, STATE_HASH_COLUMN } from "@facetdb/core";
 import type {
   ColumnFacts,
   PollingQuery,
@@ -19,8 +19,9 @@ import { isOwnedMark, markedProject, ownedColumnNames } from "./columns.ts";
  * is preferred. It must hold a point in time and refuse NULL (a row whose value is NULL is never
  * read again after the worker's first poll), and the application must set it on every insert and
  * every update: one set on insert only stops change detection silently, which nothing in the
- * catalog can tell (the migrate note says so). A config field that names the column, or forces the
- * hourly scan, is not there yet.
+ * catalog can tell (the migrate note says so). The guess is only for a source whose config leaves
+ * `lastChanged` out: a name there is used, or refused, and `false` reads the whole table every hour
+ * on purpose.
  */
 export const LAST_CHANGED_NAMES: readonly string[] = [
   "updated_at",
@@ -37,10 +38,18 @@ export const LAST_CHANGED_NAMES: readonly string[] = [
   "modified_on",
 ];
 
-/** The column FacetDB polls by, or none; `nullable` names the one it would have used but for its NULLs. */
+/**
+ * The column FacetDB polls by, or none (the hourly full scan). `named`: the config's `lastChanged`
+ * names the column, rather than the guess by `LAST_CHANGED_NAMES`. `chosen`: the config says
+ * `lastChanged: false`, so the scan is on purpose and nothing warns of it. `nullable` names the
+ * column the guess would have used but for its NULLs.
+ */
 export type LastChanged =
-  | { readonly column: string }
-  | { readonly column?: undefined; readonly nullable?: string };
+  | { readonly column: string; readonly named?: true }
+  | { readonly column?: undefined; readonly chosen?: true; readonly nullable?: string };
+
+/** The refusal's code wherever a named last-changed column cannot be polled by: migrate, prune, open, doctor. */
+export const LAST_CHANGED_CODE = "last-changed-column";
 
 export type PollingTable = {
   readonly table: TableRef;
@@ -59,6 +68,12 @@ export type PollingTable = {
   /** The single-column primary key, or undefined: none, or a composite one. */
   readonly key: string | undefined;
   readonly lastChanged: LastChanged;
+  /**
+   * Why the column the config's `lastChanged` names cannot be polled by (`last-changed-column`):
+   * the table lacks it, it holds no time, it may be NULL, or it is FacetDB's own. Install, prune,
+   * `open` and doctor refuse on it; `lastChanged` is then `{}`. Undefined otherwise.
+   */
+  readonly lastChangedRefusal: Refusal | undefined;
 };
 
 /** The table a source reads, in the dialect's default schema when the config names none. */
@@ -87,6 +102,66 @@ export function lastChangedOf(columns: readonly ColumnFacts[]): LastChanged {
   return nullable === undefined ? {} : { nullable: nullable.name };
 }
 
+/**
+ * The column the config's `lastChanged` names, as the catalog spells it, or why FacetDB cannot poll
+ * by it. The name is matched exactly, else without case when one column alone matches (Oracle keeps
+ * an unquoted `changed_on` as `CHANGED_ON`); several such columns are refused by name, and the
+ * exact spelling asked for. It must not be FacetDB's own (its writes bump them),
+ * and it must hold a point in time and refuse NULL, as the guess's must: a row whose value is NULL
+ * is never read again after the worker's first poll.
+ */
+export function namedLastChanged(
+  table: TableRef,
+  columns: readonly ColumnFacts[],
+  name: string,
+  isOwn: (column: string) => boolean,
+): { readonly column: string } | { readonly refusal: Refusal } {
+  const label = labelOf(table);
+  const otherwise = "or write lastChanged: false to read the whole table every hour on purpose";
+  const refused = (message: string, fix: string) => ({
+    refusal: { code: LAST_CHANGED_CODE, message, fix },
+  });
+  const anyCase = columns.filter((column) => column.name.toLowerCase() === name.toLowerCase());
+  const found =
+    columns.find((column) => column.name === name) ??
+    (anyCase.length === 1 ? anyCase[0] : undefined);
+  const spelled = found?.name ?? name;
+  if (isOwn(spelled)) {
+    return refused(
+      `${spelled}, which lastChanged names, is FacetDB's own column on ${label}, and FacetDB's own writes change it`,
+      `name the application's own last-changed column of ${label} in lastChanged, ${otherwise}`,
+    );
+  }
+  if (found === undefined && anyCase.length > 1) {
+    // Several columns differ from the name only in case (Postgres keeps quoted names as written):
+    // none is picked by guess, and none is said to be missing.
+    const candidates = anyCase.map((column) => column.name).join(", ");
+    return refused(
+      `${label} has no column spelled ${name} exactly, and ${anyCase.length} columns that differ from it only in case (${candidates}), so FacetDB cannot tell which one lastChanged means`,
+      `write the column's exact spelling in lastChanged (one of ${candidates}), ${otherwise}`,
+    );
+  }
+  if (found === undefined) {
+    return refused(
+      `${label} has no column ${name}, which lastChanged names as the column FacetDB polls by`,
+      `name a column of ${label} that holds a time, NOT NULL, set by the application on every insert and every update, in lastChanged, ${otherwise}`,
+    );
+  }
+  if (!found.time) {
+    return refused(
+      `${label}'s ${found.name}, which lastChanged names, holds ${found.type}, not a point in time, so FacetDB cannot tell which rows changed since its last poll`,
+      `name a column of ${label} that holds a time (a timestamp or a date), NOT NULL, set by the application on every insert and every update, in lastChanged, ${otherwise}`,
+    );
+  }
+  if (found.nullable) {
+    return refused(
+      `${label}'s ${found.name}, which lastChanged names, may be NULL, and a row whose ${found.name} is NULL would never be read again`,
+      `make ${found.name} NOT NULL and set it on every insert and every update, ${otherwise}`,
+    );
+  }
+  return { column: found.name };
+}
+
 /** Reads the table, or undefined when it does not exist. Nothing is changed. */
 export async function readTable(
   dialect: SqlDialect,
@@ -95,6 +170,8 @@ export async function readTable(
     readonly table: string;
     readonly schema?: string;
     readonly questionSet: QuestionSet;
+    /** The config's `lastChanged`: a column's name, `false` for the hourly scan, absent for the guess. */
+    readonly lastChanged?: string | false;
   },
 ): Promise<PollingTable | undefined> {
   const table = tableOf(dialect, target);
@@ -111,6 +188,25 @@ export async function readTable(
   const wanted = new Set(ownedColumnNames(target.questionSet));
   const hash = owned.find((column) => column.name === STATE_HASH_COLUMN);
   const [key, ...more] = facts.key;
+  const setting = target.lastChanged;
+  const named =
+    typeof setting === "string"
+      ? namedLastChanged(
+          table,
+          facts.columns,
+          setting,
+          (name) => ownedNames.has(name) || wanted.has(name),
+        )
+      : undefined;
+  let lastChanged: LastChanged;
+  if (named !== undefined) {
+    lastChanged = "column" in named ? { column: named.column, named: true } : {};
+  } else if (setting === false) {
+    lastChanged = { chosen: true };
+  } else {
+    // FacetDB's own columns are never the application's last-changed one: its writes bump them.
+    lastChanged = lastChangedOf(facts.columns.filter((column) => !ownedNames.has(column.name)));
+  }
   return {
     table,
     facts,
@@ -121,7 +217,7 @@ export async function readTable(
     installed: hash !== undefined,
     project: hash === undefined ? undefined : markedProject(markOf(hash)),
     key: more.length === 0 ? key : undefined,
-    // FacetDB's own columns are never the application's last-changed one: its writes bump them.
-    lastChanged: lastChangedOf(facts.columns.filter((column) => !ownedNames.has(column.name))),
+    lastChanged,
+    lastChangedRefusal: named !== undefined && "refusal" in named ? named.refusal : undefined,
   };
 }

@@ -72,6 +72,14 @@ export type EngineTarget = {
    * the config loader refuses it on any other database.
    */
   readonly capture?: "trigger" | "change-tracking";
+  /**
+   * The column a polled table is read by ("polling with a state hash … using a last-changed column;
+   * without one, a full scan every hour, with a warning"): its name, or `false` for the hourly full
+   * scan on purpose, with no warning. Absent: the polling engine looks for one by name
+   * (`updated_at`, `modified_at` …). Only the polling engine reads it; an engine with a trigger or
+   * a change feed has no use for it.
+   */
+  readonly lastChanged?: string | false;
   /** What a change to a decided record does to its status. */
   readonly onChange: OnChange;
   /**

@@ -261,6 +261,21 @@ function captureIssue(source: {
   return `capture: "change-tracking" is SQL Server's Change Tracking, and this source's connection string ${what}; remove capture (that database is watched by its trigger), or point the source at a SQL Server with an mssql: or sqlserver: connection string`;
 }
 
+/**
+ * A column's name as `lastChanged` takes it: an identifier of the source's database, in any case
+ * (Oracle keeps unquoted names in capitals), never empty and never SQL. The polling engine quotes
+ * it, and refuses it at migrate when the table has no such column.
+ */
+const COLUMN_NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+const LAST_CHANGED_RULE =
+  'lastChanged names the column the application sets on every insert and every update, such as "changed_on" (letters, digits, underscores and dollar signs, starting with a letter or an underscore), or is false to read the whole table every hour; for a column named otherwise, rename the column, or write lastChanged: false for the hourly scan';
+
+// "Using a last-changed column; without one, a full scan every hour".
+const lastChangedSchema = z
+  .union([z.literal(false), z.string()], { error: LAST_CHANGED_RULE })
+  .refine((value) => value === false || COLUMN_NAME.test(value), { error: LAST_CHANGED_RULE });
+
 const sourceSchema = strict({
   name: identifier("a source name"),
   api: z.boolean().default(false),
@@ -280,6 +295,7 @@ const sourceSchema = strict({
         'capture must be "trigger" (the default) or "change-tracking" (SQL Server only: watch the table without a trigger)',
     })
     .exactOptional(),
+  lastChanged: lastChangedSchema.exactOptional(),
   table: z.string().min(1, "table must not be empty").exactOptional(),
   // The rest of the question-set fields are judged by core's schema, per source, below.
   where: z.unknown().optional(),
@@ -361,6 +377,7 @@ function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] 
       "databaseEnv",
       "connector",
       "capture",
+      "lastChanged",
     ] as const) {
       if (source[field] !== undefined) {
         issues.push({
@@ -509,6 +526,7 @@ function sourceConfig(
     ...(source.databaseEnv === undefined ? {} : { databaseEnv: source.databaseEnv }),
     ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.capture === undefined ? {} : { capture: source.capture }),
+    ...(source.lastChanged === undefined ? {} : { lastChanged: source.lastChanged }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(questionSet.where === undefined ? {} : { where: questionSet.where }),
     read: questionSet.read,

@@ -169,6 +169,8 @@ export function engineTarget(
     storage: target.source.storage,
     // Absent unless the config says: every engine but SQL Server's knows one capture.
     ...(target.source.capture === undefined ? {} : { capture: target.source.capture }),
+    // Absent unless the config says: only the polling engine reads it.
+    ...(target.source.lastChanged === undefined ? {} : { lastChanged: target.source.lastChanged }),
     onChange: target.source.onChange,
     questionSet: questionSetOf(config, target.source),
     urlVariable: variableOf(target.source),

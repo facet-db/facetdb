@@ -25,6 +25,7 @@ export type SourceJson = {
   readonly database?: { readonly env: string };
   readonly connector?: ConnectorChoice;
   readonly capture?: CaptureMode;
+  readonly lastChanged?: string | false;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -64,6 +65,7 @@ function sourceJson(source: SourceConfig): SourceJson {
     ...(source.databaseEnv === undefined ? {} : { database: { env: source.databaseEnv } }),
     ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.capture === undefined ? {} : { capture: source.capture }),
+    ...(source.lastChanged === undefined ? {} : { lastChanged: source.lastChanged }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(source.where === undefined ? {} : { where: source.where }),
     read: source.read,
@@ -206,6 +208,7 @@ function sourceSource(source: SourceConfig): string {
     if (source.connector !== undefined) fields.push(`connector: ${text(source.connector)}`);
     if (source.capture !== undefined) fields.push(`capture: ${text(source.capture)}`);
     fields.push(`table: ${text(source.table)}`);
+    if (source.lastChanged !== undefined) fields.push(`lastChanged: ${text(source.lastChanged)}`);
   }
   if (source.where !== undefined) fields.push(`where: ${text(source.where)}`);
   fields.push(`read: ${text(source.read)}`);

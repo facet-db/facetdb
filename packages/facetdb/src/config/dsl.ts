@@ -141,6 +141,13 @@ export type SourceInput = {
   readonly connector?: ConnectorChoice;
   /** SQL Server only: `"change-tracking"` watches the table without a trigger; `"trigger"` by default. */
   readonly capture?: CaptureMode;
+  /**
+   * A polled table only (CockroachDB, Oracle, `connector: "polling"`): the column the application
+   * sets on every insert and every update, which FacetDB polls by every 10 seconds; or `false` to
+   * read the whole table every hour, on purpose and without a warning. Left out, FacetDB looks for
+   * an `updated_at`, `modified_at` or the like.
+   */
+  readonly lastChanged?: string | false;
   /** An API source: your code sends the records to `/v1/check`. */
   readonly api?: boolean;
   readonly table?: string;
@@ -179,6 +186,8 @@ export type SourceConfig = {
   readonly connector?: ConnectorChoice;
   /** How a SQL Server source notices changes, when the config says; absent, the trigger. */
   readonly capture?: CaptureMode;
+  /** The column a polled table is read by, or `false` for the hourly scan; absent, found by name. */
+  readonly lastChanged?: string | false;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -243,6 +252,7 @@ function sourceConfig(input: SourceInput): SourceConfig {
     database: input.database,
     connector: input.connector,
     capture: input.capture,
+    lastChanged: input.lastChanged,
     table: input.table,
     where: input.where,
     read: input.read,

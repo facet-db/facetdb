@@ -107,6 +107,12 @@ Rules of the shape:
   A source may set its own `model`.
 - Optional project settings: `spendingCap` with `onCapReached` (`"pause"` or `"continue"`), `modelUrl`
   for a compatible server, and per source `maxStateTokens`.
+- A table watched by polling (CockroachDB, Oracle, or `connector: "polling"`) is read by the column the
+  application sets on every insert and every update: name it with `lastChanged: "changed_on"` (a time,
+  NOT NULL), or write `lastChanged: false` to read the whole table every hour on purpose, without a
+  warning. Left out, FacetDB looks for an `updated_at`, `modified_at` or the like and warns when it
+  finds none. `facetdb migrate` refuses a name the table lacks or that is not a time, before it runs
+  anything.
 - An action is a call into a plugin (`slack.notify(...)`). `when` conditions compare decisions
   (`{ urgency: "high" }`). Actions run after a decision is written, never before.
 

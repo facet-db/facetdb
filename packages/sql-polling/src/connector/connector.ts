@@ -58,6 +58,11 @@ export type PollingConnectorOptions = {
   readonly intervalMs?: number;
   /** How often `watch` reads the whole table without one. Defaults to one hour. */
   readonly fullScanIntervalMs?: number;
+  /**
+   * The source's config chose the full scan (`lastChanged: false`): `watch` reads the whole table
+   * as without a column, and does not warn of it.
+   */
+  readonly fullScanChosen?: boolean;
   /** Rows per database page, for polls and for `scan`. Defaults to 500. */
   readonly pageSize?: number;
   /**
@@ -120,6 +125,7 @@ export function createPollingConnector(
     warn,
     intervalMs = POLL_INTERVAL_MS,
     fullScanIntervalMs = FULL_SCAN_INTERVAL_MS,
+    fullScanChosen = false,
     pageSize = DEFAULT_PAGE_SIZE,
   } = options;
   if (!Number.isInteger(pageSize) || pageSize < 1) {
@@ -260,7 +266,7 @@ export function createPollingConnector(
   }
 
   async function* watch(): AsyncGenerator<readonly RecordKey[], void, undefined> {
-    if (changedColumn === undefined) {
+    if (changedColumn === undefined && !fullScanChosen) {
       warn(
         `${labelOf(ref)} has no last-changed column, so FacetDB reads the whole table every ${fullScanIntervalMs / 60_000} minutes; give it an updated_at the application sets on every insert and every update (NOT NULL) to notice changes within ${intervalMs / 1000} seconds`,
       );

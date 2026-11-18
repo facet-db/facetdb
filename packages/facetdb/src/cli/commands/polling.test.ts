@@ -312,3 +312,55 @@ describe('facetdb doctor with connector: "polling"', () => {
     );
   });
 });
+
+describe("facetdb migrate with lastChanged on a polled source", () => {
+  /** The polled source with `lastChanged` as the config file would say it. */
+  function naming(lastChanged: string | false): ProjectConfig {
+    const config = polling();
+    return {
+      ...config,
+      sources: config.sources.map((source) => ({ ...source, lastChanged })),
+    };
+  }
+
+  it("says which column the poll compares, the one lastChanged names", async () => {
+    await world.client.query(
+      "alter table public.listings add column changed_on timestamptz not null default now()",
+    );
+    const dry = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL], {
+      config: naming("changed_on"),
+    });
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain(
+      "note: FacetDB polls public.listings every 10 seconds by changed_on, the column lastChanged names: the application must set changed_on on every insert and every update, or a change it makes is never noticed\n",
+    );
+  });
+
+  it("with false, says the table is read whole every hour, and warns of nothing", async () => {
+    const dry = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL], {
+      config: naming(false),
+    });
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain(
+      "note: FacetDB reads public.listings whole every hour, as lastChanged: false says, so a change is noticed within the hour;",
+    );
+    expect(dry.stdout).not.toContain("has no last-changed column");
+  });
+
+  it("refuses a column the table lacks before any statement, with the fix", async () => {
+    const result = await run(["migrate", "--admin-url", ADMIN_URL], {
+      config: naming("nope"),
+      answers: ["yes"],
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "error: public.listings has no column nope, which lastChanged names as the column FacetDB polls by",
+    );
+    expect(result.stderr).toContain(
+      "fix: name a column of public.listings that holds a time, NOT NULL, set by the application on every insert and every update, in lastChanged, or write lastChanged: false to read the whole table every hour on purpose",
+    );
+    expect(result.prompts).toEqual([]);
+    expect(result.stdout).not.toContain('alter table "public"."listings"');
+    expect(await columns()).toEqual(APP_COLUMNS);
+  });
+});

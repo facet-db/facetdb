@@ -15,6 +15,7 @@ import {
   anotherProject,
   installPlan,
   keyProblem,
+  lastChangedRefused,
   logOnlyPlan,
   missingTable,
   prunePlan,
@@ -33,7 +34,9 @@ import { adminUrlRefusal, subjectOf, workerUrlRefusal } from "./urls.ts";
  * where the dialect has logins; no trigger and no jobs table. Its plans hold `source` statements
  * only, whatever `storeShared` says: the store is always a Postgres and this engine is every SQL
  * database's, so the CLI's store door runs the store's part for a polling source. `open` hands out
- * the polling connector, with the column it polls by found in the catalog.
+ * the polling connector, with the column it polls by found in the catalog: the one the source's
+ * `lastChanged` names, none for `lastChanged: false`, else the first fitting name. Install, prune,
+ * `open` and doctor read that one decision, so migrate and the worker agree.
  */
 
 export type PollingEngineOptions = {
@@ -139,6 +142,13 @@ export function pollingEngine(
         if (taken !== undefined) {
           return taken;
         }
+        // The column the config names is checked before anything is planned: a poll by a column
+        // that is not there would fail at the worker's first read, and one by a column that is not
+        // a time, or may be NULL, would miss changes without a word.
+        const unfit = lastChangedRefused(found);
+        if (unfit !== undefined) {
+          return unfit;
+        }
         const login = await loginOf(query);
         if (login !== undefined && !login.exists && installOptions.workerPassword === undefined) {
           // The contract's code, before anything is drafted: the CLI words it from the source's
@@ -213,6 +223,12 @@ export function pollingEngine(
             `${labelOf(found.table)} no longer has a single-column primary key, which FacetDB installed by; restore it first.`,
           );
         }
+        // The worker's read of the column it polls by stays; one the config names wrongly is
+        // refused here as at install, never read as "no column" and revoked.
+        const unfit = lastChangedRefused(found);
+        if (unfit !== undefined) {
+          return unfit;
+        }
         return { ok: true, plan: prunePlan(dialect, target, found, key, await loginOf(query)) };
       });
     },
@@ -266,7 +282,13 @@ export function pollingEngine(
             fix: "point this source at its own table, or run the worker of the project that installed it",
           });
         }
-        const column = found.lastChanged.column;
+        // The config's lastChanged decides here as at migrate: a column it names that the worker
+        // cannot poll by is refused in migrate's words, never polled as "no column".
+        if (found.lastChangedRefusal !== undefined) {
+          throw new EngineRefusal(found.lastChangedRefusal);
+        }
+        const { lastChanged } = found;
+        const column = lastChanged.column;
         // A column the application added after the install: the worker's first poll would fail on
         // it, so it is refused now, with the command that grants the read.
         const unread = unreadColumn(found);
@@ -279,6 +301,10 @@ export function pollingEngine(
           { ...target, key },
           {
             ...(column === undefined ? {} : { lastChangedColumn: column }),
+            // lastChanged: false chose the hourly scan: the worker does not warn of it.
+            ...(lastChanged.column === undefined && lastChanged.chosen === true
+              ? { fullScanChosen: true }
+              : {}),
             // Each state field read by its type where the dialect needs it (an Oracle CLOB, whole).
             columns: found.facts.columns,
             clock: openOptions.clock,
