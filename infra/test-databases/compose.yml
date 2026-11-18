@@ -7,8 +7,8 @@
 # here: DATABASE_URL names the one you already run.
 #
 # The passwords are test-only and written here: nothing of a customer ever enters these containers,
-# and every port binds to 127.0.0.1. Every image is pinned by tag and digest;
-# to move one, resolve its tag's digest again and change both, e.g.
+# and every port binds to 127.0.0.1. Every image is pinned by tag and digest; to move one, resolve
+# its tag's digest again and change both, e.g.
 #   skopeo inspect --format '{{.Digest}}' docker://docker.io/library/mysql:8.4
 # Healthchecks use the CMD-SHELL form only: podman-compose 1.0.6 (Ubuntu 24.04) joins the
 # arguments of the exec form into one word. The URLs live in scripts/test-databases.sh.
@@ -47,6 +47,8 @@ services:
       start_period: 30s
 
   mssql:
+    # amd64 only: this digest pins a single-arch linux/amd64 image (SQL Server's is published for
+    # amd64 alone), so an arm64 machine (Apple silicon, an ARM VPS) runs it under emulation at best.
     image: mcr.microsoft.com/mssql/server:2022-latest@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
     container_name: facetdb-mssql
     environment:

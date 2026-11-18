@@ -17,9 +17,10 @@
 # Memory: the whole set needs about 6 GB (SQL Server alone 2 GB, Oracle Free about 2 GB), more than
 # a laptop can spare beside other work: start fewer, by name (mysql mariadb mssql mongo libsql
 # cockroach oracle). CI starts them all. DATABASE_URL stays your own Postgres, not one of these.
-# Compose: `podman compose` when it works (Podman needs a provider: sudo apt-get
-# install podman-compose), else `docker compose`; TEST_DATABASES_COMPOSE=podman|docker picks one
-# (CI: docker). TEST_DATABASES_TIMEOUT bounds the wait for health (seconds, default 300).
+# Compose: `podman-compose` when it is on PATH, else `podman compose` when it works (Podman needs a
+# provider: sudo apt-get install podman-compose), else `docker compose`;
+# TEST_DATABASES_COMPOSE=podman|docker picks one (CI: docker). TEST_DATABASES_TIMEOUT bounds the
+# wait for health (seconds, default 300).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 say() { echo "test-databases: $*" >&2; }
@@ -45,21 +46,29 @@ field() { awk -v e="$1" -v n="$2" '$1 == e { print $n }' <<<"$TABLE"; } # field 
 ENGINE=""
 T0=$SECONDS
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# pick_compose: `podman compose` first, else `docker compose`, unless
-# TEST_DATABASES_COMPOSE names one. `compose version` fails when Podman has no provider.
+# pick_compose: Podman first, else `docker compose`, unless TEST_DATABASES_COMPOSE names one. For
+# Podman, `podman-compose` on PATH is called directly, before `podman compose`, whose provider
+# lookup prefers Docker's compose plugin when Docker is installed beside podman. `compose version`
+# fails when Podman has no provider. Sets ENGINE (podman or docker: containers, logs, health) and
+# COMPOSE (the compose command).
+COMPOSE=()
 pick_compose() {
   local want="${TEST_DATABASES_COMPOSE:-}" c
   case "$want" in podman | docker | "") ;; *) die "TEST_DATABASES_COMPOSE is podman or docker, not '$want'" ;; esac
   for c in ${want:-podman docker}; do
-    if command -v "$c" >/dev/null 2>&1 && "$c" compose version >/dev/null 2>&1; then ENGINE="$c"; return 0; fi
+    command -v "$c" >/dev/null 2>&1 || continue
+    if [[ "$c" == podman ]] && command -v podman-compose >/dev/null 2>&1 && podman-compose version >/dev/null 2>&1; then
+      ENGINE=podman; COMPOSE=(podman-compose); return 0
+    fi
+    if "$c" compose version >/dev/null 2>&1; then ENGINE="$c"; COMPOSE=("$c" compose); return 0; fi
   done
   [[ -z "$want" ]] || die "'$want compose' does not work here ('$want compose version' fails)"
   die "neither podman compose nor docker compose works here; rootless Podman needs a compose provider: sudo apt-get install podman podman-compose"
 }
 # compose <args…>: the project's compose, its output on stderr (stdout carries only export lines).
-compose() { PODMAN_COMPOSE_WARNING_LOGS=false "$ENGINE" compose -p "$PROJECT" -f "$FILE" "$@" >&2; }
+compose() { PODMAN_COMPOSE_WARNING_LOGS=false "${COMPOSE[@]}" -p "$PROJECT" -f "$FILE" "$@" >&2; }
 
 # inspect <engine> <template>: one field of the container, on one line; fails when there is none.
 # Docker prints an empty line for a missing container before failing: the exit code decides, and
@@ -95,7 +104,7 @@ wait_healthy() {
       case "$h" in
         healthy) say "$e healthy after $((SECONDS - T0))s" ;;
         starting | unhealthy) next+=("$e") ;;
-        absent) die "$e was not created; $ENGINE compose's output is above" ;;
+        absent) die "$e was not created; ${COMPOSE[*]}'s output is above" ;;
         *) logs_tail "$e"; die "$e is $h, not running" ;;
       esac
     done
@@ -122,8 +131,8 @@ print_env() {
 up() {
   (($#)) || set -- "${ENGINES[@]}"
   T0=$SECONDS
-  say "starting $* with $ENGINE compose (a first start pulls the images)"
-  compose up -d "$@" || die "$ENGINE compose up failed; its output is above"
+  say "starting $* with ${COMPOSE[*]} (a first start pulls the images)"
+  compose up -d "$@" || die "${COMPOSE[*]} up failed; its output is above"
   say "created in $((SECONDS - T0))s; waiting until each engine is healthy"
   wait_healthy "$@"
   say "healthy in $((SECONDS - T0))s"
@@ -149,7 +158,7 @@ down() {
     [[ "$(state "$e")" != absent ]] || continue
     if "$ENGINE" rm -f -v "${now[@]}" "facetdb-$e" >/dev/null; then say "$e: container and data deleted"; else rc=1; fi
   done
-  compose down || say "$ENGINE compose down reported the lines above; the engines' containers are gone"
+  compose down || say "${COMPOSE[*]} down reported the lines above; the engines' containers are gone"
   return "$rc"
 }
 

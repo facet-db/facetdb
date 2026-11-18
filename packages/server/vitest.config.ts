@@ -13,6 +13,9 @@ export default defineConfig({
     // the workers start (postgres' testing/pglite.ts), and a cold checkout gets 15 s a test.
     globalSetup: ["../postgres/src/testing/global-setup.ts"],
     testTimeout: 15_000,
+    // A test file's beforeAll boots PGlite, and CI's runner is about four times slower than the
+    // laptop (see facetdb's config): vitest's 10 s hook default is too tight there.
+    hookTimeout: 30_000,
     // Same cap as the root config (an uncapped run spawns one worker per core; see vitest.config.ts).
     maxWorkers: 4,
   },
