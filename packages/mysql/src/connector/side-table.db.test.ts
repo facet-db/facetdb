@@ -8,11 +8,12 @@ import type {
   StateValue,
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
 import {
   createMysqlInstaller,
   JOBS_TABLE,
+  SETTINGS,
   sideTableName,
   sideViewName,
   WORKER_ACCOUNT,
@@ -82,6 +83,22 @@ function deps(clock: Clock): EngineDeps {
   return { clock, allowInsecure: false, storeShared: false };
 }
 
+/**
+ * What a reset makes and nothing else drops: the scratch database, the worker login and the reader,
+ * whose passwords are this file's. The suite's `afterAll` drops them on each server, whatever its
+ * cases did.
+ */
+async function dropScratch(server: string): Promise<void> {
+  const root = connectMysql(server);
+  try {
+    await root.query(`drop database if exists \`${SCRATCH}\``);
+    await root.query(`drop user if exists ${WORKER_ACCOUNT}`);
+    await root.query(`drop user if exists '${READER}'@'%'`);
+  } finally {
+    await root.close();
+  }
+}
+
 /** One scratch database on the server, installed by the plan in side-table mode. */
 class World {
   readonly clock = new FakeClock(START);
@@ -104,12 +121,10 @@ class World {
 
   /** A fresh scratch database, a fresh worker login and no reader, then the table (`options` after its columns). */
   async reset(options = "engine = InnoDB"): Promise<void> {
+    await dropScratch(this.server);
     const root = connectMysql(this.server);
     try {
-      await root.query(`drop database if exists \`${SCRATCH}\``);
       await root.query(`create database \`${SCRATCH}\` character set utf8mb4`);
-      await root.query(`drop user if exists ${WORKER_ACCOUNT}`);
-      await root.query(`drop user if exists '${READER}'@'%'`);
     } finally {
       await root.close();
     }
@@ -283,6 +298,10 @@ for (const variable of URL_VARIABLES) {
       for (const made of worlds.splice(0)) {
         await made.close();
       }
+    });
+    // The shared server keeps no account or database of this suite's, whatever its cases did.
+    afterAll(async () => {
+      await dropScratch(serverUrl(variable as UrlVariable));
     });
 
     async function world(target?: EngineTarget, engine?: string): Promise<World> {
@@ -473,7 +492,7 @@ for (const variable of URL_VARIABLES) {
 
       const plan = await made.plan();
       expect(plan.statements.map((statement) => statement.text)).toEqual([
-        "set session lock_wait_timeout = 10",
+        SETTINGS.text,
         expect.stringContaining("-- stops the script here"),
         `grant select on \`${SCRATCH}\`.\`${SIDE}\` to '${READER}'@'%'`,
         `grant select on \`${SCRATCH}\`.\`${VIEW}\` to '${READER}'@'%'`,

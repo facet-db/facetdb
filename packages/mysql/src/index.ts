@@ -17,6 +17,7 @@ export * from "./connector/index.ts";
 export * from "./engine/index.ts";
 // The install, uninstall and prune plans, their script and their run.
 export {
+  CREATION_COLUMN,
   createMysqlInstaller,
   JOBS_TABLE,
   type MysqlInstaller,

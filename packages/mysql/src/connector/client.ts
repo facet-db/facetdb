@@ -65,6 +65,10 @@ export const DEFAULT_MAX_CONNECTIONS = 10;
  *   longer matches instead of waiting for the transaction that holds it (InnoDB's semi-consistent
  *   read). Every other statement of the connector is a single row by its key, or a settle's probe
  *   that never waits, so the level changes nothing else.
+ *
+ * The session keeps the server's time zone: the queue's `enqueued_at` default is taken in the
+ * inserting session's zone, so a worker session in another zone would stamp its jobs apart from the
+ * application's triggers and the claim's `order by enqueued_at` would mix them.
  */
 export const SESSION_STATEMENTS: readonly string[] = [
   "set session sql_mode = trim(both ',' from replace(concat(',', @@session.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','))",

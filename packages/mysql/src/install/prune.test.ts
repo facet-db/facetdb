@@ -17,6 +17,7 @@ import {
   KEPT_REASON,
   PRUNE_RERUN_NOTE,
   REFUSED_FIX,
+  SETTINGS,
   WORKER_ACCOUNT,
 } from "./index.ts";
 
@@ -93,7 +94,7 @@ describe("planPrune", () => {
     const installed = installedListings(listingsTarget({ questionSet: withCategory(false) }));
     const plan = planOf(await planned(installed, listingsTarget()));
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       "revoke select (`category`, `category_confidence`), update (`category`, `category_confidence`)\n  on `app`.`listings` from 'facetdb_worker'@'%'",
       "alter table `app`.`listings`\n  drop column `category`,\n  drop column `category_confidence`",
     ]);
@@ -176,7 +177,7 @@ describe("planPrune", () => {
       ),
     );
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       "revoke select (`description`)\n  on `app`.`listings` from 'facetdb_worker'@'%'",
     ]);
     expect(plan.removes).toEqual([
@@ -188,6 +189,44 @@ describe("planPrune", () => {
         reason: "read no longer lists it",
       },
     ]);
+  });
+
+  it("keeps the worker's read of a time-typed created_at, which its scan orders by, and takes back any other", async () => {
+    const installed = installedListings();
+    const withMarker = (type: string): ScriptedDatabase => ({
+      ...installed,
+      tables: installed.tables.map((table) =>
+        table.name === "listings"
+          ? { ...table, columns: [...table.columns, { name: "created_at", type }] }
+          : table,
+      ),
+      worker: {
+        ...installed.worker,
+        columns: [
+          ...(installed.worker?.columns ?? []),
+          { table: "listings", column: "created_at", privilege: "SELECT" },
+        ],
+      },
+    });
+    expect(planOf(await planned(withMarker("datetime(3)"), listingsTarget()))).toEqual(EMPTY);
+    expect(planOf(await planned(withMarker("timestamp"), listingsTarget()))).toEqual(EMPTY);
+    // A created_at that is not a time orders nothing: the worker's read of it is not install's.
+    expect(texts(planOf(await planned(withMarker("varchar(32)"), listingsTarget())))).toEqual([
+      SETTINGS.text,
+      "revoke select (`created_at`)\n  on `app`.`listings` from 'facetdb_worker'@'%'",
+    ]);
+  });
+
+  it("refuses an admin who may not read mysql.user, in words that name the right to grant", async () => {
+    const denied = await planned(
+      { ...installedListings(), deniedGrantTables: ["user"] },
+      listingsTarget({ questionSet: { ...LISTINGS_QUESTIONS, read: ["title"] } }),
+    );
+    expect(refusalOf(denied)).toMatchObject({
+      code: "admin-rights",
+      fix: expect.stringContaining("grant select on mysql.user to <the admin account>"),
+    });
+    expect(denied.driver.closed).toBe(1);
   });
 
   it("is an empty plan when there is nothing to prune, or nothing installed yet", async () => {

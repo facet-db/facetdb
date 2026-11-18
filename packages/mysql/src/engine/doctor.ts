@@ -1,16 +1,20 @@
 import type { Clock, DoctorCheck, EngineDeps, EngineTarget } from "@facetdb/core";
 import {
+  engineRefusal,
   JOBS_TABLE,
   OWNED_MARK,
   OWNERS_TABLE,
   ownedColumns,
   readColumns,
   readFacetdbTables,
+  readRelation,
   readTableType,
   readWorkerRights,
   SIDE_TABLE_PRIVILEGES,
+  STATEMENT_FORMAT_PROBLEM,
   sideTableName,
   sideViewName,
+  statementFormatFix,
   WORKER_ACCOUNT,
   WORKER_USER,
   type WorkerRights,
@@ -54,7 +58,7 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
   {
     name: "install",
     looksAt:
-      "reads the catalog as the worker sees it for FacetDB's marked columns, the jobs table and the project's marker row",
+      "reads the catalog as the worker sees it for FacetDB's marked columns, the jobs table and the project's marker row, and in side-table mode that the table is still InnoDB",
   },
   {
     name: "grants",
@@ -179,13 +183,7 @@ function settingsWarnings(session: Session): readonly DoctorCheck[] {
         ]
       : []),
     ...(session.binaryLogging && session.binlogFormat === "STATEMENT"
-      ? [
-          fail(
-            "binlog",
-            "binary logging is on with binlog_format = STATEMENT, under which InnoDB refuses the worker's writes in its read committed sessions (error 1665), so every claim, write and ack would fail",
-            "set binlog_format to ROW or MIXED (MySQL 8's default is ROW), then run doctor again",
-          ),
-        ]
+      ? [fail("binlog", STATEMENT_FORMAT_PROBLEM, statementFormatFix("doctor"))]
       : []),
     ...(session.sqlMode.split(",").includes("NO_BACKSLASH_ESCAPES")
       ? [
@@ -279,10 +277,18 @@ async function installChecks(
       skip("queue", "the table is another project's"),
     ];
   }
-  const install = ok(
-    "install",
-    `${owned.length} marked columns on ${holderLabel}${side ? `, the view ${viewLabel}` : ""}, the jobs table and the marker row of project ${target.project.id} are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
-  );
+  // Side-table mode needs an InnoDB table, which install checked once: a table converted since
+  // brings back the lock wait install refuses it for, said in install's words.
+  const engine = side
+    ? engineRefusal((await readRelation(query, schema, target.table)).engine, label)
+    : undefined;
+  const install =
+    engine === undefined
+      ? ok(
+          "install",
+          `${owned.length} marked columns on ${holderLabel}${side ? `, the view ${viewLabel}` : ""}, the jobs table and the marker row of project ${target.project.id} are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
+        )
+      : fail("install", engine.message, engine.fix);
   if (!rights.tables.some((held) => held.table === JOBS_TABLE && held.privilege === "SELECT")) {
     return [install, skip("queue", "the worker login may not read the jobs table")];
   }

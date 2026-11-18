@@ -12,7 +12,6 @@ export {
 } from "./client.ts";
 export {
   CLAIM_LEASE_MS,
-  CREATION_COLUMN,
   createMysqlConnector,
   MYSQL_CAPABILITIES,
   type MysqlConnector,

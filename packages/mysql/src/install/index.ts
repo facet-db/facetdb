@@ -2,6 +2,8 @@ export {
   type Catalog,
   type CatalogColumn,
   type CatalogTrigger,
+  CREATION_COLUMN,
+  CREATION_TYPES,
   isMariaDb,
   type Owner,
   readCatalog,
@@ -26,9 +28,11 @@ export {
   type MysqlInstallerOptions,
 } from "./installer.ts";
 export { KEPT_REASON, PRUNE_RERUN_NOTE } from "./prune.ts";
-export { REFUSED_FIX } from "./refusals.ts";
+export { REFUSED_FIX, STATEMENT_FORMAT_PROBLEM, statementFormatFix } from "./refusals.ts";
 export {
+  engineRefusal,
   normalizedDefinition,
+  readRelation,
   SIDE_TABLE_NAME_LIMIT,
   SIDE_TABLE_PRIVILEGES,
   sideKeyConstraint,
@@ -48,6 +52,7 @@ export {
   RECORD_KEY_LENGTH,
   renderScript,
   SCRIPT_HEADER,
+  SETTINGS,
   type TriggerDefinition,
   type TriggerNames,
   triggerDefinitions,

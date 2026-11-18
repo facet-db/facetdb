@@ -1,5 +1,5 @@
 import type { MysqlRow } from "../sql/index.ts";
-import type { Answer } from "./recording.ts";
+import { type Answer, mysqlError } from "./recording.ts";
 
 /**
  * A MySQL database as the install, uninstall and prune plans read it, scripted: the answers of the
@@ -99,6 +99,13 @@ export type ScriptedDatabase = {
     readonly trustCreators: boolean;
     readonly superUser: boolean;
   };
+  /** `@@global.binlog_format`; `ROW`, MySQL 8's default, when absent. */
+  readonly binlogFormat?: string;
+  /**
+   * The `mysql` schema's tables the admin may not read: a select on one fails as the server's does
+   * (error 1142). None when absent.
+   */
+  readonly deniedGrantTables?: readonly ("user" | "tables_priv")[];
   /**
    * The views that read a table of the schema, as `information_schema.view_table_usage` lists them;
    * `unlisted` for a server without that view (MariaDB). None, listed, when absent.
@@ -171,9 +178,19 @@ export function scriptedDatabase(database: ScriptedDatabase): Answer {
         {
           log_bin: triggerRights.binaryLogging ? 1 : 0,
           trust_creators: triggerRights.trustCreators ? 1 : 0,
+          binlog_format: database.binlogFormat ?? "ROW",
           super_user: triggerRights.superUser ? 1 : 0,
         },
       ];
+    }
+    for (const denied of database.deniedGrantTables ?? []) {
+      if (text.includes(`from mysql.${denied} `) || text.endsWith(`from mysql.${denied}`)) {
+        throw mysqlError(
+          1142,
+          "ER_TABLEACCESS_DENIED_ERROR",
+          `SELECT command denied to user 'admin'@'%' for table '${denied}'`,
+        );
+      }
     }
     if (text.includes("select database()")) {
       return [{ name: database.database }];

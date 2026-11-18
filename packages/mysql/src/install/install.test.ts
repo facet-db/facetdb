@@ -13,6 +13,7 @@ import {
   ENGINE_DEPS,
   freshListings,
   installedListings,
+  installedSideListings,
   LISTINGS_JOBS,
   LISTINGS_QUESTIONS,
   LISTINGS_TABLE,
@@ -23,6 +24,7 @@ import {
   recordingDriver,
   type ScriptedDatabase,
   scriptedDatabase,
+  sideListingsTarget,
 } from "../testing/index.ts";
 import {
   createMysqlInstaller,
@@ -32,6 +34,7 @@ import {
   QUEUE_NOTE,
   REFUSED_FIX,
   SCRIPT_HEADER,
+  SETTINGS,
   WORKER_ACCOUNT,
 } from "./index.ts";
 
@@ -285,7 +288,7 @@ describe("planInstall: only what is missing", () => {
     });
     const plan = planOf(await planned(installedListings(), target));
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       expect.stringMatching(/^-- stops the script here/),
       "alter table `app`.`listings`\n  add column `category` varchar(255) comment 'facetdb',\n  add column `category_confidence` float comment 'facetdb',\n  add column `category_probabilities` json comment 'facetdb'",
       "grant select (`category`, `category_confidence`, `category_probabilities`)\n  on `app`.`listings` to 'facetdb_worker'@'%'",
@@ -305,7 +308,7 @@ describe("planInstall: only what is missing", () => {
     ]);
     const plan = planOf(await planned(database, target));
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       expect.stringMatching(/^-- stops the script here/),
       "grant select (`price`)\n  on `app`.`listings` to 'facetdb_worker'@'%'",
       "drop trigger if exists `app`.`facetdb_listings_upd`",
@@ -313,7 +316,17 @@ describe("planInstall: only what is missing", () => {
         "or not (cast(old.`price` as binary) <=> cast(new.`price` as binary)) then",
       ),
     ]);
-    expect(plan.notes).toEqual([INSTALL_RERUN_NOTE, DEFINER_NOTE, COLUMNS_NOTE]);
+    // The trigger is remade, not replaced: the plan says what the gap between the two leaves open.
+    expect(plan.notes).toEqual([
+      INSTALL_RERUN_NOTE,
+      DEFINER_NOTE,
+      COLUMNS_NOTE,
+      "MySQL cannot replace a trigger in place: facetdb_listings_upd of app.listings is dropped and created again, and a change the application makes to app.listings between the two statements is not queued, so run this while the table is quiet.",
+    ]);
+    // A first install creates its triggers and remakes none.
+    expect(planOf(await planned(freshListings())).notes.join("\n")).not.toContain(
+      "cannot replace a trigger",
+    );
   });
 
   it("takes a body pasted with other line ends or indentation as the same trigger", async () => {
@@ -462,7 +475,7 @@ describe("planInstall: columns, queue and capture", () => {
       await planned(installedListings(), listingsTarget({ onChange: "keep" })),
     );
     expect(texts(switched)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       expect.stringMatching(/^-- stops the script here/),
       "drop trigger if exists `app`.`facetdb_listings_new`",
       "drop trigger if exists `app`.`facetdb_listings_upd`",
@@ -961,5 +974,226 @@ describe("planInstall refuses, says why and what to do, and changes nothing", ()
         "the user 'facetdb_worker'@'%' on this server holds PROCESS on the server, CREATE on the database app, SELECT on the whole table app.listings, rights FacetDB never gives it; FacetDB grants it single columns of a table and its own two tables only. Revoke those rights, or drop the user if no project uses it, then run migrate again.",
       ),
     );
+  });
+});
+
+describe("planInstall refuses what the worker could not hash or write", () => {
+  /** The listings table with one more column, and the target reading it beside the title. */
+  function reading(type: string): readonly [ScriptedDatabase, EngineTarget] {
+    return [
+      withColumns(freshListings(), "listings", [
+        ...LISTINGS_TABLE.columns,
+        { name: "payload", type },
+      ]),
+      listingsTarget({ questionSet: { ...LISTINGS_QUESTIONS, read: ["title", "payload"] } }),
+    ];
+  }
+
+  it("refuses a state field whose value is bytes, before any statement, and reads text, numbers and times", async () => {
+    for (const type of ["varbinary(255)", "binary(16)", "bit(8)", "tinyblob", "blob", "longblob"]) {
+      const bytes = await planned(...reading(type));
+      expect(refusalOf(bytes)).toEqual({
+        code: "state-type",
+        message: `app.listings: the state field payload (${type}) holds bytes, not text; FacetDB reads a state field as utf8mb4 text to hash it and to send it to the model, and bytes that are not text read alike, so a changed value could keep its hash and a stale answer be written over it`,
+        fix: "remove it from the source's read in the config and name the text, number or time columns the model reads, then run facetdb migrate again",
+      });
+      readOnly(bytes.driver);
+    }
+    for (const type of ["json", "decimal(10,2)", "int", "datetime(3)", "enum('a','b')", "text"]) {
+      expect((await planned(...reading(type))).result.ok).toBe(true);
+    }
+  });
+
+  it("refuses a spatial state field of every family, which MySQL reads as NULL and MariaDB not at all", async () => {
+    const spatial = [
+      "geometry",
+      "point",
+      "linestring",
+      "polygon",
+      "multipoint",
+      "multilinestring",
+      "multipolygon",
+      // MySQL 8 names the collection geomcollection, MariaDB geometrycollection.
+      "geomcollection",
+      "geometrycollection",
+    ];
+    for (const type of spatial) {
+      const refusedSpatial = await planned(...reading(type));
+      expect(refusalOf(refusedSpatial)).toEqual({
+        code: "state-type",
+        message: `app.listings: the state field payload (${type}) holds a spatial value, not text; FacetDB reads a state field as utf8mb4 text to hash it and to send it to the model, and MySQL reads a spatial value as text as NULL whatever it is, and MariaDB refuses to (error 4079), so a changed value could keep its hash and a stale answer be written over it`,
+        fix: "remove it from the source's read in the config and name the text, number or time columns the model reads, then run facetdb migrate again",
+      });
+      readOnly(refusedSpatial.driver);
+    }
+    // MariaDB 11.7's vector is bytes.
+    expect(refusalOf(await planned(...reading("vector(4)"))).message).toContain(
+      "payload (vector(4)) holds bytes, not text",
+    );
+    // A blob and a point read together are named together, each with why.
+    const both = await planned(
+      withColumns(freshListings(), "listings", [
+        ...LISTINGS_TABLE.columns,
+        { name: "payload", type: "blob" },
+        { name: "place", type: "point" },
+      ]),
+      listingsTarget({ questionSet: { ...LISTINGS_QUESTIONS, read: ["payload", "place"] } }),
+    );
+    expect(refusalOf(both).message).toBe(
+      "app.listings: the state field payload (blob), place (point) holds bytes or a spatial value, not text; FacetDB reads a state field as utf8mb4 text to hash it and to send it to the model, and bytes that are not text read alike, and MySQL reads a spatial value as text as NULL whatever it is, and MariaDB refuses to (error 4079), so a changed value could keep its hash and a stale answer be written over it",
+    );
+  });
+
+  it("refuses a server that logs binary changes in STATEMENT format, in doctor's words, whatever the plan holds", async () => {
+    const statement = await planned({ ...freshListings(), binlogFormat: "STATEMENT" });
+    expect(refusalOf(statement)).toEqual({
+      code: "binlog-format",
+      message:
+        "binary logging is on with binlog_format = STATEMENT, under which InnoDB refuses the worker's writes in its read committed sessions (error 1665), so every claim, write and ack would fail; nothing was changed",
+      fix: "set binlog_format to ROW or MIXED (MySQL 8's default is ROW), then run facetdb migrate again",
+    });
+    readOnly(statement.driver);
+    // An installed table's empty plan is refused too: the worker could not write on it.
+    expect(
+      refusalOf(await planned({ ...installedListings(), binlogFormat: "STATEMENT" })).code,
+    ).toBe("binlog-format");
+    // MIXED and ROW write rows, and without a binary log the format plays no part.
+    expect((await planned({ ...freshListings(), binlogFormat: "MIXED" })).result.ok).toBe(true);
+    const unlogged = { binaryLogging: false, trustCreators: false, superUser: true };
+    expect(
+      (await planned({ ...freshListings(), binlogFormat: "STATEMENT", triggerRights: unlogged }))
+        .result.ok,
+    ).toBe(true);
+  });
+
+  it("refuses an inline install on a table installed in side-table mode, as SQL Server's install does", async () => {
+    const inline = await planned(installedSideListings(), listingsTarget());
+    expect(refusalOf(inline)).toEqual({
+      code: "storage-mode",
+      message:
+        "app.listings is installed in side-table mode (its answers are in app.facetdb_listings_answers); installing inline would keep a second copy of them on the table",
+      fix: 'uninstall first (facetdb uninstall with storage "side-table"), or keep storage "side-table" for the source in facetdb.config.ts',
+    });
+    readOnly(inline.driver);
+    // A table of that name without FacetDB's mark is the application's, not an install.
+    const theirs: ScriptedDatabase = {
+      ...freshListings(),
+      tables: [
+        LISTINGS_TABLE,
+        { name: "facetdb_listings_answers", columns: [{ name: "id", type: "int" }] },
+      ],
+    };
+    expect((await planned(theirs)).result.ok).toBe(true);
+  });
+
+  it("refuses an admin who may create users but not read mysql.user, naming the right to grant, never the driver's error", async () => {
+    const denied = await planned({ ...freshListings(), deniedGrantTables: ["user"] });
+    expect(refusalOf(denied)).toEqual({
+      code: "admin-rights",
+      message:
+        "the account of the admin connection string may not read mysql.user (error 1142); FacetDB reads it to find every account named facetdb_worker (and MariaDB's roles) before it creates or keeps the worker login, and plans nothing it cannot see; nothing was changed",
+      fix: "grant the admin account select on mysql.user (grant select on mysql.user to <the admin account>, run by an account that may), or use an admin account that has it, then run the command again",
+    });
+    readOnly(denied.driver);
+    // Side-table mode reads mysql.tables_priv for the table's readers, refused alike.
+    const sideDenied = await planned(
+      { ...freshListings(), deniedGrantTables: ["tables_priv"] },
+      sideListingsTarget(),
+    );
+    // Its words serve install, uninstall and prune alike: all three read it.
+    expect(refusalOf(sideDenied)).toEqual({
+      code: "admin-rights",
+      message:
+        "the account of the admin connection string may not read mysql.tables_priv (error 1142); FacetDB reads it to find which accounts hold rights on the table, its side table and its view (install grants the view to the table's readers; uninstall and prune take those rights back), and plans nothing it cannot see; nothing was changed",
+      fix: "grant the admin account select on mysql.tables_priv (grant select on mysql.tables_priv to <the admin account>, run by an account that may), or use an admin account that has it, then run the command again",
+    });
+    readOnly(sideDenied.driver);
+  });
+});
+
+describe("planInstall: the creation marker the backfill scans by", () => {
+  const NEWEST_NOTE =
+    "A backfill of app.listings asks its newest records first, by created_at: the worker login is granted select on that column to order by it.";
+
+  function withCreatedAt(database: ScriptedDatabase, type: string): ScriptedDatabase {
+    const table = database.tables.find((one) => one.name === "listings");
+    return withColumns(database, "listings", [
+      ...(table?.columns ?? []),
+      { name: "created_at", type },
+    ]);
+  }
+
+  it("grants the worker a time-typed created_at beside the key and the state, and says the backfill asks the newest first", async () => {
+    const plan = planOf(await planned(withCreatedAt(freshListings(), "datetime(3)")));
+    expect(texts(plan)).toContain(
+      "grant select (`id`, `title`, `description`, `created_at`, `is_scam`, `is_scam_probability`, `facetdb_status`, `facetdb_updated_at`, `facetdb_reviewed`)\n  on `app`.`listings` to 'facetdb_worker'@'%'",
+    );
+    expect(plan.notes.at(-1)).toBe(NEWEST_NOTE);
+    // Read as a state field too, it is granted once.
+    const read = listingsTarget({
+      questionSet: { ...LISTINGS_QUESTIONS, read: ["title", "created_at"] },
+    });
+    const once = planOf(await planned(withCreatedAt(freshListings(), "timestamp"), read));
+    expect(texts(once).filter((text) => text.includes("`created_at`"))).toEqual([
+      expect.stringMatching(/^grant select \(`id`, `title`, `created_at`, `is_scam`/),
+      expect.stringContaining("or not (cast(old.`created_at` as binary)"),
+    ]);
+  });
+
+  it("grants it on a table installed before, then plans nothing; a created_at that is no time is left alone", async () => {
+    const before = withCreatedAt(installedListings(), "datetime");
+    const plan = planOf(await planned(before));
+    expect(texts(plan)).toEqual([
+      SETTINGS.text,
+      expect.stringMatching(/^-- stops the script here/),
+      "grant select (`created_at`)\n  on `app`.`listings` to 'facetdb_worker'@'%'",
+    ]);
+    expect(plan.notes).toEqual([INSTALL_RERUN_NOTE, NEWEST_NOTE]);
+    const granted: ScriptedDatabase = {
+      ...before,
+      worker: {
+        ...before.worker,
+        columns: [
+          ...(before.worker?.columns ?? []),
+          { table: "listings", column: "created_at", privilege: "SELECT" },
+        ],
+      },
+    };
+    expect(planOf(await planned(granted)).statements).toEqual([]);
+    for (const type of ["varchar(32)", "bigint"]) {
+      expect(planOf(await planned(withCreatedAt(installedListings(), type))).statements).toEqual(
+        [],
+      );
+    }
+  });
+
+  it("grants it in side-table mode too, where the scan reads the table", async () => {
+    const plan = planOf(
+      await planned(withCreatedAt(freshListings(), "datetime(3)"), sideListingsTarget()),
+    );
+    expect(texts(plan)).toContain(
+      "grant select (`id`, `title`, `description`, `created_at`)\n  on `app`.`listings` to 'facetdb_worker'@'%'",
+    );
+    expect(plan.notes.at(-1)).toBe(NEWEST_NOTE);
+  });
+});
+
+describe("the script's settings", () => {
+  it("sets NO_AUTO_CREATE_USER in MariaDB's executable comment before the login, and keeps the plan-time refusal", async () => {
+    const plan = planOf(
+      await planned({
+        ...freshListings(),
+        version: "10.6.20-MariaDB",
+        sqlMode: MARIADB_SQL_MODE,
+      }),
+    );
+    const script = render(plan);
+    expect(script).toContain(
+      "\nset session lock_wait_timeout = 10 /*M! , sql_mode = concat_ws(',', nullif(@@session.sql_mode, ''), 'NO_AUTO_CREATE_USER') */;\n",
+    );
+    expect(script.indexOf("NO_AUTO_CREATE_USER")).toBeLessThan(script.indexOf("create user"));
+    expect(plan.statements[0]).toEqual(SETTINGS);
+    // The comment is one statement's: the script sends it with the timeout, not between delimiters.
+    expect(script).not.toContain("delimiter //\nset session");
   });
 });

@@ -21,7 +21,16 @@ import {
   UPDATED_AT_COLUMN,
   type WriteResult,
 } from "@facetdb/core";
-import { JOBS_TABLE, readPrimaryKey, readTableType, sideTableName } from "../install/index.ts";
+import {
+  CREATION_COLUMN,
+  CREATION_TYPES,
+  engineRefusal,
+  JOBS_TABLE,
+  readPrimaryKey,
+  readRelation,
+  readTableType,
+  sideTableName,
+} from "../install/index.ts";
 import { type MysqlRow, quoteIdent, quoteTable } from "../sql/index.ts";
 import {
   connectMysqlPool,
@@ -99,12 +108,6 @@ export const MYSQL_CAPABILITIES: Capabilities = {
   sideTable: true,
   multipleWorkers: true,
 };
-
-/** The column that marks when a record was created, when the table has it (as the Postgres scan). */
-export const CREATION_COLUMN = "created_at";
-
-/** Column types a creation marker may have: anything else would not order by time. */
-const MARKER_TYPES: ReadonlySet<string> = new Set(["datetime", "timestamp", "date"]);
 
 /** Keys a watch announces per pass. */
 const WATCH_BATCH = 200;
@@ -258,8 +261,28 @@ function cursorOf(position: Position): ScanCursor {
   );
 }
 
-/** A cursor is a boundary: it may come from a saved backfill. */
-function parseCursor(cursor: ScanCursor, byCreation: boolean): Position {
+/**
+ * How a scan orders by the creation marker: `none` without a readable one, by the key alone; `text`
+ * for a `datetime` or `date`, which the server keeps as written, by its text; `epoch` for a
+ * `timestamp`, compared and resumed by `unix_timestamp(created_at)`, the instant the server stores,
+ * since its text is local time in the session's zone and repeats an hour when daylight saving ends
+ * (the sort is the column's own, which is that instant's order).
+ */
+type CreationOrder = "none" | "text" | "epoch";
+
+/** A marker's value as the `epoch` order writes it into a cursor: `unix_timestamp`'s number as text. */
+const EPOCH = /^\d+(?:\.\d+)?$/;
+
+/**
+ * A cursor is a boundary: it may come from a saved backfill. One saved under another ordering is no
+ * place in this one: a key-only cursor from before migrate granted `created_at`, a marker cursor
+ * after the marker stopped being readable, a `timestamp` marker's local-time text from before it
+ * was ordered by its instant, or an instant after the marker became a `datetime`. Such a cursor is
+ * never compared: the scan starts again from the newest record (undefined), since `facetdb
+ * backfill` has no flag to restart it, and the records already answered are skipped by their
+ * unchanged state hash, so none is lost or asked twice.
+ */
+function parseCursor(cursor: ScanCursor, order: CreationOrder): Position | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(cursor);
@@ -270,12 +293,12 @@ function parseCursor(cursor: ScanCursor, byCreation: boolean): Position {
   if (!Array.isArray(parsed)) {
     throw invalid();
   }
-  if (!byCreation) {
+  if (parsed.length === 1) {
     const [key] = parsed;
-    if (parsed.length !== 1 || typeof key !== "string") {
+    if (typeof key !== "string") {
       throw invalid();
     }
-    return { key };
+    return order === "none" ? { key } : undefined;
   }
   const [created, key] = parsed;
   if (
@@ -285,7 +308,12 @@ function parseCursor(cursor: ScanCursor, byCreation: boolean): Position {
   ) {
     throw invalid();
   }
-  return { key, created };
+  if (order === "none") {
+    return undefined;
+  }
+  // A null marker sorts last under either order and means the same in both.
+  const sameShape = created === null || EPOCH.test(created) === (order === "epoch");
+  return sameShape ? { key, created } : undefined;
 }
 
 function primaryKeyRefusal(message: string): EngineRefusal {
@@ -380,7 +408,10 @@ export async function createMysqlConnector(
 
   /**
    * In side-table mode, the side table the worker writes: refused at open rather than at the first
-   * write, in words that say what to run. The worker sees it only when install granted it.
+   * write, in words that say what to run. The worker sees it only when install granted it. The
+   * table must still be InnoDB, as install required: on one converted since, the write's side-row
+   * lock and the application's table lock wait on each other unseen, so it is refused in install's
+   * words.
    */
   async function sideTableOf(inSchema: string): Promise<void> {
     const side = sideTableName(target.table);
@@ -390,6 +421,11 @@ export async function createMysqlConnector(
         message: `${inSchema}.${side}, where side-table mode keeps the answers of ${inSchema}.${target.table}, does not exist, or the worker login has no right on it`,
         fix: "run facetdb migrate with storage side-table for this source first",
       });
+    }
+    const { engine } = await readRelation(rows, inSchema, target.table);
+    const refused = engineRefusal(engine, `${inSchema}.${target.table}`);
+    if (refused !== undefined) {
+      throw new EngineRefusal(refused);
     }
   }
 
@@ -780,19 +816,24 @@ export async function createMysqlConnector(
   }
 
   /**
-   * Whether the table has a creation marker the worker may read: `information_schema.columns`
-   * lists only the columns the login has a right on, and install grants the key, the state and
-   * FacetDB's own, so the marker orders a scan only where the operator granted it (else the key,
-   * newest first for a growing key). Looked up once, at the first page.
+   * Whether the table has a creation marker the worker may read: `information_schema.columns` lists
+   * only the columns the login has a right on, and install grants the key, the state, FacetDB's own
+   * and a time-typed `created_at`, so the marker orders a scan where the table has one (else the
+   * key, newest first for a growing key). Looked up once, at the first page; its type decides how
+   * the scan compares it (`CreationOrder`).
    */
-  let marker: Promise<boolean> | undefined;
-  const byCreation = (): Promise<boolean> => {
+  let marker: Promise<CreationOrder> | undefined;
+  const creationOrder = (): Promise<CreationOrder> => {
     marker ??= rows(
       "select data_type as data_type from information_schema.columns where table_schema = ? and table_name = ? and column_name = ?",
       [schema, name, CREATION_COLUMN],
     ).then((found) => {
       const type = found[0]?.["data_type"];
-      return typeof type === "string" && MARKER_TYPES.has(type.toLowerCase());
+      const lower = typeof type === "string" ? type.toLowerCase() : "";
+      if (!CREATION_TYPES.has(lower)) {
+        return "none";
+      }
+      return lower === "timestamp" ? "epoch" : "text";
     });
     return marker;
   };
@@ -800,12 +841,22 @@ export async function createMysqlConnector(
   /**
    * Every record, newest first, in pages, by keyset: the creation marker then the key where the
    * marker is readable, else the key alone, so rows that arrive or get answered between pages
-   * neither shift a page nor repeat a record. `desc` puts a null marker last on both engines.
+   * neither shift a page nor repeat a record. `desc` puts a null marker last on both engines. Every
+   * marker orders by the column itself, so an index on `created_at` serves the sort (a `timestamp`
+   * sorts by its stored instant). A `timestamp` marker's bound and cursor are its `unix_timestamp`,
+   * which MySQL and MariaDB read off the stored instant with no zone conversion (`from_unixtime`
+   * would bring back the repeated hour), the bound cast back to a decimal so the two compare
+   * exactly; a `datetime` or `date` marker is compared by its own value, as written.
    */
   async function scan(cursor: ScanCursor | null): Promise<ScanPage> {
-    const ordered = await byCreation();
-    const position = cursor === null ? undefined : parseCursor(cursor, ordered);
-    const created = quoteIdent(CREATION_COLUMN);
+    const orderBy = await creationOrder();
+    const ordered = orderBy !== "none";
+    const position = cursor === null ? undefined : parseCursor(cursor, orderBy);
+    const epoch = orderBy === "epoch";
+    const created = epoch
+      ? `unix_timestamp(${quoteIdent(CREATION_COLUMN)})`
+      : quoteIdent(CREATION_COLUMN);
+    const bound = epoch ? "cast(? as decimal(20,6))" : "?";
     const params: unknown[] = [];
     let where = "";
     if (position !== undefined) {
@@ -817,12 +868,19 @@ export async function createMysqlConnector(
         where = ` where ${created} is null and ${keyColumn} < ?`;
         params.push(position.key);
       } else {
-        where = ` where (${created} < ? or (${created} = ? and ${keyColumn} < ?) or ${created} is null)`;
+        where = ` where (${created} < ${bound} or (${created} = ${bound} and ${keyColumn} < ?) or ${created} is null)`;
         params.push(position.created, position.created, position.key);
       }
     }
-    const select = ordered ? `${asText(CREATION_COLUMN)} as o, ${rowColumns}` : rowColumns;
-    const order = ordered ? `${created} desc, ${keyColumn} desc` : `${keyColumn} desc`;
+    const markerText = epoch
+      ? `cast(${created} as char character set utf8mb4)`
+      : asText(CREATION_COLUMN);
+    const select = ordered ? `${markerText} as o, ${rowColumns}` : rowColumns;
+    // Ordered by the column itself, which an index on it serves: a `timestamp` sorts by its stored
+    // instant, the order `unix_timestamp` gives, which only the bound and the cursor use.
+    const order = ordered
+      ? `${quoteIdent(CREATION_COLUMN)} desc, ${keyColumn} desc`
+      : `${keyColumn} desc`;
     const result = await rows(`select ${select} from ${table}${where} order by ${order} limit ?`, [
       ...params,
       pageSize,

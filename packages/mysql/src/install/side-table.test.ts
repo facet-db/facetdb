@@ -29,6 +29,7 @@ import {
   normalizedDefinition,
   OWNED_MARK,
   REFUSED_FIX,
+  SETTINGS,
   SIDE_TABLE_NAME_LIMIT,
   storedViewDefinition,
   WORKER_ACCOUNT,
@@ -612,7 +613,7 @@ describe("planUninstall in side-table mode", () => {
     });
     const plan = planOf(result);
     expect(texts(plan).slice(0, 13)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       "drop trigger if exists `app`.`facetdb_listings_ins`",
       "drop trigger if exists `app`.`facetdb_listings_upd`",
       `revoke select (\`id\`, \`title\`, \`description\`)\n  on ${TABLE} from ${WORKER_ACCOUNT}`,
@@ -720,7 +721,7 @@ describe("planPrune in side-table mode", () => {
       await installer(database).planPrune(sideListingsTarget(), ADMIN_URL, ENGINE_DEPS),
     );
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       `create or replace sql security invoker view ${VIEW} as
 select t.*,
   a.\`is_scam\`,

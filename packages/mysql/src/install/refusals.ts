@@ -1,4 +1,4 @@
-import type { EngineTarget, Refusal } from "@facetdb/core";
+import { EngineRefusal, type EngineTarget, type PlanResult, type Refusal } from "@facetdb/core";
 import { TLS_PARAMETER } from "../sql/index.ts";
 import {
   JOBS_TABLE,
@@ -172,6 +172,112 @@ export function triggerNameRefusal(label: string, name: string, other: string): 
     message: `a trigger named ${name} is already on ${other}; it is the name FacetDB gives a trigger of ${label}`,
     fix: "rename that trigger, then run facetdb migrate again",
   };
+}
+
+/** The `mysql` schema's grant tables a plan reads as the admin. */
+export type GrantTable = "user" | "tables_priv";
+
+/** What a plan reads each grant table for, in the refusal's words. */
+const GRANT_TABLE_USE: Readonly<Record<GrantTable, string>> = {
+  user: `to find every account named ${WORKER_USER} (and MariaDB's roles) before it creates or keeps the worker login`,
+  tables_priv:
+    "to find which accounts hold rights on the table, its side table and its view (install grants the view to the table's readers; uninstall and prune take those rights back)",
+};
+
+/**
+ * An admin that may create users but not read `mysql.user`: error 1142 at the plan's first read,
+ * said as the right to grant rather than the driver's words.
+ */
+export function grantTableRefusal(table: GrantTable): Refusal {
+  return {
+    code: "admin-rights",
+    message: `the account of the admin connection string may not read mysql.${table} (error 1142); FacetDB reads it ${GRANT_TABLE_USE[table]}, and plans nothing it cannot see; nothing was changed`,
+    fix: `grant the admin account select on mysql.${table} (grant select on mysql.${table} to <the admin account>, run by an account that may), or use an admin account that has it, then run the command again`,
+  };
+}
+
+/**
+ * Binary logging in STATEMENT format: InnoDB refuses every write of a `read committed` session
+ * under it (error 1665), the level the worker's sessions run at. doctor fails it, install refuses
+ * it, in the same words.
+ */
+export const STATEMENT_FORMAT_PROBLEM =
+  "binary logging is on with binlog_format = STATEMENT, under which InnoDB refuses the worker's writes in its read committed sessions (error 1665), so every claim, write and ack would fail";
+
+/** The fix of `STATEMENT_FORMAT_PROBLEM`, then the command to run again. */
+export function statementFormatFix(then: string): string {
+  return `set binlog_format to ROW or MIXED (MySQL 8's default is ROW), then run ${then} again`;
+}
+
+export function statementFormatRefusal(): Refusal {
+  return {
+    code: "binlog-format",
+    message: `${STATEMENT_FORMAT_PROBLEM}; nothing was changed`,
+    fix: statementFormatFix("facetdb migrate"),
+  };
+}
+
+/** Why a state type cannot be read as text: its value is bytes, or a spatial value. */
+export type NotText = "bytes" | "spatial";
+
+/** What each kind holds and why its text would not tell two values apart, in the refusal's words. */
+const NOT_TEXT_WORDS: Readonly<Record<NotText, { readonly holds: string; readonly why: string }>> =
+  {
+    bytes: { holds: "bytes", why: "bytes that are not text read alike" },
+    spatial: {
+      holds: "a spatial value",
+      why: "MySQL reads a spatial value as text as NULL whatever it is, and MariaDB refuses to (error 4079)",
+    },
+  };
+
+/**
+ * A state field whose value is not text: the worker reads a state field as utf8mb4 text to hash it
+ * and send it to the model. Bytes that are not utf8mb4 read as the same replacement characters, and
+ * a spatial value reads as NULL on MySQL 8 (MariaDB fails the read), so two values could hash alike
+ * and a stale answer be written over a changed row.
+ */
+export function stateTypeRefusal(
+  label: string,
+  fields: readonly { readonly name: string; readonly type: string; readonly kind: NotText }[],
+): Refusal {
+  const named = fields.map((field) => `${field.name} (${field.type})`).join(", ");
+  const kinds = (["bytes", "spatial"] as const).filter((kind) =>
+    fields.some((field) => field.kind === kind),
+  );
+  const holds = kinds.map((kind) => NOT_TEXT_WORDS[kind].holds).join(" or ");
+  const why = kinds.map((kind) => NOT_TEXT_WORDS[kind].why).join(", and ");
+  return {
+    code: "state-type",
+    message: `${label}: the state field ${named} holds ${holds}, not text; FacetDB reads a state field as utf8mb4 text to hash it and to send it to the model, and ${why}, so a changed value could keep its hash and a stale answer be written over it`,
+    fix: "remove it from the source's read in the config and name the text, number or time columns the model reads, then run facetdb migrate again",
+  };
+}
+
+/**
+ * An inline install on a table installed in side-table mode, as SQL Server's install refuses it:
+ * the answers would be kept twice, on the table and in the side table.
+ */
+export function inlineOverSideRefusal(label: string, sideLabel: string): Refusal {
+  return {
+    code: "storage-mode",
+    message: `${label} is installed in side-table mode (its answers are in ${sideLabel}); installing inline would keep a second copy of them on the table`,
+    fix: 'uninstall first (facetdb uninstall with storage "side-table"), or keep storage "side-table" for the source in facetdb.config.ts',
+  };
+}
+
+/**
+ * A plan's reads as one result: a refusal a read throws (`readGrantTable`) is the plan's refusal,
+ * returned as the contract's other refusals are, with nothing planned and nothing run.
+ */
+export async function refusing(work: () => Promise<PlanResult>): Promise<PlanResult> {
+  try {
+    return await work();
+  } catch (error) {
+    if (error instanceof EngineRefusal) {
+      return { ok: false, refusal: error.refusal };
+    }
+    throw error;
+  }
 }
 
 /** A run that reaches the plan's `secret` statement without a password. */

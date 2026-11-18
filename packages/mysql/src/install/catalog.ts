@@ -1,4 +1,6 @@
+import { EngineRefusal } from "@facetdb/core";
 import { type MysqlQuery, type MysqlRow, quoteIdent, quoteTable } from "../sql/index.ts";
+import { type GrantTable, grantTableRefusal } from "./refusals.ts";
 import {
   type HeldRight,
   JOBS_TABLE,
@@ -38,15 +40,34 @@ export function serverNameOf(session: Session): ServerName {
 
 /**
  * What creating a trigger needs of the admin: with binary logging on and
- * `log_bin_trust_function_creators` off, MySQL and MariaDB let only an account with SUPER create one
- * (error 1419), which a managed server's admin (RDS, Cloud SQL) does not have.
+ * `log_bin_trust_function_creators` off, MySQL and MariaDB let only an account with SUPER create
+ * one (error 1419), which a managed server's admin (RDS, Cloud SQL) does not have. The binary log's
+ * format is read with it: under `STATEMENT` the worker could write nothing.
  */
 export type TriggerRights = {
   readonly binaryLogging: boolean;
   readonly trustCreators: boolean;
   /** Whether the running account holds SUPER, as its own row of `user_privileges` shows. */
   readonly superUser: boolean;
+  /** `@@global.binlog_format`, upper case: `ROW`, `MIXED` or `STATEMENT`. */
+  readonly binlogFormat: string;
 };
+
+/**
+ * The column that marks when a record was created, when the table has one: the backfill's scan asks
+ * the newest records first by it, so the worker reads it where its type orders by time.
+ */
+export const CREATION_COLUMN = "created_at";
+
+/** The `data_type`s a creation marker may have: anything else would not order by time. */
+export const CREATION_TYPES: ReadonlySet<string> = new Set(["datetime", "timestamp", "date"]);
+
+/** The table's creation marker, when it has one of a time type; undefined otherwise. */
+export function creationMarker(columns: readonly CatalogColumn[]): CatalogColumn | undefined {
+  return columns.find(
+    (column) => column.name === CREATION_COLUMN && CREATION_TYPES.has(column.dataType),
+  );
+}
 
 /** A column of a table as `information_schema.columns` shows it. */
 export type CatalogColumn = {
@@ -130,6 +151,7 @@ const SESSION =
 /** A user's own row of `user_privileges` is always visible to it; its grantee is quoted, `current_user()` not. */
 const TRIGGER_RIGHTS = `select @@global.log_bin as log_bin,
        @@global.log_bin_trust_function_creators as trust_creators,
+       @@global.binlog_format as binlog_format,
        (select count(*) from information_schema.user_privileges
          where privilege_type = 'SUPER' and replace(grantee, '''', '') = current_user()) as super_user`;
 
@@ -168,7 +190,8 @@ const TRIGGERS = `select trigger_name as name, event_object_table as table_name,
 
 /**
  * Every account of the worker's name, whatever its host. Reading `mysql.user` needs the admin's
- * select on it, which every managed server's admin has.
+ * select on it, which every managed server's admin has; an admin without it is refused in words
+ * (`readGrantTable`).
  */
 const WORKER_HOSTS = "select host as host from mysql.user where user = ? order by host";
 
@@ -226,13 +249,14 @@ export async function readSession(query: MysqlQuery): Promise<Session> {
   };
 }
 
-/** Whether the admin may create a trigger here, read before a plan creates one (`TriggerRights`). */
+/** Whether the admin may create a trigger here, and the binary log's format (`TriggerRights`). */
 export async function readTriggerRights(query: MysqlQuery): Promise<TriggerRights> {
   const [row] = await query(TRIGGER_RIGHTS);
   return {
     binaryLogging: Number(row?.["log_bin"] ?? 0) !== 0,
     trustCreators: Number(row?.["trust_creators"] ?? 0) !== 0,
     superUser: Number(row?.["super_user"] ?? 0) > 0,
+    binlogFormat: String(row?.["binlog_format"] ?? "").toUpperCase(),
   };
 }
 
@@ -353,9 +377,43 @@ export function droppedColumnsNote(
   return `MySQL drops a column that a view reads, and the view then fails with error 1356: ${views.join(", ")} ${one ? "reads" : "read"} ${label}, so check ${one ? "it" : "them"} before this runs.`;
 }
 
+/** `ER_TABLEACCESS_DENIED_ERROR`: a select on a table the account holds no right on. */
+const TABLE_ACCESS_DENIED = 1142;
+
+/** The server's error number, read off the driver's error (a boundary). */
+function errorNumber(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("errno" in error)) {
+    return undefined;
+  }
+  return typeof error.errno === "number" ? error.errno : undefined;
+}
+
+/**
+ * A read of one of the `mysql` schema's grant tables as the admin. An admin that may create users
+ * but not read them (error 1142) is the right it lacks, thrown as that refusal, which the plans
+ * return (`refusing`) in place of the driver's error.
+ */
+export async function readGrantTable(
+  query: MysqlQuery,
+  grantTable: GrantTable,
+  text: string,
+  params?: readonly unknown[],
+): Promise<readonly MysqlRow[]> {
+  try {
+    return await query(text, params);
+  } catch (error) {
+    if (errorNumber(error) === TABLE_ACCESS_DENIED) {
+      throw new EngineRefusal(grantTableRefusal(grantTable));
+    }
+    throw error;
+  }
+}
+
 /** The hosts of every account named like the worker login: FacetDB's is the one for any host. */
 export async function workerHosts(query: MysqlQuery): Promise<readonly string[]> {
-  return (await query(WORKER_HOSTS, [WORKER_USER])).map((row) => String(row["host"]));
+  return (await readGrantTable(query, "user", WORKER_HOSTS, [WORKER_USER])).map((row) =>
+    String(row["host"]),
+  );
 }
 
 /** Whether the worker login exists: install creates it only when it does not. */

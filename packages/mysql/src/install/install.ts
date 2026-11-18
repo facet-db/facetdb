@@ -11,6 +11,8 @@ import {
   type Catalog,
   type CatalogColumn,
   type CatalogTrigger,
+  CREATION_COLUMN,
+  creationMarker,
   isMariaDb,
   NO_RIGHTS,
   readCatalog,
@@ -28,13 +30,18 @@ import {
   autoCreateUserRefusal,
   backslashModeRefusal,
   binaryLoggingRefusal,
+  inlineOverSideRefusal,
   installRefused,
   jobsTableRefusal,
+  type NotText,
   nameTooLongRefusal,
   noDatabaseRefusal,
   notATableRefusal,
   queueKeyRefusal,
+  refusing,
   sideNameTooLongRefusal,
+  statementFormatRefusal,
+  stateTypeRefusal,
   triggerNameRefusal,
   workerHostRefusal,
   workerLoginRefusal,
@@ -46,10 +53,13 @@ import {
   foreignKeyAllowed,
   foreignKeyNote,
   heldBy,
+  markedTable,
   noForeignKeyNote,
+  type Relation,
   readerGrantStatement,
   readersNote,
   readersOf,
+  readRelation,
   readSideCatalog,
   SIDE_TABLE_NAME_LIMIT,
   SIDE_TABLE_PRIVILEGES,
@@ -124,6 +134,35 @@ function columnsNote(label: string, server: ServerName): string {
   return `${server} does not tie a trigger to the columns it names: renaming or dropping the key or a state column of ${label} makes the application's writes on it fail with error 1054 until facetdb migrate runs again.`;
 }
 
+/**
+ * What remaking a trigger leaves open: a `read` change, or an `onChange` one, gives a trigger of
+ * the table a new body, and MySQL has no statement that replaces a trigger in place.
+ */
+function remadeNote(label: string, server: ServerName, names: readonly string[]): string {
+  const one = names.length === 1;
+  return `${server} cannot replace a trigger in place: ${names.join(", ")} of ${label} ${one ? "is" : "are"} dropped and created again, and a change the application makes to ${label} between the two statements is not queued, so run this while the table is quiet.`;
+}
+
+/** Said when the plan grants the worker the creation marker its backfill scans by. */
+function newestFirstNote(label: string): string {
+  return `A backfill of ${label} asks its newest records first, by ${CREATION_COLUMN}: the worker login is granted select on that column to order by it.`;
+}
+
+/** The triggers of the table the plan drops and creates again, by name: those it has already. */
+function remadeTriggers(
+  catalog: Catalog,
+  table: string,
+  created: readonly TriggerDefinition[],
+): readonly string[] {
+  return created
+    .filter((definition) =>
+      catalog.triggers.some(
+        (trigger) => trigger.name === definition.name && trigger.table === table,
+      ),
+    )
+    .map((definition) => definition.name);
+}
+
 /** A plan with nothing to do: an installed table, as it was installed. */
 const NOTHING: EnginePlan = {
   statements: [],
@@ -150,6 +189,31 @@ const PREFIX_ONLY: ReadonlySet<string> = new Set([
  * bytes would not convert back to the key a worker reads the row by.
  */
 const BINARY: ReadonlySet<string> = new Set(["binary", "varbinary", "bit"]);
+
+/**
+ * State types whose value is not text, by `data_type`: the worker reads a state field as utf8mb4
+ * text, bytes that are not utf8mb4 read as the same replacement characters, and a spatial value
+ * reads as NULL on MySQL 8 and fails the read on MariaDB (error 4079) (`stateTypeRefusal`). The
+ * spatial names are both engines' (`geomcollection` on MySQL 8, `geometrycollection` on MariaDB);
+ * `vector` is MariaDB 11.7's.
+ */
+const NOT_TEXT: ReadonlyMap<string, NotText> = new Map([
+  ...[...BINARY, "tinyblob", "blob", "mediumblob", "longblob"].map(
+    (type) => [type, "bytes"] as const,
+  ),
+  ...[
+    "geometry",
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+    "geomcollection",
+    "geometrycollection",
+  ].map((type) => [type, "spatial"] as const),
+  ["vector", "bytes"] as const,
+]);
 
 /** A generated column: a trigger can read neither its old nor its new value. */
 const GENERATED = /\b(VIRTUAL|STORED) GENERATED\b/i;
@@ -299,6 +363,14 @@ function stateRefusal(
       `${label}: the state field ${generated.join(", ")} is a generated column, which a MySQL trigger cannot compare. Read the columns it is generated from instead.`,
     );
   }
+  const notText = read.flatMap((name) => {
+    const column = byName.get(name);
+    const kind = column === undefined ? undefined : NOT_TEXT.get(column.dataType);
+    return column === undefined || kind === undefined ? [] : [{ ...column, kind }];
+  });
+  if (notText.length > 0) {
+    return stateTypeRefusal(label, notText);
+  }
   return undefined;
 }
 
@@ -379,6 +451,7 @@ function installRefusal(
   rights: WorkerRights,
   loginExists: boolean,
   side: SideCatalog | undefined,
+  inlineSide: Relation | undefined,
 ): Refusal | Keyed {
   const { schema } = catalog;
   const label = `${schema}.${target.table}`;
@@ -415,6 +488,11 @@ function installRefusal(
   const state = stateRefusal(target, catalog, label, owned);
   if (state !== undefined) {
     return state;
+  }
+  // One storage per table: inline over a side-table install would keep the answers twice (side-table
+  // mode refuses the reverse, `sideRefusal`).
+  if (inlineSide !== undefined && markedTable(inlineSide)) {
+    return inlineOverSideRefusal(label, `${schema}.${sideTableName(target.table)}`);
   }
   // Inline, FacetDB's columns are the table's; in side-table mode they are the side table's, and
   // the table must have none of them, nor a column of their names (the view lists both).
@@ -492,19 +570,27 @@ function installPlan(
       !defined.has(name) &&
       catalog.triggers.some((trigger) => trigger.name === name && trigger.table === table),
   );
-  // The worker reads the key, the state and its own columns (`current`, and its writes test
-  // facetdb_reviewed), and writes only its own: never a right on another column.
+  // The worker reads the key, the state, the creation marker its scan orders by and its own columns
+  // (`current`, and its writes test facetdb_reviewed), and writes only its own: never a right on
+  // another column.
   const ownedNames = owned.map((column) => column.name);
+  const marker = creationMarker(catalog.columns);
   const select = [
-    key.name,
-    ...target.questionSet.read.filter((column) => column !== key.name),
-    ...ownedNames,
+    ...new Set([
+      key.name,
+      ...target.questionSet.read,
+      ...(marker === undefined ? [] : [marker.name]),
+      ...ownedNames,
+    ]),
   ];
+  const held = loginExists ? rights : NO_RIGHTS;
+  const ordered = marker !== undefined && !holds(held, table, "select", marker.name);
+  const replaced = remadeTriggers(catalog, table, triggers);
   const work: readonly PlanStatement[] = [
     ...(missing.length === 0 ? [] : [addColumnsStatement(schema, table, missing)]),
     ...(catalog.jobs.present ? [] : [jobsTableStatement(schema)]),
     ...(loginExists ? [] : [WORKER_LOGIN_STATEMENT]),
-    ...grantStatements(catalog, table, select, ownedNames, loginExists ? rights : NO_RIGHTS),
+    ...grantStatements(catalog, table, select, ownedNames, held),
     ...stale.map((name) => dropTrigger(schema, name)),
     ...triggers.flatMap((definition) => [
       dropTrigger(schema, definition.name),
@@ -537,6 +623,8 @@ function installPlan(
         installRerunNote(server),
         ...(catalog.jobs.present ? [] : [QUEUE_NOTE]),
         ...(triggers.length === 0 ? [] : [definerNote(label), columnsNote(label, server)]),
+        ...(replaced.length === 0 ? [] : [remadeNote(label, server, replaced)]),
+        ...(ordered ? [newestFirstNote(label)] : []),
       ],
     },
     createsTriggers: triggers.length > 0,
@@ -555,12 +643,13 @@ function sideGrantStatements(
   table: string,
   key: string,
   read: readonly string[],
+  marker: string | undefined,
   rights: WorkerRights,
 ): { readonly worker: readonly PlanStatement[]; readonly readers: readonly PlanStatement[] } {
   const { schema } = catalog;
   const sideName = sideTableName(table);
   const viewName = sideViewName(table);
-  const select = [key, ...read.filter((column) => column !== key)].filter(
+  const select = [...new Set([key, ...read, ...(marker === undefined ? [] : [marker])])].filter(
     (column) => !holds(rights, table, "select", column),
   );
   const sideRights = SIDE_TABLE_PRIVILEGES.filter(
@@ -635,13 +724,18 @@ function sideInstallPlan(
       !defined.has(name) &&
       catalog.triggers.some((trigger) => trigger.name === name && trigger.table === table),
   );
+  const held = loginExists ? rights : NO_RIGHTS;
+  const marker = creationMarker(catalog.columns)?.name;
+  const ordered = marker !== undefined && !holds(held, table, "select", marker);
+  const replaced = remadeTriggers(catalog, table, triggers);
   const grants = sideGrantStatements(
     catalog,
     side,
     table,
     key.name,
     target.questionSet.read,
-    loginExists ? rights : NO_RIGHTS,
+    marker,
+    held,
   );
   const work: readonly PlanStatement[] = [
     ...(creates
@@ -700,6 +794,8 @@ function sideInstallPlan(
           : []),
         ...(view ? [viewNote(label, schema, table)] : []),
         ...(view || readersGranted ? [readersNote(label, schema, table)] : []),
+        ...(replaced.length === 0 ? [] : [remadeNote(label, server, replaced)]),
+        ...(ordered ? [newestFirstNote(label)] : []),
       ],
     },
     createsTriggers: triggers.length > 0,
@@ -716,44 +812,66 @@ export async function planInstall(
   if (insecure !== undefined) {
     return { ok: false, refusal: insecure };
   }
-  return withClient(connect, url, async (query): Promise<PlanResult> => {
-    // The worker login is FacetDB's one account of the name, for any host; an existing one keeps
-    // its password, which other projects on the server may share: the contract's code before
-    // anything else is read, as on Postgres.
-    const hosts = await workerHosts(query);
-    if (hosts.some((host) => host !== WORKER_HOST)) {
-      return { ok: false, refusal: workerHostRefusal(hosts) };
-    }
-    const loginExists = hosts.includes(WORKER_HOST);
-    if (!loginExists && options.workerPassword === undefined) {
-      return { ok: false, refusal: workerLoginRefusal(target) };
-    }
-    const session = await readSession(query);
-    const schema = target.schema ?? session.database;
-    if (schema === undefined) {
-      return { ok: false, refusal: noDatabaseRefusal(target) };
-    }
-    const catalog = await readCatalog(query, schema, target.table);
-    const rights = loginExists ? await readWorkerRights(query, schema) : NO_RIGHTS;
-    const side =
-      target.storage === "side-table"
-        ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
-        : undefined;
-    const checked = installRefusal(target, session, catalog, rights, loginExists, side);
-    if (!("key" in checked)) {
-      return { ok: false, refusal: checked };
-    }
-    const server = serverNameOf(session);
-    const planned =
-      side === undefined
-        ? installPlan(target, catalog, checked.key, loginExists, rights, server)
-        : sideInstallPlan(target, catalog, side, checked.key, loginExists, rights, server);
-    if (planned.createsTriggers) {
-      const allowed = await readTriggerRights(query);
-      if (allowed.binaryLogging && !allowed.trustCreators && !allowed.superUser) {
+  return withClient(connect, url, (query) =>
+    refusing(async (): Promise<PlanResult> => {
+      // The worker login is FacetDB's one account of the name, for any host; an existing one keeps
+      // its password, which other projects on the server may share: the contract's code before
+      // anything else is read, as on Postgres.
+      const hosts = await workerHosts(query);
+      if (hosts.some((host) => host !== WORKER_HOST)) {
+        return { ok: false, refusal: workerHostRefusal(hosts) };
+      }
+      const loginExists = hosts.includes(WORKER_HOST);
+      if (!loginExists && options.workerPassword === undefined) {
+        return { ok: false, refusal: workerLoginRefusal(target) };
+      }
+      const session = await readSession(query);
+      // Under statement-based binary logging the worker could write nothing (doctor's words):
+      // refused whatever the plan holds, an installed table's empty plan included.
+      const logging = await readTriggerRights(query);
+      if (logging.binaryLogging && logging.binlogFormat === "STATEMENT") {
+        return { ok: false, refusal: statementFormatRefusal() };
+      }
+      const schema = target.schema ?? session.database;
+      if (schema === undefined) {
+        return { ok: false, refusal: noDatabaseRefusal(target) };
+      }
+      const catalog = await readCatalog(query, schema, target.table);
+      const rights = loginExists ? await readWorkerRights(query, schema) : NO_RIGHTS;
+      const side =
+        target.storage === "side-table"
+          ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
+          : undefined;
+      const inlineSide =
+        side === undefined
+          ? await readRelation(query, schema, sideTableName(target.table))
+          : undefined;
+      const checked = installRefusal(
+        target,
+        session,
+        catalog,
+        rights,
+        loginExists,
+        side,
+        inlineSide,
+      );
+      if (!("key" in checked)) {
+        return { ok: false, refusal: checked };
+      }
+      const server = serverNameOf(session);
+      const planned =
+        side === undefined
+          ? installPlan(target, catalog, checked.key, loginExists, rights, server)
+          : sideInstallPlan(target, catalog, side, checked.key, loginExists, rights, server);
+      if (
+        planned.createsTriggers &&
+        logging.binaryLogging &&
+        !logging.trustCreators &&
+        !logging.superUser
+      ) {
         return { ok: false, refusal: binaryLoggingRefusal() };
       }
-    }
-    return { ok: true, plan: planned.plan };
-  });
+      return { ok: true, plan: planned.plan };
+    }),
+  );
 }

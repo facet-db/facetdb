@@ -23,6 +23,7 @@ import {
   createMysqlInstaller,
   REFUSED_FIX,
   SCRIPT_HEADER,
+  SETTINGS,
   UNINSTALL_RERUN_NOTE,
   WORKER_ACCOUNT,
 } from "./index.ts";
@@ -94,7 +95,7 @@ describe("planUninstall: the listings example", () => {
   it("removes the triggers first, then the worker's rights, the marked columns and the table's row", async () => {
     const plan = planOf(await planned(installedListings()));
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       "drop trigger if exists `app`.`facetdb_listings_new`",
       "drop trigger if exists `app`.`facetdb_listings_ins`",
       "drop trigger if exists `app`.`facetdb_listings_upd`",
@@ -137,9 +138,7 @@ describe("planUninstall: the listings example", () => {
       "MySQL and MariaDB drop a column that a view reads, and the view then fails with error 1356; MariaDB cannot list the views that read app.listings, so check them before this runs.",
     ]);
     const script = createMysqlInstaller({ connect: recordingDriver().connect }).render(plan);
-    expect(script.startsWith(`${SCRIPT_HEADER}\n\nset session lock_wait_timeout = 10;\n`)).toBe(
-      true,
-    );
+    expect(script.startsWith(`${SCRIPT_HEADER}\n\n${SETTINGS.text};\n`)).toBe(true);
   });
 
   it("names what goes and what stays, the worker login with why", async () => {
@@ -326,7 +325,7 @@ describe("planUninstall: the shared tables", () => {
     };
     const plan = planOf(await planned(dropped));
     expect(texts(plan)).toEqual([
-      "set session lock_wait_timeout = 10",
+      SETTINGS.text,
       "delete from `app`.`facetdb_jobs` where `table_name` = 'listings'",
       "delete from `app`.`facetdb_table_owners` where `table_name` = 'listings'",
       ...CLEANUP,
@@ -348,7 +347,7 @@ describe("planUninstall: the shared tables", () => {
       owners: [],
     };
     const plan = planOf(await planned(stopped));
-    expect(texts(plan)).toEqual(["set session lock_wait_timeout = 10", ...CLEANUP]);
+    expect(texts(plan)).toEqual([SETTINGS.text, ...CLEANUP]);
     expect(plan.confirm).toEqual({ kind: "project", name: "Listings" });
   });
 });
@@ -391,5 +390,16 @@ describe("planUninstall refuses, and changes nothing", () => {
     );
     expect(refusalOf(remote).code).toBe("admin-url-tls");
     expect(remote.driver.opened).toBe(0);
+  });
+
+  it("refuses an admin who may not read mysql.user in words, never the driver's error", async () => {
+    const denied = await planned({ ...installedListings(), deniedGrantTables: ["user"] });
+    expect(refusalOf(denied)).toEqual({
+      code: "admin-rights",
+      message:
+        "the account of the admin connection string may not read mysql.user (error 1142); FacetDB reads it to find every account named facetdb_worker (and MariaDB's roles) before it creates or keeps the worker login, and plans nothing it cannot see; nothing was changed",
+      fix: "grant the admin account select on mysql.user (grant select on mysql.user to <the admin account>, run by an account that may), or use an admin account that has it, then run the command again",
+    });
+    expect(denied.driver.closed).toBe(denied.driver.opened);
   });
 });

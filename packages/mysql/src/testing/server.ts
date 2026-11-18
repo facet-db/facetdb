@@ -53,6 +53,8 @@ export type FakeServerOptions = {
    * failures with `failWhen`.
    */
   readonly sideTable?: boolean;
+  /** The table's `engine` as `information_schema.tables` lists it; `InnoDB` when absent. */
+  readonly engine?: string;
 };
 
 export type FakeServer = {
@@ -182,7 +184,16 @@ export function fakeServer(options: FakeServerOptions): FakeServer {
       const listed =
         params[1] === options.table ||
         (options.sideTable === true && params[1] === `facetdb_${options.table}_answers`);
-      return installed && listed ? some([{ type: "BASE TABLE" }]) : none;
+      return installed && listed
+        ? some([
+            {
+              type: "BASE TABLE",
+              engine: params[1] === options.table ? (options.engine ?? "InnoDB") : "InnoDB",
+              create_options: "",
+              table_comment: params[1] === options.table ? "" : "facetdb",
+            },
+          ])
+        : none;
     }
     if (text.includes("from information_schema.key_column_usage")) {
       return installed && params[1] === options.table ? some([{ name: key }]) : none;

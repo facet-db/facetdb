@@ -3,7 +3,7 @@
 -- hand, give it to mysql --batch, which stops at the first error: the source command and a
 -- paste go on past one.
 
-set session lock_wait_timeout = 10;
+set session lock_wait_timeout = 10 /*M! , sql_mode = concat_ws(',', nullif(@@session.sql_mode, ''), 'NO_AUTO_CREATE_USER') */;
 
 create table if not exists `app`.`facetdb_table_owners` (
   `table_name` varchar(64) not null primary key,

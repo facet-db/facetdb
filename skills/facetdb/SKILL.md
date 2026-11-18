@@ -139,7 +139,7 @@ invocation.
 
 | Command | What it does |
 | --- | --- |
-| `facetdb init` | Creates the config file, asks for the database connection, recommends side-table mode when it finds Prisma or Drizzle, and prints the skill install commands |
+| `facetdb init` | Creates the config file, asks for the database connection and what that engine needs (the store URL for a non-Postgres source, a MongoDB replica set, SQL Server's contained user, Oracle's service and schema), asks whether the host forbids triggers (`--triggers allowed|forbidden` in a script), recommends side-table mode when it finds Prisma or Drizzle, and prints the skill install commands; `facetdb init --example listings --engine <engine>` copies a ready example (config, seed, steps) for any of the nine engines |
 | `facetdb doctor` | Checks the connection, permissions, trigger, worker and model key, and says what is wrong (`--offline` skips the model) |
 | `facetdb preview` | Answers the most recent rows in the terminal and changes nothing in the database |
 | `facetdb migrate` | Installs every source: answer columns, jobs table, change capture. Prints the SQL first (`--yes`, `--source`, `--prune`) |

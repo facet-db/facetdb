@@ -16,6 +16,7 @@ import {
   withClient,
 } from "../sql/index.ts";
 import {
+  creationMarker,
   droppedColumnsNote,
   isMariaDb,
   readCatalog,
@@ -27,7 +28,7 @@ import {
   serverNameOf,
   workerExists,
 } from "./catalog.ts";
-import { noDatabaseRefusal, pruneRefused } from "./refusals.ts";
+import { noDatabaseRefusal, pruneRefused, refusing } from "./refusals.ts";
 import {
   createViewStatement,
   readSideCatalog,
@@ -132,86 +133,162 @@ export async function planPrune(
   if (insecure !== undefined) {
     return { ok: false, refusal: insecure };
   }
-  return withClient(connect, url, async (query): Promise<PlanResult> => {
-    const session = await readSession(query);
-    const schema = target.schema ?? session.database;
-    if (schema === undefined) {
-      return { ok: false, refusal: noDatabaseRefusal(target) };
-    }
-    const catalog = await readCatalog(query, schema, target.table);
-    const { table } = target;
-    const label = `${schema}.${table}`;
-    const owner = catalog.owners.find((row) => row.table === table);
-    if (catalog.tableType === undefined || owner === undefined) {
-      return { ok: true, plan: NOTHING };
-    }
-    if (owner.projectId !== target.project.id) {
-      return {
-        ok: false,
-        refusal: pruneRefused(
-          `${label} belongs to another project (${owner.projectId}); prune it from that project.`,
+  // A refusal a read throws (an admin who may not read mysql.user) is the plan's (`refusing`).
+  return withClient(connect, url, (query) =>
+    refusing(async (): Promise<PlanResult> => {
+      const session = await readSession(query);
+      const schema = target.schema ?? session.database;
+      if (schema === undefined) {
+        return { ok: false, refusal: noDatabaseRefusal(target) };
+      }
+      const catalog = await readCatalog(query, schema, target.table);
+      const { table } = target;
+      const label = `${schema}.${table}`;
+      const owner = catalog.owners.find((row) => row.table === table);
+      if (catalog.tableType === undefined || owner === undefined) {
+        return { ok: true, plan: NOTHING };
+      }
+      if (owner.projectId !== target.project.id) {
+        return {
+          ok: false,
+          refusal: pruneRefused(
+            `${label} belongs to another project (${owner.projectId}); prune it from that project.`,
+          ),
+        };
+      }
+      const [key, ...rest] = catalog.primaryKey;
+      if (key === undefined || rest.length > 0) {
+        return {
+          ok: false,
+          refusal: pruneRefused(
+            `${label} no longer has a single-column primary key, which FacetDB installed by; restore it first.`,
+          ),
+        };
+      }
+      const { questionSet } = target;
+      // Where FacetDB's columns are: the table inline, the side table in side-table mode, whose
+      // view reads them by name.
+      const side =
+        target.storage === "side-table"
+          ? await readSideCatalog(query, schema, table, isMariaDb(session))
+          : undefined;
+      const holder = side === undefined ? table : sideTableName(table);
+      const holderLabel = `${schema}.${holder}`;
+      const holderColumns =
+        side === undefined ? catalog.columns : sideTableIsOurs(side) ? side.side.columns : [];
+      const marked = holderColumns
+        .filter((column) => column.comment === OWNED_MARK && column.name !== key)
+        .map((column) => column.name);
+      const dropped = droppedColumns(questionSet, marked);
+      const kept = keptColumns(questionSet, marked);
+      const droppedNames = new Set(dropped.map(({ column }) => column));
+      // The worker keeps its read of the key, the state, the creation marker its scan orders by,
+      // FacetDB's columns and a kept column; a column that goes loses every right first, since
+      // MySQL keeps a dropped column's grants.
+      const marker = creationMarker(catalog.columns);
+      const stays = new Set([
+        key,
+        ...questionSet.read,
+        ...(marker === undefined ? [] : [marker.name]),
+        ...ownedColumns(questionSet).map((column) => column.name),
+        ...kept,
+      ]);
+      const held = (await workerExists(query))
+        ? rightsOn(
+            await readWorkerRights(query, schema),
+            table,
+            new Set(catalog.columns.map((column) => column.name)),
+          )
+        : [];
+      const taken = held.filter(
+        ({ column, privilege }) =>
+          column !== undefined &&
+          (droppedNames.has(column) || (privilege === "SELECT" && !stays.has(column))),
+      );
+      const revoke = revokeStatement(schema, table, taken);
+      const unread = [
+        ...new Set(
+          taken.flatMap(({ column }) =>
+            column === undefined || droppedNames.has(column) ? [] : [column],
+          ),
         ),
-      };
-    }
-    const [key, ...rest] = catalog.primaryKey;
-    if (key === undefined || rest.length > 0) {
-      return {
-        ok: false,
-        refusal: pruneRefused(
-          `${label} no longer has a single-column primary key, which FacetDB installed by; restore it first.`,
-        ),
-      };
-    }
-    const { questionSet } = target;
-    // Where FacetDB's columns are: the table inline, the side table in side-table mode, whose view
-    // reads them by name.
-    const side =
-      target.storage === "side-table"
-        ? await readSideCatalog(query, schema, table, isMariaDb(session))
-        : undefined;
-    const holder = side === undefined ? table : sideTableName(table);
-    const holderLabel = `${schema}.${holder}`;
-    const holderColumns =
-      side === undefined ? catalog.columns : sideTableIsOurs(side) ? side.side.columns : [];
-    const marked = holderColumns
-      .filter((column) => column.comment === OWNED_MARK && column.name !== key)
-      .map((column) => column.name);
-    const dropped = droppedColumns(questionSet, marked);
-    const kept = keptColumns(questionSet, marked);
-    const droppedNames = new Set(dropped.map(({ column }) => column));
-    // The worker keeps its read of the key, the state, FacetDB's columns and a kept column; a
-    // column that goes loses every right first, since MySQL keeps a dropped column's grants.
-    const stays = new Set([
-      key,
-      ...questionSet.read,
-      ...ownedColumns(questionSet).map((column) => column.name),
-      ...kept,
-    ]);
-    const held = (await workerExists(query))
-      ? rightsOn(
-          await readWorkerRights(query, schema),
-          table,
-          new Set(catalog.columns.map((column) => column.name)),
-        )
-      : [];
-    const taken = held.filter(
-      ({ column, privilege }) =>
-        column !== undefined &&
-        (droppedNames.has(column) || (privilege === "SELECT" && !stays.has(column))),
-    );
-    const revoke = revokeStatement(schema, table, taken);
-    const unread = [
-      ...new Set(
-        taken.flatMap(({ column }) =>
-          column === undefined || droppedNames.has(column) ? [] : [column],
-        ),
-      ),
-    ];
-    if (revoke === undefined && dropped.length === 0) {
+      ];
+      if (revoke === undefined && dropped.length === 0) {
+        return {
+          ok: true,
+          plan: {
+            ...NOTHING,
+            keeps: kept.map(
+              (name): KeptObject => ({
+                kind: "column",
+                name,
+                of: holderLabel,
+                scope: "source",
+                reason: KEPT_REASON,
+              }),
+            ),
+          },
+        };
+      }
+      // Inline, the application's views may read a dropped column, and the note names them. The
+      // side table is read by FacetDB's own view, made again first without the columns that go, from
+      // what stays on the side table (the install that follows the prune adds a new question's).
+      const viewsNote =
+        dropped.length === 0 || side !== undefined
+          ? undefined
+          : droppedColumnsNote(label, await readViews(query, schema, table));
+      const remade =
+        side !== undefined &&
+        viewIsOurs(side) &&
+        side.view.columns.some((column) => droppedNames.has(column))
+          ? [
+              createViewStatement(
+                schema,
+                table,
+                key,
+                marked.filter((column) => !droppedNames.has(column)),
+              ),
+            ]
+          : [];
       return {
         ok: true,
         plan: {
-          ...NOTHING,
+          statements: [
+            SETTINGS,
+            ...(revoke === undefined ? [] : [revoke]),
+            ...remade,
+            // In one statement: MySQL and MariaDB drop a column a view reads without a word, and the
+            // view fails with error 1356 afterwards, which the note says.
+            ...(dropped.length === 0
+              ? []
+              : [
+                  sourceStatement(
+                    "columns",
+                    `alter table ${quoteTable(schema, holder)}\n${dropped.map(({ column }) => `  drop column ${quoteIdent(column)}`).join(",\n")}`,
+                  ),
+                ]),
+          ],
+          transactional: false,
+          removes: [
+            ...dropped.map(
+              ({ column, reason }): EngineObject => ({
+                kind: "column",
+                name: column,
+                of: holderLabel,
+                scope: "source",
+                reason,
+              }),
+            ),
+            ...unread.map(
+              (column): EngineObject => ({
+                kind: "grant",
+                name: WORKER_ACCOUNT,
+                of: column,
+                scope: "source",
+                reason: "read no longer lists it",
+              }),
+            ),
+          ],
           keeps: kept.map(
             (name): KeptObject => ({
               kind: "column",
@@ -221,82 +298,12 @@ export async function planPrune(
               reason: KEPT_REASON,
             }),
           ),
+          notes: [
+            pruneRerunNote(serverNameOf(session)),
+            ...(viewsNote === undefined ? [] : [viewsNote]),
+          ],
         },
       };
-    }
-    // Inline, the application's views may read a dropped column, and the note names them. The
-    // side table is read by FacetDB's own view, made again first without the columns that go, from
-    // what stays on the side table (the install that follows the prune adds a new question's).
-    const viewsNote =
-      dropped.length === 0 || side !== undefined
-        ? undefined
-        : droppedColumnsNote(label, await readViews(query, schema, table));
-    const remade =
-      side !== undefined &&
-      viewIsOurs(side) &&
-      side.view.columns.some((column) => droppedNames.has(column))
-        ? [
-            createViewStatement(
-              schema,
-              table,
-              key,
-              marked.filter((column) => !droppedNames.has(column)),
-            ),
-          ]
-        : [];
-    return {
-      ok: true,
-      plan: {
-        statements: [
-          SETTINGS,
-          ...(revoke === undefined ? [] : [revoke]),
-          ...remade,
-          // In one statement: MySQL and MariaDB drop a column a view reads without a word, and the
-          // view fails with error 1356 afterwards, which the note says.
-          ...(dropped.length === 0
-            ? []
-            : [
-                sourceStatement(
-                  "columns",
-                  `alter table ${quoteTable(schema, holder)}\n${dropped.map(({ column }) => `  drop column ${quoteIdent(column)}`).join(",\n")}`,
-                ),
-              ]),
-        ],
-        transactional: false,
-        removes: [
-          ...dropped.map(
-            ({ column, reason }): EngineObject => ({
-              kind: "column",
-              name: column,
-              of: holderLabel,
-              scope: "source",
-              reason,
-            }),
-          ),
-          ...unread.map(
-            (column): EngineObject => ({
-              kind: "grant",
-              name: WORKER_ACCOUNT,
-              of: column,
-              scope: "source",
-              reason: "read no longer lists it",
-            }),
-          ),
-        ],
-        keeps: kept.map(
-          (name): KeptObject => ({
-            kind: "column",
-            name,
-            of: holderLabel,
-            scope: "source",
-            reason: KEPT_REASON,
-          }),
-        ),
-        notes: [
-          pruneRerunNote(serverNameOf(session)),
-          ...(viewsNote === undefined ? [] : [viewsNote]),
-        ],
-      },
-    };
-  });
+    }),
+  );
 }

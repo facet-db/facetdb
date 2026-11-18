@@ -7,10 +7,19 @@ import type {
   RecordKey,
   StateValue,
 } from "@facetdb/core";
+import { EngineRefusal } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { createMysqlEngine } from "../engine/index.ts";
 import { URL_VARIABLES, type UrlVariable } from "../index.ts";
-import { createMysqlInstaller, JOBS_TABLE, WORKER_ACCOUNT } from "../install/index.ts";
+import {
+  createMysqlInstaller,
+  JOBS_TABLE,
+  SETTINGS,
+  sideKeyConstraint,
+  sideTableName,
+  WORKER_ACCOUNT,
+} from "../install/index.ts";
 import { connectMysql, type MysqlClient, type MysqlRow } from "../sql/index.ts";
 import { serverUrl, skipUnless } from "../testing/index.ts";
 import {
@@ -107,6 +116,20 @@ function counting(connect: MysqlPoolConnect): { connect: MysqlPoolConnect; sent:
   };
 }
 
+/**
+ * What a reset makes and nothing else drops: the scratch database and the worker login, whose
+ * password is this file's. The suite's `afterAll` drops them on each server, whatever its cases did.
+ */
+async function dropScratch(server: string): Promise<void> {
+  const root = connectMysql(server);
+  try {
+    await root.query(`drop database if exists \`${SCRATCH}\``);
+    await root.query(`drop user if exists ${WORKER_ACCOUNT}`);
+  } finally {
+    await root.close();
+  }
+}
+
 /** One scratch database on the server, installed by the install plan, with the connectors opened on it. */
 class World {
   readonly clock = new FakeClock(START);
@@ -122,18 +145,17 @@ class World {
     this.admin = connectMysql(this.urls.admin);
   }
 
-  /** A fresh scratch database and a fresh worker login, then the table. */
-  async reset(server: string): Promise<void> {
+  /** A fresh scratch database and a fresh worker login, then the table (`more` columns after its own). */
+  async reset(server: string, more = ""): Promise<void> {
+    await dropScratch(server);
     const root = connectMysql(server);
     try {
-      await root.query(`drop database if exists \`${SCRATCH}\``);
       await root.query(`create database \`${SCRATCH}\` character set utf8mb4`);
-      await root.query(`drop user if exists ${WORKER_ACCOUNT}`);
     } finally {
       await root.close();
     }
     await this.admin.query(
-      "create table tickets (id varchar(64) primary key, subject text, body text) character set utf8mb4",
+      `create table tickets (id varchar(64) primary key, subject text, body text${more}) character set utf8mb4`,
     );
   }
 
@@ -254,12 +276,16 @@ for (const variable of URL_VARIABLES) {
         await made.close();
       }
     });
+    // The shared server keeps no account or database of this suite's, whatever its cases did.
+    afterAll(async () => {
+      await dropScratch(serverUrl(variable as UrlVariable));
+    });
 
-    async function world(target?: EngineTarget): Promise<World> {
+    async function world(target?: EngineTarget, more?: string): Promise<World> {
       const server = serverUrl(variable as UrlVariable);
       const made = new World(server, target);
       worlds.push(made);
-      await made.reset(server);
+      await made.reset(server, more);
       return made;
     }
 
@@ -461,6 +487,136 @@ for (const variable of URL_VARIABLES) {
         await root.query("set global sql_mode = ?", [mode]);
         await root.close();
       }
+    });
+
+    it("a backfill asks the newest record first by created_at, which install grants the worker, whatever order the keys sort in", async () => {
+      const made = await world(ticketsTarget(), ", created_at datetime(3) not null");
+      const planned = await made.installer.planInstall(made.target, made.urls.admin, {
+        ...deps(made.clock),
+        workerPassword: PASSWORD,
+      });
+      expect(planned.ok && planned.plan.notes.at(-1)).toContain(
+        "asks its newest records first, by created_at",
+      );
+      await made.install();
+      // Keys whose order is not the records' age, as uuids are: the newest has the smallest key.
+      const rows: readonly (readonly [string, string])[] = [
+        ["c-oldest", "2026-11-01 09:00:00.000"],
+        ["a-newest", "2026-11-04 09:00:00.000"],
+        ["b-middle", "2026-11-02 09:00:00.000"],
+      ];
+      for (const [id, created] of rows) {
+        await made.admin.query(
+          "insert into tickets (id, subject, body, created_at) values (?, 's', 'b', ?)",
+          [id, created],
+        );
+      }
+      const connector = await made.connector("w1", { scanPageSize: 2 });
+      const first = await connector.scan(null);
+      expect(first.rows.map((row) => row.key)).toEqual(["a-newest", "b-middle"]);
+      const second = await connector.scan(first.next);
+      expect(second.rows.map((row) => row.key)).toEqual(["c-oldest"]);
+      // A key-only cursor saved before migrate granted created_at starts again from the newest.
+      const restarted = await connector.scan(JSON.stringify(["b-middle"]));
+      expect(restarted.rows.map((row) => row.key)).toEqual(["a-newest", "b-middle"]);
+    });
+
+    it("a timestamp created_at orders and resumes by its instant, whatever zone each session wrote or reads it in", async () => {
+      const made = await world(ticketsTarget(), ", created_at timestamp(3) null");
+      await made.install();
+      // The application writes from sessions in zones of their own; the server keeps the instant.
+      // Read as local text in one zone, d-early (14:00 at +05:00, 09:00 UTC) would sort after
+      // e-late (06:30 at -03:00, 09:30 UTC); by instant it comes first. Two share an instant.
+      const writes: readonly (readonly [string, string, string])[] = [
+        ["+05:00", "c-oldest", "2026-11-01 14:00:00.000"],
+        ["+05:00", "d-early", "2026-11-04 14:00:00.000"],
+        ["-03:00", "e-late", "2026-11-04 06:30:00.250"],
+        ["+00:00", "a-tie", "2026-11-04 09:30:00.250"],
+      ];
+      for (const [zone, id, created] of writes) {
+        await made.admin.query("set session time_zone = ?", [zone]);
+        await made.admin.query(
+          "insert into tickets (id, subject, body, created_at) values (?, 's', 'b', ?)",
+          [id, created],
+        );
+      }
+      const connector = await made.connector("w1", { scanPageSize: 1 });
+      const keys: string[] = [];
+      const cursors: (string | null)[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await connector.scan(cursor);
+        keys.push(...page.rows.map((row) => row.key));
+        cursor = page.next;
+        cursors.push(cursor);
+      } while (cursor !== null);
+      // Newest first by instant, the tie broken by the key, each record once.
+      expect(keys).toEqual(["e-late", "a-tie", "d-early", "c-oldest"]);
+      // The cursor carries unix_timestamp's number, the stored instant, not a zone's text.
+      const [stamp] = await made.admin.query(
+        "select cast(unix_timestamp(created_at) as char) as n from tickets where id = 'e-late'",
+      );
+      expect(cursors[0]).toBe(JSON.stringify([String(stamp?.["n"]), "e-late"]));
+      // A saved cursor resumes in another connector with the rest, each record once.
+      const later = await made.connector("w2", { scanPageSize: 10 });
+      expect((await later.scan(cursors[1] ?? null)).rows.map((row) => row.key)).toEqual([
+        "d-early",
+        "c-oldest",
+      ]);
+      // A cursor of local-time text from before is never compared: it starts again.
+      const restarted = await later.scan(JSON.stringify(["2026-11-04 09:30:00.250", "e-late"]));
+      expect(restarted.rows.map((row) => row.key)).toEqual([
+        "e-late",
+        "a-tie",
+        "d-early",
+        "c-oldest",
+      ]);
+    });
+
+    it("side-table mode on a table turned MyISAM after install: open refuses and doctor fails, in install's words", async () => {
+      const made = await world({ ...ticketsTarget("reset"), storage: "side-table" });
+      await made.install();
+      await (await made.connector("w1")).close();
+      // The side table's foreign key holds the table to InnoDB on both servers (errors 3776, 1217):
+      // a conversion goes through dropping it first.
+      await made.admin.query(
+        `alter table ${sideTableName("tickets")} drop foreign key ${sideKeyConstraint("tickets")}`,
+      );
+      await made.admin.query("alter table tickets engine = MyISAM");
+      const opening = made.connector("w2");
+      await expect(opening).rejects.toBeInstanceOf(EngineRefusal);
+      await expect(opening).rejects.toMatchObject({
+        refusal: {
+          code: "table-engine",
+          message: expect.stringContaining(`${SCRATCH}.tickets is a MyISAM table`),
+          fix: `convert the table to InnoDB (alter table ${SCRATCH}.tickets engine = InnoDB), or set storage "inline" for this source, then run facetdb migrate again`,
+        },
+      });
+      const checks = await createMysqlEngine().doctor(
+        made.target,
+        made.urls.worker,
+        deps(made.clock),
+      );
+      expect(checks.find((check) => check.name === "install")).toMatchObject({
+        status: "fail",
+        detail: expect.stringContaining(`${SCRATCH}.tickets is a MyISAM table`),
+      });
+    });
+
+    it("the script's settings add NO_AUTO_CREATE_USER to the session on MariaDB, under any sql_mode, and change no mode on MySQL", async () => {
+      const made = await world();
+      await made.admin.query("set session sql_mode = ''");
+      await made.admin.query(SETTINGS.text);
+      const [row] = await made.admin.query(
+        "select @@session.sql_mode as mode, @@session.lock_wait_timeout as wait, version() as version",
+      );
+      const mariadb = /mariadb/i.test(String(row?.["version"]));
+      expect(String(row?.["mode"])).toBe(mariadb ? "NO_AUTO_CREATE_USER" : "");
+      expect(Number(row?.["wait"])).toBe(10);
+      // Run again on a mode that has it, it stays one.
+      await made.admin.query(SETTINGS.text);
+      const [again] = await made.admin.query("select @@session.sql_mode as mode");
+      expect(String(again?.["mode"])).toBe(mariadb ? "NO_AUTO_CREATE_USER" : "");
     });
   });
 }

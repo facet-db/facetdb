@@ -609,7 +609,16 @@ describe("scan", () => {
     await expect(connector.scan("not a cursor")).rejects.toThrow(
       '"not a cursor" is not a scan cursor of a MySQL source',
     );
-    await expect(connector.scan(JSON.stringify(["x", "y"]))).rejects.toThrow("not a scan cursor");
+    await expect(connector.scan(JSON.stringify([1, "y"]))).rejects.toThrow("not a scan cursor");
+    await expect(connector.scan(JSON.stringify([7]))).rejects.toThrow("not a scan cursor");
+    // A cursor of the creation order, saved while the marker was readable, starts again from the
+    // newest: the answered records are skipped by their hash.
+    made.take();
+    const again = await connector.scan(JSON.stringify(["2026-06-01 00:00:00.000", "m"]));
+    const [restart] = made.take();
+    expect(restart?.text).toContain("order by `id` desc limit ?");
+    expect(restart?.text).not.toContain("where");
+    expect(again.rows.map((row) => row.key)).toEqual(["z", "m"]);
   });
 
   it("pages by created_at then the key where the worker may read it, nulls last", async () => {
@@ -642,6 +651,51 @@ describe("scan", () => {
     const third = await connector.scan(second.next);
     expect(made.take()[0]?.text).toContain("where `created_at` is null and `id` < ?");
     expect(third).toEqual({ rows: [], next: null });
+
+    // A key-only cursor saved before migrate granted created_at starts the scan again from the
+    // newest record, rather than stopping every run of the backfill.
+    const restarted = await connector.scan(JSON.stringify(["new-a"]));
+    const [sent] = made.take();
+    expect(sent?.text).toContain("order by `created_at` desc, `id` desc limit ?");
+    expect(sent?.text).not.toContain("where");
+    expect(sent?.params).toEqual([2]);
+    expect(restarted.rows.map((row) => row.key)).toEqual(["new-b", "new-a"]);
+    // An instant from a timestamp marker is no datetime text: it starts again too, never compared.
+    await connector.scan(JSON.stringify(["1793610000.000", "new-a"]));
+    expect(made.take()[0]?.text).not.toContain("where");
+  });
+
+  it("sorts a timestamp created_at by the column, which an index serves, and bounds and resumes it by its instant, unix_timestamp, never its local-time text", async () => {
+    const made = new World(ticketsTarget(), { createdAtType: "timestamp" });
+    const connector = await made.connector("w1", 2);
+    // What the fake prints for the marker is what the server's unix_timestamp prints.
+    made.server.edit("old", { subject: "s", body: "b" }, "1793500000.000");
+    made.server.edit("new-a", { subject: "s", body: "b" }, "1793610000.123");
+    made.server.edit("new-b", { subject: "s", body: "b" }, "1793610000.123");
+    made.take();
+
+    const first = await connector.scan(null);
+    expect(made.take()[1]).toEqual({
+      text: "select cast(unix_timestamp(`created_at`) as char character set utf8mb4) as o, cast(`id` as char character set utf8mb4) as k, cast(`subject` as char character set utf8mb4) as s0, cast(`body` as char character set utf8mb4) as s1, (false) as x from `app`.`tickets` order by `created_at` desc, `id` desc limit ?",
+      params: [2],
+    });
+    expect(first.rows.map((row) => row.key)).toEqual(["new-b", "new-a"]);
+    expect(first.next).toBe(JSON.stringify(["1793610000.123", "new-a"]));
+
+    const second = await connector.scan(first.next);
+    expect(made.take()).toEqual([
+      {
+        text: "select cast(unix_timestamp(`created_at`) as char character set utf8mb4) as o, cast(`id` as char character set utf8mb4) as k, cast(`subject` as char character set utf8mb4) as s0, cast(`body` as char character set utf8mb4) as s1, (false) as x from `app`.`tickets` where (unix_timestamp(`created_at`) < cast(? as decimal(20,6)) or (unix_timestamp(`created_at`) = cast(? as decimal(20,6)) and `id` < ?) or unix_timestamp(`created_at`) is null) order by `created_at` desc, `id` desc limit ?",
+        params: ["1793610000.123", "1793610000.123", "new-a", 2],
+      },
+    ]);
+    expect(second.rows.map((row) => row.key)).toEqual(["old"]);
+
+    // A cursor of local-time text, written before the marker was ordered by its instant, is never
+    // compared: the scan starts again from the newest record.
+    const restarted = await connector.scan(JSON.stringify(["2026-11-02 14:00:00.000", "new-a"]));
+    expect(made.take()[0]?.text).not.toContain("where");
+    expect(restarted.rows.map((row) => row.key)).toEqual(["new-b", "new-a"]);
   });
 });
 

@@ -31,7 +31,7 @@ import {
   type WorkerRights,
   workerExists,
 } from "./catalog.ts";
-import { noDatabaseRefusal, uninstallRefused } from "./refusals.ts";
+import { noDatabaseRefusal, refusing, uninstallRefused } from "./refusals.ts";
 import {
   accountSql,
   readSideCatalog,
@@ -349,79 +349,84 @@ export async function planUninstall(
   if (insecure !== undefined) {
     return { ok: false, refusal: insecure };
   }
-  return withClient(connect, url, async (query): Promise<PlanResult> => {
-    const session = await readSession(query);
-    const { database } = session;
-    const schema = target.schema ?? database;
-    if (schema === undefined) {
-      return { ok: false, refusal: noDatabaseRefusal(target) };
-    }
-    // The run's other tables in this schema: their objects are gone by the run's last table.
-    const inRun = new Set(
-      options.alsoUninstalling
-        .filter((other) => (other.schema ?? database) === schema)
-        .map((other) => other.table),
-    );
-    const catalog = await readCatalog(query, schema, target.table);
-    const label = `${schema}.${target.table}`;
-    const owner = catalog.owners.find((row) => row.table === target.table);
-    if (owner !== undefined && owner.projectId !== target.project.id) {
+  // A refusal a read throws (an admin who may not read mysql.user) is the plan's (`refusing`).
+  return withClient(connect, url, (query) =>
+    refusing(async (): Promise<PlanResult> => {
+      const session = await readSession(query);
+      const { database } = session;
+      const schema = target.schema ?? database;
+      if (schema === undefined) {
+        return { ok: false, refusal: noDatabaseRefusal(target) };
+      }
+      // The run's other tables in this schema: their objects are gone by the run's last table.
+      const inRun = new Set(
+        options.alsoUninstalling
+          .filter((other) => (other.schema ?? database) === schema)
+          .map((other) => other.table),
+      );
+      const catalog = await readCatalog(query, schema, target.table);
+      const label = `${schema}.${target.table}`;
+      const owner = catalog.owners.find((row) => row.table === target.table);
+      if (owner !== undefined && owner.projectId !== target.project.id) {
+        return {
+          ok: false,
+          refusal: uninstallRefused(
+            `${label} belongs to another project (${owner.projectId}); uninstall it from that project.`,
+          ),
+        };
+      }
+      const rights = (await workerExists(query))
+        ? await readWorkerRights(query, schema)
+        : NO_RIGHTS;
+      const marked = catalog.columns.some((column) => column.comment === OWNED_MARK);
+      const views = marked ? await readViews(query, schema, target.table) : [];
+      const side =
+        target.storage === "side-table"
+          ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
+          : undefined;
+      if (owner === undefined) {
+        // A run stopped after the table's row went leaves only the shared tables: the same plan
+        // finishes them. Anything else without a row is no install of this project's to undo.
+        const leftover =
+          (catalog.jobs.present || catalog.ownersPresent) &&
+          catalog.owners.length === 0 &&
+          otherQueueTables(catalog, target.table).length === 0 &&
+          !marked &&
+          !catalog.triggers.some(
+            (trigger) => trigger.table === target.table && trigger.name.startsWith("facetdb_"),
+          ) &&
+          // The side table and the view go before the row: one still there is no stopped run's.
+          (side === undefined || (!sideTableIsOurs(side) && !viewIsOurs(side)));
+        return leftover
+          ? {
+              ok: true,
+              plan: uninstallPlan(target, catalog, {
+                rights,
+                claimed: false,
+                inRun,
+                views,
+                side: undefined,
+                server: serverNameOf(session),
+              }),
+            }
+          : {
+              ok: false,
+              refusal: uninstallRefused(
+                `FacetDB is not installed on ${label} (${schema}.${OWNERS_TABLE} has no row for it); check the source's table and database.`,
+              ),
+            };
+      }
       return {
-        ok: false,
-        refusal: uninstallRefused(
-          `${label} belongs to another project (${owner.projectId}); uninstall it from that project.`,
-        ),
+        ok: true,
+        plan: uninstallPlan(target, catalog, {
+          rights,
+          claimed: true,
+          inRun,
+          views,
+          side,
+          server: serverNameOf(session),
+        }),
       };
-    }
-    const rights = (await workerExists(query)) ? await readWorkerRights(query, schema) : NO_RIGHTS;
-    const marked = catalog.columns.some((column) => column.comment === OWNED_MARK);
-    const views = marked ? await readViews(query, schema, target.table) : [];
-    const side =
-      target.storage === "side-table"
-        ? await readSideCatalog(query, schema, target.table, isMariaDb(session))
-        : undefined;
-    if (owner === undefined) {
-      // A run stopped after the table's row went leaves only the shared tables: the same plan
-      // finishes them. Anything else without a row is no install of this project's to undo.
-      const leftover =
-        (catalog.jobs.present || catalog.ownersPresent) &&
-        catalog.owners.length === 0 &&
-        otherQueueTables(catalog, target.table).length === 0 &&
-        !marked &&
-        !catalog.triggers.some(
-          (trigger) => trigger.table === target.table && trigger.name.startsWith("facetdb_"),
-        ) &&
-        // The side table and the view go before the row: one still there is no stopped run's.
-        (side === undefined || (!sideTableIsOurs(side) && !viewIsOurs(side)));
-      return leftover
-        ? {
-            ok: true,
-            plan: uninstallPlan(target, catalog, {
-              rights,
-              claimed: false,
-              inRun,
-              views,
-              side: undefined,
-              server: serverNameOf(session),
-            }),
-          }
-        : {
-            ok: false,
-            refusal: uninstallRefused(
-              `FacetDB is not installed on ${label} (${schema}.${OWNERS_TABLE} has no row for it); check the source's table and database.`,
-            ),
-          };
-    }
-    return {
-      ok: true,
-      plan: uninstallPlan(target, catalog, {
-        rights,
-        claimed: true,
-        inRun,
-        views,
-        side,
-        server: serverNameOf(session),
-      }),
-    };
-  });
+    }),
+  );
 }

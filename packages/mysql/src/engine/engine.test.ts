@@ -183,6 +183,39 @@ describe("the engine", () => {
     await connector.close();
     expect(server.closed).toBe(1);
   });
+
+  it("refuses to open side-table mode on a table no longer InnoDB, in install's words, and closes its pool", async () => {
+    const server = fakeServer({
+      database: "app",
+      table: "listings",
+      state: ["title", "description"],
+      sideTable: true,
+      engine: "MyISAM",
+    });
+    const engine = createMysqlEngine({ connect: recordingDriver().connect, pool: server.connect });
+    const opening = engine.open(target({ storage: "side-table" }), WORKER_URL, deps());
+    await expect(opening).rejects.toBeInstanceOf(EngineRefusal);
+    await expect(opening).rejects.toMatchObject({
+      refusal: {
+        code: "table-engine",
+        message: expect.stringContaining("app.listings is a MyISAM table"),
+        fix: expect.stringContaining("alter table app.listings engine = InnoDB"),
+      },
+    });
+    expect(server.closed).toBe(1);
+    // Inline mode opens on it: the worker takes no side-row lock there.
+    const inline = fakeServer({
+      database: "app",
+      table: "listings",
+      state: ["title", "description"],
+      engine: "MyISAM",
+    });
+    const opened = await createMysqlEngine({
+      connect: recordingDriver().connect,
+      pool: inline.connect,
+    }).open(target(), WORKER_URL, deps());
+    await opened.close();
+  });
 });
 
 describe("versions", () => {
@@ -468,6 +501,48 @@ describe("doctor", () => {
       status: "skip",
       detail: "the table is another project's",
     });
+  });
+
+  it("fails install in side-table mode on a table converted from InnoDB since install, in install's words", async () => {
+    const side = target({ storage: "side-table" });
+    const installed = installedSideListings(side);
+    const converted: ScriptedDatabase = {
+      ...installed,
+      tables: installed.tables.map((table) =>
+        table.name === "listings" ? { ...table, engine: "MyISAM" } : table,
+      ),
+    };
+    const checks = await createMysqlEngine({ connect: doctorDriver(converted).connect }).doctor(
+      side,
+      WORKER_URL,
+      deps(),
+    );
+    expect(brief(checks)).toEqual([
+      ["database", "ok"],
+      ["version", "ok"],
+      ["install", "fail"],
+      ["grants", "ok"],
+      ["queue", "ok"],
+    ]);
+    expect(checks[2]).toEqual({
+      name: "install",
+      status: "fail",
+      detail:
+        "app.listings is a MyISAM table; side-table mode keeps the answers in an InnoDB table beside it and serializes the worker's write with the application's on InnoDB's row locks, which a MyISAM table does not take, so the two could wait on each other until a lock timeout",
+      fix: 'convert the table to InnoDB (alter table app.listings engine = InnoDB), or set storage "inline" for this source, then run facetdb migrate again',
+    });
+    // Inline mode takes no side-row lock: a MyISAM table is no failure of its.
+    const inline = installedListings();
+    const myisam: ScriptedDatabase = {
+      ...inline,
+      tables: inline.tables.map((table) =>
+        table.name === "listings" ? { ...table, engine: "MyISAM" } : table,
+      ),
+    };
+    const inlineChecks = await createMysqlEngine({
+      connect: doctorDriver(myisam).connect,
+    }).doctor(target(), WORKER_URL, deps());
+    expect(inlineChecks.find((check) => check.name === "install")?.status).toBe("ok");
   });
 
   it("reports a server that cannot be reached, without the password, and skips the rest", async () => {

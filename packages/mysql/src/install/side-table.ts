@@ -6,7 +6,7 @@ import {
   quoteLiteral,
   quoteTable,
 } from "../sql/index.ts";
-import { type CatalogColumn, readColumns, readPrimaryKey } from "./catalog.ts";
+import { type CatalogColumn, readColumns, readGrantTable, readPrimaryKey } from "./catalog.ts";
 import { installRefused } from "./refusals.ts";
 import {
   type CaptureSource,
@@ -136,7 +136,16 @@ function optional(value: unknown): string | undefined {
   return value === null || value === undefined ? undefined : String(value);
 }
 
-async function readRelation(query: MysqlQuery, schema: string, name: string): Promise<Relation> {
+/**
+ * A relation of the database as the login sees it: the side catalog's three, the inline install's
+ * look for a side table, and the worker's look at the table's engine at `open` and in doctor
+ * (`engineRefusal`).
+ */
+export async function readRelation(
+  query: MysqlQuery,
+  schema: string,
+  name: string,
+): Promise<Relation> {
   const [row] = await query(RELATION, [schema, name]);
   return {
     type: optional(row?.["type"]),
@@ -177,7 +186,9 @@ export async function readSideCatalog(
   const view = await readRelation(query, schema, viewName);
   const [viewRow] = view.type === "VIEW" ? await query(VIEW, [schema, viewName]) : [];
   const roles = new Set(
-    mariadb ? (await query(MARIADB_ROLES)).map((row) => text(row["user_name"])) : [],
+    mariadb
+      ? (await readGrantTable(query, "user", MARIADB_ROLES)).map((row) => text(row["user_name"]))
+      : [],
   );
   return {
     schema,
@@ -197,9 +208,9 @@ export async function readSideCatalog(
           ? []
           : (await readColumns(query, schema, viewName)).map((column) => column.name),
     },
-    grants: (await query(TABLE_GRANTS, [schema, table, sideName, viewName])).map((row) =>
-      tableGrant(row, roles),
-    ),
+    grants: (
+      await readGrantTable(query, "tables_priv", TABLE_GRANTS, [schema, table, sideName, viewName])
+    ).map((row) => tableGrant(row, roles)),
   };
 }
 
@@ -311,9 +322,14 @@ export function viewIsOurs(side: SideCatalog): boolean {
   return normalizedDefinition(side.view.definition) === normalizedDefinition(expected);
 }
 
+/** Whether a relation is a table FacetDB made: a base table carrying the mark. */
+export function markedTable(relation: Relation): boolean {
+  return relation.type === "BASE TABLE" && relation.comment === OWNED_MARK;
+}
+
 /** Whether the side table of the name is FacetDB's: a base table carrying the mark. */
 export function sideTableIsOurs(side: SideCatalog): boolean {
-  return side.side.type === "BASE TABLE" && side.side.comment === OWNED_MARK;
+  return markedTable(side.side);
 }
 
 /**
@@ -331,10 +347,12 @@ export function foreignKeyAllowed(side: SideCatalog): boolean {
  * lock, changes the row (with nothing to roll back) and waits in its trigger for that side row,
  * while the worker's read waits for the table lock: InnoDB's deadlock detection cannot see a table
  * lock, so both wait out `innodb_lock_wait_timeout`, every reader of the table stalls meanwhile,
- * and the application's statement fails with its change kept and never queued.
+ * and the application's statement fails with its change kept and never queued. Install refuses such
+ * a table; doctor and the connector's `open` read the engine again, since a table converted after
+ * install brings the wait back, and say it in these words.
  */
-export function engineRefusal(side: SideCatalog, label: string): Refusal | undefined {
-  const engine = side.source.engine ?? "";
+export function engineRefusal(tableEngine: string | undefined, label: string): Refusal | undefined {
+  const engine = tableEngine ?? "";
   return engine.toLowerCase() === "innodb"
     ? undefined
     : {
@@ -369,7 +387,7 @@ export function sideRefusal(
   const label = `${schema}.${table}`;
   const sideLabel = `${schema}.${sideTableName(table)}`;
   const viewLabel = `${schema}.${sideViewName(table)}`;
-  const engine = engineRefusal(side, label);
+  const engine = engineRefusal(side.source.engine, label);
   if (engine !== undefined) {
     return engine;
   }

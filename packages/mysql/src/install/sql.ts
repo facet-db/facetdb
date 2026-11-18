@@ -102,10 +102,20 @@ export function sourceStatement(purpose: StatementPurpose, text: string): PlanSt
   return { database: "source", purpose, text };
 }
 
-/** The first statement of every script that does anything (`LOCK_WAIT_SECONDS`). */
+/**
+ * MariaDB's part of the settings, in its executable comment (one opened by `/*M!`), which MariaDB
+ * runs and MySQL reads as a comment: `NO_AUTO_CREATE_USER` added to the session's sql_mode, so a
+ * grant to an account that does not exist fails rather than create it with no password, whatever
+ * mode the session of a hand run starts in. The plan still refuses a server without it, since a
+ * client that strips comments would not send this; MySQL 8 never creates a user from a grant, and
+ * has no such mode to set.
+ */
+const MARIADB_SETTINGS = `/*M! , sql_mode = concat_ws(',', nullif(@@session.sql_mode, ''), 'NO_AUTO_CREATE_USER') */`;
+
+/** The first statement of every script that does anything (`LOCK_WAIT_SECONDS`, `MARIADB_SETTINGS`). */
 export const SETTINGS: PlanStatement = sourceStatement(
   "settings",
-  `set session lock_wait_timeout = ${LOCK_WAIT_SECONDS}`,
+  `set session lock_wait_timeout = ${LOCK_WAIT_SECONDS} ${MARIADB_SETTINGS}`,
 );
 
 /** The triggers FacetDB may put on a table, by what they do. */

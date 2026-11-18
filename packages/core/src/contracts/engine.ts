@@ -22,7 +22,10 @@ import type { Capabilities, Connector, RecordKey } from "./connector.ts";
  *   them.
  * - A plan is an ordered list, not a tree of steps: the order is what runs and what the operator
  *   reads, and on a database without transactional DDL (MySQL) a stopped run is described by one
- *   index. Every statement is idempotent, so running the same plan again completes it. An
+ *   index. Every statement is idempotent on a transactional engine, so running the same plan again
+ *   completes it; an inspect-first engine (MySQL's `alter … add column`, `revoke`, `drop column`)
+ *   fails on what is already there or gone, so after a stop the CLI plans afresh and never replays
+ *   a stopped plan. An
  *   uninstall of several tables is one plan per table, and each object's `scope` says whether it
  *   goes with its table or once for the whole run.
  * - What runs is what was printed, string for string. The one exception is a `secret` statement:
