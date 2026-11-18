@@ -35,7 +35,7 @@ import {
   toProjectJson,
 } from "../../config/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
-import { engineFor, keyWords, openConnector, requireUsableUrl } from "../engines.ts";
+import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
   CliError,
   type CommandContext,
@@ -116,10 +116,12 @@ export type WorkerParts = {
     options: { readonly workerId: string; readonly maxConnections: number },
   ) => Promise<OpenConnector>;
   /**
-   * How a table source's keys are written in the log lines: its engine's `keyText`, so MongoDB's
-   * `n:1` prints `answered 1`. Absent, or undefined for a source, keys print as they are.
+   * How a table source's keys are written in the log lines: its engine's key text for its table, so
+   * MongoDB's `n:1` prints `answered 1`, and a collection whose marker records string `_id`s prints
+   * `answered 1001` as explain reads it. Read once, after the table opened. Absent, or undefined
+   * for a source, keys print as they are.
    */
-  readonly keyTextOf?: (source: SourceConfig) => KeyText | undefined;
+  readonly keyTextOf?: (source: SourceConfig) => Promise<KeyText | undefined>;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
 };
@@ -288,8 +290,10 @@ export async function runWorkers(
       });
       // Its log and versions are kept in the store under the source's name, registered as a
       // plugin-kind source, as backfill does (the store has no third kind).
+      let keyText: KeyText | undefined;
       try {
         await start(source, "plugin");
+        keyText = await parts.keyTextOf?.(source);
       } catch (error) {
         await connector.close();
         throw error;
@@ -298,7 +302,7 @@ export async function runWorkers(
         source: source.name,
         worker: workerFor(source, connector, true),
         connector,
-        keyText: parts.keyTextOf?.(source),
+        keyText,
         close: () => connector.close(),
         answered: 0,
         alreadyAnswered: 0,
@@ -580,7 +584,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       string,
       {
         readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector>;
-        readonly keyText: KeyText | undefined;
+        readonly keyText: () => Promise<KeyText | undefined>;
       }
     >();
     for (const source of config.sources) {
@@ -596,7 +600,8 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       requireUsableUrl(engine, target, url, allowInsecure);
       const storeShared = storeSharedFor(deps.env, source);
       tables.set(source.name, {
-        keyText: engine.keyText,
+        // The type its database records for its keys, read once the table opened.
+        keyText: () => tableKeyText(engine, target, url, allowInsecure),
         open: (workerId, maxConnections) =>
           openConnector(engine, target, url, {
             clock: deps.clock,
@@ -628,7 +633,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
             }
             return table.open(open.workerId, open.maxConnections);
           },
-          keyTextOf: (source) => tables.get(source.name)?.keyText,
+          keyTextOf: async (source) => tables.get(source.name)?.keyText(),
           provider: deps.provider(config),
         });
       } finally {

@@ -1,3 +1,4 @@
+import type { KeyText } from "@facetdb/core";
 import { FakeClock, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig, score } from "../../config/index.ts";
@@ -715,6 +716,118 @@ describe("facetdb export", () => {
     expect(mongo.opened).toEqual([]);
     // With the source's connection string set, nothing is said about the keys' form.
     expect(jsonl.stderr).not.toContain("record_key");
+  });
+
+  it("writes a string _id 1001 as 1001 where the marker records strings, reading only that type", async () => {
+    const mongoConfig = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: "mongodb://facetdb_worker:worker-password@localhost:27017/app",
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+    const untyped: KeyText = {
+      // the untyped rule alone: a numeric string prints with its escape.
+      toText: (key) => (/^[0-9]+$/.test(key) ? `s:${key}` : key),
+      fromText: (text) => text,
+      form: "the document's _id as you write it",
+    };
+    const asked: string[] = [];
+    const mongo = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      keyText: untyped,
+      keyTextOf: (target) => {
+        asked.push(target.table);
+        return { ...untyped, toText: (key) => key };
+      },
+    });
+    await store.questionSets.record(LOG_ID, setOf(mongoConfig));
+    await store.log(LOG_ID).appendAnswer({
+      kind: "answer",
+      key: "1001",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "hash-boat",
+      answers: { is_scam: { type: "noul", probability: 0.03 } },
+      usage: { inputTokens: 100, outputTokens: 5 },
+      at: new Date("2026-11-04T09:00:00Z"),
+    });
+    const setup = {
+      config: mongoConfig,
+      engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+    };
+
+    const jsonl = await run(["export", "--source", "listings"], defaultEnv(), setup);
+
+    expect(jsonl.code).toBe(0);
+    expect((JSON.parse(jsonl.stdout.trim()) as { record_key: string }).record_key).toBe("1001");
+    expect(asked).toEqual(["listings"]);
+    // The type only: no connector opened, no row of the collection read.
+    expect(mongo.opened).toEqual([]);
+    // A dry run writes no key, so it reads no type.
+    asked.length = 0;
+    const dry = await run(["export", "--source", "listings", "--dry-run"], defaultEnv(), setup);
+    expect(dry.code).toBe(0);
+    expect(asked).toEqual([]);
+  });
+
+  it("writes the keys as stored, and says why on stderr, when the source's database refuses to connect", async () => {
+    const mongoConfig = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: "mongodb://facetdb_worker:worker-password@localhost:27017/app",
+          table: "listings",
+          read: ["title"],
+          questions: { is_scam: noul("Is this listing a scam?") },
+        },
+      ],
+    });
+    const mongo = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      keyText: {
+        toText: (key) => key.replace(/^n:/, ""),
+        fromText: (text) => text,
+        form: "the document's _id as you write it",
+      },
+      keyTextOf: () => {
+        // The driver's words on a server that is down; worker-password must never be echoed.
+        throw new Error(
+          "connect ECONNREFUSED 127.0.0.1:27017 (mongodb://facetdb_worker:worker-password@localhost:27017/app)",
+        );
+      },
+    });
+    await store.questionSets.record(LOG_ID, setOf(mongoConfig));
+    await store.log(LOG_ID).appendAnswer({
+      kind: "answer",
+      key: "n:1",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "hash-flat",
+      answers: { is_scam: { type: "noul", probability: 0.03 } },
+      usage: { inputTokens: 100, outputTokens: 5 },
+      at: new Date("2026-11-04T09:00:00Z"),
+    });
+
+    const result = await run(["export", "--source", "listings"], defaultEnv(), {
+      config: mongoConfig,
+      engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+    });
+
+    expect(result.code).toBe(0);
+    expect((JSON.parse(result.stdout.trim()) as { record_key: string }).record_key).toBe("n:1");
+    expect(result.stderr).toContain(
+      'note: export could not read how the keys of "listings" are written from its database (it could not be reached or read), so it writes each record_key as the FacetDB store keeps it',
+    );
+    expect(result.stderr).not.toContain("worker-password");
   });
 
   it("says on stderr which form the keys take when the source's connection string is unset here", async () => {

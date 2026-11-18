@@ -302,6 +302,23 @@ type Opening =
 type Began = "token" | "install" | "now";
 
 /**
+ * The source's database as the worker reaches it: the config's `database.collection`, else the
+ * worker's connection string's path; neither is a refusal saying where to name it.
+ */
+export function workerDatabase(target: EngineTarget, url: string): string {
+  const named = target.schema ?? databaseOf(url);
+  if (named === undefined) {
+    const subject = subjectOf(target);
+    throw new EngineRefusal({
+      code: "no-database",
+      message: `${subject} names no database, and the source names no database for the collection ${target.table}`,
+      fix: `add the database to ${subject} (mongodb://${WORKER_USER}:<password>@host/<database>), or name the collection as <database>.${target.table} in the config`,
+    });
+  }
+  return named;
+}
+
+/**
  * The runtime connector of one installed collection, under the worker login's `url`. The install
  * is checked as the worker sees it (the project's marker, the jobs collection) before anything
  * else, so a worker never makes `facetdb_jobs` by its first upsert, without the unique index that
@@ -336,15 +353,7 @@ export async function createMongoConnector(
       fix: "remove where from the source in facetdb.config.ts, or keep the records it would leave out in another collection",
     });
   }
-  const named = target.schema ?? databaseOf(url);
-  if (named === undefined) {
-    throw new EngineRefusal({
-      code: "no-database",
-      message: `${subject} names no database, and the source names no database for the collection ${collection}`,
-      fix: `add the database to ${subject} (mongodb://${WORKER_USER}:<password>@host/<database>), or name the collection as <database>.${collection} in the config`,
-    });
-  }
-  const database: string = named;
+  const database = workerDatabase(target, url);
   const label = `${database}.${collection}`;
   const verdict = tlsVerdict(url, deps.allowInsecure);
   const client: WorkerClient = (deps.connect ?? connectWorker)(url, database, {

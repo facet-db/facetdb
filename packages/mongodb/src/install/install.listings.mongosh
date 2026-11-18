@@ -1,4 +1,4 @@
-db.getSiblingDB("app").runCommand({ findAndModify: "facetdb_meta", query: { _id: "owner:listings", project: "proj_listings" }, update: { $set: { project: "proj_listings", source: "listings" }, $currentDate: { installedAt: true } }, upsert: true })
+db.getSiblingDB("app").runCommand({ findAndModify: "facetdb_meta", query: { _id: "owner:listings", project: "proj_listings" }, update: { $set: { project: "proj_listings", source: "listings", keyType: "objectId" }, $currentDate: { installedAt: true } }, upsert: true })
 
 db.getSiblingDB("app").runCommand({ create: "facetdb_jobs" })
 

@@ -20,8 +20,10 @@ export {
   storedValue,
   TOKEN_REFRESH_MS,
   tokenRun,
+  workerDatabase,
   workerUrlRefusal,
 } from "./connector.ts";
+export { readRecordedKeyType } from "./key-type.ts";
 export {
   type DocumentId,
   idOf,

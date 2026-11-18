@@ -408,22 +408,42 @@ export async function engineFor(
 }
 
 /**
- * How a source's keys are written on the terminal: its engine's `keyText` (MongoDB's `_id` as the
- * user writes it), or undefined where a key is its own text (the SQL engines, the polling engine,
- * an API source). For a command that reads the store only (`export`): nothing connects, and a
- * source whose connection string is unset here, or names no engine registered here, keeps its keys
- * as stored rather than stopping a read that never needed its database (export then says so on
- * stderr, naming the variable to set).
+ * How one table's keys are written on the terminal: the key type its engine records for it, read
+ * from its database with the worker login (`keyTextOf`: a MongoDB collection keyed by strings takes
+ * and prints `1001`), else the engine's `keyText`, else undefined where a key is its own text (the
+ * SQL engines, the polling engine).
+ */
+export async function tableKeyText(
+  engine: DatabaseEngine,
+  target: EngineTarget,
+  url: string,
+  allowInsecure: boolean,
+): Promise<KeyText | undefined> {
+  return engine.keyTextOf === undefined
+    ? engine.keyText
+    : await engine.keyTextOf(target, url, { allowInsecure });
+}
+
+/**
+ * How a source's keys are written on the terminal, for a command that reads the store (`export`):
+ * `tableKeyText` of its table, or undefined for an API source. A source whose connection string is
+ * unset here, or names no engine registered here, keeps its keys as stored rather than stopping a
+ * read that never needed its database (export then says so on stderr, naming the variable to set);
+ * only an engine that records a key type per table connects, to read it.
  */
 export async function keyTextFor(
   entries: readonly EngineEntry[],
   source: Pick<SourceConfig, "table" | "database" | "connector">,
+  target: EngineTarget,
+  allowInsecure: boolean,
 ): Promise<KeyText | undefined> {
   const url = source.database;
   if (source.table === undefined || url === undefined || source.connector === "polling") {
     return undefined;
   }
-  return readsUrl(entries, url) ? (await engineFor(entries, url)).keyText : undefined;
+  return readsUrl(entries, url)
+    ? tableKeyText(await engineFor(entries, url), target, url, allowInsecure)
+    : undefined;
 }
 
 /** A key as the terminal shows it: through the engine's `keyText` when it has one. */

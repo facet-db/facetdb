@@ -5,12 +5,14 @@ import {
   keyFromText,
   keyToText,
   MONGO_CAPABILITIES,
+  readRecordedKeyType,
   type WorkerConnect,
   workerUrlRefusal,
 } from "../connector/index.ts";
 import {
   type AdminConnect,
   connectAdmin,
+  type KeyType,
   planInstall,
   planPrune,
   planUninstall,
@@ -36,13 +38,23 @@ export const ENGINE_NAME = "mongodb";
 
 /**
  * A document's key on the terminal: the `_id` as the user writes it, never the tagged key the store
- * and the queue hold (connector/keys.ts says the rule).
+ * and the queue hold (connector/keys.ts says the rule). With the `_id` type the collection's marker
+ * records, a bare key is read in that type: a string collection takes and prints `1001` for the
+ * string "1001". No type, or `mixed`, is the untyped rule.
  */
-export const MONGO_KEY_TEXT: KeyText = {
-  toText: keyToText,
-  fromText: keyFromText,
-  form: "the document's _id as you write it (the 24 hex characters of an ObjectId, a number as its digits, a string as itself; a string _id that looks like an ObjectId or a number is written s:<id>)",
-};
+export function mongoKeyText(keyType: KeyType | undefined): KeyText {
+  return {
+    toText: (key) => keyToText(key, keyType),
+    fromText: (text) => keyFromText(text, keyType),
+    form:
+      keyType === "string"
+        ? 'the document\'s _id as you write it (a string as itself, 1001 for the _id "1001"; a string _id that starts with oid:, n: or s: is written s:<id>, and an _id of another type with its tag: oid:<hex>, n:<number>)'
+        : "the document's _id as you write it (the 24 hex characters of an ObjectId, a number as its digits, a string as itself; a string _id that looks like an ObjectId or a number is written s:<id>)",
+  };
+}
+
+/** The key text of a collection with no recorded `_id` type: the untyped rule. */
+export const MONGO_KEY_TEXT: KeyText = mongoKeyText(undefined);
 
 /** The store's cursors for a connector, and how to let go of what was opened for them. */
 export type OpenedCursors = {
@@ -107,6 +119,15 @@ export function createMongoEngine(options: MongoEngineOptions = {}): DatabaseEng
     schemes: ["mongodb", "mongodb+srv"],
     capabilities: MONGO_CAPABILITIES,
     keyText: MONGO_KEY_TEXT,
+    // The type the collection's marker records, read under the worker login.
+    keyTextOf: async (target, url, deps) =>
+      mongoKeyText(
+        await readRecordedKeyType(target, url, {
+          allowInsecure: deps.allowInsecure,
+          connect: worker,
+          warn,
+        }),
+      ),
     checks: DOCTOR_CHECKS,
     // The collection in its database: the config's, else the connection string's, as the plans name
     // it (`sourceDatabase`).

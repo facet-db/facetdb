@@ -69,6 +69,10 @@ export type FakeDatabaseState = {
   jobs: FakeJob[];
   /** Per collection, the dotted fields its documents hold under `facetdb`. */
   readonly fields: Map<string, Set<string>>;
+  /** Per collection, the BSON type (`$type`'s name) of each document's `_id`, in natural order. */
+  readonly idTypes: Map<string, readonly string[]>;
+  /** Per collection, its options as `listCollections` reports them (a validator among them). */
+  readonly options: Map<string, Readonly<Record<string, unknown>>>;
 };
 
 function emptyDatabase(): FakeDatabaseState {
@@ -80,6 +84,8 @@ function emptyDatabase(): FakeDatabaseState {
     users: new Map(),
     jobs: [],
     fields: new Map(),
+    idTypes: new Map(),
+    options: new Map(),
   };
 }
 
@@ -135,6 +141,11 @@ export class FakeMongo {
   readonly calls: FakeMongoCall[] = [];
   /** What `hello` answers: a one-node replica set's primary unless a test says otherwise. */
   hello: ServerDocument = { isWritablePrimary: true, setName: "rs0", ok: 1 };
+  /**
+   * Whether the look for an `_id` of another type runs past its `maxTimeMS` (a collection too large
+   * to read within it): the server's MaxTimeMSExpired, code 50.
+   */
+  slowIdScan = false;
   private readonly databases = new Map<string, FakeDatabaseState>();
   private readonly failures = new Map<string, Error>();
   /** Per collection, the words a document's write error carries (a validator refusing it). */
@@ -258,6 +269,29 @@ export class FakeMongo {
     return this;
   }
 
+  /**
+   * The documents of a collection, by the BSON type of each `_id` (`objectId`, `string`, `int`,
+   * `double`, `date`…), in natural order: what an install reads the `_id` type from.
+   */
+  ids(database: string, collection: string, types: readonly string[]): this {
+    const state = this.database(database);
+    state.collections.set(collection, state.collections.get(collection) ?? "collection");
+    state.idTypes.set(collection, [...types]);
+    return this;
+  }
+
+  /** A collection's options (`validator`, `validationLevel`, `validationAction`). */
+  collectionOptions(
+    database: string,
+    collection: string,
+    options: Readonly<Record<string, unknown>>,
+  ): this {
+    const state = this.database(database);
+    state.collections.set(collection, state.collections.get(collection) ?? "collection");
+    state.options.set(collection, options);
+    return this;
+  }
+
   /** A queued job of `collection`, its key as the connector writes it. */
   job(database: string, collection: string, recordKey: string): this {
     const state = this.database(database);
@@ -352,8 +386,28 @@ export class FakeMongo {
           ok: 1,
         };
       }
+      case "listCollections": {
+        const wanted = record(command["filter"], "filter")["name"];
+        return cursor(
+          database,
+          "$cmd.listCollections",
+          [...state.collections]
+            .filter(([collection]) => collection === wanted)
+            .map(([collection, type]) => ({
+              name: collection,
+              type,
+              options: state.options.get(collection) ?? {},
+            })),
+        );
+      }
       case "aggregate": {
         const collection = name(target, commandName);
+        const [first] = list(command["pipeline"], "pipeline");
+        if (record(first, "stage")["$limit"] !== undefined) {
+          // One document's `_id` type: the sample an install reads.
+          const [type] = state.idTypes.get(collection) ?? [];
+          return cursor(database, collection, type === undefined ? [] : [{ type }]);
+        }
         const fields = [...(state.fields.get(collection) ?? [])].map((field) =>
           field.replace(/^facetdb\./, ""),
         );
@@ -363,6 +417,22 @@ export class FakeMongo {
         const collection = name(target, commandName);
         const filter = record(command["filter"], "filter");
         if (collection !== META) {
+          const id = filter["_id"];
+          if (isLoose(id)) {
+            if (this.slowIdScan) {
+              throw new FakeServerError(
+                50,
+                "MaxTimeMSExpired",
+                "Executor error during find command :: caused by :: operation exceeded time limit",
+              );
+            }
+            // A document whose `_id` has another type than these (the mixed check).
+            const types = list(record(id["$not"], "$not")["$type"], "$type");
+            const other = (state.idTypes.get(collection) ?? []).some(
+              (type) => !types.includes(type),
+            );
+            return cursor(database, collection, other ? [{ _id: `${collection}-other` }] : []);
+          }
           // A source collection: only whether a document has a `facetdb` field, the one find sent.
           if (JSON.stringify(filter) !== JSON.stringify({ facetdb: { $exists: true } })) {
             throw new Error(`the fake MongoDB finds only facetdb fields in ${collection}`);
@@ -408,6 +478,8 @@ export class FakeMongo {
         }
         state.indexes.delete(collection);
         state.fields.delete(collection);
+        state.idTypes.delete(collection);
+        state.options.delete(collection);
         if (collection === META) {
           state.markers.clear();
         }

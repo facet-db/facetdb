@@ -34,6 +34,44 @@ export function workerRole(collection: string): string {
   return `${WORKER_USER}_${collection}`;
 }
 
+/**
+ * The type of a collection's `_id`, as its marker records it: how a key typed on the terminal is
+ * read. `objectId`, `number` or `string` when every document has that type; `mixed` when they
+ * differ, or when it is a type no key is made of (a Date, a Decimal128), where keys keep the
+ * untyped rule. A marker without the field was written by an earlier version, or on a collection
+ * with no document to read the type from; the next migrate records it.
+ */
+export const KEY_TYPES = ["objectId", "number", "string", "mixed"] as const;
+
+export type KeyType = (typeof KEY_TYPES)[number];
+
+/** The marker's field that records the `_id` type. */
+export const KEY_TYPE_FIELD = "keyType";
+
+/**
+ * A marker's `keyType` as the server sent it (a boundary), read only where keys are: one of
+ * `KEY_TYPES`, or undefined where the marker has none. A value FacetDB does not know (a later
+ * version's, or one written by hand) is never guessed at: keys are read as without a type (the
+ * untyped form, which reads back every key), and `warn` says so with the way to record the type
+ * again.
+ */
+export function recordedKeyType(
+  value: unknown,
+  what: string,
+  warn: (line: string) => void,
+): KeyType | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const found = KEY_TYPES.find((type) => type === value);
+  if (found === undefined) {
+    warn(
+      `${what} records the _id type ${JSON.stringify(value)}, which FacetDB does not know (it writes ${KEY_TYPES.join(", ")}), so keys are read and printed as without a type, a string _id that reads as a number or an ObjectId written s:<id>; remove the field ${KEY_TYPE_FIELD} from the marker in ${META_COLLECTION} and run facetdb migrate to read the type again`,
+    );
+  }
+  return found;
+}
+
 /** The marker document's `_id` for a collection in `facetdb_meta`. */
 export function markerId(collection: string): string {
   return `owner:${collection}`;

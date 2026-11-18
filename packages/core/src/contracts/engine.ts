@@ -423,6 +423,18 @@ export type DatabaseEngine = {
    * engines: their key is the primary key as text already.
    */
   readonly keyText?: KeyText;
+  /**
+   * How one source's keys are written, where the engine records a key type per table in the
+   * source's database (MongoDB's marker holds the collection's `_id` type, so a string `_id` "1001"
+   * is typed and printed `1001`). Read with the worker login's `url`, before anything else
+   * connects; `keyText` where nothing is recorded. The CLI asks this before `keyText` on every door
+   * that prints or reads a key. Absent, `keyText` is every source's.
+   */
+  keyTextOf?(
+    target: EngineTarget,
+    url: string,
+    deps: Pick<EngineDeps, "allowInsecure">,
+  ): Promise<KeyText>;
   /** The checks `doctor` runs, in order, and what each looks at: `doctor --dry-run` lists them. */
   readonly checks: readonly { readonly name: string; readonly looksAt: string }[];
   /**

@@ -17,7 +17,7 @@ import {
   resolveThresholds,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
-import { keyWords, openConnector, requireUsableUrl } from "../engines.ts";
+import { keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
   CliError,
   defineCommand,
@@ -44,8 +44,9 @@ import {
  * history says what was asked then. The record as it stands now is its connector's `current`: the
  * engine's for a table source, the store's for an API source. It writes nothing; the decision log
  * is append-only. The key is taken and printed as the user writes it: through the engine's
- * `keyText` where its keys carry a type tag (MongoDB: `explain listings 1` reads the key `n:1`), as
- * typed everywhere else.
+ * `keyText` where its keys carry a type tag (MongoDB: `explain listings 1` reads the key `n:1`), in
+ * the `_id` type the collection's marker records (`explain listings 1001` reads the string "1001"),
+ * as typed everywhere else.
  */
 
 type ExplainOptions = {
@@ -326,8 +327,12 @@ export const explainCommand = defineCommand<ExplainOptions>("explain", {
     const table =
       source.table === undefined ? undefined : await tableRead(deps, config, source, allowInsecure);
     // The key as the store and the connector hold it, read from the key as the user wrote it; and
-    // the form every line prints it in (MongoDB: `1` for `n:1`, the hex for `oid:<hex>`).
-    const keyText = table?.engine.keyText;
+    // the form every line prints it in (MongoDB: `1` for `n:1`, the hex for `oid:<hex>`; `1001` for
+    // the string "1001" where the collection's marker records string `_id`s).
+    const keyText =
+      table === undefined
+        ? undefined
+        : await tableKeyText(table.engine, table.target, table.url, allowInsecure);
     const key = keyText === undefined ? typed : keyText.fromText(typed);
     const shown = keyWords(keyText, key);
     const store = await deps.store({ allowInsecure });

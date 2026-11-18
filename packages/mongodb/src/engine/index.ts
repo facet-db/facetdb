@@ -6,6 +6,7 @@ export {
   MONGO_KEY_TEXT,
   type MongoEngineOptions,
   mongoEngine,
+  mongoKeyText,
   type OpenCursors,
   type OpenedCursors,
 } from "./engine.ts";

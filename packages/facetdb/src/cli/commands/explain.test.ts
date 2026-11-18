@@ -1,4 +1,4 @@
-import type { KeyText, RecordDecision } from "@facetdb/core";
+import type { EngineTarget, KeyText, RecordDecision } from "@facetdb/core";
 import { FakeClock, FakeConnector, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
@@ -420,18 +420,34 @@ describe("facetdb explain on an engine whose keys carry a type tag", () => {
     status: "done",
   };
 
-  /** The fake MongoDB: both documents answered, their decisions stored, their log in the store. */
-  async function mongoWorld(): Promise<readonly EngineEntry[]> {
+  /** A string `_id` "1001": its key is itself, which the untyped rule alone would type as `s:1001`. */
+  const STRING_KEY = "1001";
+
+  /**
+   * The key text of a collection whose marker records string `_id`s: a bare text is the string,
+   * `s:` still taken.
+   */
+  const stringTyped: KeyText = {
+    toText: (key) => key,
+    fromText: (text) => text.replace(/^s:/, ""),
+    form: "the document's _id as you write it (a string as itself)",
+  };
+
+  /** The fake MongoDB: every document answered, its decision stored, its log in the store. */
+  async function mongoWorld(
+    keyTextOf?: (target: EngineTarget) => KeyText,
+  ): Promise<readonly EngineEntry[]> {
     const database = new FakeDatabase({ fields: ["title"] });
     database.install();
     database.edit(OBJECT_KEY, { title: "A car" });
     database.edit(NUMBER_KEY, { title: "A flat" });
+    database.edit(STRING_KEY, { title: "A boat" });
     const writer = new FakeConnector(database);
-    for (const row of (await writer.read([OBJECT_KEY, NUMBER_KEY])).rows) {
+    for (const row of (await writer.read([OBJECT_KEY, NUMBER_KEY, STRING_KEY])).rows) {
       expect((await writer.write(row.key, decided, row.hash)).written).toBe(true);
     }
     await store.questionSets.record(LOG_ID, setOf(mongoConfig));
-    for (const key of [OBJECT_KEY, NUMBER_KEY]) {
+    for (const key of [OBJECT_KEY, NUMBER_KEY, STRING_KEY]) {
       await store.log(LOG_ID).appendAnswer({
         kind: "answer",
         key,
@@ -448,6 +464,7 @@ describe("facetdb explain on an engine whose keys carry a type tag", () => {
       schemes: ["mongodb", "mongodb+srv"],
       database,
       keyText: tagged,
+      ...(keyTextOf === undefined ? {} : { keyTextOf }),
     });
     return [lazyEngine("mongodb", () => Promise.resolve(engine))];
   }
@@ -507,6 +524,26 @@ describe("facetdb explain on an engine whose keys carry a type tag", () => {
     expect(result.stdout).toContain('FacetDB has no history for record 2 of "listings".');
     expect(result.stdout).toContain(`Then check the key: it is ${FORM}.`);
     expect(result.stdout).not.toContain("primary key, as text");
+  });
+
+  it("finds a numeric string _id typed bare where the marker records strings, and prints it bare", async () => {
+    const asked: string[] = [];
+    const engines = await mongoWorld((target) => {
+      asked.push(target.table);
+      return stringTyped;
+    });
+
+    const result = await explain([STRING_KEY], engines);
+
+    expect(result.code).toBe(0);
+    expect(asked).toEqual(["listings"]);
+    expect(result.stdout).toContain('History of record 1001 of "listings", oldest first:');
+    expect(result.stdout).toContain("Now: is_scam: no · status: done · reviewed: no");
+    expect(result.stdout).not.toContain("s:1001");
+    // The escape typed as before still finds it.
+    expect((await explain([`s:${STRING_KEY}`], engines)).stdout).toContain(
+      'History of record 1001 of "listings"',
+    );
   });
 });
 

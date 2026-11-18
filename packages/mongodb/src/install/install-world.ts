@@ -52,6 +52,7 @@ export const READS: ReadonlySet<string> = new Set([
   "usersInfo",
   "aggregate",
   "find",
+  "listCollections",
 ]);
 
 export function target(overrides: Partial<EngineTarget> = {}): EngineTarget {
@@ -81,9 +82,12 @@ export function refusalOf(result: PlanResult) {
   return result.refusal;
 }
 
-/** A replica set's primary with the application's collection `app.listings` and nothing of FacetDB's. */
+/**
+ * A replica set's primary with the application's collection `app.listings`, its documents keyed
+ * by ObjectIds (MongoDB's default `_id`), and nothing of FacetDB's.
+ */
 export function freshServer(): FakeMongo {
-  return new FakeMongo().collection("app", "listings");
+  return new FakeMongo().collection("app", "listings").ids("app", "listings", ["objectId"]);
 }
 
 /** Runs a plan with the worker's password and expects it to finish. */

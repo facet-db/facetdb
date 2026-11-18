@@ -107,6 +107,7 @@ describe("the listings install plan", () => {
       "MongoDB grants rights on whole collections, never on single fields: facetdb_worker can read every field of app.listings, not only title and description, and can update any of them; FacetDB's worker writes only the facetdb field.",
       "The answers go in each document's facetdb field (facetdb.is_scam, facetdb.is_scam_probability, facetdb.status, facetdb.updated_at, facetdb.reviewed and facetdb.state_hash); the worker writes them, and this install changes no document.",
       "MongoDB runs these commands one at a time, with no transaction: if one fails, the ones before it stay, and running facetdb migrate again finishes the install.",
+      "The marker records that app.listings is keyed by ObjectIds, as its documents hold: facetdb explain, facetdb export and the review take and print each _id as you write it.",
     ]);
   });
 
@@ -118,10 +119,14 @@ describe("the listings install plan", () => {
     );
     expect(server.calls[0]).toEqual({ kind: "connect", url: ADMIN, forceTls: false });
     expect(server.calls.at(-1)).toEqual({ kind: "close" });
-    // The replica set; then, beside listCollections and the marker's findOne, the application's
-    // own facetdb field (no marker yet), the role and the login.
+    // The replica set; then, beside listCollections and the marker's findOne, the application's own
+    // facetdb field (no marker yet), the `_id` type (the validator, one document's, any other
+    // type), the role and the login.
     expect(server.commandNames()).toEqual([
       "hello admin",
+      "find app",
+      "listCollections app",
+      "aggregate app",
       "find app",
       "rolesInfo app",
       "usersInfo app",
@@ -158,6 +163,7 @@ describe("the listings install plan", () => {
       _id: "owner:listings",
       project: "proj_listings",
       source: "listings",
+      keyType: "objectId",
       installedAt: new Date(0),
     });
     // A job is keyed by its collection beside the plain key: the indexes lead with it.
@@ -523,7 +529,7 @@ describe("the worker login", () => {
       "queue",
       "queue",
     ]);
-    expect(plan.notes.slice(3)).toEqual([
+    expect(plan.notes.slice(4)).toEqual([
       "MongoDB would not show the admin connection string its users and roles, so this plan makes no role or login: give facetdb_worker the rights below yourself.",
       ...STEPS,
     ]);

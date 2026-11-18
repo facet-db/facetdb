@@ -13,7 +13,10 @@ import {
   holdsSubdocument,
   type IndexInfo,
   jobsIndexes,
+  KEY_TYPE_SCAN_MS,
+  type KeyTypeRead,
   markedCollections,
+  readKeyType,
   readLogin,
   readMarker,
   readRole,
@@ -24,6 +27,8 @@ import {
   JOBS_COLLECTION,
   JOBS_INDEXES,
   type JobsIndex,
+  KEY_TYPE_FIELD,
+  type KeyType,
   META_COLLECTION,
   markerId,
   ownedFields,
@@ -216,7 +221,11 @@ function queueStatements(
  * outright, where an `update` would only list it among its write errors: the script run by hand in
  * mongosh stops there, and `run` stops with `another-project`, before anything else ran.
  */
-function markerStatement(database: string, target: EngineTarget): PlanStatement {
+function markerStatement(
+  database: string,
+  target: EngineTarget,
+  keyType: KeyType | undefined,
+): PlanStatement {
   return {
     database: "source",
     purpose: "marker",
@@ -226,13 +235,72 @@ function markerStatement(database: string, target: EngineTarget): PlanStatement 
         findAndModify: META_COLLECTION,
         query: { _id: markerId(target.table), project: target.project.id },
         update: {
-          $set: { project: target.project.id, source: target.source },
+          $set: {
+            project: target.project.id,
+            source: target.source,
+            ...(keyType === undefined ? {} : { [KEY_TYPE_FIELD]: keyType }),
+          },
           $currentDate: { installedAt: true },
         },
         upsert: true,
       },
     }),
   };
+}
+
+/**
+ * The `_id` type added to the marker of a collection installed before the marker recorded it: the
+ * one field set, under this project's marker only, with no upsert, so a marker gone or another
+ * project's since the plan was read is left as it is. `installedAt` stays: a first change stream
+ * starts there.
+ */
+function keyTypeStatement(database: string, target: EngineTarget, keyType: KeyType): PlanStatement {
+  return {
+    database: "source",
+    purpose: "marker",
+    text: printLine({
+      database,
+      command: {
+        findAndModify: META_COLLECTION,
+        query: { _id: markerId(target.table), project: target.project.id },
+        update: { $set: { [KEY_TYPE_FIELD]: keyType } },
+      },
+    }),
+  };
+}
+
+/** A key type's `_id`s in words. */
+const KEY_TYPE_WORDS: Readonly<Record<Exclude<KeyType, "mixed">, string>> = {
+  objectId: "ObjectIds",
+  number: "numbers",
+  string: "strings",
+};
+
+/** How keys are written when no single type is recorded: the untyped rule, in words. */
+const UNTYPED_KEYS =
+  'an ObjectId as its 24 hex characters, a number as its digits, a string as itself, and a string _id that reads as an ObjectId or a number written s:<id> (s:1001 for the string "1001")';
+
+/**
+ * What the operator is told of the `_id` type: the type the marker records and where it was read,
+ * with what that changes on the terminal; `mixed`, where keys keep the untyped rule; or, on a
+ * collection with no document and no declared type, or one whose look for another type ran past its
+ * bound, that none is recorded until a later migrate. `added` is an install from an earlier
+ * version, whose marker gets the type and nothing else.
+ */
+function keyTypeNote(label: string, read: KeyTypeRead, added: boolean): string {
+  if (read.keyType === undefined) {
+    return read.why === "no-document"
+      ? `${label} has no document yet, and no validator declares the type of its _id, so the marker records none: keys are read and printed as they are without one (${UNTYPED_KEYS}). Run facetdb migrate again once it has documents, and it records the type.`
+      : `FacetDB stopped looking through ${label} for an _id of another type after ${KEY_TYPE_SCAN_MS / 1000} seconds, so the marker records no type: keys are read and printed as they are without one (${UNTYPED_KEYS}). Declare the type of _id in the collection's validator ($jsonSchema, properties._id.bsonType), which FacetDB reads instead of the documents, or run facetdb migrate again at a quieter time.`;
+  }
+  const from = read.from === "validator" ? "its validator declares" : "its documents hold";
+  const before = added
+    ? `${label} was installed before FacetDB recorded the type of a collection's _id: this migrate adds keyType "${read.keyType}" to its marker in ${META_COLLECTION}, and changes no document. `
+    : "";
+  if (read.keyType === "mixed") {
+    return `${before}The _ids ${from} are of more than one type, or of one FacetDB makes no key of, so the marker records keyType "mixed", and keys keep the form they have without a type: ${UNTYPED_KEYS}.`;
+  }
+  return `${before}The marker records that ${label} is keyed by ${KEY_TYPE_WORDS[read.keyType]}, as ${from}: facetdb explain, facetdb export and the review take and print each _id as you write it${read.keyType === "string" ? ', 1001 for the string "1001"' : ""}.`;
 }
 
 /** The words of a collection another project installed on, as Postgres says them of a table. */
@@ -334,10 +402,13 @@ export async function planInstall(
       return refused(
         refusedWith(
           "migrate-refused",
-          `${label} already has documents with a field named ${SUBDOCUMENT}, and ${META_COLLECTION} holds no marker for it: FacetDB keeps its answers in that field. If the field is the application's, rename it, or point this source at another collection. If it is FacetDB's own, left by an earlier install whose marker is gone (${META_COLLECTION} dropped by hand, or by an uninstall that ran beside an install), remove it from every document with ${unset}, or put the marker back with ${markerStatement(database, target).text}; then run the command again.`,
+          `${label} already has documents with a field named ${SUBDOCUMENT}, and ${META_COLLECTION} holds no marker for it: FacetDB keeps its answers in that field. If the field is the application's, rename it, or point this source at another collection. If it is FacetDB's own, left by an earlier install whose marker is gone (${META_COLLECTION} dropped by hand, or by an uninstall that ran beside an install), remove it from every document with ${unset}, or put the marker back with ${markerStatement(database, target, undefined).text}; then run the command again.`,
         ),
       );
     }
+    // The `_id` type the marker records, read once: a recorded one is never read again.
+    const read =
+      marker?.recordsKeyType === true ? undefined : await readKeyType(client, database, collection);
     const queue = queueStatements(database, await jobsIndexes(client, database));
     if ("refusal" in queue) {
       return refused(queue.refusal);
@@ -358,11 +429,22 @@ export async function planInstall(
     if (part.kind === "refused") {
       return refused(part.refusal);
     }
-    const statements = [
-      ...(marker?.source === target.source ? [] : [markerStatement(database, target)]),
+    const installs = [
+      ...(marker?.source === target.source
+        ? []
+        : [markerStatement(database, target, read?.keyType)]),
       ...queue.statements,
       ...(part.kind === "planned" ? part.statements : []),
     ];
+    // An install from an earlier version gets its `_id` type as one field of its marker, and
+    // nothing else changes; a marker written above carries it already.
+    const found = read?.keyType;
+    const added = marker?.source === target.source && found !== undefined;
+    const statements = added ? [keyTypeStatement(database, target, found), ...installs] : installs;
+    // Unread where the marker records the type; told whenever the plan does something, so a
+    // collection with no document says once that no type is recorded yet.
+    const typeNotes =
+      read === undefined || statements.length === 0 ? [] : [keyTypeNote(label, read, added)];
     return {
       ok: true,
       plan: {
@@ -371,7 +453,8 @@ export async function planInstall(
         removes: [],
         keeps: [],
         notes: [
-          ...(statements.length === 0 ? [] : installNotes(target, database)),
+          ...(installs.length === 0 ? [] : installNotes(target, database)),
+          ...typeNotes,
           ...(part.kind === "planned" ? part.notes : unseenNotes(database, collection)),
         ],
       },

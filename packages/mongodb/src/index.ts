@@ -22,6 +22,8 @@ export {
   connectAdmin,
   JOB_COLLECTION_FIELD,
   JOBS_COLLECTION,
+  KEY_TYPES,
+  type KeyType,
   META_COLLECTION,
   ownedFields,
   planInstall,

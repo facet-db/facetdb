@@ -538,6 +538,39 @@ describe("facetdb worker", () => {
       expect(result.stdout).toMatch(new RegExp(`listings: (${HEX}|1) failed at ask: .+`));
       expect(result.stdout).not.toMatch(/oid:|n:1/);
     });
+
+    it("prints a string _id 1001 bare where the marker records strings, as explain reads it", async () => {
+      const { options } = mongoWorld();
+      const database = new FakeDatabase({ fields: ["title"] });
+      database.install();
+      database.edit("1001", { title: "A boat" });
+      const asked: string[] = [];
+      const mongo = new FakeEngine({
+        name: "mongodb",
+        schemes: ["mongodb", "mongodb+srv"],
+        database,
+        // the untyped rule alone: a numeric string prints with its escape.
+        keyText: {
+          toText: (key) => (/^[0-9]+$/.test(key) ? `s:${key}` : key),
+          fromText: (text) => text,
+          form: "the document's _id as you write it",
+        },
+        keyTextOf: (target) => {
+          asked.push(target.table);
+          return { toText: (key) => key, fromText: (text) => text, form: "a string as itself" };
+        },
+      });
+
+      const result = await run(["worker", "--once", "--no-http"], {
+        ...options,
+        engines: [lazyEngine("mongodb", () => Promise.resolve(mongo))],
+      });
+
+      expect(result.code).toBe(0);
+      expect(asked).toEqual(["listings"]);
+      expect(result.stdout).toContain("listings: answered 1001\n");
+      expect(result.stdout).not.toContain("s:1001");
+    });
   });
 
   it("--once names the decision log when the lookup of a batch's prior answers fails", async () => {

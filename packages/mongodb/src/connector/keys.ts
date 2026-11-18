@@ -1,5 +1,6 @@
 import type { RecordKey, StateValue } from "@facetdb/core";
 import { ObjectId } from "mongodb";
+import type { KeyType } from "../install/index.ts";
 
 /**
  * A document's `_id` as a record key, and its state fields as the text core hashes.
@@ -110,6 +111,13 @@ export function idOf(key: RecordKey): DocumentId | undefined {
  * (`"1"`, a 24-hex string) prints with the one escape, `s:1`, so whatever FacetDB prints reads back
  * as the document it named. The tagged form typed as written still works (`oid:…`, `n:1`, `s:…`),
  * so a script written before this keeps finding its records.
+ *
+ * With the `_id` type its marker records, a bare key is read in that type: on a collection keyed by
+ * strings `1001` is the string "1001", printed `1001`, never `s:1001`. Only the string type reads
+ * differently from the rule: 24 hex characters and a number in its own form are already an ObjectId
+ * and a number by it. `mixed`, or no type recorded, is the rule itself. The tags are read whatever
+ * the type, and a key of another type than the recorded one (a document the application added
+ * later) prints in the form that reads back as it: `n:5` in a string collection.
  */
 
 /**
@@ -130,14 +138,18 @@ function stringKey(id: string): RecordKey {
  * The key a user's text names, by the rule above: 24 hex characters an ObjectId, a number in its
  * own form a number, anything else a string; a tagged key that names a document as written
  * (`oid:<hex>`, `n:1`), and `s:<string>` the string after it. A tag-like text that names no
- * document (`n:042`, `oid:x`) is the string it spells, as `keyOf` keys that string.
+ * document (`n:042`, `oid:x`) is the string it spells, as `keyOf` keys that string. With
+ * `keyType` `string`, any other text is the string it spells.
  */
-export function keyFromText(text: string): RecordKey {
+export function keyFromText(text: string, keyType?: KeyType): RecordKey {
   if (text.startsWith(STRING)) {
     return stringKey(text.slice(STRING.length));
   }
   if (TAGGED.test(text)) {
     return idOf(text) === undefined ? stringKey(text) : text;
+  }
+  if (keyType === "string") {
+    return text;
   }
   if (TYPED_HEX.test(text)) {
     return `${OBJECT_ID}${text.toLowerCase()}`;
@@ -150,23 +162,27 @@ export function keyFromText(text: string): RecordKey {
 
 /**
  * A key as its user writes the `_id`: an ObjectId's 24 hex characters, a number's digits, a string
- * itself, or `s:<string>` for a string `keyFromText` would read as something else, so
- * `keyFromText(keyToText(key))` is `key` for every key `keyOf` writes. The empty string prints as
- * `s:`, so a log line never ends on nothing. A text in no written form (no connector hands one
- * out) is shown as it is.
+ * itself; or, where `keyFromText` under the same `keyType` would read that as something else,
+ * the tagged form (`oid:<hex>` and `n:<number>` as the key is, `s:<string>`), so
+ * `keyFromText(keyToText(key, type), type)` is `key` for every key `keyOf` writes and every type.
+ * The empty string prints as `s:`, so a log line never ends on nothing. A text in no written form
+ * (no connector hands one out) is shown as it is.
  */
-export function keyToText(key: RecordKey): string {
+export function keyToText(key: RecordKey, keyType?: KeyType): string {
   const id = idOf(key);
   if (id === undefined) {
     return key;
   }
-  if (id instanceof ObjectId) {
-    return id.toHexString();
+  const bare =
+    id instanceof ObjectId
+      ? id.toHexString()
+      : typeof id === "number"
+        ? key.slice(NUMBER.length)
+        : id;
+  if (bare !== "" && keyFromText(bare, keyType) === key) {
+    return bare;
   }
-  if (typeof id === "number") {
-    return key.slice(NUMBER.length);
-  }
-  return id !== "" && keyFromText(id) === key ? id : `${STRING}${id}`;
+  return typeof id === "string" ? `${STRING}${id}` : key;
 }
 
 /** A value as canonical JSON's value: the rules of `stateText`, inside an array or a document. */

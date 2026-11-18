@@ -1,5 +1,13 @@
 import { type AdminClient, type ServerDocument, serverCode } from "./admin.ts";
-import { JOBS_COLLECTION, META_COLLECTION, markerId, SUBDOCUMENT, WORKER_USER } from "./objects.ts";
+import {
+  JOBS_COLLECTION,
+  KEY_TYPE_FIELD,
+  type KeyType,
+  META_COLLECTION,
+  markerId,
+  SUBDOCUMENT,
+  WORKER_USER,
+} from "./objects.ts";
 
 /**
  * What the plans read of a database before they say anything (nothing here writes): the replica
@@ -86,8 +94,18 @@ export async function collectionType(
   return info["type"] === undefined ? "collection" : text(info["type"], "listCollections");
 }
 
-/** Who installed on a collection: its marker in `facetdb_meta`. */
-export type Marker = { readonly project: string; readonly source: string | undefined };
+/** Who installed on a collection, and the `_id` type recorded: its marker in `facetdb_meta`. */
+export type Marker = {
+  readonly project: string;
+  readonly source: string | undefined;
+  /**
+   * Whether the marker has a `keyType` field, whatever its value: false on a marker written before
+   * 124, or on a collection that had no document. Its value is read only where keys are
+   * (connector/key-type.ts), so a value FacetDB does not know never stops a migrate, a prune, an
+   * uninstall or the another-project refusal.
+   */
+  readonly recordsKeyType: boolean;
+};
 
 export async function readMarker(
   client: AdminClient,
@@ -102,7 +120,154 @@ export async function readMarker(
   return {
     project: text(marker["project"], `the marker of ${database}.${collection}`),
     source: typeof source === "string" ? source : undefined,
+    recordsKeyType: marker[KEY_TYPE_FIELD] !== undefined,
   };
+}
+
+/**
+ * A collection's `_id` type and where it was read (the declared schema, or the documents); or why
+ * none was: no document and no declared type, or the look for an `_id` of another type ran past
+ * `KEY_TYPE_SCAN_MS`.
+ */
+export type KeyTypeRead =
+  | { readonly keyType: KeyType; readonly from: "validator" | "documents" }
+  | { readonly keyType: undefined; readonly why: "no-document" | "timed-out" };
+
+/**
+ * How long the look for an `_id` of another type may run on the server (`maxTimeMS`): it reads
+ * every `_id` of a collection whose documents all have one type, which a large collection could
+ * make the migrate wait on. Past it, no type is recorded and the plan says so.
+ */
+export const KEY_TYPE_SCAN_MS = 30_000;
+
+/** The server's code for a command stopped by its `maxTimeMS`. */
+const MAX_TIME_EXPIRED = 50;
+
+/**
+ * The BSON types (`$type`'s names) of each key type's `_id`: those `keyOf` makes a key of
+ * (connector/keys.ts). A Decimal128 is a number with no key, so it is none of them.
+ */
+const BSON_TYPES: ReadonlyMap<Exclude<KeyType, "mixed">, readonly string[]> = new Map([
+  ["objectId", ["objectId"]],
+  ["string", ["string"]],
+  ["number", ["int", "long", "double"]],
+]);
+
+/** A type name of a `$jsonSchema` (`bsonType`'s, or JSON Schema's `type`) as a key type. */
+function schemaKind(name: string): KeyType {
+  switch (name) {
+    case "objectId":
+    case "string":
+      return name;
+    // `number` is `bsonType`'s alias of the numeric types and JSON Schema's own; `integer` is JSON Schema's.
+    case "int":
+    case "long":
+    case "double":
+    case "number":
+    case "integer":
+      return "number";
+    default:
+      return "mixed";
+  }
+}
+
+/**
+ * The `_id` type a collection's validator declares (`$jsonSchema: { properties: { _id: { bsonType
+ * } } }`), or undefined where it declares none, or would not hold a document to it: validation
+ * `off`, or the action `warn`, which lets a document of another type in. Several types that are
+ * not all one key type are `mixed`.
+ */
+async function declaredKeyType(
+  client: AdminClient,
+  database: string,
+  collection: string,
+): Promise<KeyType | undefined> {
+  const what = `listCollections for ${database}.${collection}`;
+  const { documents } = firstBatch(
+    await client.command(database, { listCollections: 1, filter: { name: collection } }),
+    what,
+  );
+  const options = documents[0]?.["options"];
+  if (!isRecord(options) || options["validationLevel"] === "off") {
+    return undefined;
+  }
+  if (options["validationAction"] === "warn" || !isRecord(options["validator"])) {
+    return undefined;
+  }
+  const schema = options["validator"]["$jsonSchema"];
+  const properties = isRecord(schema) ? schema["properties"] : undefined;
+  const id = isRecord(properties) ? properties["_id"] : undefined;
+  if (!isRecord(id)) {
+    return undefined;
+  }
+  const declared = id["bsonType"] ?? id["type"];
+  const names =
+    typeof declared === "string"
+      ? [declared]
+      : Array.isArray(declared) && declared.every((name) => typeof name === "string")
+        ? declared
+        : [];
+  const kinds = new Set(names.map(schemaKind));
+  const [only] = kinds;
+  return only === undefined ? undefined : kinds.size === 1 ? only : "mixed";
+}
+
+/**
+ * A collection's `_id` type, read before it is recorded in the marker: the type its validator
+ * declares, else the type of one document's `_id`, checked by one query for a document whose `_id`
+ * has another type (`mixed` when there is one). None for a collection with no document and no
+ * declared type: nothing says what its keys will be. The query stops at the first `_id` of another
+ * type; where none has one, it reads every `_id` once, as `holdsSubdocument` does, within
+ * `KEY_TYPE_SCAN_MS`, past which none is recorded. Read once per collection: a recorded type is
+ * never read again.
+ */
+export async function readKeyType(
+  client: AdminClient,
+  database: string,
+  collection: string,
+): Promise<KeyTypeRead> {
+  const declared = await declaredKeyType(client, database, collection);
+  if (declared !== undefined) {
+    return { keyType: declared, from: "validator" };
+  }
+  const what = `the type of an _id in ${database}.${collection}`;
+  const sample = firstBatch(
+    await client.command(database, {
+      aggregate: collection,
+      pipeline: [{ $limit: 1 }, { $project: { _id: 0, type: { $type: "$_id" } } }],
+      cursor: {},
+    }),
+    what,
+  ).documents[0];
+  if (sample === undefined) {
+    return { keyType: undefined, why: "no-document" };
+  }
+  const type = text(sample["type"], what);
+  const kind = [...BSON_TYPES].find(([, names]) => names.includes(type));
+  if (kind === undefined) {
+    return { keyType: "mixed", from: "documents" };
+  }
+  const [keyType, names] = kind;
+  let reply: ServerDocument;
+  try {
+    reply = await client.command(database, {
+      find: collection,
+      filter: { _id: { $not: { $type: names } } },
+      projection: { _id: 1 },
+      limit: 1,
+      maxTimeMS: KEY_TYPE_SCAN_MS,
+    });
+  } catch (error) {
+    if (serverCode(error) === MAX_TIME_EXPIRED) {
+      return { keyType: undefined, why: "timed-out" };
+    }
+    throw error;
+  }
+  const other = firstBatch(
+    reply,
+    `an _id of another type than ${type} in ${database}.${collection}`,
+  ).documents;
+  return { keyType: other.length === 0 ? keyType : "mixed", from: "documents" };
 }
 
 /**

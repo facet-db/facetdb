@@ -15,7 +15,7 @@ import {
   type RecordStatus,
   type SpendingGate,
 } from "@facetdb/core";
-import { keyWords, openConnector } from "../engines.ts";
+import { keyWords, openConnector, tableKeyText } from "../engines.ts";
 import {
   type CliDeps,
   CliError,
@@ -252,8 +252,17 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
       return { ok: true, dryRun: true, source: source.name, table: name, rows: limit };
     }
 
-    // A key as the user writes it: MongoDB's `65f1…` for `oid:65f1…`, `1` for `n:1`.
-    const keyText = table.reached?.engine.keyText;
+    // A key as the user writes it: MongoDB's `65f1…` for `oid:65f1…`, `1` for `n:1`, `1001` for the
+    // string "1001" where the marker records string `_id`s.
+    const keyText =
+      table.reached === undefined
+        ? undefined
+        : await tableKeyText(
+            table.reached.engine,
+            table.own,
+            table.reached.url,
+            options.allowInsecure === true,
+          );
     const shown = (key: RecordKey) => keyWords(keyText, key);
     // Made on the first request only, so a table with no rows needs no model.
     let provider: ModelProvider | undefined;

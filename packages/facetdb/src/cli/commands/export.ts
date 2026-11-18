@@ -4,7 +4,9 @@ import {
   choiceConfidence,
   type Decision,
   decide,
+  EngineRefusal,
   type HumanEntry,
+  type KeyText,
   type LogEntry,
   type Question,
   type QuestionSet,
@@ -15,18 +17,21 @@ import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeSourceId } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  engineTarget,
   loadProjectConfig,
   projectRef,
   savedQuestionSets,
+  splitTable,
   variableOf,
 } from "./database.ts";
 
 /**
  * `facetdb export --source <name>`: a source's whole decision log as JSONL or CSV, oldest first, so
  * the promise that the answers are yours is kept by a command and not by a mirror. It reads the
- * FacetDB store only, a page at a time, never the source's own database, and writes each page as it
- * is read; nothing is written but the file `--out` names, which it never replaces without
- * `--force`. A dry run counts the log in one query.
+ * FacetDB store, a page at a time, and never a row of the source's own database (of an engine that
+ * records a key type per table, only that type, so the keys print as the user writes them), and
+ * writes each page as it is read; nothing is written but the file `--out` names, which it never
+ * replaces without `--force`. A dry run counts the log in one query.
  */
 
 const FORMATS = ["jsonl", "csv"] as const;
@@ -301,21 +306,48 @@ export const exportCommand = defineCommand<ExportOptions>("export", {
     }
     // Read again inside the pages below, past the narrowing above.
     const url: string = storeUrl;
-    // The store only: the log is never read from, nor needs, the source's own database.
+    // The store's URL: the log is never read from, nor needs, the source's own database.
     const allowInsecure = options.allowInsecure === true;
     requireUsableStoreUrl(url, allowInsecure, deps.env["PGHOST"]);
-    // The key column as the user writes the key: the store keeps MongoDB's tagged key, `n:1`, and
-    // the export says `1`, as `explain` reads it. The engine is found, never opened.
-    const keyText = await keyTextFor(deps.engines, source);
-    const shown: KeyShown = (key) => keyWords(keyText, key);
     // Without the source's connection string its engine is unknown here: say which form the keys
     // take, so the two forms are never told apart in silence (stderr: stdout may be the data).
+    const storedForm =
+      "writes each record_key as the FacetDB store keeps it: the same as you type it on every database but MongoDB, whose keys then read oid:<hex> and n:<number>";
     if (source.table !== undefined && (source.database ?? "") === "") {
       const variable = variableOf(source);
       deps.io.stderr(
-        `note: ${variable} is not set here, so export cannot tell which database "${source.name}" is on and writes each record_key as the FacetDB store keeps it: the same as you type it on every database but MongoDB, whose keys then read oid:<hex> and n:<number>. Set ${variable} to export MongoDB keys as you write them.\n`,
+        `note: ${variable} is not set here, so export cannot tell which database "${source.name}" is on and ${storedForm}. Set ${variable} to export MongoDB keys as you write them.\n`,
       );
     }
+
+    // The key column as the user writes the key: the store keeps MongoDB's tagged key, `n:1`, and
+    // the export says `1`, as `explain` reads it; a collection whose marker records string `_id`s
+    // says `1001` for the string "1001". The engine is never opened: only the marker is read, for
+    // the type it records, and not by a dry run, which writes no key. The log is the store's: a
+    // source database that cannot be reached or read never stops it, the keys then go as stored,
+    // and stderr says so.
+    let keyText: KeyText | undefined;
+    if (!options.dryRun && source.table !== undefined) {
+      const target = engineTarget(
+        config,
+        { source, ...splitTable(source.table) },
+        projectRef(deps.projectDir),
+      );
+      try {
+        keyText = await keyTextFor(deps.engines, source, target, allowInsecure);
+      } catch (error) {
+        // A refusal's words are FacetDB's own; a driver's error is not echoed, since it may carry
+        // the connection string.
+        const why =
+          error instanceof EngineRefusal
+            ? error.refusal.message
+            : "it could not be reached or read";
+        deps.io.stderr(
+          `note: export could not read how the keys of "${source.name}" are written from its database (${why}), so it ${storedForm}. Check the connection with facetdb doctor, then export again to write MongoDB keys as you write them.\n`,
+        );
+      }
+    }
+    const shown: KeyShown = (key) => keyWords(keyText, key);
 
     const store = await deps.store({ allowInsecure });
     // The log is kept under the project-scoped id, never the bare source name.

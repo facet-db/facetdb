@@ -55,6 +55,11 @@ export type FakeEngineOptions = {
   readonly database?: FakeDatabase;
   /** How its keys are written on the terminal (a tagged-key engine's); absent, keys are text. */
   readonly keyText?: KeyText;
+  /**
+   * The key text a table's own database records (`DatabaseEngine.keyTextOf`: MongoDB's marker);
+   * absent, the engine has none and `keyText` is every table's.
+   */
+  readonly keyTextOf?: (target: EngineTarget, url: string) => KeyText;
   /** How it reads a connection string's login (`DatabaseEngine.login`); absent, the URL's. */
   readonly login?: NonNullable<DatabaseEngine["login"]>;
 };
@@ -154,6 +159,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly capabilities: Capabilities;
   readonly checks: DatabaseEngine["checks"];
   readonly keyText?: KeyText;
+  readonly keyTextOf?: NonNullable<DatabaseEngine["keyTextOf"]>;
   readonly login?: NonNullable<DatabaseEngine["login"]>;
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
@@ -181,6 +187,16 @@ export class FakeEngine implements DatabaseEngine {
     this.#database = options.database;
     if (options.keyText !== undefined) {
       this.keyText = options.keyText;
+    }
+    const keyTextOf = options.keyTextOf;
+    if (keyTextOf !== undefined) {
+      // Like a real engine's, it refuses a plaintext URL to another host before reading anything.
+      this.keyTextOf = (target, url, deps) => {
+        const refused = this.checkUrl(target, url, deps);
+        return refused === undefined
+          ? Promise.resolve(keyTextOf(target, url))
+          : Promise.reject(new EngineRefusal(refused));
+      };
     }
     if (options.login !== undefined) {
       this.login = options.login;
