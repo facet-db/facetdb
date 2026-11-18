@@ -4,6 +4,7 @@ import {
   type Capabilities,
   type Clock,
   type CurrentDecision,
+  type CursorStore,
   EngineRefusal,
   type EngineTarget,
   type OpenConnector,
@@ -15,6 +16,7 @@ import {
   type RecordKey,
   type ScanCursor,
   type ScanPage,
+  STATE_HASH_COLUMN,
   STATUS_COLUMN,
   type StateValue,
   stateHash,
@@ -31,6 +33,13 @@ import {
   tableNames,
 } from "../install/index.ts";
 import { type MssqlClient, type MssqlRow, quoteName, quoteString } from "../sql/index.ts";
+import {
+  createTrackedCapture,
+  NO_CURSORS,
+  noteOnStderr,
+  type TrackedCapture,
+  warnOnStderr,
+} from "./change-tracking.ts";
 import { connectMssqlPool, DEFAULT_MAX_CONNECTIONS, type MssqlPoolConnect } from "./client.ts";
 
 /**
@@ -133,10 +142,24 @@ export type MssqlConnectorDeps = {
     install(): Promise<void>;
     uninstall(): Promise<void>;
   };
+  /**
+   * The store's cursors, where a source with `capture: "change-tracking"` keeps the version it has
+   * read up to. Without them such a connector serves everything but `watch`.
+   */
+  readonly cursors?: CursorStore;
+  /** Where a lost version's warning goes: stderr by default. */
+  readonly warn?: (line: string) => void;
+  /** Where the line saying whether this worker polls Change Tracking goes: stderr by default. */
+  readonly note?: (line: string) => void;
 };
 
 export type MssqlConnector = OpenConnector & {
   readonly workerId: string;
+  /**
+   * With `capture: "change-tracking"`, the poll `watch` runs before each announcement, for a caller
+   * that drives it itself (a test's application write, a tool); undefined with the trigger.
+   */
+  readonly tracked: TrackedCapture | undefined;
 };
 
 /** The clock's time as text SQL Server converts with style 121, in UTC: what the queue compares. */
@@ -328,6 +351,14 @@ export async function createMssqlConnector(
     throw new Error(`a page holds at least one row, not ${pageSize}`);
   }
   const names = tableNames(target);
+  if (target.capture === "change-tracking" && target.storage === "side-table") {
+    // Install refuses the pair; a config changed since must not run.
+    throw new EngineRefusal({
+      code: "side-table",
+      message: `${names.label} cannot keep its answers in a side table while Change Tracking watches it: FacetDB does not combine the two yet`,
+      fix: 'remove storage: "side-table" or capture: "change-tracking" from the source in facetdb.config.ts, then run facetdb migrate',
+    });
+  }
   const pool: MssqlClient = (deps.connect ?? connectMssqlPool)(url, {
     maxConnections: deps.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
   });
@@ -415,6 +446,54 @@ export async function createMssqlConnector(
       hash: stateHash(fields, state),
       excluded: row["x"] === true,
     };
+  }
+
+  /**
+   * Change Tracking as the capture: `watch` fills the queue from the table's changes before it
+   * announces it, and `write` stores the hash of the state each decision was made on.
+   */
+  // The poller's lock lives in a session of its own, kept while the connector is open.
+  const lockSession: MssqlClient | undefined =
+    target.capture === "change-tracking"
+      ? (deps.connect ?? connectMssqlPool)(url, { maxConnections: 1 })
+      : undefined;
+  const tracking: TrackedCapture | undefined =
+    lockSession !== undefined
+      ? createTrackedCapture({
+          pool,
+          lockSession,
+          note: deps.note ?? noteOnStderr,
+          target,
+          names,
+          key: facts.key,
+          rowColumns,
+          parseRow,
+          cursors: deps.cursors ?? NO_CURSORS,
+          warn: deps.warn ?? warnOnStderr,
+          clock,
+        })
+      : undefined;
+
+  /**
+   * Whether `write` stores `facetdb_state_hash`: always with Change Tracking, and with the trigger
+   * too while the table still carries FacetDB's column from an earlier Change Tracking install and
+   * the worker may update it (that install granted it). A hash left as it was under the trigger
+   * would be stale when the source goes back to Change Tracking, and a state that returned to an
+   * old hashed value would read as answered and never be asked. Never in side-table mode, whose
+   * decisions are not on the table. Asked of the server once, at open.
+   */
+  let keepsHash = tracking !== undefined;
+  if (!keepsHash && !sideMode && facts.columns.get(STATE_HASH_COLUMN)?.marked === true) {
+    try {
+      const [row] = await pool.query(
+        "select has_perms_by_name(@p1, N'OBJECT', N'UPDATE', @p2, N'COLUMN') as writable",
+        [table, STATE_HASH_COLUMN],
+      );
+      keepsHash = row?.["writable"] === 1;
+    } catch (error) {
+      await pool.close();
+      throw error;
+    }
   }
 
   /** The state each key last read as, for `write`'s guard (the newest last; the oldest leave first). */
@@ -505,6 +584,8 @@ export async function createMssqlConnector(
     // again is.
     let announced = new Set<RecordKey>();
     while (!isClosed()) {
+      // With Change Tracking no trigger queues a change: the poll does, first.
+      await tracking?.poll();
       const waiting = (
         await pool.query(
           `select top (@p2) j.[record_key] as record_key from ${jobs} j with (readpast) where j.[table_name] = @p1 and j.[claimed_at] is null`,
@@ -651,7 +732,12 @@ select count(*) as written from @written;`;
     decision: RecordDecision,
     expectedHash: string,
   ): Promise<WriteResult> {
-    const assignments = assignmentsFor(decision);
+    // The hash of the state decided on, for Change Tracking's poll and a lost version's reconcile;
+    // `expectedHash` is that state's, checked below.
+    const assignments: (readonly [string, unknown])[] = [
+      ...assignmentsFor(decision),
+      ...(keepsHash ? [[STATE_HASH_COLUMN, expectedHash] as const] : []),
+    ];
     const remembered = lastRead.get(recordKey);
     const sent =
       remembered !== undefined && remembered.hash === expectedHash
@@ -862,6 +948,7 @@ select count(*) as written from @written;`,
   return {
     capabilities: MSSQL_CAPABILITIES,
     workerId,
+    tracked: tracking,
     install() {
       if (installer === undefined) {
         return Promise.reject(
@@ -960,7 +1047,8 @@ select count(*) as written from @written;`,
       }
       closed = true;
       wake?.();
-      await pool.close();
+      // The lock's session ends here, so another worker takes over polling within a tick.
+      await Promise.all([pool.close(), lockSession?.close()]);
     },
   };
 }

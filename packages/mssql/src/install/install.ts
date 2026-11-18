@@ -36,6 +36,15 @@ import {
   withAdmin,
 } from "./catalog.ts";
 import {
+  readTracking,
+  type TrackingFacts,
+  trackedColumns,
+  trackingGrants,
+  trackingNotes,
+  trackingRefusal,
+  trackingStatements,
+} from "./change-tracking.ts";
+import {
   anotherProject,
   claimStatement,
   markerTableStatement,
@@ -149,6 +158,8 @@ type InstallCatalog =
       readonly grants: readonly WorkerGrant[];
       /** Side-table mode alone: the side table's columns (none before the install) and the facts. */
       readonly side: SideCatalog | undefined;
+      /** Change Tracking as it is set now, read only for a target with that capture. */
+      readonly tracking: TrackingFacts | undefined;
     };
 
 /** What side-table mode reads besides. */
@@ -159,6 +170,11 @@ type SideCatalog = {
 
 /** The catalog of a table that is there. */
 type TableCatalog = Extract<InstallCatalog, { readonly table: true }>;
+
+/** Whether the target watches its table by Change Tracking rather than a trigger. */
+function tracked(target: EngineTarget): boolean {
+  return target.capture === "change-tracking";
+}
 
 /** Whether the worker is a user of the database alone: Azure SQL Database, or a contained database. */
 export function containedUsers(server: ServerFacts): boolean {
@@ -425,7 +441,7 @@ function check(
   if (computed.length > 0) {
     return refuse(
       "state-column",
-      `${label}: the state field ${computed.join(", ")} is a computed column, and a trigger cannot tell when one changes`,
+      `${label}: the state field ${computed.join(", ")} is a computed column, and ${tracked(target) ? "Change Tracking" : "a trigger"} cannot tell when one changes`,
       "list the columns it is computed from in the source's read list instead",
     );
   }
@@ -483,12 +499,14 @@ function check(
       `rename that object, or keep FacetDB on another table: ${taken.name} is the name FacetDB gives its ${taken.role}`,
     );
   }
-  // The trigger runs as the table's owner, and writes FacetDB's queue in dbo with its rights.
-  const runsAs = ownerRefusal(names, catalog.owner);
+  // The trigger runs as the table's owner, and writes FacetDB's queue in dbo with its rights;
+  // Change Tracking runs nothing as anyone, the worker queues with its own rights.
+  const runsAs = tracked(target) ? undefined : ownerRefusal(names, catalog.owner);
   if (runsAs !== undefined) {
     return { refusal: runsAs };
   }
   if (
+    !tracked(target) &&
     catalog.owner.name === "dbo" &&
     server.edition !== AZURE_SQL_DATABASE &&
     server.ownerLogin === null
@@ -756,7 +774,7 @@ function grantStatements(
 
 /** What a table that gets its first trigger means for an application that writes to it. */
 function triggerNote(names: TableNames): string {
-  return `${names.label} now has a trigger, ${names.trigger}: an application statement on the table with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default; declare the trigger to EF Core (HasTrigger("${names.trigger}") on the table's entity), or, once FacetDB offers it, watch the table with Change Tracking instead of a trigger`;
+  return `${names.label} now has a trigger, ${names.trigger}: an application statement on the table with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default; declare the trigger to EF Core (HasTrigger("${names.trigger}") on the table's entity), or watch the table with Change Tracking instead of a trigger`;
 }
 
 /** What added columns mean for an application's inserts. */
@@ -888,12 +906,70 @@ function sideStorage(
   };
 }
 
+/**
+ * The install with Change Tracking as the capture: the trigger plan with the trigger's place taken
+ * by tracking on the table and FacetDB's mark (a FacetDB trigger left from the trigger capture
+ * goes), `facetdb_state_hash` among the columns, and the worker's `view change tracking` and its
+ * read and write of the hash. Only what is missing, behind the same lock timeout, marker claim and
+ * owner check; nothing at all on an installed table.
+ */
+function trackingPlan(
+  target: EngineTarget,
+  names: TableNames,
+  catalog: TableCatalog,
+  key: CatalogColumn,
+  tracking: TrackingFacts,
+): EnginePlan {
+  const present = new Set(catalog.columns.map((column) => column.name));
+  const added = trackedColumns(ownedColumns(target.questionSet)).filter(
+    (column) => !present.has(column.name),
+  );
+  const trigger = catalog.objects.find(
+    (object) => object.schema === names.schema && object.name === names.trigger,
+  );
+  const capture = trackingStatements(names, tracking, trigger);
+  const login = loginStatements(catalog.server, catalog.worker);
+  const claimed =
+    catalog.marker?.some((row) => row.schema === names.schema && row.table === names.table) ===
+    true;
+  const changes = [
+    ...added.map((column) => columnStatement(names, column)),
+    ...(sharedObject(catalog.objects, JOBS_TABLE) === undefined ? [queueStatement(names)] : []),
+    ...capture,
+    ...login.statements,
+    ...grantStatements(target, names, key.name, catalog),
+    ...trackingGrants(names, catalog.grants),
+  ];
+  if (changes.length === 0 && claimed) {
+    return { statements: [], transactional: true, removes: [], keeps: [], notes: [] };
+  }
+  return {
+    statements: [
+      sourceStatement("settings", `set lock_timeout ${LOCK_TIMEOUT_MS}`),
+      markerTableStatement(names),
+      claimStatement(names, target.project),
+      ownerCheckStatement(names, target.project),
+      ...changes,
+    ],
+    transactional: true,
+    removes: [],
+    keeps: [],
+    notes: [
+      ...trackingNotes(names, tracking, trigger !== undefined),
+      ...(added.length === 0 ? [] : [columnsNote(names, added.length)]),
+      ...(added.some((column) => column.name === STATUS_COLUMN) ? [pendingNote(names)] : []),
+      ...login.notes,
+    ],
+  };
+}
+
 /** The catalog as install reads it: a missing table stops the reading after the server's facts. */
 async function inspect(
   connect: MssqlConnect,
   url: string,
   names: TableNames,
   storage: Storage,
+  capture: EngineTarget["capture"],
 ): Promise<InstallCatalog> {
   return withAdmin(connect, url, async (query): Promise<InstallCatalog> => {
     const server = await readServer(query);
@@ -920,6 +996,7 @@ async function inspect(
               facts: await readSideFacts(query, names),
             }
           : undefined,
+      tracking: capture === "change-tracking" ? await readTracking(query, names) : undefined,
     };
   });
 }
@@ -939,8 +1016,21 @@ export async function planInstall(
   if (impossible !== undefined) {
     return { ok: false, refusal: impossible };
   }
-  const checked = check(target, names, await inspect(connect, url, names, target.storage), options);
-  return "refusal" in checked
-    ? { ok: false, refusal: checked.refusal }
-    : { ok: true, plan: installPlan(target, names, checked.catalog, checked.key) };
+  const checked = check(
+    target,
+    names,
+    await inspect(connect, url, names, target.storage, target.capture),
+    options,
+  );
+  if ("refusal" in checked) {
+    return { ok: false, refusal: checked.refusal };
+  }
+  const { tracking } = checked.catalog;
+  if (tracking === undefined) {
+    return { ok: true, plan: installPlan(target, names, checked.catalog, checked.key) };
+  }
+  const refusal = trackingRefusal(target, names, checked.catalog.server.database, tracking);
+  return refusal === undefined
+    ? { ok: true, plan: trackingPlan(target, names, checked.catalog, checked.key, tracking) }
+    : { ok: false, refusal };
 }

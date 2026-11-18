@@ -158,6 +158,8 @@ export function engineTarget(
     table: target.table,
     ...(named ? { schema: target.schema } : {}),
     storage: target.source.storage,
+    // Absent unless the config says: every engine but SQL Server's knows one capture.
+    ...(target.source.capture === undefined ? {} : { capture: target.source.capture }),
     onChange: target.source.onChange,
     questionSet: questionSetOf(config, target.source),
     urlVariable: variableOf(target.source),

@@ -125,12 +125,22 @@ export type OnCapReached = "pause" | "continue";
  */
 export type ConnectorChoice = "polling";
 
+/**
+ * How a SQL Server source notices a changed record ("trigger and `facetdb_jobs` table, or Change
+ * Tracking"): `"trigger"`, the default, or `"change-tracking"` for a shop that forbids triggers on
+ * its tables, where the database keeps a version per row change and the worker reads it every
+ * second. SQL Server only.
+ */
+export type CaptureMode = "trigger" | "change-tracking";
+
 export type SourceInput = {
   readonly name: string;
   /** The connection string, read from the environment: `process.env.DATABASE_URL`. */
   readonly database?: string | undefined;
   /** Overrides the engine the scheme picks: `"polling"` for a host that forbids triggers. */
   readonly connector?: ConnectorChoice;
+  /** SQL Server only: `"change-tracking"` watches the table without a trigger; `"trigger"` by default. */
+  readonly capture?: CaptureMode;
   /** An API source: your code sends the records to `/v1/check`. */
   readonly api?: boolean;
   readonly table?: string;
@@ -167,6 +177,8 @@ export type SourceConfig = {
   readonly databaseEnv?: string;
   /** The engine chosen over the scheme's: `"polling"`; absent, the scheme picks it. */
   readonly connector?: ConnectorChoice;
+  /** How a SQL Server source notices changes, when the config says; absent, the trigger. */
+  readonly capture?: CaptureMode;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -230,6 +242,7 @@ function sourceConfig(input: SourceInput): SourceConfig {
     api: input.api === true,
     database: input.database,
     connector: input.connector,
+    capture: input.capture,
     table: input.table,
     where: input.where,
     read: input.read,

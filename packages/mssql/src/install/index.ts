@@ -30,6 +30,26 @@ export {
   WORKER_QUERY,
   type WorkerGrant,
 } from "./catalog.ts";
+// Change Tracking as the capture: the plan's reads, refusals and statements, the mark the runtime
+// connector and doctor read.
+export {
+  databaseTrackingStatement,
+  MARK_QUERY,
+  MIN_RETENTION_MINUTES,
+  markOf,
+  readMark,
+  readTracking,
+  STATE_HASH,
+  STATE_HASH_TYPE,
+  TRACKING_ENABLED,
+  TRACKING_FOUND,
+  TRACKING_QUERY,
+  type TrackingFacts,
+  type TrackingMark,
+  trackedColumns,
+  trackedTablesQuery,
+  versionText,
+} from "./change-tracking.ts";
 export { containedUsers, LOGIN_NOTE, planInstall, REMAP_NOTE, SIDE_RIGHTS } from "./install.ts";
 export { createInstaller, type MssqlInstaller } from "./installer.ts";
 export { anotherProject, markerQuery, SCRIPT_ERROR, SCRIPT_PREFIX } from "./marker.ts";

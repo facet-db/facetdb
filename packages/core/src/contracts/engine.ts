@@ -8,8 +8,7 @@ import type { Capabilities, Connector } from "./connector.ts";
  * offers the CLI. An engine plans install, uninstall and prune for a source, renders a plan as the
  * script the operator reads first, runs it, opens the runtime connector and answers doctor. It owns
  * the answer columns, the queue and the change capture in the source's database; the log and
- * everything else stay in the one Postgres store
- *. The CLI picks an engine by the URL's scheme.
+ * everything else stay in the one Postgres store. The CLI picks an engine by the URL's scheme.
  *
  * Design notes:
  * - A statement names the database it serves, `source` or `store`, because the store is one
@@ -64,6 +63,12 @@ export type EngineTarget = {
   readonly key?: string;
   /** Where the answers live. */
   readonly storage: "inline" | "side-table";
+  /**
+   * How the engine notices a changed record where its database offers two ways. Absent: the
+   * trigger, which every SQL engine uses; only the SQL Server engine reads `"change-tracking"`, and
+   * the config loader refuses it on any other database.
+   */
+  readonly capture?: "trigger" | "change-tracking";
   /** What a change to a decided record does to its status. */
   readonly onChange: OnChange;
   /**
@@ -74,8 +79,8 @@ export type EngineTarget = {
   readonly questionSet: QuestionSet;
   /**
    * How the engine's words name the source's connection string: the environment variable the CLI
-   * read it from (`DATABASE_URL`, `LISTINGS_URL`), so a refusal or a doctor's fix says what to set
-   *. Absent where no variable holds it (Cloud, a test): "the source's connection string".
+   * read it from (`DATABASE_URL`, `LISTINGS_URL`), so a refusal or a doctor's fix says what to set.
+   * Absent where no variable holds it (Cloud, a test): "the source's connection string".
    */
   readonly urlVariable?: string;
 };
@@ -120,11 +125,11 @@ export type PlanStatement = {
    */
   readonly text: string;
   /**
-   * The statement that gives the worker login its password, the one credential FacetDB keeps
-   *. Its text shows where the password goes, never the password, and `run`
-   * binds the one it is given. On Postgres it prints as a comment with no placeholder, and `run`
-   * executes its own `set_config` with a fresh SCRAM verifier: neither the password nor a verifier
-   * is ever in a plan or a result (the Postgres engine's test asserts it).
+   * The statement that gives the worker login its password, the one credential FacetDB keeps. Its
+   * text shows where the password goes, never the password, and `run` binds the one it is given. On
+   * Postgres it prints as a comment with no placeholder, and `run` executes its own `set_config`
+   * with a fresh SCRAM verifier: neither the password nor a verifier is ever in a plan or a result
+   * (the Postgres engine's test asserts it).
    */
   readonly secret?: true;
 };

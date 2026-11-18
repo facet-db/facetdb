@@ -263,6 +263,51 @@ describe("the example config", () => {
     expect(toProjectJson(facetdb(valid())).sources[0]).not.toHaveProperty("connector");
   });
 
+  it("carries capture: the JSON export, the config file and the import keep it, and its absence is the trigger", () => {
+    const sqlServer = "mssql://app:s3cret@db.example.com:1433/shop";
+    const config = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "orders",
+          database: sqlServer,
+          capture: "change-tracking",
+          table: "orders",
+          read: ["note"],
+          questions: { rush: noul("Rush?") },
+        },
+      ],
+    });
+    const source = config.sources[0];
+    if (source === undefined) throw new Error("fixture has a source");
+    const parsed = parseProjectConfig({
+      ...config,
+      sources: [{ ...source, databaseEnv: "ORDERS_URL" }],
+    });
+    if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
+    expect(parsed.config.sources[0]?.capture).toBe("change-tracking");
+    const json = toProjectJson(parsed.config);
+    expect(json.sources[0]?.capture).toBe("change-tracking");
+    expect(toProjectJson(fromProjectJson(json, { ORDERS_URL: sqlServer }))).toEqual(json);
+    // Imported before its variable is set, the source has no connection string to judge yet.
+    expect(toProjectJson(fromProjectJson(json, {}))).toEqual(json);
+    expect(configFileSource(parsed.config)).toContain('capture: "change-tracking",');
+    expect(toProjectJson(facetdb(valid())).sources[0]).not.toHaveProperty("capture");
+    for (const scheme of ["mssql", "sqlserver", "MSSQL"]) {
+      const ok = parseProjectConfig(
+        facetdb(
+          valid({
+            api: false,
+            table: "orders",
+            database: `${scheme}://app:s3cret@db.example.com/shop`,
+            capture: "change-tracking",
+          }),
+        ),
+      );
+      expect(ok).toMatchObject({ ok: true });
+    }
+  });
+
   it("refuses to export a connection string it cannot name a variable for", () => {
     const config = facetdb({
       model: "jev-1.14.0",
@@ -636,6 +681,54 @@ describe("what the schema refuses", () => {
     expect(onApi).toMatchObject({ ok: false });
     if (!onApi.ok) {
       expect(onApi.issues.map((issue) => issue.path)).toEqual(["sources[0].connector"]);
+    }
+  });
+
+  it('refuses capture: "change-tracking" on any database but SQL Server, with the polling connector, and on an API source', () => {
+    const issuesOf = (overrides: Partial<SourceInput>) => {
+      const parsed = parseProjectConfig(
+        facetdb(valid({ api: false, table: "orders", ...overrides })),
+      );
+      return parsed.ok ? [] : parsed.issues.map((issue) => `${issue.path}: ${issue.message}`);
+    };
+    expect(issuesOf({ database: CONNECTION, capture: "change-tracking" })).toEqual([
+      "sources[0].capture: capture: \"change-tracking\" is SQL Server's Change Tracking, and this source's connection string is a postgres: connection string; remove capture (that database is watched by its trigger), or point the source at a SQL Server with an mssql: or sqlserver: connection string",
+    ]);
+    expect(issuesOf({ database: "./shop.db", capture: "change-tracking" })).toEqual([
+      "sources[0].capture: capture: \"change-tracking\" is SQL Server's Change Tracking, and this source's connection string names no scheme (a file path); remove capture (that database is watched by its trigger), or point the source at a SQL Server with an mssql: or sqlserver: connection string",
+    ]);
+    expect(
+      issuesOf({
+        database: "mssql://app:s3cret@db.example.com/shop",
+        connector: "polling",
+        capture: "change-tracking",
+      }),
+    ).toEqual([
+      'sources[0].capture: capture: "change-tracking" is SQL Server\'s own way to notice changes, and connector: "polling" scans the table instead; remove one of them',
+    ]);
+    // The trigger is every SQL engine's: naming it is never refused.
+    expect(issuesOf({ database: CONNECTION, capture: "trigger" })).toEqual([]);
+    const wrong = messagesOf(() =>
+      fromProjectJson({
+        ...toProjectJson(facetdb(valid())),
+        sources: [
+          {
+            ...toProjectJson(facetdb(valid())).sources[0],
+            api: false,
+            table: "t",
+            database: { env: "DATABASE_URL" },
+            capture: "cdc",
+          },
+        ],
+      }),
+    );
+    expect(wrong).toContain(
+      'sources[0].capture: capture must be "trigger" (the default) or "change-tracking" (SQL Server only: watch the table without a trigger)',
+    );
+    const onApi = parseProjectConfig(facetdb(valid({ capture: "change-tracking" })));
+    expect(onApi).toMatchObject({ ok: false });
+    if (!onApi.ok) {
+      expect(onApi.issues.map((issue) => issue.path)).toEqual(["sources[0].capture"]);
     }
   });
 

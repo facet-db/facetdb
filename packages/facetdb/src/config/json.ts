@@ -1,6 +1,7 @@
 import type { Question, ThresholdOverride } from "@facetdb/core";
 import type {
   ActionCall,
+  CaptureMode,
   ConnectorChoice,
   OnCapReached,
   ProjectConfig,
@@ -23,6 +24,7 @@ export type SourceJson = {
   readonly api: boolean;
   readonly database?: { readonly env: string };
   readonly connector?: ConnectorChoice;
+  readonly capture?: CaptureMode;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -61,6 +63,7 @@ function sourceJson(source: SourceConfig): SourceJson {
     api: source.api,
     ...(source.databaseEnv === undefined ? {} : { database: { env: source.databaseEnv } }),
     ...(source.connector === undefined ? {} : { connector: source.connector }),
+    ...(source.capture === undefined ? {} : { capture: source.capture }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(source.where === undefined ? {} : { where: source.where }),
     read: source.read,
@@ -201,6 +204,7 @@ function sourceSource(source: SourceConfig): string {
   } else {
     fields.push(`database: process.env.${source.databaseEnv ?? "DATABASE_URL"}`);
     if (source.connector !== undefined) fields.push(`connector: ${text(source.connector)}`);
+    if (source.capture !== undefined) fields.push(`capture: ${text(source.capture)}`);
     fields.push(`table: ${text(source.table)}`);
   }
   if (source.where !== undefined) fields.push(`where: ${text(source.where)}`);

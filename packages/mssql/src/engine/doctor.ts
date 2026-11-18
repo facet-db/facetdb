@@ -21,6 +21,7 @@ import {
   sameTrigger,
   type TableNames,
   tableNames,
+  trackedColumns,
   triggerText,
   WORKER_USER,
   type WorkerGrant,
@@ -33,6 +34,12 @@ import {
   withoutSecrets,
   workerUrlRefusal,
 } from "../sql/index.ts";
+import {
+  CHANGE_TRACKING_CHECK,
+  changeTrackingCheck,
+  trackingRightsMissing,
+} from "./change-tracking.ts";
+import type { OpenCursors } from "./engine.ts";
 
 /**
  * `facetdb doctor`'s checks of a SQL Server or Azure SQL source, under the worker login, on one
@@ -74,6 +81,7 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
     looksAt:
       "reads the table's trigger, enabled and named for the table; its stored text is checked by facetdb migrate --dry-run with the admin connection string",
   },
+  CHANGE_TRACKING_CHECK,
   {
     name: "grants",
     looksAt:
@@ -81,6 +89,17 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
   },
   { name: "queue", looksAt: "counts the table's jobs waiting and claimed in facetdb_jobs" },
 ];
+
+/**
+ * The checks of one source, in order: the trigger's, or with `capture: "change-tracking"` the
+ * Change Tracking check in its place. `DOCTOR_CHECKS` lists both for `--dry-run`.
+ */
+export function checksOf(
+  target: Pick<EngineTarget, "capture">,
+): readonly { readonly name: string; readonly looksAt: string }[] {
+  const instead = target.capture === "change-tracking" ? "trigger" : CHANGE_TRACKING_CHECK.name;
+  return DOCTOR_CHECKS.filter((check) => check.name !== instead);
+}
 
 /** How many `select 1` round trips measure the link; the median of them is what doctor reports. */
 const ROUND_TRIPS = 3;
@@ -315,7 +334,7 @@ function missingRights(
 function applicationWrites(names: TableNames): DoctorCheck {
   return warn(
     "app-writes",
-    `${names.label} has a trigger, so an application statement on it with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default: declare the trigger to EF Core (HasTrigger("${names.trigger}") on the table's entity), or, once FacetDB offers it, watch the table with Change Tracking instead of a trigger; and an insert that lists no columns (insert into ${names.label} values (…)) fails (error 213) until it names them`,
+    `${names.label} has a trigger, so an application statement on it with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default: declare the trigger to EF Core (HasTrigger("${names.trigger}") on the table's entity), or watch the table with Change Tracking instead of a trigger; and an insert that lists no columns (insert into ${names.label} values (…)) fails (error 213) until it names them`,
   );
 }
 
@@ -328,10 +347,13 @@ export async function doctorChecks(
   target: EngineTarget,
   url: string,
   deps: EngineDeps,
+  cursors?: OpenCursors,
 ): Promise<readonly DoctorCheck[]> {
   const subject = target.urlVariable ?? "the source's connection string";
+  const order = checksOf(target);
+  const tracked = target.capture === "change-tracking";
   const skipped = (from: number, why = "not checked: the database check did not pass") =>
-    DOCTOR_CHECKS.slice(from).map(({ name }) => skip(name, why));
+    order.slice(from).map(({ name }) => skip(name, why));
   const refused = workerUrlRefusal(url, deps.allowInsecure, subject);
   if (refused !== undefined) {
     return [fail("database", `"${target.source}": ${refused.message}`, refused.fix), ...skipped(1)];
@@ -384,7 +406,9 @@ export async function doctorChecks(
       checks.push(moved, ...skipped(4, "not checked: the table was renamed"));
       return checks;
     }
-    const owned = ownedColumns(target.questionSet);
+    const owned = tracked
+      ? trackedColumns(ownedColumns(target.questionSet))
+      : ownedColumns(target.questionSet);
     const byName = new Map(columns.map((column) => [column.name, column]));
     // Where FacetDB's columns are: on the table, or in the side table.
     const sideMode = target.storage === "side-table";
@@ -452,7 +476,20 @@ export async function doctorChecks(
     const primary = await readKey(query, names.schema, names.table);
     const keyName = primary.length === 1 ? primary[0] : undefined;
     const key = keyName === undefined ? undefined : byName.get(keyName);
-    if (trigger === undefined) {
+    if (tracked) {
+      // No trigger, so no error 334 for the application either.
+      checks.push(
+        await changeTrackingCheck(
+          query,
+          target,
+          names,
+          server.database,
+          trigger,
+          cursors,
+          deps.allowInsecure,
+        ),
+      );
+    } else if (trigger === undefined) {
       checks.push(
         fail(
           "trigger",
@@ -493,14 +530,18 @@ export async function doctorChecks(
         ),
       );
     }
-    if (trigger !== undefined) {
+    if (trigger !== undefined && !tracked) {
       checks.push(applicationWrites(names));
     }
 
+    const grants = keyName === undefined ? undefined : await readGrants(query, names);
     const lacking =
-      keyName === undefined
+      keyName === undefined || grants === undefined
         ? undefined
-        : missingRights(target, names, keyName, columns, await readGrants(query, names));
+        : [
+            ...missingRights(target, names, keyName, columns, grants),
+            ...(tracked ? trackingRightsMissing(names, grants) : []),
+          ];
     checks.push(
       lacking === undefined
         ? fail(
@@ -538,10 +579,10 @@ export async function doctorChecks(
     return checks;
   } catch (error) {
     const message = withoutSecrets(error instanceof Error ? error.message : String(error), [url]);
-    const done = checks.filter((check) => DOCTOR_CHECKS.some(({ name }) => name === check.name));
+    const done = checks.filter((check) => order.some(({ name }) => name === check.name));
     if (done.length > 0) {
       // Connected, then a read of the catalog failed: that check fails, the rest are not looked at.
-      const at = DOCTOR_CHECKS[done.length]?.name ?? "queue";
+      const at = order[done.length]?.name ?? "queue";
       return [
         ...checks,
         fail(

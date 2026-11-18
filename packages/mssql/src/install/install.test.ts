@@ -68,7 +68,7 @@ const USER_FOR_LOGIN_TEXT = `if database_principal_id(N'facetdb_worker') is null
 
 /** What the fixture's plan tells the operator besides the script. */
 const FIXTURE_NOTES = [
-  `dbo.listings now has a trigger, facetdb_listings: an application statement on the table with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default; declare the trigger to EF Core (HasTrigger("facetdb_listings") on the table's entity), or, once FacetDB offers it, watch the table with Change Tracking instead of a trigger`,
+  `dbo.listings now has a trigger, facetdb_listings: an application statement on the table with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default; declare the trigger to EF Core (HasTrigger("facetdb_listings") on the table's entity), or watch the table with Change Tracking instead of a trigger`,
   "dbo.listings gains 5 columns: an application insert that lists no columns (insert into dbo.listings values (…)) fails (error 213) until it names them",
   "facetdb_status starts out NULL on dbo.listings's rows (a default would rewrite every row on SQL Server Standard, so there is none, where other databases have 'pending'), and FacetDB reads NULL as pending: a query for pending rows asks for facetdb_status = 'pending' or facetdb_status is null",
 ];

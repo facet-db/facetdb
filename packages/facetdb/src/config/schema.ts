@@ -225,6 +225,42 @@ const actionSchema = strict({
     .default({}),
 });
 
+/** The schemes of a SQL Server connection string, the one database with Change Tracking (cli/engines.ts). */
+const CHANGE_TRACKING_SCHEMES: ReadonlySet<string> = new Set(["mssql", "sqlserver"]);
+
+/** `scheme:` at the start of a connection string (RFC 3986), as the CLI's engine table reads it. */
+const URL_SCHEME = /^([a-z][a-z0-9+.-]*):/i;
+
+/**
+ * Why `capture: "change-tracking"` cannot be this source's, or undefined: it is SQL Server's own
+ * change capture, so another database's connection string, or the polling connector, which scans
+ * instead, refuses it here at the boundary rather than leaving the engine to ignore it. A source
+ * loaded from the project JSON before its variable is set has no connection string to read yet; the
+ * scheme is judged once it has.
+ */
+function captureIssue(source: {
+  readonly capture?: "trigger" | "change-tracking";
+  readonly connector?: "polling";
+  readonly database?: string;
+}): string | undefined {
+  if (source.capture !== "change-tracking") {
+    return undefined;
+  }
+  if (source.connector === "polling") {
+    return 'capture: "change-tracking" is SQL Server\'s own way to notice changes, and connector: "polling" scans the table instead; remove one of them';
+  }
+  if (source.database === undefined) {
+    return undefined;
+  }
+  const scheme = URL_SCHEME.exec(source.database.trim())?.[1]?.toLowerCase();
+  if (scheme !== undefined && CHANGE_TRACKING_SCHEMES.has(scheme)) {
+    return undefined;
+  }
+  const what =
+    scheme === undefined ? "names no scheme (a file path)" : `is a ${scheme}: connection string`;
+  return `capture: "change-tracking" is SQL Server's Change Tracking, and this source's connection string ${what}; remove capture (that database is watched by its trigger), or point the source at a SQL Server with an mssql: or sqlserver: connection string`;
+}
+
 const sourceSchema = strict({
   name: identifier("a source name"),
   api: z.boolean().default(false),
@@ -235,6 +271,13 @@ const sourceSchema = strict({
     .enum(["polling"], {
       error:
         'connector must be "polling" (watch the table by scanning, for a host that forbids triggers), or left out so the connection string\'s scheme picks the database',
+    })
+    .exactOptional(),
+  // SQL Server's "trigger and facetdb_jobs table, or Change Tracking".
+  capture: z
+    .enum(["trigger", "change-tracking"], {
+      error:
+        'capture must be "trigger" (the default) or "change-tracking" (SQL Server only: watch the table without a trigger)',
     })
     .exactOptional(),
   table: z.string().min(1, "table must not be empty").exactOptional(),
@@ -267,6 +310,10 @@ const sourceSchema = strict({
     if (kind !== undefined) {
       context.addIssue({ code: "custom", path: [field], message: secretMessage(field, kind) });
     }
+  }
+  const capture = captureIssue(source);
+  if (capture !== undefined) {
+    context.addIssue({ code: "custom", path: ["capture"], message: capture });
   }
 });
 
@@ -307,7 +354,14 @@ function issuesOf(error: z.ZodError, prefix: readonly PropertyKey[] = []): Confi
 function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   if (source.api) {
-    for (const field of ["table", "where", "database", "databaseEnv", "connector"] as const) {
+    for (const field of [
+      "table",
+      "where",
+      "database",
+      "databaseEnv",
+      "connector",
+      "capture",
+    ] as const) {
       if (source[field] !== undefined) {
         issues.push({
           path: `${at}.${field}`,
@@ -454,6 +508,7 @@ function sourceConfig(
     ...(source.database === undefined ? {} : { database: source.database }),
     ...(source.databaseEnv === undefined ? {} : { databaseEnv: source.databaseEnv }),
     ...(source.connector === undefined ? {} : { connector: source.connector }),
+    ...(source.capture === undefined ? {} : { capture: source.capture }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(questionSet.where === undefined ? {} : { where: questionSet.where }),
     read: questionSet.read,

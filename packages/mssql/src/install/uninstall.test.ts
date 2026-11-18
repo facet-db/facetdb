@@ -103,7 +103,16 @@ const LISTINGS_UNINSTALL: readonly string[] = [
   delete from [dbo].[facetdb_jobs] where [table_name] = N'[dbo].[listings]'`,
   `if object_id(N'[dbo].[facetdb_jobs]', N'U') is not null
 begin
-  if not exists (select 1 from sys.triggers t join sys.sql_modules m on m.object_id = t.object_id
+  declare @tracked bit = 0;
+  if object_id(N'[dbo].[facetdb_table_owners]', N'U') is not null
+  begin
+    if exists (select 1 from [dbo].[facetdb_table_owners] m
+                 join sys.change_tracking_tables c on c.object_id = object_id(quotename(m.[table_schema]) + N'.' + quotename(m.[table_name]), N'U')
+                where not (m.[table_schema] = N'dbo' and m.[table_name] = N'listings'))
+      set @tracked = 1;
+  end
+  if @tracked = 0
+     and not exists (select 1 from sys.triggers t join sys.sql_modules m on m.object_id = t.object_id
                   where t.parent_class = 1 and t.name like N'facetdb[_]%'
                     and charindex(N'facetdb_jobs', m.definition) > 0)
      and not exists (select 1 from [dbo].[facetdb_jobs])

@@ -1,5 +1,6 @@
 export type {
   ActionCall,
+  CaptureMode,
   ChoiceOptions,
   ConnectorChoice,
   JsonValue,

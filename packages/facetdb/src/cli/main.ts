@@ -177,10 +177,21 @@ export function processDeps(): CliDeps {
       // SQL Server 2016 and later and Azure SQL (mssql:, sqlserver:) through tedious: one admin
       // connection per plan or run, a pool under the worker login for the connector, polling the
       // jobs table every second. tedious loads @azure/identity and MSAL, so only a source of these
-      // schemes pays for them.
+      // schemes pays for them. A source with capture: "change-tracking" keeps the version it has
+      // read up to in the store's cursors, opened as MongoDB's are: only once its `watch` (or
+      // doctor's version check) needs them, closed with the connector. A lost version's warning
+      // goes to stderr, beside the worker's own lines.
       lazyEngine("mssql", async () => {
         const { createMssqlEngine } = await import("@facetdb/mssql");
-        return createMssqlEngine();
+        return createMssqlEngine({
+          cursors: async ({ allowInsecure }) => {
+            const store = await deps.store({ allowInsecure });
+            return { cursors: store.cursors, close: () => store.close() };
+          },
+          warn: (message) => {
+            process.stderr.write(`warning: ${message}\n`);
+          },
+        });
       }),
       // MongoDB 4.4 and later and Atlas (mongodb:, mongodb+srv:) through the mongodb driver: change
       // streams on a replica set, the resume token kept in the store's cursors, which this root

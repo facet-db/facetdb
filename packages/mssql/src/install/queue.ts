@@ -96,16 +96,28 @@ export function dequeueStatement(names: TableNames): PlanStatement {
 }
 
 /**
- * Uninstall: the queue goes once no FacetDB trigger writes to it (that table's writes would fail)
- * and it holds no job. The statement checks at run time, so the first table's run of a multi-table
- * uninstall leaves it to the last (`run` scope).
+ * Uninstall: the queue goes once no FacetDB trigger writes to it (that table's writes would fail),
+ * no other installed table is watched by Change Tracking (its worker queues there, with no trigger
+ * to show it), and it holds no job. The statement checks at run time, so the first table's run of a
+ * multi-table uninstall leaves it to the last (`run` scope); this table's marker row goes after it,
+ * so it is left out by name. The marker's read sits in a branch of its own: a statement naming a
+ * table that is not there fails when it runs, not when the batch compiles.
  */
 export function queueCleanupStatement(names: TableNames): PlanStatement {
   return sourceStatement(
     "cleanup",
     `if object_id(${quoteString(names.jobsRelation)}, N'U') is not null
 begin
-  if not exists (select 1 from sys.triggers t join sys.sql_modules m on m.object_id = t.object_id
+  declare @tracked bit = 0;
+  if object_id(${quoteString(names.markerRelation)}, N'U') is not null
+  begin
+    if exists (select 1 from ${names.markerRelation} m
+                 join sys.change_tracking_tables c on c.object_id = object_id(quotename(m.[table_schema]) + N'.' + quotename(m.[table_name]), N'U')
+                where not (m.[table_schema] = ${quoteString(names.schema)} and m.[table_name] = ${quoteString(names.table)}))
+      set @tracked = 1;
+  end
+  if @tracked = 0
+     and not exists (select 1 from sys.triggers t join sys.sql_modules m on m.object_id = t.object_id
                   where t.parent_class = 1 and t.name like N'facetdb[_]%'
                     and charindex(${quoteString(JOBS_TABLE)}, m.definition) > 0)
      and not exists (select 1 from ${names.jobsRelation})

@@ -7,6 +7,7 @@ import {
   type KeptObject,
   type PlanResult,
   type QuestionSet,
+  STATE_HASH_COLUMN,
 } from "@facetdb/core";
 import { adminUrlRefusal, type MssqlConnect, quoteName } from "../sql/index.ts";
 import {
@@ -101,8 +102,10 @@ export function droppedColumns(
   const owned = new Set(ownedColumns(questionSet).map((column) => column.name));
   const kept = new Set(keptColumns(marked, questionSet));
   const stillAsked = questionSet.questions.map((question) => columnsOfAnyType(question.name));
+  // `facetdb_state_hash` is the Change Tracking capture's, no question's: prune never drops it,
+  // uninstall does.
   return marked
-    .filter((name) => !owned.has(name) && !kept.has(name))
+    .filter((name) => !owned.has(name) && !kept.has(name) && name !== STATE_HASH_COLUMN)
     .map((column) => ({
       column,
       reason: stillAsked.some((columns) => columns.has(column))

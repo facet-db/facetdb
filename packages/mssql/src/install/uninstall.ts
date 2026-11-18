@@ -24,6 +24,13 @@ import {
   type WorkerGrant,
   withAdmin,
 } from "./catalog.ts";
+import {
+  readMark,
+  readTrackedTables,
+  type TrackingMark,
+  trackingUninstallNote,
+  trackingUninstallStatements,
+} from "./change-tracking.ts";
 import { markerCleanupStatement, releaseStatement, SCRIPT_ERROR, SCRIPT_PREFIX } from "./marker.ts";
 import {
   JOBS_TABLE,
@@ -132,6 +139,8 @@ type QueueFacts = {
   readonly elsewhere: number;
   /** Tables outside this run whose FacetDB trigger writes the queue: any keeps it. */
   readonly users: readonly string[];
+  /** Installed tables outside this run that Change Tracking watches: any keeps it. */
+  readonly tracked: readonly string[];
 };
 
 /** What the uninstall of an installed table read. */
@@ -146,6 +155,8 @@ type Installed = {
   readonly side: CatalogObject | undefined;
   readonly grants: readonly WorkerGrant[];
   readonly queue: QueueFacts | undefined;
+  /** FacetDB's Change Tracking mark on the table, when its install set one. */
+  readonly tracking: TrackingMark | undefined;
 };
 
 function uninstallStatements(names: TableNames, installed: Installed): readonly PlanStatement[] {
@@ -156,6 +167,8 @@ function uninstallStatements(names: TableNames, installed: Installed): readonly 
     ...(installed.trigger === undefined
       ? []
       : [sourceStatement("capture", `drop trigger if exists ${names.triggerRelation}`)]),
+    // Change Tracking: off only where FacetDB turned it on, its mark gone either way.
+    ...trackingUninstallStatements(names, installed.tracking, installed.grants),
     ...(reads.length === 0
       ? []
       : [
@@ -204,9 +217,11 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
       ? undefined
       : queue.users.length > 0
         ? `a trigger on ${inWords(queue.users)} still uses it`
-        : queue.elsewhere > 0
-          ? `it holds ${queuedJobs(queue.elsewhere)} of other tables`
-          : undefined;
+        : queue.tracked.length > 0
+          ? `the worker still queues the changes Change Tracking keeps of ${inWords(queue.tracked)} in it`
+          : queue.elsewhere > 0
+            ? `it holds ${queuedJobs(queue.elsewhere)} of other tables`
+            : undefined;
   const removes: readonly EngineObject[] = [
     ...(installed.trigger === undefined ? [] : [own("trigger", names.trigger)]),
     ...(installed.grants.some(
@@ -244,7 +259,9 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
             kind: "jobs-table",
             name: queueName,
             scope: "run",
-            ...(queue.users.length === 0 ? { count: queue.elsewhere } : {}),
+            ...(queue.users.length === 0 && queue.tracked.length === 0
+              ? { count: queue.elsewhere }
+              : {}),
             reason: queueKept,
           } as const,
         ]),
@@ -265,7 +282,8 @@ function uninstallPlan(names: TableNames, installed: Installed): EnginePlan {
     transactional: true,
     removes,
     keeps,
-    notes: [],
+    notes:
+      installed.tracking === undefined ? [] : [trackingUninstallNote(names, installed.tracking)],
     confirm: { kind: "project", name: installed.row.projectName },
   };
 }
@@ -387,6 +405,10 @@ export async function planUninstall(
           .filter(([table]) => !runJobs.has(table))
           .reduce((sum, [, n]) => sum + n, 0),
         users: (await readQueueUsers(query)).filter((label) => !runLabels.has(label)),
+        // A table Change Tracking watches has no trigger, and its jobs still need the queue.
+        tracked: (await readTrackedTables(query, names, objects)).filter(
+          (label) => !runLabels.has(label),
+        ),
       };
     }
     return {
@@ -402,6 +424,7 @@ export async function planUninstall(
         side: sideTableOf(objects, names),
         grants: await readGrants(query, names),
         queue,
+        tracking: await readMark(query, names),
       }),
     };
   });

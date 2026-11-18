@@ -15,7 +15,7 @@ import {
   serverError,
   type World,
 } from "../testing/index.ts";
-import { createMssqlEngine, DOCTOR_CHECKS, ENGINE_NAME, serverName } from "./index.ts";
+import { checksOf, createMssqlEngine, DOCTOR_CHECKS, ENGINE_NAME, serverName } from "./index.ts";
 
 /**
  * The SQL Server engine: the installer spread as its plans, the worker URL refused before anything
@@ -117,6 +117,8 @@ describe("the mssql engine", () => {
       "containment",
       "install",
       "trigger",
+      // In the trigger check's place for capture: "change-tracking".
+      "change-tracking",
       "grants",
       "queue",
     ]);
@@ -243,7 +245,7 @@ describe("doctor", () => {
         name: "app-writes",
         status: "warn",
         detail:
-          'dbo.listings has a trigger, so an application statement on it with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default: declare the trigger to EF Core (HasTrigger("facetdb_listings") on the table\'s entity), or, once FacetDB offers it, watch the table with Change Tracking instead of a trigger; and an insert that lists no columns (insert into dbo.listings values (…)) fails (error 213) until it names them',
+          'dbo.listings has a trigger, so an application statement on it with an OUTPUT clause and no INTO fails (error 334), as Entity Framework Core 7 and later write by default: declare the trigger to EF Core (HasTrigger("facetdb_listings") on the table\'s entity), or watch the table with Change Tracking instead of a trigger; and an insert that lists no columns (insert into dbo.listings values (…)) fails (error 213) until it names them',
       },
       {
         name: "grants",
@@ -325,8 +327,11 @@ describe("doctor", () => {
         '"listings": LISTINGS_URL logs in to 127.0.0.1:1433/listings as dbo (the user dbo of listings), not facetdb_worker',
       fix: "set LISTINGS_URL to the worker login: mssql://facetdb_worker:<the worker password>@<host>:1433/<database>",
     });
+    // A trigger source's checks: the Change Tracking check is another capture's.
     expect(statuses(checks.slice(1))).toEqual(
-      DOCTOR_CHECKS.slice(1).map((check) => [check.name, "skip"]),
+      checksOf(LISTINGS)
+        .slice(1)
+        .map((check) => [check.name, "skip"]),
     );
   });
 
