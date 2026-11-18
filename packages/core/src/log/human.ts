@@ -2,7 +2,13 @@ import type { DecisionLog, RecordDecision, RecordKey, WriteResult } from "../con
 import type { Question } from "../questions/index.ts";
 import { type RecordStatus, transition } from "../records/index.ts";
 import { type Answer, choiceConfidence, type Decision } from "../thresholds/index.ts";
-import type { HumanEntry, HumanValue, LogEntry } from "./model.ts";
+import {
+  type HumanDecisionEntry,
+  type HumanEntry,
+  type HumanValue,
+  isHumanDecision,
+  type LogEntry,
+} from "./model.ts";
 
 /**
  * What the worker and the review path write: a connector's `write`, passed in so this module never
@@ -44,27 +50,35 @@ export function humanDecision(question: Question, value: HumanValue, answer: Ans
 
 /**
  * The human decision that stands for a question given a record's history: the person's latest word
- * on it, provided it was made against the record's current state, since it stands until that
- * state changes. A decision made against an older state is retired, and so is one followed by an
- * answer at another state: after A, B, A the decision made at A does not return.
+ * on it, provided it was made against the record's current state (it stands until the record's
+ * state changes). A decision made against an older state is retired, and so is one followed by an
+ * answer at another state: after A, B, A the decision made at A does not return. A decision
+ * followed by its withdrawal is ignored, and the word before it, if any still stands, is the latest
+ * again.
  */
 export function standingHuman(
   history: readonly LogEntry[],
   question: string,
   stateHash: string,
-): HumanEntry | undefined {
-  let latest: HumanEntry | undefined;
+): HumanDecisionEntry | undefined {
+  // The decisions on this question still in force, oldest first.
+  let words: HumanDecisionEntry[] = [];
   for (const entry of history) {
-    if (entry.kind === "human" && entry.question === question) {
-      latest = entry;
-    } else if (
-      entry.kind === "answer" &&
-      latest !== undefined &&
-      entry.stateHash !== latest.stateHash
-    ) {
-      latest = undefined;
+    if (entry.kind === "answer") {
+      words = words.filter((word) => word.stateHash === entry.stateHash);
+    } else if (entry.question === question && isHumanDecision(entry)) {
+      words.push(entry);
+    } else if (entry.question === question) {
+      // A withdrawal takes back its reviewer's own latest decision at its state, never another's.
+      const taken = words.findLastIndex(
+        (word) => word.reviewer === entry.reviewer && word.stateHash === entry.stateHash,
+      );
+      if (taken !== -1) {
+        words.splice(taken, 1);
+      }
     }
   }
+  const latest = words.at(-1);
   return latest !== undefined && latest.stateHash === stateHash ? latest : undefined;
 }
 
@@ -89,7 +103,11 @@ export type ReviewedRecord = {
   readonly status: RecordStatus;
   /** Every question of the set, in order. */
   readonly questions: readonly Question[];
-  /** What is decided so far; an undecided question is `needs_review`. */
+  /**
+   * What is decided so far; an undecided question is `needs_review`. The people's decisions that
+   * stand in the log are laid over these, so for a withdrawal they must be the thresholds' alone:
+   * a person's value here would outlive its withdrawal.
+   */
   readonly decisions: Readonly<Record<string, Decision>>;
   /** The latest logged answers for this state. */
   readonly answers: Readonly<Record<string, Answer>>;
@@ -101,13 +119,19 @@ export type HumanResult = {
 };
 
 /**
- * Applies one reviewer decision from the review screen. The entry is logged first, so a crash
- * between the two steps leaves a logged decision and an unchanged row, never a changed row nobody
- * can explain; then the value is written at once with `reviewed` set, and the status becomes done
- * when every question is decided. Every person's decision standing in the log is written, not
- * only this one: two reviewers working from the same card snapshot would otherwise each write
- * the other's question back to review. If the record changed while the card was open the write
- * is refused and the entry no longer stands, because its hash is old.
+ * Applies one reviewer decision, or one withdrawal of a reviewer's own decision, through the same
+ * door. The entry is logged first, so a crash between the two steps leaves a logged decision and an
+ * unchanged row, never a changed row nobody can explain; then the value is written at once with
+ * `reviewed` set, and the status becomes done when every question is decided. Every person's
+ * decision standing in the log is written, not only this one: two reviewers working from the same
+ * card snapshot would otherwise each write the other's question back to review. If the record
+ * changed while the card was open the write is refused and the entry no longer stands, because its
+ * hash is old.
+ *
+ * A decision is taken only on a needs_review record. A withdrawal is taken on a needs_review or a
+ * done record (the decision it takes back may have closed it): its question falls back to what
+ * `record.decisions` says of it, so a record whose question no threshold decides is needs_review
+ * again, and `reviewed` stays true, since a person did decide.
  */
 export async function applyHumanDecision(
   entry: HumanEntry,
@@ -115,9 +139,14 @@ export async function applyHumanDecision(
   log: DecisionLog,
   write: DecisionWriter,
 ): Promise<HumanResult> {
-  if (record.status !== "needs_review") {
+  if (isHumanDecision(entry) && record.status !== "needs_review") {
     throw new Error(
       `only a needs_review record can take a human decision, not one that is ${record.status}`,
+    );
+  }
+  if (record.status !== "needs_review" && record.status !== "done") {
+    throw new Error(
+      `only a needs_review or done record can take a withdrawal, not one that is ${record.status}`,
     );
   }
   if (entry.key !== record.key || entry.stateHash !== record.hash) {
@@ -165,8 +194,18 @@ function withPeople(
   const allDecided = record.questions.every(
     (candidate) => decisions[candidate.name]?.kind === "decided",
   );
-  const status = allDecided ? transition(record.status, "human-decided-last") : record.status;
-  return { decisions, status };
+  return { decisions, status: statusAfterPeople(record.status, allDecided) };
+}
+
+/**
+ * A needs_review record is done once every question is decided; a done record a withdrawal left
+ * with an undecided question goes back to review.
+ */
+function statusAfterPeople(current: RecordStatus, allDecided: boolean): RecordStatus {
+  if (current === "done") {
+    return allDecided ? "done" : transition(current, "human-withdrew");
+  }
+  return allDecided ? transition(current, "human-decided-last") : current;
 }
 
 function humanCount(history: readonly LogEntry[]): number {

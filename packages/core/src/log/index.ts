@@ -20,11 +20,14 @@ export {
 } from "./human.ts";
 export type {
   AnswerEntry,
+  HumanDecisionEntry,
   HumanEntry,
   HumanValue,
   LogEntry,
   LoggedUsage,
+  Withdrawal,
 } from "./model.ts";
+export { isHumanDecision, isWithdrawal, WITHDRAWN } from "./model.ts";
 export type { ReapplyReport } from "./reapply.ts";
 export { reapplyThresholds } from "./reapply.ts";
 export { decideRecord, statusOf } from "./record-decisions.ts";

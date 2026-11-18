@@ -51,11 +51,14 @@ export type StatusEvent =
   | "released-unchecked"
   | "skipped"
   | "human-decided-last"
+  | "human-withdrew"
   | { readonly event: "state-changed"; readonly onChange: OnChange };
 
 /**
  * The status after one event. `human-decided-last` is only valid on a needs_review record (the
  * review screen shows nothing else); any other status there is a caller bug and throws.
+ * `human-withdrew` sends a needs_review or done record back to review, since a person can only take
+ * back a decision made on the review screen; any other status throws.
  */
 export function transition(current: RecordStatus, event: StatusEvent): RecordStatus {
   if (typeof event === "object") {
@@ -81,5 +84,12 @@ export function transition(current: RecordStatus, event: StatusEvent): RecordSta
         );
       }
       return "done";
+    case "human-withdrew":
+      if (current !== "needs_review" && current !== "done") {
+        throw new Error(
+          `a withdrawn decision can only reopen a needs_review or done record, not one that is ${current}`,
+        );
+      }
+      return "needs_review";
   }
 }

@@ -6,7 +6,7 @@ import {
   decide,
   resolveThresholds,
 } from "../thresholds/index.ts";
-import type { AnswerEntry, HumanEntry, LogEntry } from "./model.ts";
+import { type AnswerEntry, type HumanEntry, isHumanDecision, type LogEntry } from "./model.ts";
 
 /**
  * One record's history in words. Each model answer and each human decision is read with the wording
@@ -110,6 +110,15 @@ export type ExplainedEntry =
       readonly decided: string;
       readonly reviewer: string;
       readonly note?: string;
+    }
+  | {
+      /** A reviewer took back their own decision (undo); both stay in the log. */
+      readonly kind: "withdrawal";
+      readonly at: string;
+      readonly version: number;
+      readonly question: string;
+      readonly wording: string;
+      readonly reviewer: string;
     };
 
 function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): ExplainedEntry {
@@ -134,14 +143,20 @@ function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): Explai
 
 function explainHuman(entry: HumanEntry, set: QuestionSet | undefined): ExplainedEntry {
   const question = set?.questions.find((candidate) => candidate.name === entry.question);
-  return {
-    kind: "human",
+  const common = {
     at: entry.at.toISOString(),
     version: entry.version,
     question: entry.question,
     wording: question?.instructions ?? entry.question,
-    decided: chosenWords(entry.value),
     reviewer: entry.reviewer,
+  };
+  if (!isHumanDecision(entry)) {
+    return { kind: "withdrawal", ...common };
+  }
+  return {
+    kind: "human",
+    ...common,
+    decided: chosenWords(entry.value),
     ...(entry.note === undefined ? {} : { note: entry.note }),
   };
 }

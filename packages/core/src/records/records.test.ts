@@ -63,6 +63,14 @@ describe("transition", () => {
       expect(() => transition(current, "human-decided-last")).toThrow(/needs_review/);
     }
   });
+
+  it("a withdrawn decision (undo) sends a done or needs_review record back to review", () => {
+    expect(transition("done", "human-withdrew")).toBe("needs_review");
+    expect(transition("needs_review", "human-withdrew")).toBe("needs_review");
+    for (const current of allStatuses.filter((s) => s !== "needs_review" && s !== "done")) {
+      expect(() => transition(current, "human-withdrew")).toThrow(/needs_review or done/);
+    }
+  });
 });
 
 describe("NULL until decided", () => {

@@ -60,6 +60,11 @@ function yesNo(value: boolean): string {
 
 function lineOf(entry: ExplainedEntry): string[] {
   const at = when(new Date(entry.at));
+  if (entry.kind === "withdrawal") {
+    return [
+      `${at} · question set v${entry.version} · "${entry.wording}" decision withdrawn by ${entry.reviewer} (undo)`,
+    ];
+  }
   if (entry.kind === "human") {
     const note = entry.note === undefined ? "" : ` · note: ${entry.note}`;
     return [

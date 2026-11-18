@@ -15,3 +15,16 @@ export {
   reviewEntryOf,
   reviewsOf,
 } from "./queue.ts";
+export type {
+  CardRef,
+  DecidedQuestion,
+  DecideResult,
+  OpenedCard,
+  OpenQuestion,
+  ReviewActionFailure,
+  ReviewQuestions,
+  ReviewService,
+  ReviewServiceDeps,
+  UndoResult,
+} from "./service.ts";
+export { createReviewService } from "./service.ts";

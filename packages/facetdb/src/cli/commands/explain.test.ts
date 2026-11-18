@@ -255,6 +255,40 @@ describe("facetdb explain", () => {
     expect(result.stderr).toContain("decided no by ana@example.com");
   });
 
+  it("prints a decision and its withdrawal (undo), both kept in the log", async () => {
+    await seedHistory();
+    await store.log(LOG_ID).appendHuman({
+      kind: "human",
+      key: "r1",
+      question: "is_scam",
+      value: { withdrawn: true },
+      reviewer: "ana@example.com",
+      stateHash: "hash-2",
+      version: 2,
+      at: new Date("2026-10-30T16:46:00Z"),
+    });
+
+    const result = await run(["explain", "listings", "r1"], configWith(CURRENT_WORDING));
+
+    expect(result.code).toBe(0);
+    const lines = result.stdout.split("\n");
+    const decided = lines.findIndex((line) => line.includes("decided no by ana@example.com"));
+    expect(decided).toBeGreaterThan(-1);
+    expect(lines[decided + 1]).toBe(
+      `2026-10-30 16:46 · question set v2 · "${SECOND_WORDING}" decision withdrawn by ana@example.com (undo)`,
+    );
+
+    const json = await run(["explain", "listings", "r1", "--json"], configWith(CURRENT_WORDING));
+    const printed = JSON.parse(json.stdout) as { entries: { kind: string; reviewer?: string }[] };
+    expect(printed.entries.map((entry) => entry.kind)).toEqual([
+      "answer",
+      "answer",
+      "human",
+      "withdrawal",
+    ]);
+    expect(printed.entries[3]?.reviewer).toBe("ana@example.com");
+  });
+
   it("reads the current state from the side table, not the app's table, in side-table mode", async () => {
     await seedHistory();
     // Side-table install: the app's table is untouched (no FacetDB columns, and the worker cannot

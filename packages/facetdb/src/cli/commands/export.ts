@@ -6,6 +6,7 @@ import {
   decide,
   EngineRefusal,
   type HumanEntry,
+  isHumanDecision,
   type KeyText,
   type LogEntry,
   type Question,
@@ -116,7 +117,11 @@ function answersInOrder(entry: AnswerEntry, set: QuestionSet | undefined): [stri
   });
 }
 
+/** A person's decision in words; a reviewer's undo reads "withdrawn". */
 function humanWords(entry: HumanEntry): string {
+  if (!isHumanDecision(entry)) {
+    return "withdrawn";
+  }
   return typeof entry.value === "boolean" ? (entry.value ? "yes" : "no") : entry.value;
 }
 

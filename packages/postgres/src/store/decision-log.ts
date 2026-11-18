@@ -6,6 +6,7 @@ import {
   type DecisionLog,
   type HumanEntry,
   type HumanValue,
+  isHumanDecision,
   type LogEntry,
   type LoggedUsage,
   type QuestionSet,
@@ -310,7 +311,8 @@ export async function searchDecisions(
       const decisions =
         entry.kind === "answer"
           ? answerDecisions(entry, versions.get(entry.version))
-          : { [entry.question]: chosenWords(entry.value) };
+          : // A reviewer's undo reads "withdrawn", as the export prints it.
+            { [entry.question]: isHumanDecision(entry) ? chosenWords(entry.value) : "withdrawn" };
       if (status === undefined || statusOfDecisions(decisions) === status) {
         found.push({ cursor, entry, decisions });
       }

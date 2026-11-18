@@ -34,14 +34,29 @@ export type AnswerEntry = {
 export type HumanValue = boolean | string;
 
 /**
- * One question of one record decided by a person. `stateHash` is the state the reviewer saw; the
- * decision stands only while the record still has that state.
+ * Undo against an append-only log. A person takes back their own decision on a question by logging
+ * this marker in its place; the decision and its withdrawal both stay in the log, and the decision
+ * no longer stands. Stored as the jsonb `value` of a human row.
+ */
+export type Withdrawal = { readonly withdrawn: true };
+
+export const WITHDRAWN: Withdrawal = { withdrawn: true };
+
+/** Whether a logged human value is a withdrawal rather than a decision. */
+export function isWithdrawal(value: HumanValue | Withdrawal): value is Withdrawal {
+  return typeof value === "object";
+}
+
+/**
+ * One question of one record decided by a person, or (`value` the `WITHDRAWN` marker) a person's
+ * own decision on it taken back. `stateHash` is the state the reviewer saw; the decision stands
+ * only while the record still has that state.
  */
 export type HumanEntry = {
   readonly kind: "human";
   readonly key: string;
   readonly question: string;
-  readonly value: HumanValue;
+  readonly value: HumanValue | Withdrawal;
   readonly reviewer: string;
   readonly note?: string;
   readonly stateHash: string;
@@ -49,5 +64,13 @@ export type HumanEntry = {
   readonly version: number;
   readonly at: Date;
 };
+
+/** A person's decision, as opposed to the withdrawal of one. */
+export type HumanDecisionEntry = HumanEntry & { readonly value: HumanValue };
+
+/** Whether a human entry is a decision rather than a withdrawal. */
+export function isHumanDecision(entry: HumanEntry): entry is HumanDecisionEntry {
+  return !isWithdrawal(entry.value);
+}
 
 export type LogEntry = AnswerEntry | HumanEntry;

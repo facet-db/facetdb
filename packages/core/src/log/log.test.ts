@@ -12,6 +12,8 @@ import {
   type ReviewedRecord,
   reapplyThresholds,
   recordAnswer,
+  standingHuman,
+  WITHDRAWN,
 } from "./index.ts";
 
 // The questions and thresholds below are the low-stakes defaults: a noul is yes at or above 0.70
@@ -525,6 +527,104 @@ describe("a human decision stands until the record's state changes", () => {
     expect(result.written).toBe(false);
     expect(writes).toEqual([]);
     expect(await humanDecisionStands(log, "r1", "scam", "h-newer")).toBe(false);
+  });
+});
+
+describe("a withdrawal takes back a person's own decision (undo)", () => {
+  const unsure = { scam: { type: "noul", probability: 0.55 } } as const;
+  const withdrawal = (reviewer: string, stateHash: string): HumanEntry => ({
+    kind: "human",
+    key: "r1",
+    question: "scam",
+    value: WITHDRAWN,
+    reviewer,
+    stateHash,
+    version: 1,
+    at: new Date("2026-10-31T11:05:00Z"),
+  });
+  const byBea = (value: boolean): HumanEntry => ({
+    ...humanEntry("r1", "scam", value, "h1"),
+    reviewer: "bea",
+  });
+
+  it("leaves a decision followed by its withdrawal out, and the thresholds decide again", async () => {
+    const log = new FakeDecisionLog();
+    await log.appendAnswer(answerEntry("r1", "h1", unsure));
+    await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
+    await log.appendHuman(withdrawal("amara", "h1"));
+    const { write, writes } = fakeWriter([], { r1: "h1" });
+
+    await recordAnswer(answerEntry("r1", "h1", unsure), questionSet([scam]), log, write);
+
+    expect(standingHuman(await log.history("r1"), "scam", "h1")).toBeUndefined();
+    expect(writes[0]?.decision.decisions["scam"]).toEqual({ kind: "needs_review" });
+  });
+
+  it("takes back only its own reviewer's decision, never another's", async () => {
+    const log = new FakeDecisionLog();
+    await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
+    await log.appendHuman(withdrawal("bea", "h1"));
+
+    expect(standingHuman(await log.history("r1"), "scam", "h1")?.value).toBe(true);
+  });
+
+  it("makes the word before it the latest again when that one still stands", async () => {
+    const log = new FakeDecisionLog();
+    await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
+    await log.appendHuman(byBea(false));
+    await log.appendHuman(withdrawal("bea", "h1"));
+
+    expect(standingHuman(await log.history("r1"), "scam", "h1")).toMatchObject({
+      reviewer: "amara",
+      value: true,
+    });
+  });
+
+  it("goes through applyHumanDecision: logged first, a done record back to review, reviewed kept", async () => {
+    const journal: string[] = [];
+    const log = new FakeDecisionLog(journal);
+    await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
+    journal.splice(0);
+    const { write, writes } = fakeWriter(journal, { r1: "h1" });
+    const done: ReviewedRecord = {
+      key: "r1",
+      hash: "h1",
+      status: "done",
+      questions: [scam],
+      decisions: { scam: { kind: "needs_review" } },
+      answers: unsure,
+    };
+
+    const result = await applyHumanDecision(withdrawal("amara", "h1"), done, log, write);
+
+    expect(result).toEqual({ written: true, status: "needs_review" });
+    expect(journal).toEqual(["append human r1", "write r1"]);
+    expect(writes[0]?.decision).toEqual({
+      decisions: { scam: { kind: "needs_review" } },
+      status: "needs_review",
+      reviewed: true,
+    });
+    expect((await log.history("r1")).map((entry) => entry.kind === "human" && entry.value)).toEqual(
+      [true, WITHDRAWN],
+    );
+  });
+
+  it("is refused on a record a person cannot have decided (pending, error, skipped)", async () => {
+    const log = new FakeDecisionLog();
+    const { write } = fakeWriter([], { r1: "h1" });
+    const pending: ReviewedRecord = {
+      key: "r1",
+      hash: "h1",
+      status: "pending",
+      questions: [scam],
+      decisions: { scam: { kind: "needs_review" } },
+      answers: unsure,
+    };
+
+    await expect(
+      applyHumanDecision(withdrawal("amara", "h1"), pending, log, write),
+    ).rejects.toThrow(/needs_review or done/);
+    expect(await log.history("r1")).toEqual([]);
   });
 });
 
