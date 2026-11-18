@@ -216,6 +216,8 @@ function rig(
         sources: ["listings", "support_messages"],
         keyText: (source) => (source === "listings" ? options.keyText : undefined),
       }),
+      home: { home: () => Promise.reject(new Error("these tests read no home")) },
+      sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
     },
     newRequestId: () => "req-1",
   });

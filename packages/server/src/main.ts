@@ -11,7 +11,16 @@ import {
   type PreviewSource,
   type ProjectConfigDoor,
 } from "./config/service.ts";
-import { createDecisionsService, type DecisionsServiceDeps } from "./data/index.ts";
+import {
+  createDashboardReads,
+  createDecisionsService,
+  createDoctors,
+  createHomeService,
+  createSourcesService,
+  type DashboardDatabase,
+  type DashboardDoor,
+  type DecisionsServiceDeps,
+} from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 
 export type ServerDeps = {
@@ -38,6 +47,13 @@ export type ServerDeps = {
   readonly preview: (source: string) => PreviewSource | undefined;
   /** The decision log's reader, the project's sources and how their keys are written. */
   readonly decisions: DecisionsServiceDeps;
+  /**
+   * The store's database, which the Home and Sources pages read: heartbeats, usage, alerts, the
+   * decision log, the review queue, the run log and the backfill cursors.
+   */
+  readonly storeDatabase: DashboardDatabase;
+  /** The project's sources with their engines and doctors, and its cap, as only the CLI knows them. */
+  readonly dashboard: DashboardDoor;
 };
 
 /**
@@ -45,6 +61,13 @@ export type ServerDeps = {
  * `facetdb worker` serves the returned app (`@hono/node-server`) next to its loop.
  */
 export function createServer(deps: ServerDeps): Hono<AppEnv> {
+  // One doctor cache for both pages, so Home and Sources open one round of connections a minute.
+  const dashboard = {
+    door: deps.dashboard,
+    reads: createDashboardReads(deps.storeDatabase),
+    doctors: createDoctors(deps.clock),
+    clock: deps.clock,
+  };
   return createApp({
     keys: createApiKeys(deps.store.apiKeys),
     check: createCheckService({
@@ -57,6 +80,8 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
     data: {
       runs: createRunsService({ reader: deps.store.runs }),
       decisions: createDecisionsService(deps.decisions),
+      home: createHomeService(dashboard),
+      sources: createSourcesService(dashboard),
     },
     newRequestId: randomUUID,
   });

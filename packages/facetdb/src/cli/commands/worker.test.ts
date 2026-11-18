@@ -750,6 +750,71 @@ describe("facetdb worker", () => {
     });
   });
 
+  it("serves Home and Sources from the store and each source's engine", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const result = await run(["worker", "--once"]);
+    expect(result.code, result.stderr).toBe(0);
+    const { secret } = await store.apiKeys.create(projectRef(PROJECT_DIR).id, "studio");
+    const [listener] = served;
+    const get = async (path: string) => {
+      const response = await listener?.handler(
+        new Request(`http://localhost${path}`, { headers: { authorization: `Bearer ${secret}` } }),
+      );
+      return { status: response?.status, json: (await response?.json()) as unknown };
+    };
+
+    const home = await get("/v1/home");
+    expect(home.status).toBe(200);
+    // The answer the run wrote is today's in the store's log; the queue and the alerts are empty.
+    expect(home.json).toMatchObject({
+      answered: { today: 1, words: { figure: "1" } },
+      queue: { waiting: 0, words: { figure: "None" } },
+      spending: { status: "uncapped" },
+      alerts: [],
+    });
+    // The engine's doctor ran under the source's URL: PGlite's one login is its superuser, not the
+    // worker login, so doctor's database check fails and Home says so in the alert's words.
+    expect(home.json).toMatchObject({
+      health: {
+        checks: [
+          { name: "worker" },
+          { name: "model", status: "ok", words: "Model healthy" },
+          {
+            name: "sources",
+            status: "fail",
+            words: expect.stringContaining("not as the worker login facetdb_worker"),
+          },
+        ],
+        sources: [{ name: "listings", verdict: "failing" }],
+      },
+    });
+
+    const sources = await get("/v1/sources");
+    expect(sources).toMatchObject({
+      status: 200,
+      json: {
+        sources: [
+          {
+            name: "listings",
+            kind: "table",
+            connector: "Postgres, trigger",
+            how: {
+              label: "Wakes",
+              words: expect.stringMatching(/^Instantly, on the trigger's notification\./),
+            },
+            answers: "Inline columns on public.listings. One question, version 1.",
+            backfill: { state: "none", fraction: null },
+            login: {
+              words: "facetdb_worker reads id and title, and writes only FacetDB's own columns.",
+            },
+          },
+        ],
+      },
+    });
+    // The worker's connection string never reaches a response.
+    expect(JSON.stringify([home.json, sources.json])).not.toContain("worker-password");
+  });
+
   it("--port binds the given port, and refuses one that is not a port", async () => {
     const ok = await run(["worker", "--once", "--port", "8080"]);
     expect(ok.code).toBe(0);

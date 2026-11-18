@@ -4,7 +4,9 @@ import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
 import { decisionsRoutes } from "./decisions.ts";
 import type { DecisionsService } from "./decisions-service.ts";
+import { type HomeService, homeRoutes } from "./home.ts";
 import { RUNS_PER_PAGE, type RunsService } from "./runs.ts";
+import { type SourcesService, sourcesRoutes } from "./sources.ts";
 
 /**
  * The read endpoints behind the dashboard's pages: each is parse, one service call, map; the API
@@ -14,6 +16,9 @@ export type DataServices = {
   readonly runs: RunsService;
   /** The decision log searched, and one record's history (the Decisions page and the why page). */
   readonly decisions: DecisionsService;
+  /** The dashboard's Home and Sources figures. */
+  readonly home: HomeService;
+  readonly sources: SourcesService;
 };
 
 /** A source as the config names one; anything else could never match, so it is refused plainly. */
@@ -69,6 +74,9 @@ export function dataRoutes(services: DataServices): Hono<AppEnv> {
 
   // The decision log and the why page, in their own file.
   route.route("/", decisionsRoutes(services.decisions));
+  // Home and Sources.
+  route.route("/", homeRoutes(services.home));
+  route.route("/", sourcesRoutes(services.sources));
 
   return route;
 }

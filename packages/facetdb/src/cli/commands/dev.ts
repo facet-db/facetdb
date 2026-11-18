@@ -4,6 +4,7 @@ import type { SourceConfig } from "../../config/index.ts";
 import { embeddedParts } from "../embedded.ts";
 import { stoppedError } from "../engines.ts";
 import { defineCommand } from "../program.ts";
+import { tableFacts } from "./dashboard-door.ts";
 import {
   engineTarget,
   loadProjectConfig,
@@ -131,6 +132,18 @@ export const devCommand = defineCommand<DevOptions>("dev", {
           project,
           store,
           storeClient: client,
+          // The embedded database is a directory of files with one user: its login is the file's.
+          tableFacts: (source) => ({
+            ...tableFacts({
+              engine,
+              target: targetOf({ source, ...splitTable(source.table ?? "") }),
+              url: DEV_URL,
+              source,
+              deps: engineDeps,
+            }),
+            database: "PGlite",
+            login: { kind: "file" },
+          }),
           openTable: (source, open) =>
             engine.open(targetOf({ source, ...splitTable(source.table ?? "") }), DEV_URL, {
               ...engineDeps,

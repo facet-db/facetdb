@@ -105,7 +105,7 @@ function pruneLines(plan: EnginePlan, done: boolean): readonly string[] {
  * The user and password a connection string logs in with: as its engine reads the string where the
  * engine says how (MongoDB's several-host replica set string), else as a URL.
  */
-function loginOf(
+export function loginOf(
   engine: DatabaseEngine,
   url: string,
 ): { readonly user: string; readonly password: string } | undefined {

@@ -58,6 +58,8 @@ const NO_DATA: DataServices = {
     search: () => Promise.reject(new Error("these tests search no decisions")),
     why: () => Promise.reject(new Error("these tests explain no record")),
   },
+  home: { home: () => Promise.reject(new Error("these tests read no home")) },
+  sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
 };
 
 const scam: Question = {

@@ -27,6 +27,7 @@ import {
   createServer,
   type DeliveryReport,
   onlyRecord,
+  type TableFacts,
 } from "@facetdb/server";
 import {
   judgeDraftSource,
@@ -51,6 +52,7 @@ import {
   storeSharedFor,
   storeSourceId,
 } from "../store-door.ts";
+import { tableFacts } from "./dashboard-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
   engineTarget,
@@ -122,6 +124,11 @@ export type WorkerParts = {
    * for a source, keys print as they are.
    */
   readonly keyTextOf?: (source: SourceConfig) => Promise<KeyText | undefined>;
+  /**
+   * A table source as the dashboard's Home and Sources endpoints show it: its engine's words, its
+   * login's reach and its doctor. Nothing connects until the doctor runs.
+   */
+  readonly tableFacts: (source: SourceConfig) => TableFacts;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
 };
@@ -211,11 +218,16 @@ export async function runWorkers(
    * One source's worker. The loop's worker carries the alerts and the outage policy; a check call's
    * worker (one record, `forRecord`) leaves both to the loop, which answers the record if it fails.
    */
-  function workerFor(source: SourceConfig, connector: Connector, loop: boolean): Worker {
+  function versionOf(source: SourceConfig): number {
     const version = versions.get(source.name);
     if (version === undefined) {
       throw new Error(`the source ${source.name} was not started by this worker`);
     }
+    return version;
+  }
+
+  function workerFor(source: SourceConfig, connector: Connector, loop: boolean): Worker {
+    const version = versionOf(source);
     return createWorker({
       connector,
       provider,
@@ -361,6 +373,23 @@ export async function runWorkers(
           },
         },
         clock,
+        // The dashboard's Home and Sources: the store's figures through the worker's own store
+        // client, and each source as only this package knows it.
+        storeDatabase: parts.storeClient,
+        dashboard: {
+          projectId: project.id,
+          cap:
+            config.spendingCap === undefined
+              ? undefined
+              : { inputTokens: config.spendingCap, onCapReached: config.onCapReached },
+          sources: config.sources.map((source) => ({
+            name: source.name,
+            read: source.read,
+            questions: source.questions.length,
+            version: versionOf(source),
+            table: source.api ? undefined : parts.tableFacts(source),
+          })),
+        },
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement, which only
@@ -600,6 +629,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       {
         readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector>;
         readonly keyText: () => Promise<KeyText | undefined>;
+        readonly facts: TableFacts;
       }
     >();
     for (const source of config.sources) {
@@ -617,6 +647,13 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       tables.set(source.name, {
         // The type its database records for its keys, read once the table opened.
         keyText: () => tableKeyText(engine, target, url, allowInsecure),
+        facts: tableFacts({
+          engine,
+          target,
+          url,
+          source,
+          deps: { clock: deps.clock, allowInsecure, storeShared },
+        }),
         open: (workerId, maxConnections) =>
           openConnector(engine, target, url, {
             clock: deps.clock,
@@ -649,6 +686,13 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
             return table.open(open.workerId, open.maxConnections);
           },
           keyTextOf: async (source) => tables.get(source.name)?.keyText(),
+          tableFacts: (source) => {
+            const table = tables.get(source.name);
+            if (table === undefined) {
+              throw new Error(`the source ${source.name} reads no table`);
+            }
+            return table.facts;
+          },
           provider: deps.provider(config),
         });
       } finally {

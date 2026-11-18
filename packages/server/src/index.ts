@@ -31,16 +31,25 @@ export type {
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";
 export type {
+  Capture,
+  DashboardDatabase,
+  DashboardDoor,
   DecisionRow,
   DecisionsPage,
   DecisionsService,
   DecisionsServiceDeps,
   DecisionsStore,
+  Home,
+  SourceFacts,
+  SourceRow,
+  TableFacts,
+  WorkerLogin,
 } from "./data/index.ts";
 export {
   createDecisionsService,
   DECISIONS_DEFAULT_LIMIT,
   DECISIONS_MAX_LIMIT,
+  DOCTOR_FRESH_MS,
 } from "./data/index.ts";
 export type { DataServices } from "./data/routes.ts";
 export type { RunsPage, RunsService, RunView } from "./data/runs.ts";

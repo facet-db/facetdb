@@ -158,6 +158,11 @@ async function rig() {
         questionSets: () => Promise.reject(new Error("the SDK reads no question set")),
       },
     },
+    // Nor does it read the dashboard's pages: a read fails the test.
+    storeDatabase: {
+      query: () => Promise.reject(new Error("the SDK reads no dashboard figure")),
+    },
+    dashboard: { projectId: PROJECT, cap: undefined, sources: [] },
     store: {
       ...createCheckStore(
         store,

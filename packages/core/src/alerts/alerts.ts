@@ -8,6 +8,7 @@ import {
   FAILURE_WINDOW_MS,
   HEARTBEAT_LOSS_MS,
   resolvedMessage,
+  WORKER_NOT_RUNNING_WHAT,
 } from "./events.ts";
 
 /** An alert that has been raised and not yet resolved. */
@@ -199,7 +200,7 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     if (clock.now() - last >= HEARTBEAT_LOSS_MS) {
       return raise({
         kind: "worker_not_running",
-        what: "The worker has sent no heartbeat for 2 minutes.",
+        what: WORKER_NOT_RUNNING_WHAT,
         ...scope,
         question: null,
         did: "Records stay queued and are answered when the worker is back.",

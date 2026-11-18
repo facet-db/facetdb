@@ -34,6 +34,27 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
 /** No heartbeat for this long and the worker is not running. */
 export const HEARTBEAT_LOSS_MS = 2 * 60_000;
 
+/**
+ * What the worker-not-running alert says happened: the heartbeat watcher raises it in these words,
+ * and the dashboard's health says the same when the heartbeat is that old.
+ */
+export const WORKER_NOT_RUNNING_WHAT = "The worker has sent no heartbeat for 2 minutes.";
+
+/**
+ * What each kind is called where a person reads it (the dashboard's Home and its recent alerts).
+ * The spending cap is one event in two steps.
+ */
+export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
+  worker_not_running: "Worker not running",
+  model_failing: "Model failing",
+  connector_lost_access: "Connector lost access",
+  spending_80: "Spending at 80% of the cap",
+  spending_paused: "Spending cap reached",
+  backfill_finished: "Backfill finished",
+  backfill_failed: "Backfill failed",
+  question_set_changed: "Question set changed",
+};
+
 /** One alert per event per this long until it resolves. */
 export const ALERT_WINDOW_MS = 30 * 60_000;
 
