@@ -378,6 +378,15 @@ describe("with the store in another database", () => {
   it("plans the source's side alone: no log, no store table, no word of either", async () => {
     await freshWorld();
     await installSeparate();
+    // A logged source, as the worker leaves it, so the shared plan resolves a log to purge (without
+    // one both plans had no source to name, and the equality below held by accident). The tables
+    // are made here only for the shared plan to read; the separate plan never looks.
+    await install();
+    await registerSource();
+    await decisionLog([[LOG_ID, "1"]]);
+    await q(
+      `insert into facetdb.cursors (run, cursor, done) values ('backfill:${LOG_ID}:all@v1', 'k', false)`,
+    );
     const sharedPlan = planOf(
       await engine.planUninstall(target(), ADMIN, { ...shared, purge: true, alsoUninstalling: [] }),
     );
@@ -389,8 +398,30 @@ describe("with the store in another database", () => {
       }),
     );
     expect(sharedPlan.statements.some((statement) => statement.database === "store")).toBe(true);
+    expect(engine.render(sharedPlan)).toContain("delete from facetdb.decisions");
+    // The shared plan names the source it purges, and guards its log on the source's side, before
+    // anything changes: in table mode the guard's owner-row branch never fires (the table holds its
+    // owner row), so the separate plan, whose log the store door purges, carries neither.
+    const named = (text: string) => text.includes("facetdb.uninstall_source");
+    const guard = (text: string) => text.includes("may be shared with");
+    expect(sharedPlan.statements.filter((statement) => guard(statement.text))).toHaveLength(1);
+    expect(
+      plan.statements.some((statement) => named(statement.text) || guard(statement.text)),
+    ).toBe(false);
     expect(plan.statements).toEqual(
-      sharedPlan.statements.filter((statement) => statement.database === "source"),
+      sharedPlan.statements
+        .filter((statement) => statement.database === "source" && !guard(statement.text))
+        .map((statement) =>
+          named(statement.text)
+            ? {
+                ...statement,
+                text: statement.text.replace(
+                  `, set_config('facetdb.uninstall_source', '${LOG_ID}', true)`,
+                  "",
+                ),
+              }
+            : statement,
+        ),
     );
     expect(engine.render(plan)).not.toMatch(
       /delete from facetdb\.decisions|drop table facetdb\.decisions/,

@@ -252,6 +252,17 @@ end
 $$`,
     ],
   },
+  {
+    version: 5,
+    statements: [
+      // The export pages one source's log oldest first by `where source_id = $1 and id > $2 order
+      // by id` (decision-log.ts, `page`); `decisions_by_record` leads with the record's key, so
+      // without this index that page reads every row of the source. A plain `create index` (not
+      // `concurrently`, which cannot run inside the migration's transaction) holds off the
+      // worker's appends to the log while it builds, once, during `facetdb migrate`.
+      `create index if not exists decisions_by_source on facetdb.decisions (source_id, id)`,
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */

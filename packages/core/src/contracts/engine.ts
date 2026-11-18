@@ -283,7 +283,9 @@ export type RunResult = {
   /**
    * Where the run stopped before its end, by index into the plan's statements, and why: one of the
    * engine's own checks refusing (another project claimed the table since the plan was read), or
-   * the database's error, with no secret in its words. Absent when every statement ran.
+   * the database's error, with no secret in its words. A failure after the last statement (the
+   * commit, or the engine's own reading after it) is at the statement count: no statement failed.
+   * Absent when the run finished.
    */
   readonly stopped?:
     | { readonly at: number; readonly refusal: Refusal }

@@ -59,6 +59,11 @@ if (firstSource === undefined) {
 }
 const source: SourceConfig = firstSource;
 const questionSet: QuestionSet = questionSetOf(config, source);
+/** The project of `/work/listings-app`, as the composition root names it (`projectRef`). */
+const PROJECT = { id: "listings-app", name: "listings-app" };
+/** The source's runs in the store's cursors: the project, the source, then the kind. */
+const ALL_V1 = "backfill:listings-app:listings:all@v1";
+const ONLY_CATEGORY = "backfill:listings-app:listings:only@v1:category";
 
 /** Counts enqueues in order, so a test can assert newest first and that a decline queued nothing. */
 class RecordingConnector extends FakeConnector {
@@ -135,6 +140,8 @@ async function seedFirstQuestion(): Promise<void> {
 
 function depsFor(provider: FakeProvider, connector: Connector = world.connector): BackfillDeps {
   return {
+    project: PROJECT.id,
+    source: source.name,
     connector,
     worker: provider,
     clock: world.clock,
@@ -176,6 +183,7 @@ function run(
             ? wireBackfillDryRun({
                 config,
                 source,
+                project: PROJECT,
                 connector: world.connector,
                 clock: world.clock,
               })
@@ -308,13 +316,15 @@ describe("facetdb backfill", () => {
     const deps = wireBackfillDryRun({
       config,
       source,
+      project: PROJECT,
       connector: world.connector,
       clock: world.clock,
     });
 
-    expect(await deps.cursorStore.load("all@v1")).toBeUndefined();
+    expect([deps.project, deps.source]).toEqual(["listings-app", "listings"]);
+    expect(await deps.cursorStore.load(ALL_V1)).toBeUndefined();
     expect(await deps.log.latestAnswer("r1")).toBeUndefined();
-    expect(() => deps.cursorStore.save("all@v1", { cursor: null, done: true })).toThrow(
+    expect(() => deps.cursorStore.save(ALL_V1, { cursor: null, done: true })).toThrow(
       "a dry run never",
     );
     expect(() => deps.worker.ask({} as never)).toThrow("a dry run never");
@@ -348,7 +358,7 @@ describe("facetdb backfill", () => {
     expect(result.stdout).toContain("Resume point saved:");
     expect(result.stdout).toContain("6 records done. That was the last page.");
     expect(result.stdout).toContain("6 records queued for the worker");
-    expect(world.cursors.saved.get("all@v1")?.done).toBe(true);
+    expect(world.cursors.saved.get(ALL_V1)?.done).toBe(true);
   });
 
   it("--yes starts without a prompt", async () => {
@@ -399,7 +409,7 @@ describe("facetdb backfill", () => {
     expect(stopped.stderr).toContain("the backfill stopped at the page it was on");
     expect(stopped.stderr).toContain("run facetdb backfill again");
     expect(stopped.stdout).toContain("Resume point saved:");
-    const saved = world.cursors.saved.get("only@v1:category");
+    const saved = world.cursors.saved.get(ONLY_CATEGORY);
     expect(saved?.done).toBe(false);
     expect(saved?.cursor).not.toBeNull();
 
@@ -413,7 +423,7 @@ describe("facetdb backfill", () => {
     expect(asked).not.toContain("r5");
     expect(asked).toEqual(expect.arrayContaining(["r2", "r1"]));
     expect(asked.filter((key) => key === "r4" || key === "r3")).toHaveLength(1);
-    expect(world.cursors.saved.get("only@v1:category")?.done).toBe(true);
+    expect(world.cursors.saved.get(ONLY_CATEGORY)?.done).toBe(true);
     for (const key of KEYS) {
       expect(world.db.decisionOf(key)?.status).toBe("done");
     }

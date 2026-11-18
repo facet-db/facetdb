@@ -13,6 +13,9 @@ export type {
   PageProgress,
 } from "./backfill.ts";
 export {
+  BACKFILL_RUN_PREFIX,
+  BACKFILL_RUN_SUFFIX,
+  backfillRun,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
   ESTIMATE_SAMPLE_SIZE,

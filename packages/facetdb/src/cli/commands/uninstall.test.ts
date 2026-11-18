@@ -1,5 +1,7 @@
 import type { EngineObject, EngineTarget, KeptObject, PlanResult } from "@facetdb/core";
 import { FakeClock, FakeEngine } from "@facetdb/core/testing";
+import { tokenRun } from "@facetdb/mongodb";
+import { versionRun } from "@facetdb/mssql";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
@@ -398,6 +400,47 @@ describe("uninstall --purge", () => {
   });
 });
 
+describe("the source's resume rows in the store's cursors", () => {
+  async function cursors(runs: readonly string[]): Promise<void> {
+    for (const run of runs) {
+      await q(`insert into facetdb.cursors (run, cursor, done) values ($1, 'k', false)`, [run]);
+    }
+  }
+  const runs = async () =>
+    (await q(`select run from facetdb.cursors`)).map((row) => String(row["run"])).sort();
+
+  it("a plain uninstall says it removes the source's backfill place, and deletes it", async () => {
+    // Another project keeps the shared tables, so the rows left are there to read afterwards.
+    await q(`insert into facetdb.projects (id, name) values ('other', 'other')`);
+    await cursors([`backfill:${LOG_ID}:all@v1`, `backfill:${PROJECT}:orders:all@v1`]);
+    const result = await runSeeingPrompts(["uninstall", "--admin-url", ADMIN_URL], [PROJECT]);
+    expect(result.code, result.stderr).toBe(0);
+    const before = result.seen[0] ?? "";
+    expect(before).toContain(
+      `This removes: ${REMOVES_TABLE}; the resume rows of source listings in facetdb.cursors (1 row);`,
+    );
+    expect(before).toContain("delete from facetdb.cursors where");
+    expect(result.stdout.slice(before.length)).toContain(
+      `Removed ${REMOVES_TABLE}; the resume rows of source listings in facetdb.cursors (1 row);`,
+    );
+    expect(await runs()).toEqual([`backfill:${PROJECT}:orders:all@v1`]);
+  });
+
+  it("--purge with no other project drops the shared tables, whatever stream tokens and versions earlier uninstalls left", async () => {
+    // A MongoDB and a Change Tracking source of the project, uninstalled by an earlier version:
+    // their rows stayed, `done: false`, and kept every shared table. They keep nothing now.
+    await registerSourceWithLog();
+    await cursors([`mongo:${PROJECT}:items`, `ct:${PROJECT}:orders`, `backfill:${LOG_ID}:all@v2`]);
+    const result = await run(["uninstall", "--purge", "--admin-url", ADMIN_URL], [PROJECT]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      `the resume rows of source listings in facetdb.cursors (1 row); ${USAGE}; ${FUNCTIONS}; ${QUEUE}; ${SHARED};`,
+    );
+    expect(result.stdout).not.toContain("backfill cursor that names no source");
+    expect(await schemaExists()).toBe(false);
+  });
+});
+
 describe("what the purge's checks say, through the CLI", () => {
   /** The same project with a second table, `orders`: a log may be shared while it is installed. */
   const twoTables: ProjectConfig = facetdb({
@@ -463,14 +506,14 @@ describe("what the purge's checks say, through the CLI", () => {
     await q(`insert into facetdb.cursors (run, cursor, done) values ('v1', 'c-17', false)`);
     const notes = await connectorNotes(false);
     expect(notes).toEqual([
-      `the project ${PROJECT} and the store's shared tables stay because of an unfinished backfill cursor (run v1); it keeps the shared tables until the backfill finishes or the cursor is deleted.`,
+      `the project ${PROJECT} and the store's shared tables stay because of an unfinished backfill cursor that names no source (run v1); it was written before a backfill kept its place per source, no backfill resumes it any more, and it keeps the shared tables until it is deleted: delete from facetdb.cursors where run in ('v1');`,
     ]);
     const result = await run(["uninstall", "--admin-url", ADMIN_URL], [PROJECT]);
     expect(result.code, result.stderr).toBe(0);
     for (const note of notes) {
       expect(result.stdout).toContain(`note: ${note}\n`);
     }
-    const keeps = `the decision log tables (only --purge deletes a log); the shared FacetDB tables, because a backfill is unfinished (run v1; it finishes, or its cursor is deleted); ${WORKER}`;
+    const keeps = `the decision log tables (only --purge deletes a log); the shared FacetDB tables, because a backfill cursor that names no source is unfinished (run v1; no backfill resumes it, so it stays until it is deleted); ${WORKER}`;
     expect(result.stdout).toContain(`This keeps: ${keeps}.\n`);
     expect(result.stdout).toContain(`Removed FacetDB from public.listings; kept: ${keeps}.\n`);
   });
@@ -1027,6 +1070,173 @@ describe("the words of an engine that is not Postgres", () => {
     expect((JSON.parse(json.stdout) as { sources: { table: string }[] }).sources).toMatchObject([
       { table: "dbo.listings" },
     ]);
+  });
+
+  /** A plan as the MongoDB engine's uninstall makes one, with the store elsewhere. */
+  const mongoPlan = () =>
+    uninstallPlan(
+      [{ kind: "field", name: "facetdb", of: "app.listings", scope: "source" }],
+      [
+        {
+          kind: "login",
+          name: "facetdb_worker",
+          scope: "run",
+          noun: "user",
+          reason: "uninstall never drops it",
+        },
+      ],
+    );
+  const MONGO_URL = "mongodb://facetdb_worker:s3cret-worker@127.0.0.1:27017/app";
+  /** Where the source's resume rows are, by the keys the MongoDB and SQL Server connectors write. */
+  const at = { project: { id: PROJECT, name: PROJECT }, source: "listings" };
+  const storeRuns = async () =>
+    (await q(`select run from facetdb.cursors`)).map((row) => String(row["run"])).sort();
+
+  it.each([
+    ["the MongoDB stream's resume token", () => tokenRun(at)],
+    ["the Change Tracking version", () => versionRun(at)],
+  ])(
+    "a plain uninstall deletes %s from the store, through the store door, and says so",
+    async (_, run) => {
+      await q(
+        `insert into facetdb.cursors (run, cursor, done) values ($1, 'k', false), ($2, 'k', false)`,
+        [run(), `mongo:${PROJECT}:items`],
+      );
+      const mongodb = new FakeEngine({
+        name: "mongodb",
+        schemes: ["mongodb", "mongodb+srv"],
+        plans: { uninstall: mongoPlan() },
+      });
+      const dry = await runOn(mongodb, "mongodb", MONGO_URL, ["uninstall", "--dry-run"]);
+      expect(dry.code, dry.stderr).toBe(0);
+      expect(dry.stdout).toContain(
+        `-- store: localhost:5432/facetdb\nbegin;\n\nselect set_config('facetdb.resume_source', '${PROJECT}:listings', true);\n\ndo $$`,
+      );
+      expect(dry.stdout).not.toContain("delete from facetdb.decisions");
+      expect(dry.stdout).toContain(
+        "This removes: from app.listings: 1 FacetDB field (facetdb); the resume rows of source listings in facetdb.cursors (1 row).\n",
+      );
+      expect(await storeRuns()).toHaveLength(2);
+
+      const real = await runOn(mongodb, "mongodb", MONGO_URL, ["uninstall"], [PROJECT]);
+      expect(real.code, real.stderr).toBe(0);
+      expect(real.stdout).toContain(
+        "Removed from app.listings: 1 FacetDB field (facetdb); the resume rows of source listings in facetdb.cursors (1 row).\n",
+      );
+      expect(await storeRuns()).toEqual([`mongo:${PROJECT}:items`]);
+      // With nothing of the source's left in the store, the next one has no store part at all.
+      const again = await runOn(mongodb, "mongodb", MONGO_URL, ["uninstall", "--dry-run"]);
+      expect(again.stdout).not.toContain("-- store:");
+    },
+  );
+
+  it("a plain uninstall whose store part fails says the rows stay, and the statement that deletes them", async () => {
+    await q(`insert into facetdb.cursors (run, cursor, done) values ($1, 'k', false)`, [
+      tokenRun(at),
+    ]);
+    const mongodb = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      plans: { uninstall: mongoPlan() },
+    });
+    // The second connection to the store is the run's (the first read the rows to show them).
+    let storeConnections = 0;
+    const connect: SqlConnect = (url, options) => {
+      const inner = world.connect(url, options);
+      storeConnections += url === STORE_URL ? 1 : 0;
+      return url === STORE_URL && storeConnections === 2
+        ? {
+            ...inner,
+            transaction: () => Promise.reject(new Error("connect ECONNREFUSED 10.0.0.5:5432")),
+          }
+        : inner;
+    };
+    const onMongo: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        database: MONGO_URL,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+    const result = await runInProcess(
+      ["uninstall", "--json", "--admin-url", MONGO_URL],
+      {
+        projectDir: PROJECT_DIR,
+        env: { DATABASE_URL: STORE_URL },
+        loadConfig: () => Promise.resolve(onMongo),
+        engines: [
+          ...postgresEngines(connect),
+          lazyEngine("mongodb", () => Promise.resolve(mongodb)),
+        ],
+        connect,
+        answers: [PROJECT],
+      },
+      COMMANDS,
+    );
+    expect(result.code).toBe(1);
+    const parsed = JSON.parse(result.stdout) as {
+      error: { message: string; fix: string };
+      details: unknown;
+    };
+    expect(parsed.error.message).toBe(
+      "the FacetDB install on listings was removed; the resume rows of source listings in the FacetDB store on localhost:5432/facetdb were not deleted: connect ECONNREFUSED 10.0.0.5:5432.",
+    );
+    expect(parsed.error.fix).toBe(
+      `fix what the message says, then delete them in the store: delete from facetdb.cursors where run in ('mongo:${PROJECT}:listings');`,
+    );
+    expect(parsed.details).toEqual({ removed: ["listings"], resumeRowsLeft: ["listings"] });
+    expect(await storeRuns()).toEqual([`mongo:${PROJECT}:listings`]);
+  });
+
+  it("refuses an uninstall with the store elsewhere and no DATABASE_URL, before anything connects: the store holds the source's resume rows", async () => {
+    const noConnection: SqlConnect = (url) => {
+      throw new Error(`a connection was opened to ${url}`);
+    };
+    const mongodb = new FakeEngine({
+      name: "mongodb",
+      schemes: ["mongodb", "mongodb+srv"],
+      plans: { uninstall: mongoPlan() },
+    });
+    const onMongo: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        database: MONGO_URL,
+        databaseEnv: "LISTINGS_URL",
+      })),
+    };
+    const uninstall = (flags: readonly string[]) =>
+      runInProcess(
+        ["uninstall", ...flags, "--admin-url", MONGO_URL],
+        {
+          projectDir: PROJECT_DIR,
+          env: {},
+          loadConfig: () => Promise.resolve(onMongo),
+          engines: [
+            ...postgresEngines(noConnection),
+            lazyEngine("mongodb", () => Promise.resolve(mongodb)),
+          ],
+          connect: noConnection,
+        },
+        COMMANDS,
+      );
+    const fix =
+      "fix: set DATABASE_URL to the connection string of the FacetDB store's database; if that database is gone, point it at any Postgres where FacetDB may create its store. Nothing of the source is touched until you type the name back\n";
+    const plain = await uninstall(["--dry-run"]);
+    expect(plain.code).toBe(1);
+    expect(plain.stderr).toContain(
+      "error: DATABASE_URL is not set, and the FacetDB store, in another database than the source's, holds the resume rows of source listings (where a backfill or a change stream picks up again): uninstall needs DATABASE_URL to remove them; nothing was changed\n",
+    );
+    expect(plain.stderr).toContain(fix);
+    expect(plain.stdout).toBe("");
+    const purge = await uninstall(["--purge"]);
+    expect(purge.code).toBe(1);
+    expect(purge.stderr).toContain(
+      "error: DATABASE_URL is not set, and the FacetDB store, in another database than the source's, holds the resume rows and the decision log of source listings: uninstall needs DATABASE_URL to remove them; nothing was changed\n",
+    );
+    expect(purge.stderr).toContain(fix);
+    expect(purge.prompts).toEqual([]);
   });
 
   it("MongoDB: the collection, its role and its user", async () => {

@@ -1,12 +1,15 @@
 import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS } from "@facetdb/core";
 import {
   AmbiguousHostError,
+  deleteCursorsSql,
   migrateStore,
   PlaintextUrlError,
   type PurgedSource,
+  readResumeRows,
   readStoreLog,
   rekeyNotes,
   requireTls,
+  resumeRowsStatements,
   SCHEMA_VERSION,
   SECRET_VARIABLE,
   type SqlConnect,
@@ -431,47 +434,74 @@ export async function runStoreMigration(connect: SqlConnect, url: string): Promi
   }
 }
 
-/** The store's part of `facetdb uninstall --purge` when it is its own database, as shown. */
-export type StorePurge = {
+/**
+ * The store's part of `facetdb uninstall` when it is its own database, as shown: with `--purge` the
+ * source's decision log (`log`), and always the source's resume rows in `facetdb.cursors` (its
+ * backfills' places, a MongoDB stream's token, a Change Tracking version), so a source installed
+ * again never resumes from where this one stopped.
+ */
+export type StoreUninstall = {
   readonly label: string;
   readonly statements: readonly string[];
   readonly script: string;
-  readonly log: StoreLog;
+  /** The log the purge deletes; undefined without `--purge`, when the log stays. */
+  readonly log: StoreLog | undefined;
+  /** The run keys of the source's resume rows, as read before the script is shown. */
+  readonly resumeRows: readonly string[];
 };
 
-export async function showStorePurge(
+/**
+ * The store's part for one source, read and nothing else: undefined when there is nothing to do
+ * there (no `--purge`, and no resume row of the source in the store). With `--purge` the script is
+ * the log's purge then the resume rows' delete, in one transaction; without, the delete alone.
+ */
+export async function showStoreUninstall(
   connect: SqlConnect,
   url: string,
   source: PurgedSource,
-): Promise<StorePurge> {
+  purge: boolean,
+): Promise<StoreUninstall | undefined> {
   const client = connect(url);
   try {
-    const statements = storePurgeStatements(source);
+    const resumeRows = await readResumeRows(client.query, source.id);
+    if (!purge && resumeRows.length === 0) {
+      return undefined;
+    }
+    const statements = [
+      ...(purge ? storePurgeStatements(source) : []),
+      ...resumeRowsStatements(source.id),
+    ];
     return {
       label: databaseLabel(url),
       statements,
       script: scriptOf(statements),
-      log: await readStoreLog(client.query, source.id),
+      log: purge ? await readStoreLog(client.query, source.id) : undefined,
+      resumeRows,
     };
   } finally {
     await client.close();
   }
 }
 
+/** The statement an operator runs in the store to delete the resume rows a failed part left. */
+export function resumeRowsByHand(part: StoreUninstall): string {
+  return deleteCursorsSql(part.resumeRows);
+}
+
 /** The fix of a refused purge, in the words of the engine's refusals. */
 const REFUSED_FIX =
   "change the table or the config as the message says, then run the command again; nothing was changed";
 
-/** Runs the purge shown, as shown, in one transaction; its guard's refusal is the CLI's error. */
-export async function runStorePurge(
+/** Runs the store's part shown, as shown, in one transaction; its guard's refusal is the CLI's error. */
+export async function runStoreUninstall(
   connect: SqlConnect,
   url: string,
-  purge: StorePurge,
+  part: StoreUninstall,
 ): Promise<void> {
   const client = connect(url);
   try {
     await client.transaction(async (query) => {
-      for (const statement of purge.statements) {
+      for (const statement of part.statements) {
         await query(statement);
       }
     });

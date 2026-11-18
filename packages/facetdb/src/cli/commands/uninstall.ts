@@ -3,11 +3,13 @@ import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
 import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
 import {
   requireStoreUrl,
-  runStorePurge,
-  type StorePurge,
-  showStorePurge,
+  resumeRowsByHand,
+  runStoreUninstall,
+  type StoreUninstall,
+  showStoreUninstall,
   storeSharedFor,
   storeSourceId,
+  storeUrlOf,
 } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -22,6 +24,7 @@ import {
 import {
   accountLines,
   once,
+  resumeRows,
   runKept,
   runRemoved,
   sourceLog,
@@ -39,7 +42,9 @@ import {
  * another database the engine's plan is the source's side alone, and `--purge` deletes the source's
  * log from the store through the store door, after the engine's run; when that purge fails, the
  * words say both halves: the source's side gone, the log still in the store, and the command that
- * ends it.
+ * ends it. Every uninstall, purge or not, deletes the source's resume rows in the store's
+ * `facetdb.cursors`: in the engine's script with the store shared, through the store door
+ * otherwise, so a source with the store elsewhere needs `DATABASE_URL` whatever the flags.
  */
 
 type UninstallOptions = {
@@ -57,16 +62,27 @@ type Shown = {
   readonly label: string;
   readonly plan: EnginePlan;
   readonly script: string;
-  /** With the store in another database and `--purge`: the store's part, run after the engine's. */
-  readonly storePurge?: StorePurge;
+  /**
+   * With the store in another database: the store's part, run after the engine's, when there is
+   * one (`--purge`, or resume rows of the source in the store).
+   */
+  readonly store?: StoreUninstall;
 };
 
-/** What the run removes from the store: the source's log, with the store in its own database. */
+/**
+ * What the run removes from the store, with the store in its own database: the source's log with
+ * `--purge`, and its resume rows when it has any.
+ */
 function storeRemoved(item: Shown): readonly string[] {
-  const purge = item.storePurge;
-  return purge === undefined
-    ? []
-    : [sourceLog(item.target.source.name, purge.log.decisions, purge.log.versions)];
+  const part = item.store;
+  if (part === undefined) {
+    return [];
+  }
+  const name = item.target.source.name;
+  return [
+    ...(part.log === undefined ? [] : [sourceLog(name, part.log.decisions, part.log.versions)]),
+    ...(part.resumeRows.length === 0 ? [] : [resumeRows(name, part.resumeRows.length)]),
+  ];
 }
 
 /**
@@ -119,11 +135,21 @@ function doneWords(ran: readonly Shown[], keeps: readonly string[]): string {
     : `${done}; kept: ${keeps.join("; ")}.`;
 }
 
-/** A table the run removed, in words: with the store elsewhere, its log purged there too. */
+/** What the store's part of a table's uninstall deletes, in short words: its log, its resume rows. */
+function storeShortWords(item: Shown, part: StoreUninstall): string {
+  const name = item.target.source.name;
+  const parts = [
+    ...(part.log === undefined ? [] : [`the decision log of source ${name}`]),
+    ...(part.resumeRows.length === 0 ? [] : [`the resume rows of source ${name}`]),
+  ];
+  return parts.join(" and ");
+}
+
+/** A table the run removed, in words: with the store elsewhere, its log or resume rows there too. */
 const removedWords = (item: Shown) =>
-  item.storePurge === undefined
+  item.store === undefined
     ? item.label
-    : `${item.label} (and the decision log of source ${item.target.source.name} in the FacetDB store)`;
+    : `${item.label} (and ${storeShortWords(item, item.store)} in the FacetDB store)`;
 
 /** The run-wide removals "This removes" promised that did not happen, as the sentence that says so. */
 function notDoneWords(promised: readonly string[]): string {
@@ -163,11 +189,13 @@ function afterPartialRun(
  * unreachable, its guard refusing, a raw error), the words say both halves and how to finish, in
  * afterPartialRun's shape: the tables removed before this one, the run-wide removals that did not
  * happen, and `--json` with every table removed, this one with them, and the log not purged.
+ * Without `--purge` the store's part is the source's resume rows alone: the words say they stay,
+ * and the fix is the statement that deletes them.
  */
 function logNotPurged(
   error: unknown,
   item: Shown,
-  storeLabel: string,
+  part: StoreUninstall,
   removedHere: readonly EngineObject[],
   ran: readonly Shown[],
   promised: readonly string[],
@@ -184,12 +212,43 @@ function logNotPurged(
       : ` Already removed in this run, before this: ${ran.map(removedWords).join(", ")}.`;
   // What this table's run removed of the run's own objects did happen; the rest did not.
   const doneHere = new Set(runRemoved(removedHere));
+  const why = `${withoutNothingDone(cause.message)}.${before}${notDoneWords(promised.filter((words) => !doneHere.has(words)))}`;
+  const removed = [...ran, item].map((done) => done.label);
+  if (part.log === undefined) {
+    // No purge: only the resume rows were to go, and a later uninstall finds no install to plan,
+    // so the fix is the one statement that deletes the rows read before the confirmation.
+    return new CliError(
+      cause.code,
+      `${sourceSide}; the resume rows of source ${name} in the FacetDB store on ${part.label} were not deleted: ${why}`,
+      `fix what the message says, then delete them in the store: ${resumeRowsByHand(part)}`,
+      cause.exit,
+      { removed, resumeRowsLeft: [name] },
+    );
+  }
   return new CliError(
     cause.code,
-    `${sourceSide}; the decision log of source ${name} in the FacetDB store on ${storeLabel} was not purged: ${withoutNothingDone(cause.message)}.${before}${notDoneWords(promised.filter((words) => !doneHere.has(words)))}`,
+    `${sourceSide}; the decision log of source ${name} in the FacetDB store on ${part.label} was not purged: ${why}`,
     `fix what the message says, then run facetdb uninstall --purge --source ${name} again: with the install gone, it purges the log alone`,
     cause.exit,
-    { removed: [...ran, item].map((done) => done.label), notPurged: [name] },
+    { removed, notPurged: [name] },
+  );
+}
+
+/**
+ * Why an uninstall with the store in another database stops when `DATABASE_URL` is unset, before
+ * anything connects: the store holds the sources' resume rows, and with `--purge` their logs, and
+ * only it can remove them. A store whose database is gone is no dead end: reading and deleting what
+ * is there treats a store without FacetDB's tables as an empty one.
+ */
+function storeNeeded(sources: readonly string[], purge: boolean): CliError {
+  const named = `${sources.length === 1 ? "source" : "sources"} ${sources.join(", ")}`;
+  const held = purge
+    ? `the resume rows and the decision log of ${named}`
+    : `the resume rows of ${named} (where a backfill or a change stream picks up again)`;
+  return new CliError(
+    "database-url",
+    `DATABASE_URL is not set, and the FacetDB store, in another database than the source's, holds ${held}: uninstall needs DATABASE_URL to remove them; nothing was changed`,
+    "set DATABASE_URL to the connection string of the FacetDB store's database; if that database is gone, point it at any Postgres where FacetDB may create its store. Nothing of the source is touched until you type the name back",
   );
 }
 
@@ -224,8 +283,15 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
     // The engine first, so a scheme FacetDB does not serve is refused before a credential is asked.
     const { engine, url } = await adminRun(deps, first, options.adminUrl);
     const storeShared = storeSharedFor(deps.env, first.source);
-    const storeUrl =
-      storeShared || !options.purge ? undefined : requireStoreUrl(deps.env, allowInsecure);
+    // With the store elsewhere every uninstall reaches it: the source's resume rows go with or
+    // without --purge, so its URL is required before anything connects.
+    if (!storeShared && storeUrlOf(deps.env) === undefined) {
+      throw storeNeeded(
+        targets.map((target) => target.source.name),
+        options.purge,
+      );
+    }
+    const storeUrl = storeShared ? undefined : requireStoreUrl(deps.env, allowInsecure);
     const engineDeps = { clock: deps.clock, allowInsecure, storeShared };
     const all = targets.map((target) => engineTarget(config, target, project));
     const shown: Shown[] = [];
@@ -240,15 +306,21 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       if (!planned.ok) {
         throw refusalError(planned.refusal);
       }
-      const storePurge =
+      const store =
         storeUrl === undefined
           ? undefined
-          : await showStorePurge(deps.connect, storeUrl, {
-              id: storeSourceId(project.id, target.source.name),
-              name: target.source.name,
-              projectId: project.id,
-            });
-      if (storePurge !== undefined && storePurge.log.records > 0) {
+          : await showStoreUninstall(
+              deps.connect,
+              storeUrl,
+              {
+                id: storeSourceId(project.id, target.source.name),
+                name: target.source.name,
+                projectId: project.id,
+              },
+              options.purge,
+            );
+      const log = store?.log;
+      if (log !== undefined && log.records > 0) {
         throw new CliError(
           "uninstall-refused",
           `the decision log of source "${target.source.name}" is shared with the store source "${target.source.name}" of project ${project.id}, which holds records and is live; nothing was changed.`,
@@ -256,13 +328,14 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
         );
       }
       if (
-        storePurge !== undefined &&
+        store !== undefined &&
+        log !== undefined &&
         planned.plan.confirm?.kind === "source" &&
-        storePurge.log.decisions + storePurge.log.versions === 0
+        log.decisions + log.versions + store.resumeRows.length === 0
       ) {
         throw new CliError(
           "uninstall-refused",
-          `${engine.label(own)} has no FacetDB install left, and the FacetDB store on ${storePurge.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
+          `${engine.label(own)} has no FacetDB install left, and the FacetDB store on ${store.label} holds no decision log of source "${target.source.name}"; there is nothing to purge.`,
           "check the source's name, table and schema; nothing was changed",
         );
       }
@@ -272,7 +345,7 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
         label: engine.label(own),
         plan: planned.plan,
         script: engine.render(planned.plan),
-        ...(storePurge === undefined ? {} : { storePurge }),
+        ...(store === undefined ? {} : { store }),
       });
     }
     // With the store elsewhere and no --purge, the log stays there, in no plan of the engine's.
@@ -293,9 +366,9 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       for (const note of item.plan.notes) {
         print(`note: ${note}`);
       }
-      if (item.storePurge !== undefined) {
-        print(`-- store: ${item.storePurge.label}`);
-        print(item.storePurge.script);
+      if (item.store !== undefined) {
+        print(`-- store: ${item.store.label}`);
+        print(item.store.script);
       }
     }
     for (const line of accountLines(runWords(shown, keptInStore))) {
@@ -315,9 +388,9 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
           sql: item.script,
           applied: ran !== undefined,
           notes: item.plan.notes,
-          ...(item.storePurge === undefined
+          ...(item.store === undefined
             ? {}
-            : { store: { database: item.storePurge.label, sql: item.storePurge.script } }),
+            : { store: { database: item.store.label, sql: item.store.script } }),
         })),
       };
     };
@@ -379,11 +452,11 @@ export const uninstallCommand = defineCommand<UninstallOptions>("uninstall", {
       }
       // The store's part goes once the engine's run has finished (its source-side checks passed):
       // from here the source's side is gone, and any failure says both halves.
-      if (item.storePurge !== undefined && storeUrl !== undefined) {
+      if (item.store !== undefined && storeUrl !== undefined) {
         try {
-          await runStorePurge(deps.connect, storeUrl, item.storePurge);
+          await runStoreUninstall(deps.connect, storeUrl, item.store);
         } catch (error) {
-          throw logNotPurged(error, item, item.storePurge.label, result.removed, ran, promised);
+          throw logNotPurged(error, item, item.store, result.removed, ran, promised);
         }
       }
       const removed = [

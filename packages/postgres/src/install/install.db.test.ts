@@ -1,12 +1,14 @@
-import type { QuestionSet } from "@facetdb/core";
+import type { EngineTarget, QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresConnector } from "../capture/index.ts";
+import { createPostgresEngine } from "../engine/index.ts";
 import { connectPostgres, type SqlClient, type SqlConnect, type SqlQuery } from "../sql/index.ts";
 import { createStore, sourceIdOf } from "../store/index.ts";
 import { createScratchDatabase, type ScratchDatabase, TEST_SECRET } from "../testing/index.ts";
 import { migrate } from "./migrate.ts";
 import { prune } from "./prune.ts";
+import { enqueueRole, workerRole } from "./sql.ts";
 import { uninstall } from "./uninstall.ts";
 
 /**
@@ -68,14 +70,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Every step is tried whatever the ones before it did, and the first error is thrown once all
+  // have been (as `scratch.drop()` does): no role a test created stays on the shared server only
+  // because a close or the database's drop threw first.
+  const errors: unknown[] = [];
+  const attempt = async (step: () => Promise<void>) => {
+    try {
+      await step();
+    } catch (error) {
+      errors.push(error);
+    }
+  };
   // Newest first, so the worker's connection is gone before the admin's and the scratch database
   // can be dropped; a beforeAll that failed before `worker` existed still cleans up what it opened.
   for (const connection of open.splice(0).reverse()) {
-    await connection.close();
+    await attempt(() => connection.close());
   }
-  await scratch.drop();
+  await attempt(() => scratch.drop());
   for (const role of roles.splice(0).reverse()) {
-    await scratch.admin(`drop role if exists ${role}`);
+    await attempt(() => scratch.admin(`drop role if exists ${role}`));
+  }
+  if (errors.length > 0) {
+    throw errors[0];
   }
 });
 
@@ -250,8 +266,8 @@ describe("the worker login on a real Postgres", () => {
       expect(
         await store.usage.finish("proj_listings", "2026-11", admitted.reservation ?? "", 7),
       ).toBe(7);
-      // The webhook outbox (@facetdb/server) is a store table too; the worker queues and claims
-      // in it with the same login (a run on Supabase failed here: the worker had created it).
+      // The webhook outbox (@facetdb/server) is a store table too; the worker queues and claims in
+      // it with the same login (a run on Supabase failed here: the worker had created it).
       const reserved = await recording.query(
         "select nextval(pg_get_serial_sequence('facetdb.webhook_outbox', 'id'))::text as id",
       );
@@ -718,5 +734,190 @@ describe("two installs and two admins on a real Postgres", () => {
     }
     await asDba(`revoke update on facetdb.question_set_versions from ${scratch.workerRole}`);
     expect(await again()).toMatchObject({ ok: true, applied: true });
+  });
+});
+
+describe("a worker login created between an install's plan and its run", () => {
+  it("keeps the password the other project's migrate gave it: the run stops at its secret statement", async () => {
+    // Roles of their own (a second suffix), so the login is absent when this install is planned.
+    const suffix = `${scratch.roleSuffix}r`;
+    const login = workerRole(suffix);
+    roles.push(login, enqueueRole(suffix));
+    const engine = createPostgresEngine({
+      connect: connectPostgres,
+      pgHost: undefined,
+      roleSuffix: suffix,
+    });
+    const deps = { clock: new FakeClock(0), allowInsecure: false, storeShared: true } as const;
+    const target = (table: string, id: string): EngineTarget => ({
+      project: { id, name: id },
+      source: table,
+      table,
+      storage: "inline",
+      onChange: "reset",
+      questionSet: listings,
+    });
+    for (const table of ["race_mine", "race_theirs"]) {
+      await admin.query(
+        `create table public.${table} (id serial primary key, title text, description text)`,
+      );
+    }
+    const mine = target("race_mine", "proj_mine");
+    const theirs = target("race_theirs", "proj_theirs");
+    const MINE = "my-long-random-password-for-tests";
+    const THEIRS = "their-long-random-password-for-tests";
+    const planned = await engine.planInstall(mine, scratch.url, { ...deps, workerPassword: MINE });
+    if (!planned.ok) {
+      throw new Error(planned.refusal.message);
+    }
+    expect(planned.plan.statements.some((statement) => statement.secret === true)).toBe(true);
+
+    // Meanwhile, another project's migrate creates the login with its own password.
+    const other = await engine.planInstall(theirs, scratch.url, {
+      ...deps,
+      workerPassword: THEIRS,
+    });
+    if (!other.ok) {
+      throw new Error(other.refusal.message);
+    }
+    const ranTheirs = await engine.run(theirs, other.plan, scratch.url, {
+      ...deps,
+      workerPassword: THEIRS,
+    });
+    expect(ranTheirs.stopped).toBeUndefined();
+
+    const result = await engine.run(mine, planned.plan, scratch.url, {
+      ...deps,
+      workerPassword: MINE,
+    });
+    expect(result).toMatchObject({
+      ran: [],
+      stopped: {
+        at: planned.plan.statements.findIndex((statement) => statement.secret === true),
+        refusal: { code: "worker-login-created", fix: "run facetdb migrate again, which keeps it" },
+      },
+    });
+    // Theirs still logs in; mine never became the login's password; nothing of mine was installed.
+    const asTheirs = connectPostgres(scratch.as(login, THEIRS));
+    const asMine = connectPostgres(scratch.as(login, MINE));
+    try {
+      expect(await asTheirs.query("select 1 as one")).toEqual([{ one: 1 }]);
+      await expect(asMine.query("select 1")).rejects.toThrow();
+    } finally {
+      await asTheirs.close();
+      await asMine.close();
+    }
+    expect(
+      await admin.query(
+        "select table_name from facetdb.table_owners where table_name in ('race_mine', 'race_theirs') order by 1",
+      ),
+    ).toEqual([{ table_name: "race_theirs" }]);
+  });
+
+  it("serializes two first installs on the login's lock: the second waits, then stops at its secret statement", async () => {
+    const suffix = `${scratch.roleSuffix}s`;
+    const login = workerRole(suffix);
+    roles.push(login, enqueueRole(suffix));
+    // The first run's transaction stays open after its last statement, the lock held, until the
+    // test lets it commit; `reached` says it got there.
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached: () => void = () => undefined;
+    const holding = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const held: SqlConnect = (url, options) => {
+      const inner = connectPostgres(url, options);
+      return {
+        ...inner,
+        transaction: (work) =>
+          inner.transaction(async (query) => {
+            const done = await work(query);
+            reached();
+            await gate;
+            return done;
+          }),
+      };
+    };
+    const first = createPostgresEngine({ connect: held, pgHost: undefined, roleSuffix: suffix });
+    const second = createPostgresEngine({
+      connect: connectPostgres,
+      pgHost: undefined,
+      roleSuffix: suffix,
+    });
+    const deps = { clock: new FakeClock(0), allowInsecure: false, storeShared: true } as const;
+    const target = (table: string): EngineTarget => ({
+      project: { id: `proj_${table}`, name: table },
+      source: table,
+      table,
+      storage: "inline",
+      onChange: "reset",
+      questionSet: listings,
+    });
+    for (const table of ["lock_first", "lock_second"]) {
+      await admin.query(
+        `create table public.${table} (id serial primary key, title text, description text)`,
+      );
+    }
+    const FIRST = "the-first-long-random-password-for-tests";
+    const SECOND = "the-second-long-random-password-for-tests";
+    // Both planned while the login is absent: both would create it.
+    const planned = async (engine: typeof first, table: string, password: string) => {
+      const result = await engine.planInstall(target(table), scratch.url, {
+        ...deps,
+        workerPassword: password,
+      });
+      if (!result.ok) {
+        throw new Error(result.refusal.message);
+      }
+      return result.plan;
+    };
+    const firstPlan = await planned(first, "lock_first", FIRST);
+    const secondPlan = await planned(second, "lock_second", SECOND);
+
+    const firstRun = first.run(target("lock_first"), firstPlan, scratch.url, {
+      ...deps,
+      workerPassword: FIRST,
+    });
+    await holding;
+    const secondRun = second.run(target("lock_second"), secondPlan, scratch.url, {
+      ...deps,
+      workerPassword: SECOND,
+    });
+    // The second waits on the login's lock (within its 10-second lock_timeout), then the first commits.
+    const waiting = async () =>
+      Number(
+        (
+          await admin.query(
+            `select count(*)::int as n from pg_catalog.pg_locks l
+              join pg_catalog.pg_database d on d.oid = l.database
+             where l.locktype = 'advisory' and not l.granted and d.datname = current_database()`,
+          )
+        )[0]?.["n"],
+      );
+    for (let tries = 0; (await waiting()) === 0; tries += 1) {
+      expect(tries).toBeLessThan(200);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    release();
+    expect((await firstRun).stopped).toBeUndefined();
+    expect(await secondRun).toMatchObject({
+      ran: [],
+      stopped: {
+        at: secondPlan.statements.findIndex((statement) => statement.secret === true),
+        refusal: { code: "worker-login-created" },
+      },
+    });
+    const asFirst = connectPostgres(scratch.as(login, FIRST));
+    const asSecond = connectPostgres(scratch.as(login, SECOND));
+    try {
+      expect(await asFirst.query("select 1 as one")).toEqual([{ one: 1 }]);
+      await expect(asSecond.query("select 1")).rejects.toThrow();
+    } finally {
+      await asFirst.close();
+      await asSecond.close();
+    }
   });
 });

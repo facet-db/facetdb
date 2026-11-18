@@ -10,23 +10,30 @@ import type {
 import {
   anotherProjectOwner,
   installRefusal,
+  loginLock,
   PASSWORD_STATEMENT,
   pruneRefusal,
   ranNote,
   scramVerifier,
   uninstallRefusal,
 } from "../install/index.ts";
-import type { SqlClient, SqlConnect, SqlQuery, SqlRow } from "../sql/index.ts";
+import {
+  quoteLiteral,
+  type SqlClient,
+  type SqlConnect,
+  type SqlQuery,
+  type SqlRow,
+} from "../sql/index.ts";
 import { REFUSED_FIX } from "./plans.ts";
 import { adminUrlRefusal, plainMessage } from "./urls.ts";
 
 /**
  * `run`: the plan's statements against the admin URL, in order and as printed, in one transaction
- * as `migrate`, `uninstall` and `prune` run theirs. The one statement that is not its
- * printed text is the `secret` one: a comment in the plan, run as `PASSWORD_STATEMENT` with a fresh
- * SCRAM verifier of the password given, so neither the password nor a verifier is in a plan, a
- * script or a result. A stop is the script's own refusal when it raised one (in its words, under
- * the code the CLI prints for it today), the database's error otherwise, with no secret in it.
+ * as `migrate`, `uninstall` and `prune` run theirs. The one statement that is not its printed text
+ * is the `secret` one: a comment in the plan, run as `PASSWORD_STATEMENT` with a fresh SCRAM
+ * verifier of the password given, so neither the password nor a verifier is in a plan, a script or
+ * a result. A stop is the script's own refusal when it raised one (in its words, under the code the
+ * CLI prints for it today), the database's error otherwise, with no secret in it.
  */
 
 /** What a run says when it reaches the plan's `secret` statement without a password. */
@@ -35,6 +42,51 @@ const NO_PASSWORD: Refusal = {
   message: "this plan sets the worker login's password, and the run was given none",
   fix: "set the source's connection string to the worker login with its password",
 };
+
+/**
+ * What a run says when the worker login it was planned to create exists by its `secret` statement:
+ * another project's migrate created it between this plan and its run, and setting this password
+ * would lock that project's worker out (an existing login keeps its password).
+ */
+function loginCreatedMeanwhile(login: string): Refusal {
+  return {
+    code: "worker-login-created",
+    message: `the worker login ${login} was created meanwhile, by another project's migrate; its password was left as it is and nothing was changed`,
+    fix: "run facetdb migrate again, which keeps it",
+  };
+}
+
+/**
+ * The worker login's row, read inside the run's transaction at its `secret` statement. The name is
+ * `workerRole`'s (lower-case letters, digits and `_` only), written as a literal: the statement
+ * carries no parameter, so nothing but the password statement ever binds one.
+ */
+const roleExists = (login: string) =>
+  `select 1 from pg_catalog.pg_roles where rolname = ${quoteLiteral(login)}`;
+
+/** SQLSTATE `lock_not_available`: a wait passed the script's `lock_timeout` (10 seconds). */
+const LOCK_TIMEOUT = "55P03";
+
+/**
+ * The refusal of a run that waited past its `lock_timeout` on the login's lock (`loginLock`, its
+ * third statement): another first install on the server is creating the worker login right now,
+ * and holds the lock until it commits. Only this statement's timeout is read so; a timeout on any
+ * other statement (a busy table the install alters) stays the database's own words, as before.
+ */
+function loginLockTimeout(
+  error: unknown,
+  statement: PlanStatement | undefined,
+  login: string,
+): Refusal | undefined {
+  if (sqlState(error) !== LOCK_TIMEOUT || statement?.text !== loginLock(login)) {
+    return undefined;
+  }
+  return {
+    code: "worker-login-busy",
+    message: `another project's migrate is creating the worker login ${login} at this moment, and this run waited 10 seconds for it; nothing was changed (the transaction rolled back after its two set local lines)`,
+    fix: "run facetdb migrate again once that migrate has finished: it then finds the login and keeps its password",
+  };
+}
 
 /** Thrown inside the run's transaction to stop it, and roll it back, with a refusal. */
 class Stop extends Error {
@@ -130,9 +182,9 @@ async function gone(query: SqlQuery, object: EngineObject): Promise<boolean> {
 }
 
 /**
- * Whether this run was its uninstall's last: every run-scoped object of the plan is gone,
- * because nothing needs it any more. The first table's run of a multi-table uninstall finds the
- * second still needing them, so it reports its own objects only.
+ * Whether this run was its uninstall's last: every run-scoped object of the plan is gone, because
+ * nothing needs it any more. The first table's run of a multi-table uninstall finds the second
+ * still needing them, so it reports its own objects only.
  */
 async function lastOfRun(query: SqlQuery, removes: readonly EngineObject[]): Promise<boolean> {
   for (const object of removes) {
@@ -146,6 +198,8 @@ async function lastOfRun(query: SqlQuery, removes: readonly EngineObject[]): Pro
 export async function runPlan(
   connect: SqlConnect,
   pgHost: string | undefined,
+  /** The worker login the plan's role block names (`workerRole` of the engine's suffix). */
+  workerLogin: string,
   target: EngineTarget,
   plan: EnginePlan,
   url: string,
@@ -170,6 +224,15 @@ export async function runPlan(
         if (workerPassword === undefined) {
           throw new Stop(NO_PASSWORD);
         }
+        // A plan holds a `secret` statement only when the login was absent as it was planned
+        // (planInstall). Read again here, in the run's transaction: a login that exists now was
+        // made by someone else since, and the role block would reset its password. The script took
+        // the login's lock as its third statement, right after its two `set local` lines
+        // (`loginLock`), and every script that may create the login takes it too, so none can
+        // create it between this read and the role block.
+        if ((await query(roleExists(workerLogin))).length > 0) {
+          throw new Stop(loginCreatedMeanwhile(workerLogin));
+        }
         const verifier = scramVerifier(workerPassword);
         verifiers.push(verifier);
         await query(PASSWORD_STATEMENT, [verifier]);
@@ -178,6 +241,9 @@ export async function runPlan(
       }
       done.push(statement);
     }
+    // Every statement ran: a failure from here (the reading below, or the commit) is after the
+    // last one, at the statement count, never blamed on the last statement.
+    at = plan.statements.length;
     return lastOfRun(query, plan.removes);
   };
   try {
@@ -193,7 +259,11 @@ export async function runPlan(
     // A transaction rolls back whole; without one, what ran before the stop stays. Nothing links
     // an object to a statement, so a stopped run reports none removed.
     const ran = plan.transactional ? [] : done;
-    const refusal = error instanceof Stop ? error.refusal : scriptRefusal(error, target, plan);
+    const refusal =
+      error instanceof Stop
+        ? error.refusal
+        : (loginLockTimeout(error, plan.statements[at], workerLogin) ??
+          scriptRefusal(error, target, plan));
     return {
       ran,
       stopped:

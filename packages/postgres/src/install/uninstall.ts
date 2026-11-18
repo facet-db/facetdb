@@ -11,7 +11,16 @@ import {
   type SqlQuery,
   type SqlRow,
 } from "../sql/index.ts";
-import { STORE_FUNCTIONS, STORE_TABLES, STORE_VERSION_TABLE, sourceIdOf } from "../store/index.ts";
+import {
+  deleteCursorsSql,
+  NOT_A_RESUME_ROW,
+  readResumeRows,
+  resumeRowsStatements,
+  STORE_FUNCTIONS,
+  STORE_TABLES,
+  STORE_VERSION_TABLE,
+  sourceIdOf,
+} from "../store/index.ts";
 import { type InstalledTable, readInstalled, SCRIPT_HEADER, settingsStatement } from "./catalog.ts";
 import {
   type InstallStatement,
@@ -72,12 +81,14 @@ export type UninstallSource = {
 /**
  * What uninstall removes, as the catalog showed it, and which source's log rows `purge` deletes:
  * `sourceId` is the id already resolved against the store, or undefined when no source was found
- * (the script then has no `delete` of the log at all).
+ * (the script then has no `delete` of the log at all). `resumeOf` is the source's store id
+ * (`sourceIdOf` of the table's project and the source's name), whose resume rows in
+ * `facetdb.cursors` go with or without a purge.
  */
 export type UninstallTarget = Pick<
   InstalledTable,
   "schema" | "table" | "project" | "marked" | "sideColumns" | "viewMarked"
-> & { readonly sourceId: string | undefined };
+> & { readonly sourceId: string | undefined; readonly resumeOf: string };
 
 /**
  * The source's decision log as resolved against the store: `found` names the id its rows are
@@ -115,7 +126,7 @@ export type ProjectKeptBy =
   /** The project's spending: its usage, reservations or alert marks. */
   | "usage"
   | "heartbeats"
-  /** An unfinished backfill cursor (cursors name no project, so any keeps every project). */
+  /** An unfinished backfill cursor that names no source (from an earlier version), so it keeps every project. */
   | "cursors"
   /** Records of one of the project's store sources. */
   | "records"
@@ -230,8 +241,16 @@ export type UninstallPlan = {
   readonly pendingElsewhere: number;
   /** After a plain uninstall that leaves a log nothing else uses, the command that deletes it. */
   readonly logOnlyPurge: LogOnlyPurge | undefined;
-  /** The run keys of unfinished backfill cursors (they keep every project and the shared tables). */
+  /**
+   * The run keys of unfinished backfill cursors that name no source (written by an earlier version;
+   * they keep every project and the shared tables).
+   */
   readonly unfinishedCursors: readonly string[];
+  /**
+   * The run keys of the source's resume rows in `facetdb.cursors`, which the script deletes with or
+   * without a purge; empty with the store elsewhere, where the CLI's store door reads them.
+   */
+  readonly resumeRows: readonly string[];
   /** With `--purge`: the project's other sources whose logs stay (none deleted but `log`'s). */
   readonly otherSourceLogs: readonly OtherSourceLog[];
   /** FacetDB objects the script leaves in place on purpose (an orphan side table), as `schema.table`. */
@@ -275,8 +294,13 @@ const PROJECT_STATE: readonly (readonly [table: string, column: string, kept: Pr
 /** A webhook still to be sent: neither delivered nor given up (retried for 24 hours). */
 const PENDING_DELIVERY = "delivered_at is null and gave_up_at is null";
 
-/** A backfill cursor a run would resume from; a finished one restarts from the top anyway. */
-const UNFINISHED_CURSOR = "not done";
+/**
+ * A backfill cursor that names no source and that a run would resume from (a finished one restarts
+ * from the top anyway): one written by an earlier version, which keeps every project. A source's
+ * resume rows (its backfills', its change stream's token, its Change Tracking version) are not:
+ * they go with the source's own uninstall (`resumeRowsStatements`).
+ */
+const UNFINISHED_CURSOR = `not done and ${NOT_A_RESUME_ROW}`;
 
 /**
  * The tables a polling install marked: no owner row names them, and their worker reads them through
@@ -388,6 +412,7 @@ end $$`,
     // The log before the marker and the shared tables: the purged source's registration is what
     // kept the store "in use", and with it gone the sweep below can see that nothing is.
     ...(options.purge ? purgeStatements(purged) : []),
+    ...resumeRowsDelete(source.resumeOf),
     projectMarkerStatement(),
     // The trigger functions are shared by every table of the database: each goes once no trigger calls it.
     plain(
@@ -571,6 +596,17 @@ end $$`,
 }
 
 /**
+ * The source's resume rows in `facetdb.cursors` (its backfills' places; a MongoDB or Change
+ * Tracking source keeps its token or version there too), with or without a purge: a reinstalled
+ * source must start from the top, never from a place its earlier install left. They serve the
+ * store: with the store elsewhere, the CLI's store door deletes them.
+ */
+function resumeRowsDelete(sourceId: string): readonly InstallStatement[] {
+  const [setting, remove] = resumeRowsStatements(sourceId);
+  return [plain("settings", setting, "store"), plain("data", remove, "store")];
+}
+
+/**
  * `facetdb.projects` goes last among the store's tables, after the purge block: once no project
  * remains and nothing that references it is left (the sweep dropped those with it empty).
  */
@@ -751,6 +787,8 @@ function logOnlyPurgeSql(target: {
     liveRecheckStatement(),
     sharedLogGuardStatement(),
     ...purgeStatements(target.sourceId),
+    // An uninstall from an earlier version left them: they go with the log the purge deletes.
+    ...resumeRowsDelete(target.sourceId),
     projectMarkerStatement(),
     sharedTablesStatement(),
     projectsTableStatement(),
@@ -1370,12 +1408,15 @@ function otherLogsNotes(logs: readonly OtherSourceLog[]): readonly string[] {
   );
 }
 
-/** When an unfinished backfill cursor alone keeps the project and the store's shared tables. */
+/** When an unfinished backfill cursor that names no source alone keeps the project and the shared tables. */
 function cursorNote(forecast: StoreForecast, projectId: string): string | undefined {
   if (forecast.projectKeptBy.length !== 1 || forecast.projectKeptBy[0] !== "cursors") {
     return undefined;
   }
-  return `the project ${projectId} and the store's shared tables stay because of an unfinished backfill cursor (run ${forecast.unfinishedCursors.join(", ")}); it keeps the shared tables until the backfill finishes or the cursor is deleted.`;
+  const runs = forecast.unfinishedCursors;
+  // Such a key names no source: it was written by an earlier version, and no backfill resumes it
+  // now.
+  return `the project ${projectId} and the store's shared tables stay because of an unfinished backfill cursor that names no source (run ${runs.join(", ")}); it was written before a backfill kept its place per source, no backfill resumes it any more, and it keeps the shared tables until it is deleted: ${deleteCursorsSql(runs)}`;
 }
 
 function pendingNote(n: number, projectId: string): string | undefined {
@@ -1563,6 +1604,7 @@ async function draftLogOnlyPurge(
     purge: true,
     log,
     ...forecast,
+    resumeRows: options.store ? await readResumeRows(query, log.sourceId) : [],
     logOnlyPurge: undefined,
     otherSourceLogs: [],
     leftInPlace: [],
@@ -1614,11 +1656,14 @@ export async function draftUninstall(
     ? await resolveTableLog(query, installed, options.source.name)
     : { status: "not-found", given: options.source.name, found: [], logged: 0 };
   const purgedSourceId = purge && log.status === "found" ? log.sourceId : undefined;
+  // The source's resume rows are keyed as its log is: by the table's project and the source's
+  // name, whether or not the store registers the source.
+  const resumeOf = sourceIdOf(installed.project.id, options.source.name);
   // The log is keyed by the table's project and the source's name (`sourceIdOf`), so no other
   // installed table shares it, and `resolveTableLog` never resolves a live store source (one
   // with records); the transaction checks both again (`sharedLogGuardStatement`).
   const statements = uninstallSql(
-    { ...installed, sourceId: purgedSourceId },
+    { ...installed, sourceId: purgedSourceId, resumeOf },
     { purge, ...(options.roleSuffix === undefined ? {} : { roleSuffix: options.roleSuffix }) },
   );
   const forecast = await forecastStore(query, {
@@ -1666,6 +1711,7 @@ export async function draftUninstall(
     purge,
     log,
     ...forecast,
+    resumeRows: options.store ? await readResumeRows(query, resumeOf) : [],
     // An orphan side table left in place keeps the schema from being empty.
     schemaDropped: forecast.schemaDropped && orphan === undefined,
     logOnlyPurge: later,

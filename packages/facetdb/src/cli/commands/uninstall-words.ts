@@ -50,6 +50,27 @@ export function sourceLog(source: string, decisions: number, versions: number): 
   return `the decision log of source ${source} (${logSize(decisions, versions)})`;
 }
 
+/** Where a source's resume rows are in the store: its backfills' places, a stream's token. */
+const CURSORS = "facetdb.cursors";
+
+/**
+ * The phrase of a source's resume rows, which every uninstall of it deletes. Named by its source,
+ * never "its": a run of several sources says each one's, and `once` keeps every phrase that
+ * differs.
+ */
+export function resumeRows(source: string, rows: number): string {
+  return `the resume rows of source ${source} in ${CURSORS} (${counted(rows, "row", "rows")})`;
+}
+
+/** A plan's object for a source's resume rows: the cursors table, its source as `of`, counted. */
+const isResumeRows = (
+  object: EngineObject,
+): object is EngineObject & { readonly of: string; readonly count: number } =>
+  object.kind === "store-table" &&
+  object.name === CURSORS &&
+  object.of !== undefined &&
+  object.count !== undefined;
+
 /** What each kind is called where the phrases do not word it. */
 const NOUNS: Readonly<Record<ObjectKind, string>> = {
   column: "column",
@@ -136,7 +157,9 @@ function entrySize(entry: {
  */
 export function tableRemoved(removes: readonly EngineObject[]): readonly string[] {
   const own = removes.filter((object) => object.scope === "source");
-  const table = own.find((object) => object.kind !== "log")?.of;
+  // A source's log and its resume rows are the store's, said after the table's own words.
+  const table = own.find((object) => object.kind !== "log" && !isResumeRows(object))?.of;
+  const resume: string[] = [];
   const columns: string[] = [];
   const fields: string[] = [];
   const sideTables: string[] = [];
@@ -185,12 +208,19 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
       case "grant":
         grants.push(`the ${object.name} login's rights on it`);
         break;
+      case "store-table":
+        if (isResumeRows(object)) {
+          // A source's resume rows: their own phrase, after its log's.
+          resume.push(resumeRows(object.of, object.count));
+        } else {
+          others.push(plainly(object, table));
+        }
+        break;
       case "function":
       case "schema":
       case "login":
       case "index":
       case "collection":
-      case "store-table":
         others.push(plainly(object, table));
         break;
       case "log":
@@ -227,6 +257,7 @@ export function tableRemoved(removes: readonly EngineObject[]): readonly string[
     ...logEntries(own).map(
       (entry) => `the decision log of source ${entry.source} (${entrySize(entry)})`,
     ),
+    ...resume,
   ];
 }
 

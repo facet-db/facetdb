@@ -13,10 +13,13 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import { buildRequest } from "../requests/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
 import {
+  BACKFILL_RUN_PREFIX,
+  BACKFILL_RUN_SUFFIX,
   type BackfillDeps,
   type BackfillProgress,
   type BackfillReport,
   type BackfillWorker,
+  backfillRun,
   type CursorStore,
   createBackfill,
 } from "./backfill.ts";
@@ -263,6 +266,8 @@ async function rig(rows: number, pageSize = 10): Promise<Rig> {
     cursors,
     journal,
     deps: (worker, questionSet = SCAM_ONLY, version = 1) => ({
+      project: "proj_market",
+      source: "listings",
       connector: connector as Connector,
       worker,
       clock,
@@ -465,6 +470,8 @@ describe("backfill pacing", () => {
     await connector.install();
     const worker = new ScriptedWorker(clock, []);
     const backfill = createBackfill({
+      project: "proj_market",
+      source: "listings",
       connector,
       worker,
       clock,
@@ -547,6 +554,82 @@ describe("backfill resume", () => {
     // Every record was asked exactly once overall.
     expect(worker.requests).toHaveLength(25);
     expect(r.cursors.saves.at(-1)?.progress).toEqual({ cursor: null, done: true });
+  });
+
+  it("keeps two sources at one question-set version on cursors of their own, each resuming from its own place", async () => {
+    // One store of cursors for the project, as the FacetDB store keeps one table for every source.
+    const listings = await rig(25);
+    const orders = await rig(25);
+    const cursors = listings.cursors;
+    const worker = new ScriptedWorker(listings.clock, listings.journal);
+    const ordersWorker = new ScriptedWorker(orders.clock, orders.journal);
+    const listingsDeps = () => listings.deps(worker);
+    const ordersDeps = () => ({
+      ...orders.deps(ordersWorker),
+      source: "orders",
+      cursorStore: cursors,
+    });
+
+    // Listings stops on its second page, orders on its third: two different saved places.
+    listings.connector.failEnqueue = (key) => key === "k14";
+    orders.connector.failEnqueue = (key) => key === "k4";
+    expect((await createBackfill(listingsDeps()).run({ pace: 2, onEstimate: yes })).status).toBe(
+      "stopped",
+    );
+    const ordersFirst = await createBackfill(ordersDeps()).run({ pace: 2, onEstimate: yes });
+    expect(ordersFirst.status).toBe("stopped");
+    // Orders started at its own top, not at the place listings saved a moment before.
+    expect(orders.connector.scans[0]).toBeNull();
+    const placeOf = async (source: string) =>
+      (await cursors.load(`backfill:proj_market:${source}:all@v1`))?.cursor;
+    const listingsPlace = await placeOf("listings");
+    const ordersPlace = await placeOf("orders");
+    expect(listingsPlace).not.toBeNull();
+    expect(ordersPlace).not.toBeNull();
+    expect(ordersPlace).not.toEqual(listingsPlace);
+    expect(new Set(cursors.saves.map(({ run }) => run))).toEqual(
+      new Set(["backfill:proj_market:listings:all@v1", "backfill:proj_market:orders:all@v1"]),
+    );
+
+    // A restart of each, in the other order: each resumes where it stopped, and finishes.
+    orders.connector.failEnqueue = () => false;
+    orders.connector.scans.length = 0;
+    listings.connector.failEnqueue = () => false;
+    listings.connector.scans.length = 0;
+    expect((await createBackfill(ordersDeps()).run({ pace: 2, onEstimate: yes })).status).toBe(
+      "completed",
+    );
+    expect((await createBackfill(listingsDeps()).run({ pace: 2, onEstimate: yes })).status).toBe(
+      "completed",
+    );
+    expect(orders.connector.scans[0]).toBe(ordersPlace);
+    expect(listings.connector.scans[0]).toBe(listingsPlace);
+    expect(await cursors.load("backfill:proj_market:orders:all@v1")).toEqual({
+      cursor: null,
+      done: true,
+    });
+    expect(await cursors.load("backfill:proj_market:listings:all@v1")).toEqual({
+      cursor: null,
+      done: true,
+    });
+  });
+
+  it("keys a run by project, source and kind, each key's tail a whole BACKFILL_RUN_SUFFIX", () => {
+    expect(backfillRun("proj_a", "listings", 3, undefined)).toBe("backfill:proj_a:listings:all@v3");
+    expect(backfillRun("proj_a", "listings", 3, ["spam", "category"])).toBe(
+      "backfill:proj_a:listings:only@v3:category,spam",
+    );
+    const suffix = new RegExp(BACKFILL_RUN_SUFFIX);
+    const tail = (key: string, project: string, source: string) =>
+      key.slice(`${BACKFILL_RUN_PREFIX}${project}:${source}:`.length);
+    expect(tail(backfillRun("p", "a", 12, undefined), "p", "a")).toMatch(suffix);
+    expect(tail(backfillRun("p", "a", 2, ["spam", "is_scam"]), "p", "a")).toMatch(suffix);
+    // A project's id may hold `:all@v` (a directory's name): project `p:a:all@v2`'s source `x`
+    // begins with project `p` source `a`'s prefix, and only the whole tail tells them apart.
+    const theirs = backfillRun("p:a:all@v2", "x", 1, undefined);
+    expect(theirs).toBe("backfill:p:a:all@v2:x:all@v1");
+    expect(theirs.startsWith("backfill:p:a:all@v")).toBe(true);
+    expect(tail(theirs, "p", "a")).not.toMatch(suffix);
   });
 
   it("saves the cursor after every page, and the last save says done", async () => {

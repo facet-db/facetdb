@@ -461,7 +461,13 @@ export function processDeps(
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
         const connector = await sourceConnector(deps, config, source, mode.allowInsecure === true);
         return {
-          deps: wireBackfillDryRun({ config, source, connector, clock }),
+          deps: wireBackfillDryRun({
+            config,
+            source,
+            project: projectRef(projectDir),
+            connector,
+            clock,
+          }),
           close: () => connector.close(),
         };
       }

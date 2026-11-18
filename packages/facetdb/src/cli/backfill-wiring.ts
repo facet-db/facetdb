@@ -36,6 +36,7 @@ const NO_CAP = { inputTokens: Number.MAX_SAFE_INTEGER, onCapReached: "continue" 
 export type DryRunWiring = {
   readonly config: ProjectConfig;
   readonly source: SourceConfig;
+  readonly project: ProjectRef;
   readonly connector: Connector;
   readonly clock: Clock;
 };
@@ -53,6 +54,8 @@ function neverDoes(what: string): never {
 export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
   const { config, source, clock } = wiring;
   return {
+    project: wiring.project.id,
+    source: source.name,
     connector: wiring.connector,
     worker: { ask: () => neverDoes("asks the model") },
     clock,
@@ -95,6 +98,10 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
   const version = await store.questionSets.record(sourceId, questionSet);
   const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
   return {
+    // The run's key in the store's cursors carries both: two sources at one question-set version
+    // never resume from each other's place.
+    project: project.id,
+    source: source.name,
     connector: wiring.connector,
     worker: wiring.provider,
     clock,

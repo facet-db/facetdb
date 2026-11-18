@@ -321,8 +321,12 @@ describe("run", () => {
         workerPassword: "another-long-random-password",
       }),
     );
+    // Neither the password nor the login's lock, which only a script that creates the login takes.
     expect(second.statements).toEqual(
-      first.statements.filter((statement) => statement.secret !== true),
+      first.statements.filter(
+        (statement) =>
+          statement.secret !== true && !statement.text.includes("hashtext('facetdb:login:"),
+      ),
     );
     expect(await engine.run(target(), second, ADMIN, shared)).toEqual({
       ran: second.statements,
@@ -331,6 +335,96 @@ describe("run", () => {
     });
     expect(await catalog()).toEqual(before);
     expect(await workerPassword()).toBe(hash);
+  });
+
+  it("prints the login's lock first in a plan that creates the login, and in no other", async () => {
+    await listingsTable();
+    const LOCK = "select pg_advisory_xact_lock(hashtext('facetdb:login:facetdb_worker'))";
+    for (const deps of [shared, separate]) {
+      const first = planOf(
+        await engine.planInstall(target(), ADMIN, { ...deps, workerPassword: PASSWORD }),
+      );
+      // Right after the transaction's settings, before anything else, and before the secret.
+      expect(first.statements.slice(0, 3)).toEqual([
+        {
+          database: "source",
+          purpose: "settings",
+          text: "set local standard_conforming_strings = on",
+        },
+        { database: "source", purpose: "settings", text: "set local lock_timeout = '10s'" },
+        { database: "source", purpose: "settings", text: LOCK },
+      ]);
+      expect(first.statements.filter((statement) => statement.text === LOCK)).toHaveLength(1);
+      expect(engine.render(first)).toContain(`${LOCK};\n`);
+    }
+    const plan = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    expect(
+      (await engine.run(target(), plan, ADMIN, { ...shared, workerPassword: PASSWORD })).stopped,
+    ).toBeUndefined();
+    // The login exists now: no secret statement, so no lock either.
+    const second = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    expect(second.statements.some((statement) => statement.secret === true)).toBe(false);
+    expect(engine.render(second)).not.toContain("pg_advisory_xact_lock(hashtext('facetdb:login:");
+  });
+
+  it("says another project's migrate holds the login when the wait on its lock passes lock_timeout, and only then", async () => {
+    await listingsTable();
+    const plan = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    const LOCK = "select pg_advisory_xact_lock(hashtext('facetdb:login:facetdb_worker'))";
+    /** A driver whose statement `failing` times out, as the server says it (SQLSTATE 55P03). */
+    const timingOut =
+      (failing: (text: string) => boolean): SqlConnect =>
+      () => ({
+        ...world.client,
+        transaction: (work) =>
+          world.client.transaction((query) =>
+            work(async (text, params) => {
+              if (failing(text)) {
+                throw Object.assign(new Error("canceling statement due to lock timeout"), {
+                  code: "55P03",
+                });
+              }
+              return query(text, params);
+            }),
+          ),
+      });
+    const run = (connect: SqlConnect) =>
+      createPostgresEngine({ connect, pgHost: undefined }).run(target(), plan, ADMIN, {
+        ...shared,
+        workerPassword: PASSWORD,
+      });
+    expect(await run(timingOut((text) => text === LOCK))).toEqual({
+      ran: [],
+      stopped: {
+        at: plan.statements.findIndex((statement) => statement.text === LOCK),
+        refusal: {
+          code: "worker-login-busy",
+          message:
+            "another project's migrate is creating the worker login facetdb_worker at this moment, and this run waited 10 seconds for it; nothing was changed (the transaction rolled back after its two set local lines)",
+          fix: "run facetdb migrate again once that migrate has finished: it then finds the login and keeps its password",
+        },
+      },
+      removed: [],
+      notes: [],
+    });
+    expect(plan.statements.findIndex((statement) => statement.text === LOCK)).toBe(2);
+    // A timeout on another statement (a busy table the install alters) keeps the server's words.
+    const alter = plan.statements.findIndex((statement) =>
+      statement.text.startsWith("alter table"),
+    );
+    expect(await run(timingOut((text) => text.startsWith("alter table")))).toEqual({
+      ran: [],
+      stopped: { at: alter, error: "canceling statement due to lock timeout" },
+      removed: [],
+      notes: [],
+    });
+    expect(await present("facetdb.jobs")).toBe(false);
   });
 
   it("puts neither the password nor a verifier in a plan, its script or a run's result", async () => {
@@ -399,6 +493,96 @@ describe("run", () => {
           message: "this plan sets the worker login's password, and the run was given none",
           fix: "set the source's connection string to the worker login with its password",
         },
+      },
+      removed: [],
+      notes: [],
+    });
+    expect(await present("facetdb.jobs")).toBe(false);
+  });
+
+  it("stops at the secret statement, keeping the login's password, when another project created the login since the plan", async () => {
+    await listingsTable();
+    await world.client.query(
+      "create table public.orders (id serial primary key, title text, description text)",
+    );
+    const plan = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    // Another project's migrate, between this plan and its run: it creates the login.
+    const theirs = target({
+      project: { id: "proj_b", name: "Bee" },
+      source: "orders",
+      table: "orders",
+    });
+    const other = planOf(
+      await engine.planInstall(theirs, ADMIN, {
+        ...shared,
+        workerPassword: "their-long-random-password",
+      }),
+    );
+    expect(
+      (
+        await engine.run(theirs, other, ADMIN, {
+          ...shared,
+          workerPassword: "their-long-random-password",
+        })
+      ).stopped,
+    ).toBeUndefined();
+    const hash = await workerPassword();
+    const before = await catalog();
+
+    expect(
+      await engine.run(target(), plan, ADMIN, { ...shared, workerPassword: PASSWORD }),
+    ).toEqual({
+      ran: [],
+      stopped: {
+        at: plan.statements.findIndex((statement) => statement.secret === true),
+        refusal: {
+          code: "worker-login-created",
+          message:
+            "the worker login facetdb_worker was created meanwhile, by another project's migrate; its password was left as it is and nothing was changed",
+          fix: "run facetdb migrate again, which keeps it",
+        },
+      },
+      removed: [],
+      notes: [],
+    });
+    expect(await workerPassword()).toBe(hash);
+    expect(await catalog()).toEqual(before);
+    // Planned again, the install keeps the login as it is: no secret statement, and it runs.
+    const again = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    expect(again.statements.some((statement) => statement.secret === true)).toBe(false);
+    expect((await engine.run(target(), again, ADMIN, shared)).stopped).toBeUndefined();
+    expect(await workerPassword()).toBe(hash);
+  });
+
+  it("stops after the last statement, at the statement count, when the commit fails", async () => {
+    await listingsTable();
+    const plan = planOf(
+      await engine.planInstall(target(), ADMIN, { ...shared, workerPassword: PASSWORD }),
+    );
+    // Every statement runs; the transaction then fails as a commit that loses would.
+    const failingCommit: SqlConnect = () => ({
+      ...world.client,
+      transaction: (work) =>
+        world.client.transaction(async (query) => {
+          await work(query);
+          throw new Error("could not serialize access due to read/write dependencies");
+        }),
+    });
+    const result = await createPostgresEngine({ connect: failingCommit, pgHost: undefined }).run(
+      target(),
+      plan,
+      ADMIN,
+      { ...shared, workerPassword: PASSWORD },
+    );
+    expect(result).toEqual({
+      ran: [],
+      stopped: {
+        at: plan.statements.length,
+        error: "could not serialize access due to read/write dependencies",
       },
       removed: [],
       notes: [],

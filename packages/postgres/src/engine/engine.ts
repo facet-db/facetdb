@@ -13,7 +13,8 @@ import {
   draftPrune,
   draftUninstall,
   type MigrateSource,
-  WORKER_ROLE,
+  type RoleSuffix,
+  workerRole,
 } from "../install/index.ts";
 import { connectPostgres, quoteIdent, type SqlClient, type SqlConnect } from "../sql/index.ts";
 import { STORE_VERSION_TABLE } from "../store/index.ts";
@@ -96,6 +97,12 @@ export type PostgresEngineOptions = {
    * would pass the TLS refusal. `undefined` takes such a URL as this machine's.
    */
   readonly pgHost: string | undefined;
+  /**
+   * The install's own role names (`RoleSuffix`), for the real-Postgres suites, which share one
+   * server: the plans' scripts and `run`'s login check name `facetdb_worker<suffix>`. Tests only;
+   * the composition root never passes it. The plans' words still say `facetdb_worker`.
+   */
+  readonly roleSuffix?: RoleSuffix;
 };
 
 /** What Postgres can do, as the capture connector declares it (the default driver can LISTEN). */
@@ -155,7 +162,9 @@ function tableOf(target: EngineTarget): { readonly table: string; readonly schem
 }
 
 export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEngine {
-  const { connect, pgHost } = options;
+  const { connect, pgHost, roleSuffix } = options;
+  const login = workerRole(roleSuffix);
+  const suffixed = roleSuffix === undefined ? {} : { roleSuffix };
 
   /** Plans with the admin URL: opened for the call, closed whatever happens, kept nowhere. */
   async function withAdmin<T>(url: string, work: (client: SqlClient) => Promise<T>): Promise<T> {
@@ -207,7 +216,7 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
       }
       return withAdmin(url, async ({ query }) => {
         // An existing login keeps its password: other projects on the server may share it.
-        const exists = (await query(ROLE_EXISTS, [WORKER_ROLE])).length > 0;
+        const exists = (await query(ROLE_EXISTS, [login])).length > 0;
         if (!exists && installOptions.workerPassword === undefined) {
           // The contract's code, before anything is drafted, as the CLI refused before printing:
           // the CLI words it from the source's connection string.
@@ -215,8 +224,8 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
             ok: false,
             refusal: {
               code: "worker-login",
-              message: `the worker login ${WORKER_ROLE} does not exist yet, and no password was given to create it with`,
-              fix: `put the worker login and a long random password in ${subjectOf(target)}: postgres://${WORKER_ROLE}:<a long random password>@<host>/<database>; the install creates the login with that password`,
+              message: `the worker login ${login} does not exist yet, and no password was given to create it with`,
+              fix: `put the worker login and a long random password in ${subjectOf(target)}: postgres://${login}:<a long random password>@<host>/<database>; the install creates the login with that password`,
             },
           };
         }
@@ -230,6 +239,7 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
           source,
           questionSet: target.questionSet,
           project: target.project,
+          ...suffixed,
           ...(exists || installOptions.workerPassword === undefined
             ? {}
             : { workerPassword: installOptions.workerPassword }),
@@ -254,6 +264,7 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
             table: other.table,
           })),
           store: uninstallOptions.storeShared,
+          ...suffixed,
         });
         if (!draft.ok) {
           return refusedPlan("uninstall-refused", draft.reason);
@@ -281,6 +292,7 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
           source: tableOf(target),
           questionSet: target.questionSet,
           project: target.project,
+          ...suffixed,
         });
         if (draft.ok) {
           return { ok: true, plan: prunePlan(draft) };
@@ -294,7 +306,8 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
 
     render,
 
-    run: (target, plan, url, runOptions) => runPlan(connect, pgHost, target, plan, url, runOptions),
+    run: (target, plan, url, runOptions) =>
+      runPlan(connect, pgHost, login, target, plan, url, runOptions),
 
     checkUrl: (target, url, deps) =>
       workerUrlRefusal(url, deps.allowInsecure, pgHost, subjectOf(target)),

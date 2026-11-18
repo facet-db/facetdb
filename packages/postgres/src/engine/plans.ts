@@ -21,9 +21,9 @@ import {
 import { STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
 
 /**
- * Today's install, uninstall and prune, as the engine contract's plans: every statement
- * as printed, tagged by the database it serves; what goes and what stays as typed objects carrying
- * the words the CLI prints today. The old-field → new-place table is in engine.ts.
+ * Today's install, uninstall and prune, as the engine contract's plans: every statement as printed,
+ * tagged by the database it serves; what goes and what stays as typed objects carrying the words
+ * the CLI prints today. The old-field → new-place table is in engine.ts.
  */
 
 /** The fix of every refusal of a plan, as the CLI words it today (`refused` in its database.ts). */
@@ -125,6 +125,8 @@ const OWNERS = "facetdb.table_owners";
 const PROJECTS = "facetdb.projects";
 const DECISIONS = "facetdb.decisions";
 const VERSIONS = "facetdb.question_set_versions";
+/** Where a source's resume rows are: its backfills' places, and a stream's token. */
+const CURSORS = "facetdb.cursors";
 
 /**
  * The store's shared tables, as the uninstall's sweep drops them once no project remains: every
@@ -185,7 +187,7 @@ function sharedTablesReasons(plan: UninstallPlan): readonly string[] {
         break;
       case "cursors":
         store.push(
-          `a backfill is unfinished (run ${inWords(plan.unfinishedCursors)}; it finishes, or its cursor is deleted)`,
+          `a backfill cursor that names no source is unfinished (run ${inWords(plan.unfinishedCursors)}; no backfill resumes it, so it stays until it is deleted)`,
         );
         break;
       default:
@@ -275,6 +277,19 @@ function tableRemoves(plan: UninstallPlan, storeShared: boolean): readonly Engin
         ]),
     ...(storeShared && plan.purge && plan.log.status === "found"
       ? logEntries(plan.log.given, plan.log)
+      : []),
+    // The source's resume rows go with or without a purge: its own, so `source`-scoped, and named
+    // by the source (`of`), since a run of several sources deletes each one's.
+    ...(storeShared && plan.resumeRows.length > 0
+      ? [
+          {
+            kind: "store-table",
+            name: CURSORS,
+            of: plan.log.given,
+            scope: "source",
+            count: plan.resumeRows.length,
+          } satisfies EngineObject,
+        ]
       : []),
   ];
 }
@@ -393,8 +408,8 @@ function runKeeps(
 /**
  * An uninstall's plan: the table's own removes and keeps (`scope: "source"`), then the run's
  * (`scope: "run"`), each in the order the CLI words them; the name typed back is the project's for
- * a table, the source's for a log-only purge. Without `storeShared` the log and the store's
- * tables are the CLI's store door's: no statement, object or note of theirs is here.
+ * a table, the source's for a log-only purge. Without `storeShared` the log and the store's tables
+ * are the CLI's store door's: no statement, object or note of theirs is here.
  */
 export function uninstallPlan(
   draft: Extract<UninstallDraft, { readonly ok: true }>,

@@ -92,10 +92,9 @@ export type InstallStatement = {
   /** What part of the script it is, as the engine's plan names it. */
   readonly purpose: StatementPurpose;
   /**
-   * The database it serves, by the table it serves and never by the function that wrote it
-   *: `store` for the FacetDB store's own tables, which the engine
-   * plans only when the store is the source's database; `source` for everything the source's
-   * database needs whatever the store.
+   * The database it serves, by the table it serves and never by the function that wrote it: `store`
+   * for the FacetDB store's own tables, which the engine plans only when the store is the source's
+   * database; `source` for everything the source's database needs whatever the store.
    */
   readonly database: StatementDatabase;
 };
@@ -185,8 +184,8 @@ export function anotherProject(table: string, owner: string): string {
 
 /**
  * The project a message of `anotherProject` names for this table (`schema.table`), or undefined
- * when the message is any other: the engine's `run` reads the script's own owner check by it
- *, never by a guess at the words.
+ * when the message is any other: the engine's `run` reads the script's own owner check by it, never
+ * by a guess at the words.
  */
 export function anotherProjectOwner(table: string, message: string): string | undefined {
   const marker = "\u0000";
@@ -374,6 +373,14 @@ end $$`;
  * trigger`), the roles and the policies created only when absent. Running it twice changes nothing;
  * a password given on a later run resets the worker's password and nothing else.
  */
+/**
+ * The transaction-scoped lock of one worker login's creation, keyed on its name (`workerRole`'s
+ * letters, digits and `_`, written as a literal): taken by every script that may create it.
+ */
+export function loginLock(login: string): string {
+  return `select pg_advisory_xact_lock(hashtext(${quoteLiteral(`facetdb:login:${login}`)}))`;
+}
+
 export function installSql(
   source: TableSource,
   questionSet: QuestionSet,
@@ -414,6 +421,12 @@ export function installSql(
     // The `alter table` statements take ACCESS EXCLUSIVE on the customer's table: better a failed
     // migrate after ten seconds than the application's queries piling up behind it.
     plain("settings", "set local lock_timeout = '10s'"),
+    // A script that creates the worker login (it was absent when planned) holds the login's lock
+    // for its whole transaction, first of all, so two first installs on one server (two projects)
+    // run one after the other: the second, once the first commits, finds the login and stops at its
+    // password statement (the engine's run) instead of resetting the first's password. The store's
+    // migrations take a lock of the same family (`hashtext`).
+    ...(options.workerPassword === undefined ? [] : [plain("settings", loginLock(workerName))]),
     // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
     // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
     ...storeInstallStatements().map(storeStatement),

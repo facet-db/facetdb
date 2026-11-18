@@ -75,6 +75,45 @@ describe("the words for a kind the phrases do not cover", () => {
  * queue and the marks as the engine spells them, the trigger or the Change Tracking turned off, the
  * side table and view, MongoDB's role and user; nothing kept, no keeps line.
  */
+describe("a source's resume rows", () => {
+  const rows = (of: string, count: number): EngineObject => ({
+    kind: "store-table",
+    name: "facetdb.cursors",
+    of,
+    scope: "source",
+    count,
+  });
+
+  it("are said by their source after its log, never inside the table's words", () => {
+    expect(
+      tableRemoved([
+        rows("orders", 2),
+        { kind: "column", name: "is_scam", of: TABLE, scope: "source" },
+        { kind: "log", name: "facetdb.decisions", of: "orders", scope: "source", count: 3 },
+      ]),
+    ).toEqual([
+      "from public.orders: 1 FacetDB column (is_scam)",
+      "the decision log of source orders (3 decisions)",
+      "the resume rows of source orders in facetdb.cursors (2 rows)",
+    ]);
+  });
+
+  it("stand alone in a log-only purge, which has no table words", () => {
+    expect(tableRemoved([rows("orders", 1)])).toEqual([
+      "the resume rows of source orders in facetdb.cursors (1 row)",
+    ]);
+  });
+
+  it("stay two phrases in a run of two sources, as `once` keeps them", () => {
+    expect(
+      once([...tableRemoved([rows("orders", 1)]), ...tableRemoved([rows("items", 1)])]),
+    ).toEqual([
+      "the resume rows of source orders in facetdb.cursors (1 row)",
+      "the resume rows of source items in facetdb.cursors (1 row)",
+    ]);
+  });
+});
+
 describe("the words of every engine's plan", () => {
   const MSSQL = "dbo.listings";
   const own = (kind: EngineObject["kind"], name: string): EngineObject => ({

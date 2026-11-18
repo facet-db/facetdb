@@ -402,10 +402,12 @@ describe("what an uninstall keeps while it is in use", () => {
     await q(`insert into facetdb.cursors (run, cursor, done) values ('v1', 'c-17', false)`);
     const cursor = await plans();
     expect(cursor.plan.keeps.filter((object) => object.kind === "store-table")).toEqual(
-      shared_("a backfill is unfinished (run v1; it finishes, or its cursor is deleted)"),
+      shared_(
+        "a backfill cursor that names no source is unfinished (run v1; no backfill resumes it, so it stays until it is deleted)",
+      ),
     );
     expect(cursor.plan.notes).toEqual([
-      `the project ${project.id} and the store's shared tables stay because of an unfinished backfill cursor (run v1); it keeps the shared tables until the backfill finishes or the cursor is deleted.`,
+      `the project ${project.id} and the store's shared tables stay because of an unfinished backfill cursor that names no source (run v1); it was written before a backfill kept its place per source, no backfill resumes it any more, and it keeps the shared tables until it is deleted: delete from facetdb.cursors where run in ('v1');`,
     ]);
     await q(
       `insert into facetdb.usage (project_id, month, input_tokens) values ('${project.id}', '2026-11', 4200)`,
@@ -414,9 +416,57 @@ describe("what an uninstall keeps while it is in use", () => {
     const usage = await plans();
     expect(usage.plan.keeps.filter((object) => object.kind === "store-table")).toEqual(
       shared_(
-        "project proj_listings still has usage and worker heartbeats and a backfill is unfinished (run v1; it finishes, or its cursor is deleted)",
+        "project proj_listings still has usage and worker heartbeats and a backfill cursor that names no source is unfinished (run v1; no backfill resumes it, so it stays until it is deleted)",
       ),
     );
+  });
+
+  it("names the source's resume rows among its own removes, deletes them, and keeps nothing for them", async () => {
+    await freshWorld();
+    await install();
+    for (const run of [`backfill:${LOG_ID}:all@v1`, `mongo:${LOG_ID}`]) {
+      await q(`insert into facetdb.cursors (run, cursor, done) values ($1, 'k', false)`, [run]);
+    }
+    const { plan } = await plans();
+    expect(plan.removes.filter((object) => object.kind === "store-table")).toEqual([
+      // The source's own rows, not the run's: a run of several sources deletes each one's.
+      { kind: "store-table", name: "facetdb.cursors", of: SOURCE_ID, scope: "source", count: 2 },
+      // And with nothing else left, the sweep: the rows never kept the shared tables.
+      ...shared_("no project remains"),
+    ]);
+    expect(plan.notes).toEqual([]);
+    const deletes = plan.statements.filter((statement) =>
+      statement.text.includes("delete from facetdb.cursors"),
+    );
+    expect(deletes.map((statement) => [statement.database, statement.purpose])).toEqual([
+      ["store", "data"],
+    ]);
+    // Another project keeps the shared tables (and lets a plan made as if the store were elsewhere
+    // pass its store-left-behind refusal).
+    await q(`insert into facetdb.projects (id, name) values ('proj_b', 'B')`);
+    // With the store elsewhere the store door deletes them: no statement and no word of them here.
+    const separatePlan = planOf(
+      await engine.planUninstall(target(), ADMIN, {
+        ...shared,
+        storeShared: false,
+        purge: false,
+        alsoUninstalling: [],
+      }),
+    );
+    expect(engine.render(separatePlan)).not.toContain("delete from facetdb.cursors");
+    expect(separatePlan.removes.some((object) => object.name === "facetdb.cursors")).toBe(false);
+    // The shared tables stay: the run deletes the rows and reports them removed.
+    const kept = (await plans()).plan;
+    const result = await engine.run(target(), kept, ADMIN, shared);
+    expect(result.stopped).toBeUndefined();
+    expect(result.removed).toContainEqual({
+      kind: "store-table",
+      name: "facetdb.cursors",
+      of: SOURCE_ID,
+      scope: "source",
+      count: 2,
+    });
+    expect(await count(`select 1 from facetdb.cursors`)).toBe(0);
   });
 
   it("a trigger with no owner row keeps the queue and the functions, and says which", async () => {

@@ -4,6 +4,8 @@ set local standard_conforming_strings = on;
 
 set local lock_timeout = '10s';
 
+select pg_advisory_xact_lock(hashtext('facetdb:login:facetdb_worker'));
+
 create schema if not exists "facetdb";
 
 create table if not exists facetdb.store_migrations (
@@ -232,6 +234,10 @@ end
 $$;
 
 insert into facetdb.store_migrations (version) values (4) on conflict (version) do nothing;
+
+create index if not exists decisions_by_source on facetdb.decisions (source_id, id);
+
+insert into facetdb.store_migrations (version) values (5) on conflict (version) do nothing;
 
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,

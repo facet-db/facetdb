@@ -9,6 +9,13 @@ export {
   storePurgeStatements,
 } from "./purge.ts";
 export {
+  deleteCursorsSql,
+  NOT_A_RESUME_ROW,
+  RESUME_RUN_PREFIXES,
+  readResumeRows,
+  resumeRowsStatements,
+} from "./resume-rows.ts";
+export {
   migrateStore,
   PROJECTS_TABLE_SQL,
   rekeyNotes,

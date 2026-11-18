@@ -13,8 +13,8 @@ import {
 } from "../testing/index.ts";
 
 /**
- * What `uninstall` keeps on PGlite: the shared queue, the store's tables and a project's
- * pending deliveries and backfills while anything still uses them. The uninstall itself is
+ * What `uninstall` keeps on PGlite: the shared queue, the store's tables and a project's pending
+ * deliveries and backfills while anything still uses them. The uninstall itself is
  * uninstall.test.ts (split by subject so no file passes 10 s).
  */
 
@@ -199,10 +199,70 @@ describe("uninstall keeps a project's pending state", () => {
       unfinishedCursors: ["v1"],
     });
     expect(result.ok && result.notes).toContain(
-      `the project ${project.id} and the store's shared tables stay because of an unfinished backfill cursor (run v1); it keeps the shared tables until the backfill finishes or the cursor is deleted.`,
+      `the project ${project.id} and the store's shared tables stay because of an unfinished backfill cursor that names no source (run v1); it was written before a backfill kept its place per source, no backfill resumes it any more, and it keeps the shared tables until it is deleted: delete from facetdb.cursors where run in ('v1');`,
     );
     expect(await q(`select id from facetdb.projects`)).toEqual([{ id: project.id }]);
     expect(await present("facetdb.cursors")).toBe(true);
+  });
+
+  /** The source's resume rows: its backfills' places, a stream's token, a CT version. */
+  const OWN_RUNS = [
+    `backfill:${project.id}:listings:all@v1`,
+    `backfill:${project.id}:listings:only@v2:category`,
+    `ct:${project.id}:listings`,
+    `mongo:${project.id}:listings`,
+  ];
+  /** Rows that are not this source's: another source of the project, and a project whose id holds a colon. */
+  const OTHER_RUNS = [
+    `backfill:${project.id}:orders:all@v1`,
+    `backfill:${project.id}:listings:x:all@v1`,
+    `mongo:${project.id}:listings_old`,
+  ];
+
+  async function resumeRows(runs: readonly string[]): Promise<void> {
+    for (const run of runs) {
+      await q(`insert into facetdb.cursors (run, cursor, done) values ($1, 'c-17', false)`, [run]);
+    }
+  }
+
+  it("deletes the source's resume rows with a plain uninstall, and never counts them as an unfinished backfill", async () => {
+    await freshWorld();
+    await install();
+    // Another project keeps the shared tables, so what the delete leaves is there to read.
+    await q(`insert into facetdb.projects (id, name) values ('proj_b', 'B')`);
+    await resumeRows([...OWN_RUNS, ...OTHER_RUNS]);
+    const { result, printed } = await runUninstall();
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      projectKeptBy: [],
+      resumeRows: [...OWN_RUNS].sort(),
+    });
+    expect(result.ok && result.notes.join("\n")).not.toContain("backfill cursor");
+    expect(printed[0]).toContain(
+      `select set_config('facetdb.resume_source', '${project.id}:listings', true)`,
+    );
+    expect(
+      (await q(`select run from facetdb.cursors`)).map((row) => String(row["run"])).sort(),
+    ).toEqual([...OTHER_RUNS].sort());
+    // Nothing of the project remains, so its row went: the source's rows kept nothing.
+    expect(await q(`select id from facetdb.projects order by id`)).toEqual([{ id: "proj_b" }]);
+  });
+
+  it("lets the shared-table sweep go once only a source's resume rows are left", async () => {
+    await freshWorld();
+    await install();
+    await registerSource();
+    await resumeRows(OWN_RUNS);
+    const { result } = await runUninstall({ purge: true });
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(result.ok && result.plan).toMatchObject({
+      projectKeptBy: [],
+      unfinishedCursors: [],
+      sharedTablesDropped: true,
+      schemaDropped: true,
+    });
+    expect(await present("facetdb.cursors")).toBe(false);
+    expect(await count(`select 1 from pg_namespace where nspname = 'facetdb'`)).toBe(0);
   });
 
   it("counts records only through the project's own sources", async () => {

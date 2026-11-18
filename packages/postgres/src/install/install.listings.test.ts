@@ -131,6 +131,7 @@ describe("a role suffix (the real-Postgres suites' own roles)", () => {
       sideColumns: undefined,
       viewMarked: false,
       sourceId: undefined,
+      resumeOf: `${project.id}:listings`,
     };
     const uninstall = renderSql(uninstallSql(target, { purge: false, roleSuffix: SUFFIX }));
     const prune = renderSql(

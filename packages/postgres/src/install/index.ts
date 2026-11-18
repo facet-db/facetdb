@@ -31,6 +31,7 @@ export {
   type InstallStatement,
   installOwnedColumns,
   installSql,
+  loginLock,
   ownedColumnsQuery,
   PASSWORD_SETTING,
   PASSWORD_STATEMENT,

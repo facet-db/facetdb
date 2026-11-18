@@ -44,8 +44,9 @@ export type BackfillProgress = {
 };
 
 /**
- * Where backfill progress survives a restart. `run` names the kind of run (the whole set at one
- * question-set version, or one set of added questions), so two kinds never share a cursor.
+ * Where backfill progress survives a restart. `run` names the source and the kind of run (the whole
+ * set at one question-set version, or one set of added questions), so two sources, or two kinds of
+ * run of one source, never share a cursor (`backfillRun`).
  */
 export type CursorStore = {
   load(run: string): Promise<BackfillProgress | undefined>;
@@ -61,6 +62,10 @@ export type BackfillWorker = {
 };
 
 export type BackfillDeps = {
+  /** The project the source belongs to: its id, part of the run's key in the cursor store. */
+  readonly project: string;
+  /** The source's name in the config, part of the run's key in the cursor store. */
+  readonly source: string;
   readonly connector: Connector;
   readonly worker: BackfillWorker;
   readonly clock: Clock;
@@ -234,7 +239,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     }
     const asked = pickQuestions(questionSet, options.onlyQuestions);
     const only = options.onlyQuestions === undefined ? undefined : new Set(options.onlyQuestions);
-    const runKey = runKeyOf(version, options.onlyQuestions);
+    const runKey = backfillRun(deps.project, deps.source, version, options.onlyQuestions);
     // The alert names the added questions when the run asks only those, else every question.
     const askedLabel =
       options.onlyQuestions === undefined ? null : options.onlyQuestions.join(", ");
@@ -416,8 +421,8 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           state: row.state,
           questions: asked,
         };
-        // Admitted before the call, as the worker admits each of its requests. A refused request
-        // is not made, and the run pauses; the record goes back to the queue with its claim.
+        // Admitted before the call, as the worker admits each of its requests. A refused request is
+        // not made, and the run pauses; the record goes back to the queue with its claim.
         const reservation = await spending.admit(estimateRequestTokens(request));
         if (reservation === undefined) {
           paused = true;
@@ -576,11 +581,42 @@ function newReport(estimated: BackfillEstimate): MutableReport {
   };
 }
 
-/** A run's identity for the cursor store: the whole set at one version, or one group of added questions. */
-function runKeyOf(version: number, onlyQuestions: readonly string[] | undefined): string {
+/**
+ * How every backfill run key in the cursor store begins. The store's other rows of a source carry
+ * their own prefix (`mongo:` for a change stream's resume token, `ct:` for Change Tracking's
+ * version), so uninstall tells a source's resume rows from anything else by it.
+ */
+export const BACKFILL_RUN_PREFIX = "backfill:";
+
+/**
+ * What follows `backfill:<project>:<source>:` in a run key, whole, as a regular expression that
+ * JavaScript and Postgres's `~` read alike: the whole set at a version, or a version and the added
+ * questions' names (`QUESTION_NAME_PATTERN`'s letters, digits and `_`, joined by commas).
+ */
+export const BACKFILL_RUN_SUFFIX = "^(all@v[0-9]+|only@v[0-9]+:[a-z0-9_,]+)$";
+
+/**
+ * A run's identity in the cursor store: the project and the source (the store keeps one table of
+ * cursors for every source of every project), then the whole set at one version or one group of
+ * added questions: `backfill:<project>:<source>:all@v<version>` or
+ * `backfill:<project>:<source>:only@v<version>:<names>`. The `<project>:<source>` part is the
+ * store's source id (`sourceIdOf` in the Postgres store), whose uninstall deletes these rows. A
+ * project id is a directory's name and may hold anything, `:all@v` included, so one source's key
+ * can begin another's (project `p` source `a` against project `p:a:all@v2` source `x`): a key is
+ * told as a source's only when what follows `backfill:<project>:<source>:` is a whole
+ * `BACKFILL_RUN_SUFFIX`, never by its start alone. A key written by an earlier version (`all@v1`,
+ * with no source) is never read again: the run it named starts from the top under its new key.
+ */
+export function backfillRun(
+  project: string,
+  source: string,
+  version: number,
+  onlyQuestions: readonly string[] | undefined,
+): string {
+  const scope = `${BACKFILL_RUN_PREFIX}${project}:${source}:`;
   return onlyQuestions === undefined
-    ? `all@v${version}`
-    : `only@v${version}:${[...onlyQuestions].sort().join(",")}`;
+    ? `${scope}all@v${version}`
+    : `${scope}only@v${version}:${[...onlyQuestions].sort().join(",")}`;
 }
 
 /** The questions a run asks; a name the set does not have is a caller's mistake, said plainly. */

@@ -285,13 +285,18 @@ describe("the install script and the store", () => {
     await q(`insert into facetdb.records (source_id, record_key, state, hash, status) values
       ('tickets', 't1', '{}', 'h', 'pending'), ('tickets', 't2', '{}', 'h', 'pending'),
       ('😀', 'e1', '{}', 'h', 'pending')`);
-    // The store queue's keys embed the id, length-prefixed in UTF-16 units (`queuePrefix`); a
-    // table source's job (its own key, the store sharing the database) is not the store's.
+    // The store queue's keys embed the id, length-prefixed in UTF-16 units (`queuePrefix`); a table
+    // source's job (its own key, the store sharing the database) is not the store's. The control
+    // job has the old prefix of `listings` exactly (`8:listings:`), and `listings` holds no
+    // records, so only the rekey's records gate keeps it as it is (`9:` never matched).
     const prefix = (id: string) => `${id.length}:${id}:`;
-    await q(
-      `insert into facetdb.jobs (record_key) values ($1), ($2), ($3), ('42'), ('9:listings:x')`,
-      [`${prefix("tickets")}t1`, `${prefix("tickets")}t2`, `${prefix("😀")}e1`],
-    );
+    expect(`${prefix("listings")}x`).toBe("8:listings:x");
+    await q(`insert into facetdb.jobs (record_key) values ($1), ($2), ($3), ('42'), ($4)`, [
+      `${prefix("tickets")}t1`,
+      `${prefix("tickets")}t2`,
+      `${prefix("😀")}e1`,
+      `${prefix("listings")}x`,
+    ]);
     await q(`insert into facetdb.cursors (run, cursor, done) values ('all@v1', 'k', false)`);
     const count = async (table: string) =>
       (await q(`select count(*)::int as n from facetdb.${table}`))[0]?.["n"];
@@ -338,7 +343,7 @@ describe("the install script and the store", () => {
         "14:proj_b:tickets:t2",
         `${prefix("proj_b:😀")}e1`,
         "42",
-        "9:listings:x",
+        "8:listings:x",
       ].sort(),
     );
     // Every record's history reads as before, under the new id (what `facetdb explain` prints).
@@ -363,6 +368,78 @@ describe("the install script and the store", () => {
     });
     expect(again.migrationNotes).toEqual([]);
     await again.close();
+  });
+
+  it("migration 4's records gate opens for `listings` once it holds records: its `8:listings:` job is rekeyed to `15:proj_a:listings:`", async () => {
+    // The other side of the control job above: the same key, the source now a store source.
+    const world = await installed();
+    const q = (sql: string, params: readonly unknown[] = []) => world.client.query(sql, params);
+    await q(`delete from facetdb.store_migrations where version >= 4`);
+    await q(`insert into facetdb.projects (id, name) values ('proj_a', 'A')`);
+    await q(
+      `insert into facetdb.sources (id, project_id, name, kind) values ('listings', 'proj_a', 'listings', 'plugin')`,
+    );
+    await q(
+      `insert into facetdb.records (source_id, record_key, state, hash, status) values ('listings', 'x', '{}', 'h', 'pending')`,
+    );
+    await q(`insert into facetdb.jobs (record_key) values ('8:listings:x'), ('42')`);
+    const store = await createStore({
+      url: "postgres://admin@localhost/listings",
+      pgHost: undefined,
+      connect: () => world.client,
+      secret: TEST_SECRET,
+      clock: new FakeClock(),
+    });
+    await store.close();
+    expect(
+      (await q(`select record_key from facetdb.jobs order by 1`)).map((r) => r["record_key"]),
+    ).toEqual(["15:proj_a:listings:x", "42"].sort());
+  });
+
+  it("a store at version 4 gets the log's (source_id, id) index from migration 5, once", async () => {
+    const world = await installed();
+    const q = (sql: string) => world.client.query(sql);
+    const index = async () =>
+      (
+        await q(
+          `select indexname, indexdef from pg_indexes where schemaname = 'facetdb' and tablename = 'decisions' and indexname = 'decisions_by_source'`,
+        )
+      ).map((row) => row["indexdef"]);
+    expect(await index()).toEqual([
+      "CREATE INDEX decisions_by_source ON facetdb.decisions USING btree (source_id, id)",
+    ]);
+    // The store as version 4 left it: no index, no row for 5.
+    await q(`drop index facetdb.decisions_by_source`);
+    await q(`delete from facetdb.store_migrations where version = 5`);
+    const store = await createStore({
+      url: "postgres://admin@localhost/listings",
+      pgHost: undefined,
+      connect: () => world.client,
+      secret: TEST_SECRET,
+      clock: new FakeClock(),
+    });
+    await store.close();
+    expect(await index()).toHaveLength(1);
+    expect(await q(`select max(version) as v from facetdb.store_migrations`)).toEqual([
+      { v: SCHEMA_VERSION },
+    ]);
+    expect(SCHEMA_VERSION).toBe(5);
+    // Run again, by the install script and by a store opening: nothing changes, nothing fails.
+    const before = await facetdbCatalog(world);
+    await install(world);
+    await install(world);
+    expect(await facetdbCatalog(world)).toEqual(before);
+    expect(await index()).toHaveLength(1);
+    // The export's page reads through it (the planner's choice, with sequential scans priced out).
+    await q(`set enable_seqscan = off`);
+    try {
+      const plan = await q(
+        `explain select id from facetdb.decisions where source_id = 'p:s' and id > 0 order by id limit 100`,
+      );
+      expect(JSON.stringify(plan)).toContain("decisions_by_source");
+    } finally {
+      await q(`reset enable_seqscan`);
+    }
   });
 
   it("a second run changes nothing", async () => {
@@ -441,9 +518,9 @@ describe("the install script and the store", () => {
   });
 
   it("a store at version 1 (installed before the outbox moved in) names its version, and migrate brings it up to date", async () => {
-    // The state every install made before this migration is in (the Supabase project of the
-    // example among them): the worker login says how far behind it is and what to run; the
-    // admin's second `facetdb migrate` adds the outbox and the worker's rights on it.
+    // The state every install made before this migration is in (the Supabase project of the example
+    // among them): the worker login says how far behind it is and what to run; the admin's second
+    // `facetdb migrate` adds the outbox and the worker's rights on it.
     const world = await installed();
     await world.client.query(`delete from facetdb.store_migrations where version >= 2`);
     await world.client.query(`drop table facetdb.webhook_outbox`);
