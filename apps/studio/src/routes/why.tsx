@@ -1,22 +1,17 @@
 import { createRoute } from "@tanstack/react-router";
-import { PageHead } from "../shell/index.ts";
+import { WhyPage } from "../features/why/index.ts";
 import { shellRoute } from "./root.tsx";
 
-// "Why was this decided" for one record (the mockups' why.html): under /decisions, so the rail
-// marks Decisions. The key is the record's as its source writes it, URL-encoded in the path. Its
-// content is not built yet.
+// "Why was this decided" for one record (the mockups' why.html): under /decisions, so the rail marks
+// Decisions. The key is the record's as the log shows it, which may hold a slash, a space or a
+// percent sign: the router decodes it from the path once and the API client encodes it once.
 export const whyRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/decisions/$source/$key",
-  component: WhyPage,
+  component: WhyRoute,
 });
 
-function WhyPage() {
+function WhyRoute() {
   const { source, key } = whyRoute.useParams();
-  return (
-    <PageHead
-      title="Why was this decided"
-      lede={`The history of ${key} in ${source}: every answer and decision, with the wording and thresholds in force at each.`}
-    />
-  );
+  return <WhyPage source={source} recordKey={key} />;
 }

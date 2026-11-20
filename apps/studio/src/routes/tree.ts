@@ -7,6 +7,7 @@ import { pluginsRoute } from "./plugins.tsx";
 import { questionsRoute } from "./questions.tsx";
 import { reviewRoute } from "./review.tsx";
 import { type RouterContext, rootRoute, shellRoute } from "./root.tsx";
+import { parseSearch } from "./search.ts";
 import { settingsRoute } from "./settings.tsx";
 import { signInRoute } from "./sign-in.tsx";
 import { sourcesRoute } from "./sources.tsx";
@@ -38,6 +39,8 @@ export function createStudioRouter(context: RouterContext, history?: RouterHisto
   return createRouter({
     routeTree,
     context,
+    // Text values of the address are read as written (routes/search.ts).
+    parseSearch,
     ...(history === undefined ? {} : { history }),
   });
 }

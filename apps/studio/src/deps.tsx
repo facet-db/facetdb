@@ -19,6 +19,8 @@ export type StudioDeps = {
   readonly schedule: Scheduler;
   /** The page's own origin (`http://127.0.0.1:4040`): the sign-in page goes back to it alone. */
   readonly origin: string;
+  /** Puts text on the clipboard; called inside the click that asked (Copy link), may refuse. */
+  readonly clipboard: (text: string) => Promise<void>;
 };
 
 const DepsContext = createContext<StudioDeps | null>(null);

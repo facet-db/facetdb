@@ -8,6 +8,8 @@ export type Scheduler = {
   readonly now: () => number;
   /** Calls `run` every `ms` until the returned function is called. */
   readonly every: (ms: number, run: () => void) => () => void;
+  /** Calls `run` once, `ms` from now, unless the returned function is called first. */
+  readonly after: (ms: number, run: () => void) => () => void;
 };
 
 /** The window's clock and intervals. */
@@ -18,6 +20,12 @@ export function browserScheduler(): Scheduler {
       const id = window.setInterval(run, ms);
       return () => {
         window.clearInterval(id);
+      };
+    },
+    after: (ms, run) => {
+      const id = window.setTimeout(run, ms);
+      return () => {
+        window.clearTimeout(id);
       };
     },
   };

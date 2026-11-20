@@ -208,6 +208,144 @@ export type SignedIn = z.infer<typeof signedInSchema>;
 
 const signedOutSchema = z.object({ signedOut: z.literal(true) });
 
+/*
+ * The Decisions page and the why page: the log of one source, one record's history, the run log and
+ * the sources' names.
+ */
+
+/** One model answer as the log search carries it: the raw figures and what its version's thresholds made of it. */
+const loggedAnswerSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("noul"), probability: z.number(), decision: z.string() }),
+  z.object({
+    type: z.literal("choice"),
+    top: z.string(),
+    probabilities: z.array(z.number()),
+    decision: z.string(),
+  }),
+  z.object({
+    type: z.literal("score"),
+    probabilities: z.array(z.number()),
+    confidence: z.number(),
+    decision: z.string(),
+  }),
+]);
+export type LoggedAnswer = z.infer<typeof loggedAnswerSchema>;
+
+/** One row of the decision log (`GET /v1/decisions`), in the export's shape: a model call or a person's decision. */
+const decisionRowSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("answer"),
+    time: z.string(),
+    record_key: z.string(),
+    version: z.number(),
+    model: z.string(),
+    answers: z.record(z.string(), loggedAnswerSchema),
+  }),
+  z.object({
+    kind: z.literal("human"),
+    time: z.string(),
+    record_key: z.string(),
+    version: z.number(),
+    question: z.string(),
+    value: z.string(),
+    decision: z.string(),
+    decided_by: z.string(),
+    note: z.string().optional(),
+  }),
+]);
+export type DecisionRow = z.infer<typeof decisionRowSchema>;
+
+const decisionsPageSchema = z.object({
+  decisions: z.array(decisionRowSchema),
+  /** The cursor of the page after this one, as the worker made it; null on the last page. */
+  next: z.string().nullable(),
+});
+export type DecisionsPage = z.infer<typeof decisionsPageSchema>;
+
+/** The filters of `GET /v1/decisions`: the source is required, every other one narrows the log. */
+export type DecisionFilters = {
+  readonly source: string;
+  readonly key?: string;
+  readonly question?: string;
+  readonly status?: "decided" | "needs_review";
+  readonly reviewer?: string;
+  /** ISO 8601, included. */
+  readonly from?: string;
+};
+
+/** `GET /v1/decisions/:source/:key`: the entries `facetdb explain` prints, oldest first, in its words. */
+const explainedEntrySchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("answer"),
+    at: z.string(),
+    model: z.string(),
+    version: z.number(),
+    answers: z.array(
+      z.object({
+        question: z.string(),
+        wording: z.string(),
+        said: z.string(),
+        decision: z.string(),
+      }),
+    ),
+  }),
+  z.object({
+    kind: z.literal("human"),
+    at: z.string(),
+    version: z.number(),
+    question: z.string(),
+    wording: z.string(),
+    decided: z.string(),
+    reviewer: z.string(),
+    note: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("withdrawal"),
+    at: z.string(),
+    version: z.number(),
+    question: z.string(),
+    wording: z.string(),
+    reviewer: z.string(),
+  }),
+]);
+export type ExplainedEntry = z.infer<typeof explainedEntrySchema>;
+
+const decisionHistorySchema = z.object({
+  source: z.string(),
+  key: z.string(),
+  entries: z.array(explainedEntrySchema),
+});
+export type DecisionHistory = z.infer<typeof decisionHistorySchema>;
+
+/** `GET /v1/runs`: one page of the run log, newest first, 50 a page. */
+const runsPageSchema = z.object({
+  runs: z.array(
+    z.object({
+      source: z.string(),
+      kind: z.enum(["pass", "backfill"]),
+      startedAt: z.string(),
+      endedAt: z.string(),
+      claimed: z.number(),
+      answered: z.number(),
+      toReview: z.number(),
+      errors: z.number(),
+      discarded: z.number(),
+      tokens: z.number(),
+    }),
+  ),
+  page: z.number(),
+  perPage: z.number(),
+  more: z.boolean(),
+});
+export type RunsPage = z.infer<typeof runsPageSchema>;
+export type Run = RunsPage["runs"][number];
+
+/**
+ * `GET /v1/config`, the source names only: the project JSON is answered from the worker's memory
+ * and touches no source database, unlike `GET /v1/sources`, whose doctors connect to each one.
+ */
+const sourceNamesSchema = z.object({ sources: z.array(z.object({ name: z.string().min(1) })) });
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -232,6 +370,17 @@ export type ApiClient = {
   readonly home: () => Promise<Home>;
   readonly signIn: (name: string, password: string) => Promise<SignedIn>;
   readonly signOut: () => Promise<void>;
+  /** The names of the project's sources, in the config's order (the Decisions page's source choice). */
+  readonly sourceNames: () => Promise<readonly string[]>;
+  /** One page of one source's log, newest first; `cursor` is the previous page's `next`. */
+  readonly decisions: (filters: DecisionFilters, cursor?: string) => Promise<DecisionsPage>;
+  /** One record's history; the key is as the log shows it, encoded once into the path here. */
+  readonly decisionHistory: (source: string, key: string) => Promise<DecisionHistory>;
+  /** One page of the run log from 1; one source by name, or every source. */
+  readonly runs: (options: {
+    readonly source?: string;
+    readonly page: number;
+  }) => Promise<RunsPage>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -335,5 +484,29 @@ export function createApiClient(fetch: Fetch): ApiClient {
     signOut: async () => {
       await call(signedOutSchema, "DELETE", "/session");
     },
+    sourceNames: async () =>
+      (await call(sourceNamesSchema, "GET", "/config")).sources.map((source) => source.name),
+    decisions: (filters, cursor) => {
+      const { source, ...narrowing } = filters;
+      const query = [
+        `source=${encodeURIComponent(source)}`,
+        ...Object.entries({ ...narrowing, cursor }).flatMap(([name, value]) =>
+          value === undefined ? [] : [`${name}=${encodeURIComponent(value)}`],
+        ),
+      ];
+      return call(decisionsPageSchema, "GET", `/decisions?${query.join("&")}`);
+    },
+    decisionHistory: (source, key) =>
+      call(
+        decisionHistorySchema,
+        "GET",
+        `/decisions/${encodeURIComponent(source)}/${encodeURIComponent(key)}`,
+      ),
+    runs: ({ source, page }) =>
+      call(
+        runsPageSchema,
+        "GET",
+        `/runs?${source === undefined ? "" : `source=${encodeURIComponent(source)}&`}page=${String(page)}`,
+      ),
   };
 }

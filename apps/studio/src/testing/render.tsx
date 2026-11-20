@@ -6,7 +6,7 @@ import type { ApiClient } from "../api/index.ts";
 import { type KeyValueStorage, LIGHT_QUERY, type Media, PHONE_QUERY } from "../shell/index.ts";
 import { Studio } from "../studio.tsx";
 import { fakeApi } from "./fake-client.ts";
-import { fakeScheduler } from "./fake-scheduler.ts";
+import { FAKE_START, fakeScheduler } from "./fake-scheduler.ts";
 
 /**
  * How a studio test renders the whole app (the shell's test and every page's): the real router at a
@@ -16,6 +16,9 @@ import { fakeScheduler } from "./fake-scheduler.ts";
 
 /** The origin a test's studio is served from, as `facetdb studio` serves it. */
 export const STUDIO_ORIGIN = "http://127.0.0.1:4040";
+
+/** The moment a test's studio calls now unless it is given another: the fake scheduler's start. */
+export const STUDIO_NOW = new Date(FAKE_START);
 
 /** `localStorage` as a map: two renders over one of these are a reload of the page. */
 export function memoryStorage(): KeyValueStorage & { readonly data: Map<string, string> } {
@@ -66,6 +69,10 @@ export type RenderStudioOptions = {
   readonly light?: boolean;
   /** Mount under React's StrictMode, as main.tsx does. */
   readonly strict?: boolean;
+  /** The moment the fake scheduler starts at (STUDIO_NOW unless given); `schedule.advance` moves it on. */
+  readonly now?: Date;
+  /** The clipboard; by default it takes the text into `copied` of the result. */
+  readonly clipboard?: (text: string) => Promise<void>;
 };
 
 export function renderStudio(options: RenderStudioOptions = {}) {
@@ -76,16 +83,29 @@ export function renderStudio(options: RenderStudioOptions = {}) {
     [PHONE_QUERY]: options.phone ?? false,
     [LIGHT_QUERY]: options.light ?? false,
   });
-  const schedule = fakeScheduler();
+  const schedule = fakeScheduler(options.now?.getTime());
   const history = createMemoryHistory({ initialEntries: [options.path ?? "/"] });
   const user = userEvent.setup();
+  const copied: string[] = [];
   const studio = (
     <Studio
-      deps={{ api, storage, media: screenMedia.media, schedule, origin: STUDIO_ORIGIN }}
+      deps={{
+        api,
+        storage,
+        media: screenMedia.media,
+        schedule,
+        origin: STUDIO_ORIGIN,
+        clipboard:
+          options.clipboard ??
+          ((text) => {
+            copied.push(text);
+            return Promise.resolve();
+          }),
+      }}
       history={history}
     />
   );
   // main.tsx mounts under StrictMode, which runs every effect twice in development.
   const rendered = render(options.strict === true ? <StrictMode>{studio}</StrictMode> : studio);
-  return { ...rendered, api, history, media: screenMedia, schedule, user };
+  return { ...rendered, api, history, media: screenMedia, schedule, user, copied };
 }

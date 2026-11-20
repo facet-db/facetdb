@@ -25,6 +25,9 @@ const deps: StudioDeps = {
   media: browserMedia((query) => window.matchMedia(query)),
   schedule: browserScheduler(),
   origin: window.location.origin,
+  // Reached on each use: outside a secure page (http on another machine) there is no clipboard,
+  // and reading it then is a TypeError the caller turns into the select-the-text fallback.
+  clipboard: (text) => window.navigator.clipboard.writeText(text),
 };
 
 const root = document.getElementById("root");

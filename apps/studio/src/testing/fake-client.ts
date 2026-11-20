@@ -1,11 +1,14 @@
 import {
   type ApiClient,
   ApiError,
+  type DecisionHistory,
+  type DecisionsPage,
   type Home,
   type Project,
   type ReviewCard,
   type ReviewCardId,
   type ReviewQueue,
+  type RunsPage,
 } from "../api/index.ts";
 
 /**
@@ -145,6 +148,139 @@ export const SAMPLE_HOME: Home = {
   ],
 };
 
+/*
+ * The Decisions page and the why page: the mockups' marketplace log, shaped as the worker answers.
+ */
+
+export const SAMPLE_SOURCE_NAMES: readonly string[] = ["listings", "support_messages"];
+
+export const SAMPLE_DECISIONS: DecisionsPage = {
+  decisions: [
+    {
+      kind: "human",
+      time: "2026-11-06T14:31:00.000Z",
+      record_key: "48213",
+      version: 3,
+      question: "is_scam",
+      value: "yes",
+      decision: "yes",
+      decided_by: "hailey",
+      note: "gift-card payment, two-day-old seller",
+    },
+    {
+      kind: "answer",
+      time: "2026-11-06T14:14:00.000Z",
+      record_key: "48213",
+      version: 3,
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.58, decision: "needs review" },
+        category: {
+          type: "choice",
+          top: "electronics",
+          probabilities: [0.95, 0.03, 0.02],
+          decision: "electronics",
+        },
+      },
+    },
+    {
+      kind: "answer",
+      time: "2026-11-06T13:58:00.000Z",
+      record_key: "48190",
+      version: 3,
+      model: "jev-1.14.0",
+      answers: { is_scam: { type: "noul", probability: 0.02, decision: "no" } },
+    },
+  ],
+  next: null,
+};
+
+/** The history of the mockup's record 48213, oldest first, as `facetdb explain` words it. */
+export function sampleHistory(source: string, key: string): DecisionHistory {
+  return {
+    source,
+    key,
+    entries: [
+      {
+        kind: "answer",
+        at: "2026-11-03T10:02:00.000Z",
+        model: "jev-1.14.0",
+        version: 2,
+        answers: [
+          {
+            question: "is_scam",
+            wording: "Is this listing a scam?",
+            said: "27% likely yes",
+            decision: "no",
+          },
+          {
+            question: "category",
+            wording: "Which category is this listing?",
+            said: "electronics, 93% sure",
+            decision: "electronics",
+          },
+        ],
+      },
+      {
+        kind: "answer",
+        at: "2026-11-06T14:14:00.000Z",
+        model: "jev-1.14.0",
+        version: 3,
+        answers: [
+          {
+            question: "is_scam",
+            wording: "Is this listing a scam?",
+            said: "58% likely yes",
+            decision: "needs review",
+          },
+        ],
+      },
+      {
+        kind: "human",
+        at: "2026-11-06T14:31:00.000Z",
+        version: 3,
+        question: "is_scam",
+        wording: "Is this listing a scam?",
+        decided: "yes",
+        reviewer: "hailey",
+        note: "gift-card payment, two-day-old seller",
+      },
+    ],
+  };
+}
+
+export const SAMPLE_RUNS: RunsPage = {
+  runs: [
+    {
+      source: "listings",
+      kind: "pass",
+      startedAt: "2026-11-06T14:14:02.000Z",
+      endedAt: "2026-11-06T14:14:04.000Z",
+      claimed: 20,
+      answered: 18,
+      toReview: 2,
+      errors: 0,
+      discarded: 0,
+      tokens: 14_900,
+    },
+    {
+      source: "listings",
+      kind: "backfill",
+      startedAt: "2026-11-06T14:10:11.000Z",
+      endedAt: "2026-11-06T14:10:22.400Z",
+      claimed: 500,
+      answered: 497,
+      toReview: 3,
+      errors: 0,
+      discarded: 0,
+      tokens: 361_000,
+    },
+  ],
+  page: 1,
+  perPage: 50,
+  more: false,
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -196,6 +332,10 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     home: () => Promise.resolve(SAMPLE_HOME),
     signIn: (name) => Promise.resolve({ reviewer: name, expiresAt: "2026-11-06T02:00:00.000Z" }),
     signOut: () => Promise.resolve(),
+    sourceNames: () => Promise.resolve(SAMPLE_SOURCE_NAMES),
+    decisions: () => Promise.resolve(SAMPLE_DECISIONS),
+    decisionHistory: (source, key) => Promise.resolve(sampleHistory(source, key)),
+    runs: () => Promise.resolve(SAMPLE_RUNS),
     ...answers,
   };
   return {
@@ -249,6 +389,23 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     signOut: () => {
       calls.push("signOut");
       return answer.signOut();
+    },
+    // The arguments ride in the note as JSON, so a test reads what the page asked for.
+    sourceNames: () => {
+      calls.push("sourceNames");
+      return answer.sourceNames();
+    },
+    decisions: (filters, cursor) => {
+      calls.push(`decisions ${JSON.stringify({ ...filters, cursor })}`);
+      return answer.decisions(filters, cursor);
+    },
+    decisionHistory: (source, key) => {
+      calls.push(`decisionHistory ${JSON.stringify({ source, key })}`);
+      return answer.decisionHistory(source, key);
+    },
+    runs: (options) => {
+      calls.push(`runs ${JSON.stringify(options)}`);
+      return answer.runs(options);
     },
   };
 }

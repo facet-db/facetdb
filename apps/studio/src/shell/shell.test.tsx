@@ -393,6 +393,7 @@ describe("the routes", () => {
       media: fakeMedia({}).media,
       schedule: fakeScheduler(),
       origin: STUDIO_ORIGIN,
+      clipboard: () => Promise.resolve(),
     });
     const paths = Object.keys(router.routesByPath)
       .map((path) => (path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path))
