@@ -596,6 +596,17 @@ export async function runWorkers(
           projectId: project.id,
           json: () => toProjectJson(fleet.config()),
           validate: (draft) => judgeDraftSource(fleet.config(), draft, deps.env),
+          // The Questions page's version history: what the store keeps of each source, and the
+          // version its loop answers under now.
+          history: {
+            sources: () =>
+              fleet.config().sources.map((source) => ({
+                name: source.name,
+                inForce: fleet.loop(source.name)?.version ?? null,
+              })),
+            read: (name, limit) =>
+              store.questionSets.history(storeSourceId(project.id, name), limit),
+          },
           ...(configFile === undefined
             ? {}
             : {

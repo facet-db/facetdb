@@ -10,6 +10,13 @@ import {
   type QuestionTestService,
   type TestEstimate,
 } from "@facetdb/core";
+import {
+  type HistoryDoor,
+  unreadHistory,
+  VERSION_HISTORY_SHOWN,
+  type VersionHistory,
+  versionHistory,
+} from "./versions.ts";
 
 /**
  * The project configuration behind the studio's door ("two ways in, same project configuration"):
@@ -53,6 +60,11 @@ export type ProjectConfigDoor = {
   json(): unknown;
   /** Judges a draft source, merged over the source of that name or added as a new one. */
   validate(draft: SourceDraft): DraftCheck;
+  /**
+   * The question-set versions the store keeps for each source of the config in force (the Questions
+   * page's version history). Best effort: a read that fails is said, never a 500.
+   */
+  readonly history: HistoryDoor;
   /**
    * Apply: the diff a draft makes to `facetdb.config.ts`, and the write and the worker's reload.
    * Absent where nothing may write the file: `facetdb dev` and `facetdb worker --once`.
@@ -199,8 +211,14 @@ export type TestOutcome =
   | { readonly kind: "fields_differ"; readonly source: string }
   | Extract<PreviewOutcome, { readonly kind: "capped" | "model_failed" }>;
 
+/** `GET /v1/config`: the project JSON, and each source's version history beside it. */
+export type ProjectWithHistory = {
+  readonly project: unknown;
+  readonly versions: Readonly<Record<string, VersionHistory>>;
+};
+
 export type ConfigService = {
-  json(projectId: string): ConfigOutcome<unknown>;
+  json(projectId: string): Promise<ConfigOutcome<ProjectWithHistory>>;
   validate(projectId: string, draft: SourceDraft): ConfigOutcome<ValidateOutcome>;
   preview(projectId: string, draft: SourceDraft, limit: number): Promise<PreviewOutcome>;
   /** With `estimateOnly`, reads the records and prices the run without calling the model. */
@@ -229,6 +247,11 @@ export type ConfigServiceDeps = {
   readonly config: ProjectConfigDoor;
   /** The running source of that name, or undefined when this worker runs none. */
   readonly preview: (source: string) => PreviewSource | undefined;
+  /**
+   * The worker's log (ServerDeps `log`): a reason the browser is not told (the store's own error
+   * can name its host or role) is written here.
+   */
+  readonly log: (line: string) => void;
 };
 
 function sameFields(
@@ -260,8 +283,28 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
   const ours = (projectId: string) => projectId === config.projectId;
 
   return {
-    json(projectId) {
-      return ours(projectId) ? { kind: "ok", value: config.json() } : { kind: "unknown_project" };
+    async json(projectId) {
+      if (!ours(projectId)) {
+        return { kind: "unknown_project" };
+      }
+      const project = config.json();
+      // The config is the worker's memory; the history is the store's, read per source and best
+      // effort: a store that cannot be read costs the history its versions, with a note, never
+      // the config (the Decisions page's source names and Settings read this endpoint too).
+      const versions = await Promise.all(
+        config.history.sources().map(async ({ name, inForce }) => {
+          try {
+            // One past the versions shown, so the oldest listed is still compared with the one before.
+            const stored = await config.history.read(name, VERSION_HISTORY_SHOWN + 1);
+            return [name, versionHistory({ inForce, versions: stored })] as const;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            deps.log(`the version history of ${name} could not be read from the store: ${reason}`);
+            return [name, unreadHistory(name, inForce)] as const;
+          }
+        }),
+      );
+      return { kind: "ok", value: { project, versions: Object.fromEntries(versions) } };
     },
 
     validate(projectId, draft) {

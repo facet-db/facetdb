@@ -117,7 +117,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       clock: deps.clock,
       retryAfterSeconds: deps.retryAfterSeconds,
     }),
-    config: createConfigService({ config: deps.config, preview: deps.preview }),
+    config: createConfigService({ config: deps.config, preview: deps.preview, log: deps.log }),
     data: {
       runs: createRunsService({ reader: deps.store.runs }),
       decisions: createDecisionsService(deps.decisions),

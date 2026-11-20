@@ -697,4 +697,67 @@ describe("alerts, cursors and question-set versions", () => {
     expect(one.createdAt.getTime()).toBe(1_700_000_000_000);
     expect(await scalar(db, "select count(*)::int from facetdb.question_set_versions")).toBe(2);
   });
+
+  it("read a source's version history newest first, each with its time and the set it was made from, up to a limit", async () => {
+    const { store, clock } = await newStore();
+    const set: QuestionSet = {
+      questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
+      read: ["body"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    expect(await store.questionSets.history("src", 5)).toEqual([]);
+    await store.questionSets.record("src", set);
+    clock.advance(60_000);
+    const reworded: QuestionSet = {
+      ...set,
+      questions: [
+        {
+          type: "noul",
+          name: "scam",
+          instructions: "Is this listing likely a scam?",
+          stakes: "low",
+        },
+      ],
+    };
+    await store.questionSets.record("src", reworded);
+    clock.advance(60_000);
+    const widened: QuestionSet = { ...reworded, read: ["body", "title"] };
+    await store.questionSets.record("src", widened);
+    await store.questionSets.record("other", set);
+
+    const history = await store.questionSets.history("src", 5);
+    expect(history.map((entry) => entry.version)).toEqual([3, 2, 1]);
+    expect(history.map((entry) => entry.createdAt.getTime())).toEqual([
+      1_700_000_120_000, 1_700_000_060_000, 1_700_000_000_000,
+    ]);
+    expect(history[0]?.questionSet).toEqual(widened);
+    expect(history[2]?.questionSet).toEqual(set);
+    expect(history[0]?.contentHash).toBe((await store.questionSets.latest("src"))?.contentHash);
+    expect((await store.questionSets.history("src", 2)).map((entry) => entry.version)).toEqual([
+      3, 2,
+    ]);
+  });
+
+  it("read a stored set that no longer parses as unreadable, with the parser's words, and the others as they are", async () => {
+    const { store, db } = await newStore();
+    const set: QuestionSet = {
+      questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
+      read: ["body"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    await store.questionSets.record("src", set);
+    // A set an older FacetDB saved under rules this one refuses: an alias for the model.
+    await db.query(
+      `insert into facetdb.question_set_versions (source_id, version, content_hash, question_set)
+       values ('src', 2, 'h2', $1::jsonb)`,
+      [JSON.stringify({ ...set, model: "jev-latest" })],
+    );
+
+    const [newest, oldest] = await store.questionSets.history("src", 5);
+    expect(newest).toMatchObject({ version: 2, questionSet: null });
+    expect(newest?.unreadable).toEqual(expect.stringContaining("jev-latest"));
+    expect(oldest).toMatchObject({ version: 1, questionSet: set, unreadable: null });
+  });
 });

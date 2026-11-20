@@ -112,9 +112,16 @@ function rig(file: ConfigFileDoor | undefined) {
         validate: () => {
           throw new Error("Apply judges through its own door");
         },
+        history: {
+          sources: () => {
+            throw new Error("Apply reads no version history");
+          },
+          read: () => Promise.reject(new Error("Apply reads no version history")),
+        },
         ...(file === undefined ? {} : { file }),
       },
       preview: () => undefined,
+      log: () => undefined,
     }),
     data: NO_DATA,
     review: NO_REVIEW,

@@ -146,6 +146,12 @@ async function rig() {
       validate: () => {
         throw new Error("the SDK validates no draft");
       },
+      history: {
+        sources: () => {
+          throw new Error("the SDK reads no version history");
+        },
+        read: () => Promise.reject(new Error("the SDK reads no version history")),
+      },
     },
     preview: () => undefined,
     decisions: {

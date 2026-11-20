@@ -114,12 +114,15 @@ function issuesInWords(issues: readonly DraftIssue[]): string {
 export function configRoutes(service: ConfigService): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
 
-  route.get("/config", (c) => {
-    const outcome = service.json(c.get("projectId"));
+  // The project JSON as the loader exports it, and beside its sources (never inside one, so a
+  // source sent back as a draft carries no key the loader does not know) each source's version
+  // history by name: number, when it was made, what changed in words.
+  route.get("/config", async (c) => {
+    const outcome = await service.json(c.get("projectId"));
     if (outcome.kind === "unknown_project") {
       throw unknownProject();
     }
-    return c.json(outcome.value as object);
+    return c.json({ ...(outcome.value.project as object), versions: outcome.value.versions });
   });
 
   // A draft that breaks a rule is still a 200: the issues are the answer the editor shows.

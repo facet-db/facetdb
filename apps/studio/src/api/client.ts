@@ -423,6 +423,244 @@ export type SpendingConfig = {
   readonly onCapReached: "pause" | "continue";
 };
 
+/*
+ * The Questions page: the project's configuration with each source's version history, a draft's
+ * judgement, its live preview, its test against the version in force, and Apply.
+ */
+
+const stakesSchema = z.enum(["low", "high"]);
+
+/** One question as the project JSON writes it (the exporter's `Omit<Question, "name">`). */
+const questionJsonSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("noul"),
+    instructions: z.string(),
+    criteria: z
+      .object({ true: z.string().exactOptional(), false: z.string().exactOptional() })
+      .exactOptional(),
+    stakes: stakesSchema,
+  }),
+  z.object({
+    type: z.literal("choice"),
+    instructions: z.string(),
+    options: z.array(z.object({ name: z.string(), description: z.string() })),
+    stakes: stakesSchema,
+    storeProbabilities: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("score"),
+    instructions: z.string(),
+    levels: z.array(z.object({ name: z.string(), description: z.string().exactOptional() })),
+    stakes: stakesSchema,
+  }),
+]);
+export type QuestionJson = z.infer<typeof questionJsonSchema>;
+
+/** A question's thresholds as the config overrides them; a key left out is the stakes default. */
+const thresholdOverrideSchema = z.object({
+  yesAbove: z.number().min(0).max(1).exactOptional(),
+  noBelow: z.number().min(0).max(1).exactOptional(),
+  confidenceAtLeast: z.number().min(0).max(1).exactOptional(),
+});
+export type ThresholdOverride = z.infer<typeof thresholdOverrideSchema>;
+
+/** A source of the project JSON, the fields the Questions page reads; the rest are the file's. */
+const configSourceSchema = z.object({
+  name: z.string().min(1),
+  read: z.array(z.string()),
+  where: z.string().exactOptional(),
+  model: z.string().exactOptional(),
+  questions: z.record(z.string(), questionJsonSchema),
+  thresholds: z.record(z.string(), thresholdOverrideSchema),
+});
+export type ConfigSource = z.infer<typeof configSourceSchema>;
+
+/** `GET /v1/config`: the project JSON, and each source's question-set versions by name. */
+const projectConfigSchema = z.object({
+  model: z.string(),
+  sources: z.array(configSourceSchema),
+  versions: z.record(
+    z.string(),
+    z.object({
+      /** The version the worker answers under now; null when it does not run the source. */
+      inForce: z.number().int().nullable(),
+      /** Newest first: the number, when a worker first ran it, what changed in words. */
+      versions: z.array(
+        z.object({ version: z.number().int(), createdAt: z.string(), changes: z.string() }),
+      ),
+      /** Older versions are kept than the ones listed. */
+      earlier: z.boolean(),
+      /** What of the history could not be read from the store, in words; null when all of it was. */
+      note: z.string().nullable(),
+    }),
+  ),
+});
+export type ProjectConfig = z.infer<typeof projectConfigSchema>;
+export type SourceVersions = ProjectConfig["versions"][string];
+
+/** What the page sends: one source by name, its questions and thresholds, merged over the file's. */
+export type SourceDraft = {
+  readonly name: string;
+  readonly questions: Readonly<Record<string, QuestionJson>>;
+  readonly thresholds: Readonly<Record<string, ThresholdOverride>>;
+};
+
+/** A wording warning in the CLI's shape: the words `facetdb preview` prints. */
+const wordingWarningSchema = z.object({
+  source: z.string(),
+  question: z.string().nullable(),
+  code: z.string(),
+  message: z.string(),
+  fix: z.string(),
+});
+export type WordingWarning = z.infer<typeof wordingWarningSchema>;
+
+/** `POST /v1/config/validate`: the loader's problems by field path, or its warnings. */
+const draftValidationSchema = z.object({
+  valid: z.boolean(),
+  issues: z.array(z.object({ path: z.string(), message: z.string() })),
+  warnings: z.array(wordingWarningSchema),
+});
+export type DraftValidation = z.infer<typeof draftValidationSchema>;
+export type DraftIssue = DraftValidation["issues"][number];
+
+const probability = z.number().min(0).max(1);
+
+/** One model answer with every probability, so a threshold is re-applied without a call. */
+const previewAnswerSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("noul"), probability }),
+  z.object({ type: z.literal("choice"), top: z.string(), probabilities: z.array(probability) }),
+  z.object({
+    type: z.literal("score"),
+    probabilities: z.array(probability),
+    confidence: probability,
+  }),
+]);
+export type PreviewAnswer = z.infer<typeof previewAnswerSchema>;
+
+const costSchema = z.object({ inputTokens: z.number().min(0), dollars: z.number().min(0) });
+export type Cost = z.infer<typeof costSchema>;
+
+/** `POST /v1/preview`: the newest rows, each answered or skipped with why, and what it cost. */
+const draftPreviewSchema = z.object({
+  rows: z.array(
+    z.discriminatedUnion("kind", [
+      z.object({ key: z.string(), kind: z.literal("skipped"), reason: z.string() }),
+      z.object({
+        key: z.string(),
+        kind: z.literal("answered"),
+        state: z.record(z.string(), z.string().nullable()),
+        model: z.string(),
+        answers: z.record(z.string(), previewAnswerSchema),
+      }),
+    ]),
+  ),
+  decided: z.number().int().min(0),
+  review: z.number().int().min(0),
+  cost: costSchema,
+  warnings: z.array(wordingWarningSchema),
+});
+export type DraftPreview = z.infer<typeof draftPreviewSchema>;
+export type PreviewRow = DraftPreview["rows"][number];
+
+/** What a test would read, ask and cost, before anything is asked. */
+const testEstimateSchema = z.object({
+  sampleRecords: z.number().int().min(0),
+  reviewedRecords: z.number().int().min(0),
+  requests: z.number().int().min(0),
+  inputTokens: z.number().min(0),
+  dollars: z.number().min(0),
+});
+export type TestEstimate = z.infer<typeof testEstimateSchema>;
+
+const testEstimatedSchema = z.object({
+  estimate: testEstimateSchema,
+  warnings: z.array(wordingWarningSchema),
+});
+
+const agreementSideSchema = z.object({
+  agreed: z.number().int().min(0),
+  disagreed: z.number().int().min(0),
+  unsure: z.number().int().min(0),
+  rate: probability.nullable(),
+});
+export type AgreementSide = z.infer<typeof agreementSideSchema>;
+
+/** `POST /v1/test` run: per question of the draft, what would change and the agreement with people. */
+const testResultSchema = z.object({
+  sample: z.object({ records: z.number().int().min(0), asked: z.number().int().min(0) }),
+  reviewed: z.object({ records: z.number().int().min(0), asked: z.number().int().min(0) }),
+  skipped: z.record(z.string(), z.number().int().min(0)),
+  removed: z.array(z.string()),
+  questions: z.array(
+    z.object({
+      question: z.string(),
+      comparison: z.enum(["compared", "new", "kind-changed"]),
+      compared: z.number().int().min(0),
+      changed: z.number().int().min(0),
+      toDecided: z.number().int().min(0),
+      toReview: z.number().int().min(0),
+      toAnotherValue: z.number().int().min(0),
+      noCurrentAnswer: z.number().int().min(0),
+      keptForPeople: z.number().int().min(0),
+      agreement: z.discriminatedUnion("kind", [
+        z.object({ kind: z.literal("none"), reason: z.string() }),
+        z.object({
+          kind: z.literal("measured"),
+          records: z.number().int().min(0),
+          now: agreementSideSchema.nullable(),
+          draft: agreementSideSchema,
+        }),
+      ]),
+    }),
+  ),
+  cost: costSchema,
+  estimate: testEstimateSchema,
+  warnings: z.array(wordingWarningSchema),
+});
+export type TestResult = z.infer<typeof testResultSchema>;
+export type TestQuestionRow = TestResult["questions"][number];
+
+/** A refusal or a note in plain words, with what to do about it. */
+const wordsSchema = z.object({ message: z.string(), fix: z.string() });
+
+/** `POST /v1/apply` without `confirm`: the file's diff and the plan that names it; nothing written. */
+const applyDiffSchema = z.object({
+  written: z.literal(false),
+  path: z.string(),
+  diff: z.string(),
+  changed: z.boolean(),
+  plan: z.string(),
+  /** Why the write is refused without `force`: git keeps no copy of the file as it is. */
+  uncommitted: wordsSchema.nullable(),
+  warnings: z.array(wordingWarningSchema),
+});
+export type ApplyDiff = z.infer<typeof applyDiffSchema>;
+
+const reloadSchema = z.discriminatedUnion("loaded", [
+  z.object({
+    loaded: z.literal(true),
+    sources: z.array(
+      z.object({
+        source: z.string(),
+        outcome: z.enum(["unchanged", "restarted", "stopped", "not-started", "kept", "failed"]),
+        version: z.number().int().nullable(),
+        message: z.string().nullable(),
+      }),
+    ),
+    notes: z.array(z.string()),
+  }),
+  z.object({ loaded: z.literal(false), message: z.string(), fix: z.string() }),
+]);
+export type ApplyReload = z.infer<typeof reloadSchema>;
+
+/** `POST /v1/apply` with `confirm`: written and reloaded, or nothing to write after all. */
+const applyWrittenSchema = z.discriminatedUnion("written", [
+  z.object({ written: z.literal(true), path: z.string(), diff: z.string(), reload: reloadSchema }),
+  z.object({ written: z.literal(false), path: z.string(), changed: z.literal(false) }),
+]);
+export type ApplyWritten = z.infer<typeof applyWrittenSchema>;
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -468,6 +706,24 @@ export type ApiClient = {
    */
   readonly addReviewer: (name: string, password: string) => Promise<void>;
   readonly spendingConfig: () => Promise<SpendingConfig>;
+  // The Questions page: one method per endpoint.
+  /** The project JSON from the worker's memory, and each source's version history. */
+  readonly projectConfig: () => Promise<ProjectConfig>;
+  /** The loader's judgement of a draft: its problems by field path, or its wording warnings. */
+  readonly validateDraft: (draft: SourceDraft) => Promise<DraftValidation>;
+  /** The draft asked of the 20 newest rows: one model call per row, under the spending cap. */
+  readonly previewDraft: (draft: SourceDraft) => Promise<DraftPreview>;
+  /** What testing the draft would read and cost; the model is not called. */
+  readonly testEstimate: (draft: SourceDraft) => Promise<TestEstimate>;
+  /** The test itself: up to 1,000 model requests, sent only after the estimate was accepted. */
+  readonly testDraft: (draft: SourceDraft) => Promise<TestResult>;
+  /** The diff the draft makes to facetdb.config.ts and the plan naming it; nothing is written. */
+  readonly applyDiff: (draft: SourceDraft) => Promise<ApplyDiff>;
+  /** Writes the file the plan names and reloads the worker; `force` only when the person chose it. */
+  readonly applyWrite: (
+    draft: SourceDraft,
+    confirm: { readonly plan: string; readonly force: boolean },
+  ) => Promise<ApplyWritten>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -605,5 +861,17 @@ export function createApiClient(fetch: Fetch): ApiClient {
       const config = await call(spendingConfigSchema, "GET", "/config");
       return { tokens: config.spendingCap ?? null, onCapReached: config.onCapReached };
     },
+    projectConfig: () => call(projectConfigSchema, "GET", "/config"),
+    validateDraft: (draft) =>
+      call(draftValidationSchema, "POST", "/config/validate", { source: draft }),
+    previewDraft: (draft) => call(draftPreviewSchema, "POST", "/preview", { source: draft }),
+    testEstimate: async (draft) =>
+      (await call(testEstimatedSchema, "POST", "/test", { source: draft, estimate: true }))
+        .estimate,
+    testDraft: (draft) =>
+      call(testResultSchema, "POST", "/test", { source: draft, estimate: false }),
+    applyDiff: (draft) => call(applyDiffSchema, "POST", "/apply", { source: draft }),
+    applyWrite: (draft, { plan, force }) =>
+      call(applyWrittenSchema, "POST", "/apply", { source: draft, confirm: plan, force }),
   };
 }

@@ -121,9 +121,40 @@ const PROJECT_JSON = {
  * read override the running source; a threshold above 1 is the loader's error at its path; a
  * question that counts gets the wording warning.
  */
+/** What the store keeps of `listings`: version 1 asked "Is it a scam?", version 2 adds a choice. */
+const CREATED = new Date(Date.UTC(2026, 10, 1, 9, 0));
+const WIDENED = new Date(Date.UTC(2026, 10, 3, 9, 40));
+const category: Question = {
+  type: "choice",
+  name: "category",
+  instructions: "Which category fits this listing?",
+  options: [
+    { name: "electronics", description: "phones, computers" },
+    { name: "other", description: "anything else" },
+  ],
+  stakes: "low",
+  storeProbabilities: false,
+};
+
 const door: ProjectConfigDoor = {
   projectId: PROJECT,
   json: () => PROJECT_JSON,
+  history: {
+    sources: () => [{ name: "listings", inForce: 2 }],
+    read: (source, limit) =>
+      Promise.resolve(
+        source === "listings"
+          ? [
+              {
+                version: 2,
+                createdAt: WIDENED,
+                questionSet: { ...RUNNING, questions: [scam, category] },
+              },
+              { version: 1, createdAt: CREATED, questionSet: RUNNING },
+            ].slice(0, limit)
+          : [],
+      ),
+  },
   validate: (draft: SourceDraft): DraftCheck => {
     const thresholds = (draft["thresholds"] ?? {}) as QuestionSet["thresholds"];
     const yesAbove = thresholds["is_scam"]?.yesAbove;
@@ -240,6 +271,8 @@ async function rig(
     readonly excludes?: (state: Readonly<Record<string, string | null>>) => boolean;
     /** The project the studio believes it serves; the configuration door's own is `PROJECT`. */
     readonly studioProject?: string;
+    /** The store's side of the version history, in place of the door's own. */
+    readonly history?: ProjectConfigDoor["history"];
   } = {},
 ) {
   const database = new FakeDatabase({
@@ -302,12 +335,17 @@ async function rig(
       clock,
     }).testQuestionSet,
   };
+  /** The worker's log: what the server writes there and never tells the browser. */
+  const logged: string[] = [];
   const app = createApp({
     keys,
     check: NO_CHECK,
     config: createConfigService({
-      config: door,
+      config: options.history === undefined ? door : { ...door, history: options.history },
       preview: (source) => (source === "listings" ? running : undefined),
+      log: (line) => {
+        logged.push(line);
+      },
     }),
     data: NO_DATA,
     studio: {
@@ -350,7 +388,7 @@ async function rig(
     };
   }
 
-  return { call, provider, database };
+  return { call, provider, database, logged };
 }
 
 describe("the config routes", () => {
@@ -376,12 +414,97 @@ describe("the config routes", () => {
     expect(t.provider.requests).toHaveLength(0);
   });
 
-  it("GET /v1/config returns the project JSON of the loader's export", async () => {
+  it("GET /v1/config returns the project JSON of the loader's export, and each source's version history beside its sources", async () => {
     const t = await rig();
     const response = await t.call("GET", "/v1/config");
 
     expect(response.status).toBe(200);
-    expect(response.json).toEqual(PROJECT_JSON);
+    expect(response.json).toEqual({
+      ...PROJECT_JSON,
+      versions: {
+        listings: {
+          inForce: 2,
+          earlier: false,
+          versions: [
+            { version: 2, createdAt: "2026-11-03T09:40:00.000Z", changes: "category added" },
+            { version: 1, createdAt: "2026-11-01T09:00:00.000Z", changes: "Created, with is_scam" },
+          ],
+          note: null,
+        },
+      },
+    });
+    // The sources stay as the exporter writes them: a draft built from one carries no history.
+    expect(response.json["sources"]).toEqual(PROJECT_JSON.sources);
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
+  it("GET /v1/config still answers the config when the store's history cannot be read, the history empty with a note", async () => {
+    const t = await rig({
+      history: {
+        sources: () => [{ name: "listings", inForce: 2 }],
+        // The store's own words name its host and role: they reach the worker's log, never the page.
+        read: () =>
+          Promise.reject(
+            new Error('connect ECONNREFUSED db.internal.example:5432 (role "facetdb_worker")'),
+          ),
+      },
+    });
+    const response = await t.call("GET", "/v1/config");
+
+    expect(response.status).toBe(200);
+    expect(response.json).toEqual({
+      ...PROJECT_JSON,
+      versions: {
+        listings: {
+          inForce: 2,
+          earlier: false,
+          versions: [],
+          note: "The version history of listings could not be read from the store. The questions shown are the worker's own, as it runs them; the worker's output says why.",
+        },
+      },
+    });
+    const sentText = JSON.stringify(response.json);
+    expect(sentText).not.toContain("db.internal.example");
+    expect(sentText).not.toContain("facetdb_worker");
+    expect(t.logged).toEqual([
+      'the version history of listings could not be read from the store: connect ECONNREFUSED db.internal.example:5432 (role "facetdb_worker")',
+    ]);
+  });
+
+  it("GET /v1/config leaves out a stored set this worker cannot read, and says so", async () => {
+    const t = await rig({
+      history: {
+        sources: () => [{ name: "listings", inForce: 3 }],
+        read: () =>
+          Promise.resolve([
+            {
+              version: 3,
+              createdAt: WIDENED,
+              questionSet: { ...RUNNING, questions: [scam, category] },
+            },
+            { version: 2, createdAt: WIDENED, questionSet: null },
+            { version: 1, createdAt: CREATED, questionSet: RUNNING },
+          ]),
+      },
+    });
+    const response = await t.call("GET", "/v1/config");
+
+    expect(response.status).toBe(200);
+    expect(response.json["versions"]).toEqual({
+      listings: {
+        inForce: 3,
+        earlier: false,
+        versions: [
+          {
+            version: 3,
+            createdAt: "2026-11-03T09:40:00.000Z",
+            changes: "What changed from version 2 cannot be said: that version cannot be read",
+          },
+          { version: 1, createdAt: "2026-11-01T09:00:00.000Z", changes: "Created, with is_scam" },
+        ],
+        note: "Version 2 is kept in a form this worker cannot read, so it is left out.",
+      },
+    });
   });
 
   it("answers a studio wired to another project than the configuration's with nothing of the project", async () => {

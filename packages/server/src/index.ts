@@ -51,6 +51,13 @@ export type {
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";
 export type {
+  HistoryDoor,
+  SourceHistory,
+  StoredVersion,
+  VersionHistory,
+} from "./config/versions.ts";
+export { VERSION_HISTORY_SHOWN } from "./config/versions.ts";
+export type {
   Capture,
   DashboardDatabase,
   DashboardDoor,

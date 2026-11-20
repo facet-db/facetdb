@@ -24,7 +24,11 @@ import {
   searchDecisions,
 } from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
-import { readQuestionSets } from "./question-sets.ts";
+import {
+  readQuestionSetHistory,
+  readQuestionSets,
+  type StoredQuestionSetVersion,
+} from "./question-sets.ts";
 import { createReviewQueue } from "./reviews.ts";
 import { integer, text, toMs } from "./rows.ts";
 import { createRunStore, type RunStore } from "./runs.ts";
@@ -113,9 +117,11 @@ export type Store = {
    * The question-set versions of one source: `record` stores the set under the version it should
    * run under, which is the previous one when its content is unchanged and the next otherwise.
    * `versions` reads the saved sets of the given versions; one the store does not keep is absent.
+   * `history` reads the newest `limit` versions, newest first, with their times and sets.
    */
   questionSets: {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
+    history(sourceId: string, limit: number): Promise<readonly StoredQuestionSetVersion[]>;
     record(sourceId: string, questionSet: QuestionSet): Promise<QuestionSetVersion>;
     versions(
       sourceId: string,
@@ -277,6 +283,7 @@ export async function createStore(options: StoreOptions): Promise<Store> {
 
       questionSets: {
         latest: (sourceId) => latestVersion(client.query, sourceId),
+        history: (sourceId, limit) => readQuestionSetHistory(client.query, sourceId, limit),
         versions: (sourceId, versions) => readQuestionSets(client.query, sourceId, versions),
         async record(sourceId, questionSet) {
           return client.transaction(async (query) => {

@@ -2,10 +2,15 @@ import {
   type Alerts,
   type ApiClient,
   ApiError,
+  type ApplyDiff,
+  type ApplyWritten,
   type DecisionHistory,
   type DecisionsPage,
+  type DraftPreview,
+  type DraftValidation,
   type Home,
   type Project,
+  type ProjectConfig,
   type ReviewCard,
   type ReviewCardId,
   type ReviewerAccounts,
@@ -13,6 +18,8 @@ import {
   type RunsPage,
   type SpendingConfig,
   type StudioAccess,
+  type TestEstimate,
+  type TestResult,
 } from "../api/index.ts";
 
 /**
@@ -378,6 +385,242 @@ export const SAMPLE_REVIEWERS: ReviewerAccounts = [
 /** $25 at $1 per million input tokens, pausing at the cap, as SAMPLE_HOME has it. */
 export const SAMPLE_SPENDING_CONFIG: SpendingConfig = { tokens: 25_000_000, onCapReached: "pause" };
 
+/*
+ * The Questions page: the mockup's marketplace configuration with its version history, a draft
+ * judged clean, a preview of six rows, a test and Apply, shaped as the worker answers.
+ */
+
+export const SAMPLE_PROJECT_CONFIG: ProjectConfig = {
+  model: "jev-1.14.0",
+  sources: [
+    {
+      name: "listings",
+      read: ["title", "price"],
+      questions: {
+        is_scam: {
+          type: "noul",
+          instructions: "Is this listing likely a scam?",
+          criteria: {
+            true: "A price far below market, payment outside the platform, a seller a few days old, urgency.",
+            false: "A plausible price, a seller with history, ordinary payment.",
+          },
+          stakes: "high",
+        },
+        category: {
+          type: "choice",
+          instructions: "Which category fits this listing?",
+          options: [
+            { name: "electronics", description: "phones, computers, consoles, cameras, audio" },
+            { name: "furniture", description: "tables, sofas, shelves, desks, beds" },
+            { name: "vehicles", description: "cars, motorbikes, scooters, parts" },
+            { name: "clothing", description: "clothes, shoes, bags, accessories" },
+            { name: "other", description: "anything that fits none of the above" },
+          ],
+          stakes: "low",
+          storeProbabilities: false,
+        },
+      },
+      thresholds: {},
+    },
+    {
+      name: "support_messages",
+      read: ["subject", "body"],
+      questions: {
+        urgency: {
+          type: "score",
+          instructions: "How urgent is this message?",
+          levels: [{ name: "low" }, { name: "medium" }, { name: "high" }],
+          stakes: "low",
+        },
+      },
+      thresholds: { urgency: { confidenceAtLeast: 0.6 } },
+    },
+  ],
+  versions: {
+    listings: {
+      inForce: 3,
+      earlier: false,
+      note: null,
+      versions: [
+        {
+          version: 3,
+          createdAt: "2026-11-02T09:40:00.000Z",
+          changes: "The wording and the criteria of is_scam",
+        },
+        { version: 2, createdAt: "2026-11-01T15:10:00.000Z", changes: "category added" },
+        { version: 1, createdAt: "2026-10-30T11:00:00.000Z", changes: "Created, with is_scam" },
+      ],
+    },
+    support_messages: {
+      inForce: 1,
+      earlier: false,
+      note: null,
+      versions: [
+        { version: 1, createdAt: "2026-11-01T15:10:00.000Z", changes: "Created, with urgency" },
+      ],
+    },
+  },
+};
+
+export const SAMPLE_VALIDATION: DraftValidation = { valid: true, issues: [], warnings: [] };
+
+/** A category's probabilities, its top option first in the mockup's option order. */
+const categories = (top: number, at: number): number[] =>
+  [0, 1, 2, 3, 4].map((index) => (index === at ? top : (1 - top) / 4));
+
+/**
+ * The newest listings answered at the sample's thresholds (is_scam high stakes: yes at 90%, no at
+ * 10%; category low: 50% confidence): two rows decided, three to review, one left out by `where`.
+ */
+export const SAMPLE_PREVIEW: DraftPreview = {
+  rows: [
+    {
+      key: "48213",
+      kind: "answered",
+      state: { title: "iPhone 15 Pro, sealed, 60% off, pay by gift card", price: "390" },
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.58 },
+        category: { type: "choice", top: "electronics", probabilities: categories(0.95, 0) },
+      },
+    },
+    {
+      key: "48190",
+      kind: "answered",
+      state: { title: "Oak dining table, 6 chairs, pickup only", price: "420" },
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.03 },
+        category: { type: "choice", top: "furniture", probabilities: categories(0.97, 1) },
+      },
+    },
+    {
+      key: "48177",
+      kind: "answered",
+      state: { title: "MacBook Air M3, brand new, send the deposit first", price: "450" },
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.94 },
+        category: { type: "choice", top: "electronics", probabilities: categories(0.95, 0) },
+      },
+    },
+    {
+      key: "48160",
+      kind: "answered",
+      state: { title: "PS5 bundle, two controllers", price: "380" },
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.12 },
+        category: { type: "choice", top: "electronics", probabilities: categories(0.98, 0) },
+      },
+    },
+    {
+      key: "48151",
+      kind: "answered",
+      state: { title: "Rolex Submariner, no box, cash only, today", price: "1200" },
+      model: "jev-1.14.0",
+      answers: {
+        is_scam: { type: "noul", probability: 0.91 },
+        category: { type: "choice", top: "other", probabilities: categories(0.41, 4) },
+      },
+    },
+    { key: "48140", kind: "skipped", reason: "filtered-out" },
+  ],
+  decided: 2,
+  review: 3,
+  cost: { inputTokens: 3_750, dollars: 0.000_157_5 },
+  warnings: [],
+};
+
+export const SAMPLE_TEST_ESTIMATE: TestEstimate = {
+  sampleRecords: 1_000,
+  reviewedRecords: 212,
+  requests: 1_212,
+  inputTokens: 909_000,
+  dollars: 0.038_178,
+};
+
+/** The mockup's test: 41 of 1,000 is_scam answers would change, agreement 91% now and 96% with the draft. */
+export const SAMPLE_TEST_RESULT: TestResult = {
+  sample: { records: 1_000, asked: 1_000 },
+  reviewed: { records: 212, asked: 212 },
+  skipped: {},
+  removed: [],
+  questions: [
+    {
+      question: "is_scam",
+      comparison: "compared",
+      compared: 1_000,
+      changed: 41,
+      toDecided: 29,
+      toReview: 12,
+      toAnotherValue: 0,
+      noCurrentAnswer: 0,
+      keptForPeople: 0,
+      agreement: {
+        kind: "measured",
+        records: 212,
+        now: { agreed: 180, disagreed: 18, unsure: 14, rate: 0.909 },
+        draft: { agreed: 196, disagreed: 8, unsure: 8, rate: 0.961 },
+      },
+    },
+    {
+      question: "category",
+      comparison: "compared",
+      compared: 1_000,
+      changed: 0,
+      toDecided: 0,
+      toReview: 0,
+      toAnotherValue: 0,
+      noCurrentAnswer: 0,
+      keptForPeople: 0,
+      agreement: { kind: "none", reason: "no-reviewed-records" },
+    },
+  ],
+  cost: { inputTokens: 905_000, dollars: 0.038_01 },
+  estimate: SAMPLE_TEST_ESTIMATE,
+  warnings: [],
+};
+
+export const SAMPLE_APPLY_DIFF: ApplyDiff = {
+  written: false,
+  path: "facetdb.config.ts",
+  diff: [
+    "--- a/facetdb.config.ts",
+    "+++ b/facetdb.config.ts",
+    "@@ -9,3 +9,3 @@",
+    "       questions: {",
+    '-        "is_scam": noul("Is this listing likely a scam?", { stakes: "high" }),',
+    '+        "is_scam": noul("Is this listing a scam or a fake?", { stakes: "high" }),',
+    "       },",
+    "",
+  ].join("\n"),
+  changed: true,
+  plan: "plan-1",
+  uncommitted: null,
+  warnings: [],
+};
+
+export const SAMPLE_APPLIED: ApplyWritten = {
+  written: true,
+  path: "facetdb.config.ts",
+  diff: SAMPLE_APPLY_DIFF.diff,
+  reload: {
+    loaded: true,
+    sources: [
+      {
+        source: "listings",
+        outcome: "restarted",
+        version: 4,
+        message:
+          "the question set changed: it finishes the batch in hand, then answers with version 4; nothing already answered is asked again.",
+      },
+      { source: "support_messages", outcome: "unchanged", version: 1, message: null },
+    ],
+    notes: [],
+  },
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -438,6 +681,14 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     reviewers: () => Promise.resolve(SAMPLE_REVIEWERS),
     addReviewer: () => Promise.resolve(),
     spendingConfig: () => Promise.resolve(SAMPLE_SPENDING_CONFIG),
+    // The Questions page's.
+    projectConfig: () => Promise.resolve(SAMPLE_PROJECT_CONFIG),
+    validateDraft: () => Promise.resolve(SAMPLE_VALIDATION),
+    previewDraft: () => Promise.resolve(SAMPLE_PREVIEW),
+    testEstimate: () => Promise.resolve(SAMPLE_TEST_ESTIMATE),
+    testDraft: () => Promise.resolve(SAMPLE_TEST_RESULT),
+    applyDiff: () => Promise.resolve(SAMPLE_APPLY_DIFF),
+    applyWrite: () => Promise.resolve(SAMPLE_APPLIED),
     ...answers,
   };
   return {
@@ -529,6 +780,35 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     spendingConfig: () => {
       calls.push("spendingConfig");
       return answer.spendingConfig();
+    },
+    // The Questions page's: the draft each call sent rides in the note as JSON.
+    projectConfig: () => {
+      calls.push("projectConfig");
+      return answer.projectConfig();
+    },
+    validateDraft: (draft) => {
+      calls.push(`validateDraft ${JSON.stringify(draft)}`);
+      return answer.validateDraft(draft);
+    },
+    previewDraft: (draft) => {
+      calls.push(`previewDraft ${JSON.stringify(draft)}`);
+      return answer.previewDraft(draft);
+    },
+    testEstimate: (draft) => {
+      calls.push(`testEstimate ${JSON.stringify(draft)}`);
+      return answer.testEstimate(draft);
+    },
+    testDraft: (draft) => {
+      calls.push(`testDraft ${JSON.stringify(draft)}`);
+      return answer.testDraft(draft);
+    },
+    applyDiff: (draft) => {
+      calls.push(`applyDiff ${JSON.stringify(draft)}`);
+      return answer.applyDiff(draft);
+    },
+    applyWrite: (draft, confirm) => {
+      calls.push(`applyWrite ${JSON.stringify({ ...confirm, draft })}`);
+      return answer.applyWrite(draft, confirm);
     },
   };
 }

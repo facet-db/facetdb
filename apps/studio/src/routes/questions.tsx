@@ -1,19 +1,25 @@
 import { createRoute } from "@tanstack/react-router";
-import { PageHead } from "../shell/index.ts";
+import { QuestionsPage, questionsSearch } from "../features/questions/index.ts";
 import { shellRoute } from "./root.tsx";
 
-// Questions. Its content is not built yet.
+// Questions. The address holds the source whose tab is open, validated here; the source name
+// reaches the validator as written (routes/search.ts).
 export const questionsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: "/questions",
-  component: QuestionsPage,
+  validateSearch: questionsSearch,
+  component: QuestionsRoute,
 });
 
-function QuestionsPage() {
+function QuestionsRoute() {
+  const { source } = questionsRoute.useSearch();
+  const navigate = questionsRoute.useNavigate();
   return (
-    <PageHead
-      title="Questions"
-      lede="The question editor with a live preview on 20 rows, thresholds with a slider, version history, Test and Apply."
+    <QuestionsPage
+      source={source}
+      onSource={(name) => {
+        void navigate({ search: { source: name }, replace: true });
+      }}
     />
   );
 }

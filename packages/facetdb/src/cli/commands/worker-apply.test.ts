@@ -231,6 +231,17 @@ describe("Apply on a running facetdb worker", () => {
           questions: { is_scam: { instructions: "Is this listing a scam or a fake?" } },
         },
       ],
+      // The version history from the store: the write made version 2, now in force.
+      versions: {
+        listings: {
+          inForce: 2,
+          earlier: false,
+          versions: [
+            { version: 2, changes: "The wording of is_scam" },
+            { version: 1, changes: "Created, with is_scam" },
+          ],
+        },
+      },
     });
     // One new version row, through the store's version path; the model was never asked.
     const sourceId = storeSourceId(projectRef(PROJECT_DIR).id, "listings");
