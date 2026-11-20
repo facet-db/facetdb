@@ -133,6 +133,9 @@ async function runSeeingPrompts(
         write: unused,
         writeParts: unused,
         peek: unused,
+        lines: () => {
+          throw new Error("unused");
+        },
         hasClaudeCommand: () => false,
       },
       clock: { now: () => 0, sleep: unused },

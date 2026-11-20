@@ -120,6 +120,7 @@ describe("facetdb users add", () => {
         write: unused,
         writeParts: unused,
         peek: unused,
+        lines: unused,
         hasClaudeCommand: unused,
       },
       clock: new FakeClock(0),

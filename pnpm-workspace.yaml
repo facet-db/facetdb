@@ -14,3 +14,7 @@ minimumReleaseAgeStrict: true
 # calls initOracleClient. Denied, the script never runs.
 allowBuilds:
   oracledb: false
+  # esbuild arrives with Vite (apps/studio). Its install script only checks that the platform binary
+  # runs and swaps a shim for it; the binary itself comes from the optional
+  # @esbuild/<platform> package, so Vite builds without the script. Denied, it never runs.
+  esbuild: false

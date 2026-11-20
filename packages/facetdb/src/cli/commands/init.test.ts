@@ -70,6 +70,9 @@ function workspaceOf(root: string, claudeOnPath: boolean): Workspace {
     },
     writeParts: () => Promise.reject(new Error("init writes no file in parts")),
     peek: () => Promise.reject(new Error("init reads no file")),
+    lines: () => {
+      throw new Error("init reads no file");
+    },
     hasClaudeCommand: () => claudeOnPath,
   };
 }

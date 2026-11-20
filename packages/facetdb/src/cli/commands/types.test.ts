@@ -672,6 +672,9 @@ describe("facetdb types: registered in the program", () => {
                 : { kind: "file", firstLine: text.split("\n")[0] ?? "" },
             );
           },
+          lines: () => {
+            throw new Error("types reads no file");
+          },
           hasClaudeCommand: () => false,
         },
       },

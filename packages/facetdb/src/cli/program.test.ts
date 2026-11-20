@@ -129,6 +129,9 @@ describe("the facetdb program", () => {
           write: () => Promise.resolve(),
           writeParts: () => Promise.resolve("written"),
           peek: () => Promise.resolve({ kind: "none" }),
+          lines: () => {
+            throw new Error("unused");
+          },
           hasClaudeCommand: () => false,
         },
         clock: { now: () => 0, sleep: () => Promise.resolve() },

@@ -129,6 +129,11 @@ export type Workspace = {
    * `facetdb types` replaces a file only when its first line is the generated header.
    */
   peek(path: string): Promise<PathFound>;
+  /**
+   * The lines of a file, one at a time as they are asked for, never through a symbolic link
+   * (`facetdb review --from`). The caller has `peek`ed the path: a missing file fails here.
+   */
+  lines(path: string): AsyncIterable<string>;
   /** Whether the `claude` command is on the PATH. */
   hasClaudeCommand(): boolean;
 };
@@ -542,6 +547,9 @@ export async function runInProcess(
         write: () => Promise.reject(new Error("this test gave the command no workspace")),
         writeParts: () => Promise.reject(new Error("this test gave the command no workspace")),
         peek: () => Promise.reject(new Error("this test gave the command no workspace")),
+        lines: () => {
+          throw new Error("this test gave the command no workspace");
+        },
         hasClaudeCommand: () => {
           throw new Error("this test gave the command no workspace");
         },

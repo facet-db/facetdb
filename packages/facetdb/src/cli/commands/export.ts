@@ -53,7 +53,7 @@ type ExportOptions = {
 type Versions = ReadonlyMap<number, QuestionSet>;
 
 /** What one answer to one question comes to, in the columns the export has. */
-type Reading = {
+export type Reading = {
   /** The option or level the model named; empty for a noul, whose answer is the probability. */
   readonly value: string;
   readonly probability: number | null;
@@ -73,7 +73,12 @@ function decisionWords(decision: Decision): string {
   return typeof decision.value === "boolean" ? (decision.value ? "yes" : "no") : decision.value;
 }
 
-function readAnswer(set: QuestionSet | undefined, name: string, answer: Answer): Reading {
+/**
+ * What one answer comes to in the export's columns, under the question set of its version. Shared
+ * with `review --from`, which tells an edited export row from the log's own words by comparing it
+ * with this.
+ */
+export function readAnswer(set: QuestionSet | undefined, name: string, answer: Answer): Reading {
   const question = questionOf(set, name);
   const decision =
     question === undefined || set === undefined

@@ -39,6 +39,7 @@ import {
 import { ALLOW_INSECURE_OPTION, loadProjectConfig, projectRef, questionSetOf } from "./database.ts";
 import { type TableRead, tableRead } from "./explain.ts";
 import { COLORED, PLAIN, waitingWords, wrap } from "./review-card.ts";
+import { reviewFromFile } from "./review-from.ts";
 import { reviewSession, type SourceView } from "./review-session.ts";
 
 /**
@@ -65,6 +66,8 @@ type ReviewOptions = {
   readonly below?: string;
   readonly limit?: string;
   readonly user?: string;
+  readonly from?: string;
+  readonly yes?: boolean;
   readonly allowInsecure?: boolean;
 };
 
@@ -94,6 +97,13 @@ export type QueueRead = {
   readonly reviewer: string;
   readonly queue: Pick<ReviewQueue, "list">;
   readonly sources: readonly ReviewSource[];
+  /** Each source's log by its store id, read-only here: `--from` reads a record's history to say who decided it. */
+  readonly logs: ReadonlyMap<string, Pick<DecisionLog, "history">>;
+  /** The saved question sets of a source's versions (one the store does not keep is absent): what an export row's words were made under. */
+  versions(
+    sourceId: string,
+    versions: readonly number[],
+  ): Promise<ReadonlyMap<number, QuestionSet>>;
   close(): Promise<void>;
 };
 
@@ -137,6 +147,31 @@ function planOf(options: ReviewOptions): ReviewPlan {
       );
     }
     limit = count;
+  }
+  if (options.from !== undefined) {
+    // The file names its records; these narrow a walk through the queue.
+    const walking = (
+      [
+        ["--question", options.question],
+        ["--below", options.below],
+        ["--limit", options.limit],
+      ] as const
+    )
+      .filter(([, given]) => given !== undefined)
+      .map(([flag]) => flag);
+    if (walking.length > 0) {
+      throw usage(
+        "review-from-flags",
+        `${walking.join(" and ")} narrow${walking.length === 1 ? "s" : ""} the cards a person walks through, and --from names its records in the file`,
+        "leave them out; --source keeps --from to the rows of one source",
+      );
+    }
+  } else if (options.yes === true) {
+    throw usage(
+      "review-yes",
+      "--yes confirms the decisions --from is about to apply, and there is no --from",
+      "add --from <file>, or leave --yes out",
+    );
   }
   if (options.user !== undefined && !isUserName(options.user)) {
     throw usage(
@@ -231,6 +266,12 @@ export function createReviewCommand(door: ReviewDoor): RegisteredCommand {
         description:
           "decide as this reviewer account (facetdb users list) after its password is asked; by default as os:<your user name>",
       },
+      {
+        flags: "--from <file>",
+        description:
+          "apply the decisions in a JSONL file (the rows facetdb export writes, or {source, key, question, value, note?} rows) as the reviewer, after showing what it will do and asking; no card is walked through",
+      },
+      { flags: "--yes", description: "with --from, apply without asking, after showing the plan" },
       ALLOW_INSECURE_OPTION,
     ],
     run: async (context) => {
@@ -260,6 +301,9 @@ export function createReviewCommand(door: ReviewDoor): RegisteredCommand {
             `pass one of: ${[...new Set(known)].join(", ")}`,
           );
         }
+      }
+      if (options.from !== undefined) {
+        return reviewFromFile({ context, config, sources }, door, options.from);
       }
       const reviewer = options.user ?? `${OS_REVIEWER_PREFIX}${deps.osUser()}`;
       if (options.dryRun) {
@@ -382,7 +426,14 @@ async function reviewerOf(
 export const projectDoor: ReviewDoor = {
   async queue(input) {
     const { store, reviewer, sources } = await openStore(input, false);
-    return { reviewer, queue: store.reviews, sources, close: () => store.close() };
+    return {
+      reviewer,
+      queue: store.reviews,
+      sources,
+      logs: new Map(sources.map((source) => [source.id, store.log(source.id)])),
+      versions: (sourceId, versions) => store.questionSets.versions(sourceId, versions),
+      close: () => store.close(),
+    };
   },
 
   async cards(input) {
@@ -448,6 +499,8 @@ export const projectDoor: ReviewDoor = {
         reviewer: opened.reviewer,
         queue: store.reviews,
         sources: opened.sources,
+        logs,
+        versions: (sourceId, versions) => store.questionSets.versions(sourceId, versions),
         service,
         close,
       };

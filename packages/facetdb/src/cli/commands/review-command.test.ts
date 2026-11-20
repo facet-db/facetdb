@@ -188,6 +188,8 @@ function world(config: ProjectConfig = configOf()) {
         reviewer: REVIEWER,
         queue,
         sources,
+        logs: new Map([[SOURCE, log]]),
+        versions: () => Promise.resolve(new Map([[3, questionSet]])),
         close: () => {
           calls.closed += 1;
           return Promise.resolve();
@@ -200,6 +202,8 @@ function world(config: ProjectConfig = configOf()) {
         reviewer: REVIEWER,
         queue,
         sources,
+        logs: new Map([[SOURCE, log]]),
+        versions: () => Promise.resolve(new Map([[3, questionSet]])),
         service,
         close: () => {
           calls.closed += 1;

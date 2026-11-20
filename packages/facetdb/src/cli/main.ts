@@ -122,6 +122,26 @@ async function modeOf(file: string): Promise<number | undefined> {
 }
 
 /**
+ * A file's lines, read as the consumer asks for them (`review --from`), so a large export is never
+ * held whole. Never through a symbolic link, as `peek` reads none; a byte order mark that a Windows
+ * editor put first is dropped.
+ */
+async function* linesOf(file: string): AsyncGenerator<string> {
+  // O_NOFOLLOW, as `peek`: a link put there since the check is refused, never read through.
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const input = handle.createReadStream({ encoding: "utf8" });
+  try {
+    let first = true;
+    for await (const line of createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY })) {
+      yield first ? line.replace(/^﻿/, "") : line;
+      first = false;
+    }
+  } finally {
+    input.destroy();
+  }
+}
+
+/**
  * The project directory on the real disk, and the `claude` command looked up on the real PATH.
  * `files.link` is the disk's own unless a test hands in one that refuses, as a filesystem without
  * hard links does.
@@ -193,6 +213,7 @@ export function diskWorkspace(
         await rm(partial, { force: true });
       }
     },
+    lines: (path) => linesOf(resolve(projectDir, path)),
     peek: async (path) => {
       const file = resolve(projectDir, path);
       try {

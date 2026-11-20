@@ -150,6 +150,9 @@ function run(
           return "written";
         },
         peek: () => Promise.reject(new Error("export reads no file")),
+        lines: () => {
+          throw new Error("export reads no file");
+        },
         hasClaudeCommand: () => false,
       },
     },
