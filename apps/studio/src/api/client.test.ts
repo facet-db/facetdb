@@ -103,3 +103,67 @@ describe("the API client", () => {
     });
   });
 });
+
+describe("the review calls", () => {
+  const card = { source: "support_messages", key: "a/b 1", stateHash: "h-1" };
+  const named = '{"source":"support_messages","stateHash":"h-1"}';
+
+  it("narrows the queue and opens by filter, sending only what is set", async () => {
+    const t = recording((path) =>
+      path.startsWith("/v1/review/queue") ? json(SAMPLE_QUEUE) : json({ card: null }),
+    );
+    const api = createApiClient(t.fetch);
+    await api.reviewQueue({ limit: 1, source: "listings", below: 0.6 });
+    expect(await api.reviewOpen({ source: "listings", question: "is_scam" })).toEqual({
+      card: null,
+    });
+    expect(await api.reviewOpen()).toEqual({ card: null });
+    expect(t.sent.map((one) => [one.init?.method, one.path, one.init?.body])).toEqual([
+      ["GET", "/v1/review/queue?limit=1&source=listings&below=0.6", undefined],
+      ["POST", "/v1/review/open", '{"source":"listings","question":"is_scam"}'],
+      ["POST", "/v1/review/open", "{}"],
+    ]);
+  });
+
+  it("names a card by its key in the path and its source and state hash in the body", async () => {
+    const answers: Record<string, unknown> = {
+      renew: { lockedUntil: "2026-11-06T12:11:00.000Z" },
+      decide: { status: "needs_review", open: ["q"], failedActions: [] },
+      skip: { skipped: true },
+      release: { released: true },
+    };
+    const t = recording((path) => json(answers[path.split("/").at(-1) ?? ""]));
+    const api = createApiClient(t.fetch);
+    await api.reviewRenew(card);
+    await api.reviewDecide(card, { question: "q", value: true, note: "n" });
+    await api.reviewSkip(card);
+    await api.reviewRelease(card);
+    expect(t.sent.map((one) => [one.path, one.init?.body])).toEqual([
+      ["/v1/review/a%2Fb%201/renew", named],
+      [
+        "/v1/review/a%2Fb%201/decide",
+        '{"source":"support_messages","stateHash":"h-1","question":"q","value":true,"note":"n"}',
+      ],
+      ["/v1/review/a%2Fb%201/skip", named],
+      ["/v1/review/a%2Fb%201/release", named],
+    ]);
+    // Only the release asks the browser to finish it after the page is gone.
+    expect(t.sent.map((one) => one.init?.keepalive === true)).toEqual([false, false, false, true]);
+  });
+
+  it("undoes with an empty body and refuses an answer that is not a card", async () => {
+    const t = recording(() => json({ status: "needs_review", card: null, failedActions: [] }));
+    expect(await createApiClient(t.fetch).reviewUndo()).toEqual({
+      status: "needs_review",
+      card: null,
+      failedActions: [],
+    });
+    expect(t.sent.map((one) => [one.init?.method, one.path, one.init?.body])).toEqual([
+      ["POST", "/v1/review/undo", "{}"],
+    ]);
+    const wrong = recording(() => json({ card: { source: "x" } }));
+    await expect(createApiClient(wrong.fetch).reviewOpen()).rejects.toMatchObject({
+      code: "unexpected-answer",
+    });
+  });
+});

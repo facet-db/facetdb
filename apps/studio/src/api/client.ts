@@ -57,6 +57,87 @@ const queueSchema = z.object({
 });
 export type ReviewQueue = z.infer<typeof queueSchema>;
 
+/** What narrows the queue and `open`: all optional, `below` strictly between 0 and 1. */
+export type ReviewFilter = {
+  readonly source?: string;
+  readonly question?: string;
+  readonly below?: number;
+};
+
+/** What `open` takes: a filter for the next card, or one record by its source and key (never both). */
+export type ReviewOpenTarget = ReviewFilter | { readonly source: string; readonly key: string };
+
+/** The card a request names: its source and the state hash it was opened at (the key rides in the path). */
+export type ReviewCardId = {
+  readonly source: string;
+  readonly key: string;
+  readonly stateHash: string;
+};
+
+// The review endpoints' answers: a card the reviewer holds is the one answer that carries a
+// record's state; the question types are the product's three.
+const questionType = z.enum(["noul", "choice", "score"]);
+const reviewOption = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  probability: z.number().min(0).max(1),
+});
+const reviewOpenQuestion = z.object({
+  name: z.string(),
+  type: questionType,
+  instructions: z.string(),
+  said: z.string(),
+  figure: z.number().min(0).max(1),
+  top: z.string(),
+  options: z.array(reviewOption),
+});
+const reviewDecidedQuestion = z.object({
+  name: z.string(),
+  type: questionType,
+  instructions: z.string(),
+  value: z.union([z.boolean(), z.string()]),
+  said: z.string(),
+});
+const reviewCard = z.object({
+  source: z.string(),
+  key: z.string(),
+  stateHash: z.string(),
+  state: z.record(z.string(), z.string().nullable()),
+  open: z.array(reviewOpenQuestion),
+  decided: z.array(reviewDecidedQuestion),
+  since: z.string(),
+  lockedUntil: z.string(),
+});
+export type ReviewCard = z.infer<typeof reviewCard>;
+export type ReviewOpenQuestion = z.infer<typeof reviewOpenQuestion>;
+export type ReviewDecidedQuestion = z.infer<typeof reviewDecidedQuestion>;
+
+/** `POST /v1/review/open`: the next card under the filter, or null when none is left. */
+const openedSchema = z.object({ card: reviewCard.nullable() });
+export type ReviewOpened = z.infer<typeof openedSchema>;
+
+const recordStatus = z.enum(["pending", "done", "needs_review", "error", "unchecked", "skipped"]);
+
+/** `POST /v1/review/:key/decide`: the record's status now, the questions still open, the actions that failed. */
+const decidedSchema = z.object({
+  status: recordStatus,
+  open: z.array(z.string()),
+  failedActions: z.array(z.string()),
+});
+export type ReviewDecided = z.infer<typeof decidedSchema>;
+
+/** `POST /v1/review/undo`: the card back in the queue and held by this reviewer, or null when it is not theirs to hold. */
+const undoneSchema = z.object({
+  status: recordStatus,
+  card: reviewCard.nullable(),
+  failedActions: z.array(z.string()),
+});
+export type ReviewUndone = z.infer<typeof undoneSchema>;
+
+const renewedSchema = z.object({ lockedUntil: z.string() });
+const skippedSchema = z.object({ skipped: z.literal(true) });
+const releasedSchema = z.object({ released: z.literal(true) });
+
 /**
  * `GET /v1/home` as the rail's instrument and the Home page read it: the health checks, the records
  * answered today, the review queue, the month's spending against the cap and the recent alerts,
@@ -129,11 +210,35 @@ const signedOutSchema = z.object({ signedOut: z.literal(true) });
 
 export type ApiClient = {
   readonly project: () => Promise<Project>;
-  readonly reviewQueue: (options?: { readonly limit?: number }) => Promise<ReviewQueue>;
+  readonly reviewQueue: (
+    options?: ReviewFilter & { readonly limit?: number },
+  ) => Promise<ReviewQueue>;
+  // The Review page: the card's life, one method per endpoint.
+  /** The next card under a filter, or the one record named by its source and key. */
+  readonly reviewOpen: (target?: ReviewOpenTarget) => Promise<ReviewOpened>;
+  readonly reviewRenew: (card: ReviewCardId) => Promise<{ readonly lockedUntil: string }>;
+  readonly reviewDecide: (
+    card: ReviewCardId,
+    decision: {
+      readonly question: string;
+      readonly value: boolean | string;
+      readonly note?: string;
+    },
+  ) => Promise<ReviewDecided>;
+  readonly reviewSkip: (card: ReviewCardId) => Promise<void>;
+  /** Also sent as the page closes, so it asks the browser to finish the request after the page is gone. */
+  readonly reviewRelease: (card: ReviewCardId) => Promise<void>;
+  readonly reviewUndo: () => Promise<ReviewUndone>;
   readonly home: () => Promise<Home>;
   readonly signIn: (name: string, password: string) => Promise<SignedIn>;
   readonly signOut: () => Promise<void>;
 };
+
+/** A record's key as one path segment: the surface reads it back URL-decoded. */
+const keyPath = (card: ReviewCardId) => encodeURIComponent(card.key);
+
+/** The body every card call carries; the strict surface refuses anything else. */
+const idBody = (card: ReviewCardId) => ({ source: card.source, stateHash: card.stateHash });
 
 /** The surface's path prefix (`API_VERSION` of @facetdb/server). */
 const API = "/v1";
@@ -151,9 +256,11 @@ export function createApiClient(fetch: Fetch): ApiClient {
     method: "GET" | "POST" | "DELETE",
     path: string,
     body?: unknown,
+    keepalive = false,
   ): Promise<z.output<Schema>> {
     const response = await fetch(`${API}${path}`, {
       method,
+      ...(keepalive ? { keepalive: true } : {}),
       headers:
         body === undefined
           ? { accept: "application/json" }
@@ -198,8 +305,31 @@ export function createApiClient(fetch: Fetch): ApiClient {
 
   return {
     project: () => call(projectSchema, "GET", "/project"),
-    reviewQueue: (options) =>
-      call(queueSchema, "GET", `/review/queue?limit=${String(options?.limit ?? 1)}`),
+    reviewQueue: (options) => {
+      const query = new URLSearchParams({ limit: String(options?.limit ?? 1) });
+      for (const name of ["source", "question", "below"] as const) {
+        const value = options?.[name];
+        if (value !== undefined) {
+          query.set(name, String(value));
+        }
+      }
+      return call(queueSchema, "GET", `/review/queue?${query.toString()}`);
+    },
+    reviewOpen: (target) => call(openedSchema, "POST", "/review/open", target ?? {}),
+    reviewRenew: (card) =>
+      call(renewedSchema, "POST", `/review/${keyPath(card)}/renew`, idBody(card)),
+    reviewDecide: (card, decision) =>
+      call(decidedSchema, "POST", `/review/${keyPath(card)}/decide`, {
+        ...idBody(card),
+        ...decision,
+      }),
+    reviewSkip: async (card) => {
+      await call(skippedSchema, "POST", `/review/${keyPath(card)}/skip`, idBody(card));
+    },
+    reviewRelease: async (card) => {
+      await call(releasedSchema, "POST", `/review/${keyPath(card)}/release`, idBody(card), true);
+    },
+    reviewUndo: () => call(undoneSchema, "POST", "/review/undo", {}),
     home: () => call(homeSchema, "GET", "/home"),
     signIn: (name, password) => call(signedInSchema, "POST", "/session", { name, password }),
     signOut: async () => {

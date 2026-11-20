@@ -6,7 +6,16 @@ export type {
   Home,
   HomeAlert,
   Project,
+  ReviewCard,
+  ReviewCardId,
+  ReviewDecided,
+  ReviewDecidedQuestion,
+  ReviewFilter,
+  ReviewOpened,
+  ReviewOpenQuestion,
+  ReviewOpenTarget,
   ReviewQueue,
+  ReviewUndone,
   SignedIn,
 } from "./client.ts";
 export { ApiError, createApiClient, needsSignIn, SIGN_IN_CODE } from "./client.ts";

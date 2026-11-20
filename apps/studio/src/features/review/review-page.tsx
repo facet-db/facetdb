@@ -1,0 +1,412 @@
+import { Button, EmptyState, Kbd, StatusWord } from "@facetdb/ui";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+import { type RefObject, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  projectQuery,
+  type ReviewCardId,
+  type ReviewOpenTarget,
+  reviewCountQuery,
+} from "../../api/index.ts";
+import { useApi, useSchedule } from "../../deps.tsx";
+import { ReviewCardView } from "./card.tsx";
+import {
+  createReviewController,
+  type Notice,
+  type ReviewController,
+  type ReviewDeps,
+  type ReviewState,
+  type Screen,
+} from "./controller.ts";
+import { keyedAnswers, pressedKey } from "./keys.ts";
+import { REVIEW_QUEUE_KEY } from "./queries.ts";
+import { TopBar } from "./top-bar.tsx";
+
+/**
+ * The Review page: one card on a quiet stage, the queue count and the filters in a thin bar over
+ * it, the keys at the bottom, and nothing else. The session (controller.ts) holds the card and
+ * every request; this file wires its calls, draws its state and hears the keys.
+ */
+
+/** The session over the page's dependencies: the API through mutations, the scheduler, the router. */
+function useReviewController(): ReviewController {
+  const api = useApi();
+  const schedule = useSchedule();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const reviewer = useQuery(projectQuery(api)).data?.reviewer;
+  // Through mutations, so a "sign in" answer to any call reaches the shell's rule (studio.tsx).
+  const open = useMutation({ mutationFn: (target: ReviewOpenTarget) => api.reviewOpen(target) });
+  const renew = useMutation({ mutationFn: (card: ReviewCardId) => api.reviewRenew(card) });
+  const decide = useMutation({
+    mutationFn: (ask: {
+      readonly card: ReviewCardId;
+      readonly decision: Parameters<typeof api.reviewDecide>[1];
+    }) => api.reviewDecide(ask.card, ask.decision),
+  });
+  const skip = useMutation({ mutationFn: (card: ReviewCardId) => api.reviewSkip(card) });
+  const release = useMutation({ mutationFn: (card: ReviewCardId) => api.reviewRelease(card) });
+  const undo = useMutation({ mutationFn: () => api.reviewUndo() });
+
+  const latest: ReviewDeps = {
+    calls: {
+      open: open.mutateAsync,
+      renew: renew.mutateAsync,
+      decide: (card, decision) => decide.mutateAsync({ card, decision }),
+      skip: skip.mutateAsync,
+      release: release.mutateAsync,
+      undo: () => undo.mutateAsync(),
+    },
+    // A page that is closing cannot wait for the answer: the call asks the browser to finish it.
+    closing: (card) => {
+      void api.reviewRelease(card).catch(() => undefined);
+    },
+    schedule,
+    // The same query the rail reads, and this page's own, ask again.
+    counted: () => {
+      void queryClient.invalidateQueries({ queryKey: reviewCountQuery(api).queryKey });
+      void queryClient.invalidateQueries({ queryKey: REVIEW_QUEUE_KEY });
+    },
+    goHome: () => {
+      void navigate({ to: "/" });
+    },
+    reviewer: () => reviewer,
+  };
+  const depsRef = useRef(latest);
+  depsRef.current = latest;
+  const [controller] = useState(() => createReviewController(() => depsRef.current));
+
+  useEffect(() => {
+    controller.start();
+    // Closing the tab gives the card back where the browser lets a request out (keepalive).
+    const onPageHide = () => {
+      controller.closing();
+    };
+    // A page restored from the browser's back-forward cache shows a card that was given back: it
+    // opens one again instead of showing a hold it no longer has.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        controller.restored();
+      }
+    };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      controller.stop();
+    };
+  }, [controller]);
+  return controller;
+}
+
+/**
+ * The keys: `y` and `n`, `1` to `9`, `s`, `u`, `q`. The listener asks `pressedKey` first (no key
+ * under a modifier, in a text field, a listbox or a dialog), and the session refuses a key while
+ * a request about the card is in flight, so a double press decides one thing.
+ */
+function useReviewKeys(session: ReviewController): void {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = pressedKey(event);
+      if (key === undefined) {
+        return;
+      }
+      // The session's own state at the press, not what was last drawn: the answer is for the card
+      // held now, and its identity goes with the decision.
+      const { screen } = session.getState();
+      const live = screen.kind === "card" && screen.lost === null ? screen.card : null;
+      let act: (() => void) | undefined;
+      if (key === "q") {
+        act = () => {
+          session.leave();
+        };
+      } else if (key === "u") {
+        act = () => {
+          session.undo();
+        };
+      } else if (key === "s" && live !== null) {
+        act = () => {
+          session.skip();
+        };
+      } else if (live !== null) {
+        const answer = keyedAnswers(live.open).find((one) => one.key === key);
+        if (answer !== undefined) {
+          act = () => {
+            session.decide(
+              { source: live.source, key: live.key, stateHash: live.stateHash },
+              answer.question,
+              answer.value,
+            );
+          };
+        }
+      }
+      if (act !== undefined) {
+        event.preventDefault();
+        act();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [session]);
+}
+
+/** The keys that click a focused button. */
+const ACTIVATES: ReadonlySet<string> = new Set(["Enter", " "]);
+
+/**
+ * A key held down must not decide what the reviewer has not read. After each decision the focus
+ * moves to the next answer, and a button does not filter the repeats of a held Enter, so a held
+ * key would click through the questions and on to the next card. Two rules, in the capture phase
+ * on the document and only for what happens on the stage:
+ * - a repeated Enter or Space keydown is stopped before it can click;
+ * - a click that comes from a key (detail 0, with a key in play) acts only if the keydown that
+ *   began the press was seen on that same button while the card on screen was the one it is now.
+ *   A key held across the focus move, or across a new card, does nothing until it is released.
+ * A click with no key in play (a pointer's, an assistive technology's) is left alone.
+ */
+function useHeldKeyGuard(stage: RefObject<HTMLElement | null>, screenKey: string): void {
+  const now = useRef(screenKey);
+  now.current = screenKey;
+  useEffect(() => {
+    type Press = {
+      readonly key: string;
+      readonly origin: EventTarget | null;
+      readonly screen: string;
+    };
+    let down: Press | null = null;
+    let released: Press | null = null;
+    const onStage = (event: Event) =>
+      event.target instanceof Node && stage.current?.contains(event.target) === true;
+    // Only a button on the stage is guarded: a text field, the record's scroll region and every
+    // control outside the stage keep what a key does natively (a held Space repeats in the note).
+    const buttonOnStage = (target: EventTarget | null) => {
+      const button = target instanceof Element ? target.closest("button") : null;
+      return button !== null && stage.current?.contains(button) === true;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      // A finished press is forgotten by any key that comes after it.
+      released = null;
+      if (!ACTIVATES.has(event.key)) {
+        return;
+      }
+      if (event.repeat) {
+        if (buttonOnStage(event.target)) {
+          event.preventDefault();
+        }
+        return;
+      }
+      down = buttonOnStage(event.target)
+        ? { key: event.key, origin: event.target, screen: now.current }
+        : null;
+    };
+    // Focus leaving the stage ends whatever press the stage was holding.
+    const onFocusIn = (event: FocusEvent) => {
+      if (!onStage(event)) {
+        down = null;
+        released = null;
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (down?.key === event.key) {
+        released = down;
+        down = null;
+      }
+    };
+    const onPointerDown = () => {
+      released = null;
+    };
+    const onClick = (event: MouseEvent) => {
+      if (event.detail !== 0 || !onStage(event)) {
+        return;
+      }
+      const began = down ?? released;
+      released = null;
+      if (began === null) {
+        return;
+      }
+      if (began.origin !== event.target || began.screen !== now.current) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("click", onClick, true);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("click", onClick, true);
+    };
+  }, [stage]);
+}
+
+/** What changes which control should take the focus: a new card, a new set of open questions, a lost hold. */
+function focusKey(screen: Screen): string {
+  if (screen.kind !== "card") {
+    return screen.kind;
+  }
+  const { card } = screen;
+  const names = card.open.map((question) => question.name).join(",");
+  return `card ${card.source} ${card.key} ${card.stateHash} ${names} ${screen.lost === null ? "held" : "lost"}`;
+}
+
+/**
+ * The page speaks in two places that stay in the page from the start, so a change is announced:
+ * a polite status for confirmations and an alert for what needs reading. A decision is said once.
+ */
+function Notices({ notice }: { readonly notice: Notice | null }) {
+  return (
+    <div className="mb-4 min-h-6">
+      <p role="status" className="m-0">
+        {notice?.tone === "information" ? <span key={notice.id}>{notice.text}</span> : null}
+      </p>
+      <p role="alert" className="m-0">
+        {notice?.tone === "warning" ? (
+          <span key={notice.id} className="inline-flex flex-wrap items-baseline gap-x-2.5">
+            <StatusWord status="warning" size="small" />
+            <span>{notice.text}</span>
+          </span>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+/** The keys, at the bottom of the stage. */
+function KeysBar() {
+  return (
+    <ul
+      aria-label="Keys"
+      className="m-0 mt-6.5 flex list-none flex-wrap justify-center gap-x-5 gap-y-3.5 p-0 text-[13px] text-text-3"
+    >
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>y</Kbd> yes
+      </li>
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>n</Kbd> no
+      </li>
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>1</Kbd> to <Kbd>9</Kbd> pick
+      </li>
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>s</Kbd> skip
+      </li>
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>u</Kbd> undo
+      </li>
+      <li className="inline-flex items-center gap-1.5">
+        <Kbd>q</Kbd> quit
+      </li>
+    </ul>
+  );
+}
+
+function Stage({
+  controller,
+  state,
+}: {
+  readonly controller: ReviewController;
+  readonly state: ReviewState;
+}) {
+  const { screen, filter } = state;
+  switch (screen.kind) {
+    case "opening":
+      return <p className="m-0 py-10 text-center text-text-2">Opening the next card.</p>;
+    case "card":
+      return (
+        <ReviewCardView
+          card={screen.card}
+          lost={screen.lost}
+          note={state.note}
+          canUndo={state.canUndo}
+          onNote={controller.setNote}
+          onAnswer={controller.decide}
+          onSkip={controller.skip}
+          onUndo={controller.undo}
+          onLeave={controller.leave}
+          onMoveOn={controller.moveOn}
+        />
+      );
+    case "empty":
+      return (
+        <EmptyState
+          title="Nothing to review"
+          action={
+            Object.keys(filter).length > 0 ? (
+              <Button
+                variant="primary"
+                data-autofocus=""
+                onClick={() => {
+                  controller.filterTo({});
+                }}
+              >
+                Show every card
+              </Button>
+            ) : (
+              <Button variant="primary" data-autofocus="" onClick={controller.moveOn}>
+                Check again
+              </Button>
+            )
+          }
+        >
+          {Object.keys(filter).length > 0
+            ? "No card waits under this filter. A card appears here when the model is unsure about a record."
+            : "Every record is decided. A card appears here when the model is unsure about a record."}
+        </EmptyState>
+      );
+    case "failed":
+      return (
+        <EmptyState
+          title="The next card did not open"
+          action={
+            <Button variant="primary" data-autofocus="" onClick={controller.moveOn}>
+              Try again
+            </Button>
+          }
+        >
+          The reason is above. Nothing was decided.
+        </EmptyState>
+      );
+  }
+}
+
+export function ReviewPage() {
+  const controller = useReviewController();
+  const state = useSyncExternalStore(controller.subscribe, controller.getState);
+  useReviewKeys(controller);
+
+  useEffect(() => {
+    document.title = "Review · FacetDB";
+  }, []);
+
+  // The focus lands on the first answer of the first open question when a card opens, and moves
+  // to the next question after a decision, unless the reviewer is typing in the note.
+  const stage = useRef<HTMLDivElement>(null);
+  const focusOn = focusKey(state.screen);
+  useHeldKeyGuard(stage, focusOn);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the key is what asks for the move
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      return;
+    }
+    stage.current?.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+  }, [focusOn]);
+
+  return (
+    <div ref={stage} className="mx-auto w-full max-w-[760px] min-w-0">
+      <h1 className="sr-only">Review</h1>
+      <TopBar filter={state.filter} onFilter={controller.filterTo} />
+      <Notices notice={state.notice} />
+      <Stage controller={controller} state={state} />
+      <KeysBar />
+    </div>
+  );
+}

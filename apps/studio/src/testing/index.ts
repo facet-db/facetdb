@@ -3,11 +3,14 @@
 export type { FakeApi } from "./fake-client.ts";
 export {
   fakeApi,
+  SAMPLE_CARD,
   SAMPLE_HOME,
   SAMPLE_PROJECT,
   SAMPLE_QUEUE,
   signInRequired,
   unexpected,
 } from "./fake-client.ts";
+export type { FakeScheduler } from "./fake-scheduler.ts";
+export { FAKE_START, fakeScheduler } from "./fake-scheduler.ts";
 export type { RenderStudioOptions } from "./render.tsx";
 export { fakeMedia, memoryStorage, renderStudio, STUDIO_ORIGIN } from "./render.tsx";

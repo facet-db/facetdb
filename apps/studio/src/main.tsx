@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { z } from "zod";
 import { createApiClient } from "./api/client.ts";
 import type { StudioDeps } from "./deps.tsx";
+import { browserScheduler } from "./schedule.ts";
 import { browserMedia } from "./shell/media.ts";
 import { Studio } from "./studio.tsx";
 import "./app.css";
@@ -22,6 +23,7 @@ const deps: StudioDeps = {
   // Reached on each use: in a private window even reading `window.localStorage` throws.
   storage: () => window.localStorage,
   media: browserMedia((query) => window.matchMedia(query)),
+  schedule: browserScheduler(),
   origin: window.location.origin,
 };
 

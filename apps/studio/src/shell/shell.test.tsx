@@ -6,6 +6,7 @@ import { createStudio } from "../studio.tsx";
 import {
   fakeApi,
   fakeMedia,
+  fakeScheduler,
   memoryStorage,
   renderStudio,
   SAMPLE_HOME,
@@ -390,6 +391,7 @@ describe("the routes", () => {
       api: fakeApi(),
       storage: () => memoryStorage(),
       media: fakeMedia({}).media,
+      schedule: fakeScheduler(),
       origin: STUDIO_ORIGIN,
     });
     const paths = Object.keys(router.routesByPath)

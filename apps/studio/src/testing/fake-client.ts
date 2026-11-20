@@ -3,6 +3,8 @@ import {
   ApiError,
   type Home,
   type Project,
+  type ReviewCard,
+  type ReviewCardId,
   type ReviewQueue,
 } from "../api/index.ts";
 
@@ -29,6 +31,57 @@ export const SAMPLE_QUEUE: ReviewQueue = {
       open: [{ name: "is_scam", figure: 0.58 }],
     },
   ],
+};
+
+/** The Review page's sample card (the mockup's): two open questions and one decided. */
+export const SAMPLE_CARD: ReviewCard = {
+  source: "support_messages",
+  key: "5521",
+  stateHash: "h-5521",
+  state: {
+    subject: "Charged twice",
+    body: "I was charged twice for order 5521 and I want the second charge back today.",
+    channel: "email",
+    customer: '{"plan":"pro","orders":14,"since":"2024-03"}',
+  },
+  open: [
+    {
+      name: "urgency",
+      type: "score",
+      instructions: "How urgent is this message?",
+      said: "high, 62% sure",
+      figure: 0.62,
+      top: "high",
+      options: [
+        { name: "low", probability: 0.07 },
+        { name: "medium", probability: 0.31 },
+        { name: "high", probability: 0.62 },
+      ],
+    },
+    {
+      name: "wants_refund",
+      type: "noul",
+      instructions: "Is the customer asking for their money back?",
+      said: "84% likely yes",
+      figure: 0.84,
+      top: "yes",
+      options: [
+        { name: "yes", probability: 0.84 },
+        { name: "no", probability: 0.16 },
+      ],
+    },
+  ],
+  decided: [
+    {
+      name: "team",
+      type: "choice",
+      instructions: "Which team should handle it?",
+      value: "billing",
+      said: "billing",
+    },
+  ],
+  since: "2026-11-06T11:46:00.000Z",
+  lockedUntil: "2026-11-06T12:10:00.000Z",
 };
 
 export const SAMPLE_HOME: Home = {
@@ -107,13 +160,39 @@ export function unexpected(name: string): () => Promise<never> {
   return () => Promise.reject(new Error(`this test expected no call to ${name}`));
 }
 
-export type FakeApi = ApiClient & { readonly calls: readonly string[] };
+/**
+ * `calls` notes each call by name; `refs` notes the card each review call was sent for, as the
+ * request names it (`reviewDecide support_messages/5521@h-5521`), so a test holds the page to
+ * sending the state hash of the card it showed.
+ */
+export type FakeApi = ApiClient & {
+  readonly calls: readonly string[];
+  readonly refs: readonly string[];
+};
+
+/** A filter in the call log: ` source=listings below=0.6`, nothing for no filter. */
+function filterWords(filter: Parameters<ApiClient["reviewOpen"]>[0]): string {
+  return Object.entries(filter ?? {})
+    .map(([name, value]) => ` ${name}=${String(value)}`)
+    .join("");
+}
 
 export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
   const calls: string[] = [];
+  const refs: string[] = [];
+  const noted = (name: string, card: ReviewCardId) => {
+    refs.push(`${name} ${card.source}/${card.key}@${card.stateHash}`);
+  };
   const answer: ApiClient = {
     project: () => Promise.resolve(SAMPLE_PROJECT),
     reviewQueue: () => Promise.resolve(SAMPLE_QUEUE),
+    reviewOpen: () => Promise.resolve({ card: SAMPLE_CARD }),
+    reviewRenew: () => Promise.resolve({ lockedUntil: "2026-11-06T12:11:00.000Z" }),
+    reviewDecide: () => Promise.resolve({ status: "done", open: [], failedActions: [] }),
+    reviewSkip: () => Promise.resolve(),
+    reviewRelease: () => Promise.resolve(),
+    reviewUndo: () =>
+      Promise.resolve({ status: "needs_review", card: SAMPLE_CARD, failedActions: [] }),
     home: () => Promise.resolve(SAMPLE_HOME),
     signIn: (name) => Promise.resolve({ reviewer: name, expiresAt: "2026-11-06T02:00:00.000Z" }),
     signOut: () => Promise.resolve(),
@@ -121,6 +200,7 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
   };
   return {
     calls,
+    refs,
     project: () => {
       calls.push("project");
       return answer.project();
@@ -128,6 +208,35 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     reviewQueue: (options) => {
       calls.push("reviewQueue");
       return answer.reviewQueue(options);
+    },
+    reviewOpen: (filter) => {
+      calls.push(`reviewOpen${filterWords(filter)}`);
+      return answer.reviewOpen(filter);
+    },
+    reviewRenew: (card) => {
+      calls.push(`reviewRenew ${card.key}`);
+      noted("reviewRenew", card);
+      return answer.reviewRenew(card);
+    },
+    reviewDecide: (card, decision) => {
+      const note = decision.note === undefined ? "" : ` note=${decision.note}`;
+      calls.push(`reviewDecide ${card.key} ${decision.question}=${String(decision.value)}${note}`);
+      noted("reviewDecide", card);
+      return answer.reviewDecide(card, decision);
+    },
+    reviewSkip: (card) => {
+      calls.push(`reviewSkip ${card.key}`);
+      noted("reviewSkip", card);
+      return answer.reviewSkip(card);
+    },
+    reviewRelease: (card) => {
+      calls.push(`reviewRelease ${card.key}`);
+      noted("reviewRelease", card);
+      return answer.reviewRelease(card);
+    },
+    reviewUndo: () => {
+      calls.push("reviewUndo");
+      return answer.reviewUndo();
     },
     home: () => {
       calls.push("home");

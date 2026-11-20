@@ -1,10 +1,12 @@
 import { createMemoryHistory } from "@tanstack/react-router";
 import { render } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
+import { StrictMode } from "react";
 import type { ApiClient } from "../api/index.ts";
 import { type KeyValueStorage, LIGHT_QUERY, type Media, PHONE_QUERY } from "../shell/index.ts";
 import { Studio } from "../studio.tsx";
 import { fakeApi } from "./fake-client.ts";
+import { fakeScheduler } from "./fake-scheduler.ts";
 
 /**
  * How a studio test renders the whole app (the shell's test and every page's): the real router at a
@@ -62,6 +64,8 @@ export type RenderStudioOptions = {
   readonly phone?: boolean;
   /** The system prefers the light theme. */
   readonly light?: boolean;
+  /** Mount under React's StrictMode, as main.tsx does. */
+  readonly strict?: boolean;
 };
 
 export function renderStudio(options: RenderStudioOptions = {}) {
@@ -72,13 +76,16 @@ export function renderStudio(options: RenderStudioOptions = {}) {
     [PHONE_QUERY]: options.phone ?? false,
     [LIGHT_QUERY]: options.light ?? false,
   });
+  const schedule = fakeScheduler();
   const history = createMemoryHistory({ initialEntries: [options.path ?? "/"] });
   const user = userEvent.setup();
-  const rendered = render(
+  const studio = (
     <Studio
-      deps={{ api, storage, media: screenMedia.media, origin: STUDIO_ORIGIN }}
+      deps={{ api, storage, media: screenMedia.media, schedule, origin: STUDIO_ORIGIN }}
       history={history}
-    />,
+    />
   );
-  return { ...rendered, api, history, media: screenMedia, user };
+  // main.tsx mounts under StrictMode, which runs every effect twice in development.
+  const rendered = render(options.strict === true ? <StrictMode>{studio}</StrictMode> : studio);
+  return { ...rendered, api, history, media: screenMedia, schedule, user };
 }

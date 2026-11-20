@@ -1,5 +1,6 @@
 import { createContext, type ReactNode, useContext } from "react";
 import type { ApiClient } from "./api/client.ts";
+import type { Scheduler } from "./schedule.ts";
 import type { Media } from "./shell/media.ts";
 import type { KeyValueStorage } from "./shell/theme.tsx";
 
@@ -14,6 +15,8 @@ export type StudioDeps = {
   /** The browser's `localStorage`, reached through a function: in a private window reaching it throws. */
   readonly storage: () => KeyValueStorage;
   readonly media: Media;
+  /** The clock and the repeating call: the Review page renews its card's lock on them. */
+  readonly schedule: Scheduler;
   /** The page's own origin (`http://127.0.0.1:4040`): the sign-in page goes back to it alone. */
   readonly origin: string;
 };
@@ -36,6 +39,11 @@ export function useDeps(): StudioDeps {
     throw new Error("useDeps is called outside <Studio>, which provides the dependencies");
   }
   return deps;
+}
+
+/** The scheduler, for a page's clock and timers: `useSchedule().every(ms, run)` returns how to stop. */
+export function useSchedule(): Scheduler {
+  return useDeps().schedule;
 }
 
 /** The API client, for a page's queries: `const api = useApi(); useQuery({ queryKey, queryFn: () => api.x() })`. */
