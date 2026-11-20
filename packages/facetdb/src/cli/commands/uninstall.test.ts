@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess, runProgram } from "../program.ts";
+import { NO_TERMINAL } from "../terminal.ts";
 import {
   createPgliteWorld,
   type PgliteWorld,
@@ -150,6 +151,7 @@ async function runSeeingPrompts(
       },
       embedded: { open: unused, wipe: unused },
       examples: { read: unused },
+      terminal: NO_TERMINAL,
     },
     COMMANDS,
   );

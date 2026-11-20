@@ -11,6 +11,7 @@ import {
   type RegisteredCommand,
   runInProcess,
 } from "./program.ts";
+import { NO_TERMINAL } from "./terminal.ts";
 import {
   createPgliteWorld,
   type PgliteWorld,
@@ -149,6 +150,7 @@ describe("the facetdb program", () => {
           wipe: () => Promise.reject(new Error("unused")),
         },
         examples: { read: () => Promise.reject(new Error("unused")) },
+        terminal: NO_TERMINAL,
       },
       COMMANDS,
       { code: 0 },
@@ -168,6 +170,7 @@ describe("the facetdb program", () => {
       "dev",
       "types",
       "users",
+      "review",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

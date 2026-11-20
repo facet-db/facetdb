@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { choice, facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess, runProgram } from "../program.ts";
+import { NO_TERMINAL } from "../terminal.ts";
 import {
   createPgliteWorld,
   migrate,
@@ -229,6 +230,7 @@ async function runSeeingPrompts(
         wipe: () => Promise.reject(new Error("no embedded database")),
       },
       examples: { read: () => Promise.reject(new Error("no example projects")) },
+      terminal: NO_TERMINAL,
     },
     COMMANDS,
   );

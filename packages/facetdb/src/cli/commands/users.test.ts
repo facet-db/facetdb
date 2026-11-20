@@ -1,6 +1,7 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { type CliDeps, type CliIo, runInProcess, runProgram } from "../program.ts";
+import { NO_TERMINAL } from "../terminal.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -138,6 +139,7 @@ describe("facetdb users add", () => {
       random: unused,
       embedded: { open: unused, wipe: unused },
       examples: { read: unused },
+      terminal: NO_TERMINAL,
     };
     expect(await runProgram(["users", "add", "maya"], deps, COMMANDS)).toBe(0);
     expect(asked).toEqual([

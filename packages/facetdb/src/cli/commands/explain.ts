@@ -114,7 +114,7 @@ async function currentState(
 }
 
 /** A table source as explain reads it: its engine, its target and the worker login's URL. */
-type TableRead = {
+export type TableRead = {
   readonly engine: DatabaseEngine;
   readonly target: EngineTarget;
   readonly url: string;
@@ -123,7 +123,7 @@ type TableRead = {
 };
 
 /** The table source's engine, target and URL; its URL refused before anything connects. */
-async function tableRead(
+export async function tableRead(
   deps: Parameters<typeof sourceTable>[0],
   config: ProjectConfig,
   source: SourceConfig,

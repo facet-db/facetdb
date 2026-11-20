@@ -45,6 +45,7 @@ import {
 } from "./program.ts";
 import { serveHttp } from "./serve.ts";
 import { requireStoreSecret, requireStoreUrl, storeSharedFor } from "./store-door.ts";
+import { processTerminal } from "./terminal.ts";
 import { quietTypelessPackageWarning } from "./warnings.ts";
 
 /**
@@ -499,6 +500,7 @@ export function processDeps(
     random: Math.random,
     embedded: diskEmbedded,
     examples: diskExamples,
+    terminal: processTerminal({ input: process.stdin, output: process.stdout, env }),
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.

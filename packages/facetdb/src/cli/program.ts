@@ -5,6 +5,7 @@ import type { Peer, WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
+import { NO_TERMINAL, type ReviewTerminal } from "./terminal.ts";
 
 /**
  * The commander program every `facetdb` command is registered on. `registerCommand` gives each
@@ -211,6 +212,8 @@ export type CliDeps = {
   readonly embedded: EmbeddedDatabases;
   /** The example projects `facetdb init --example` copies into the project. */
   readonly examples: ExampleShelf;
+  /** Single keys and a card's width and colour, for `facetdb review`. */
+  readonly terminal: ReviewTerminal;
 };
 
 /** One request in, one response out: the shape of a Hono app's `fetch`, told who is on the other end. */
@@ -472,7 +475,8 @@ type OptionalInTests =
   | "abortAfter"
   | "random"
   | "embedded"
-  | "examples";
+  | "examples"
+  | "terminal";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -557,6 +561,7 @@ export async function runInProcess(
       examples: {
         read: () => Promise.reject(new Error("this test gave the command no example projects")),
       },
+      terminal: NO_TERMINAL,
       ...rest,
       io,
     },
