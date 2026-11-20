@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { ApiError } from "../api/index.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, SHELL_REFRESH_MS } from "../api/index.ts";
 import { returnPath, STUDIO_ROUTES } from "../routes/index.ts";
 import { createStudio } from "../studio.tsx";
 import {
@@ -8,12 +8,17 @@ import {
   fakeMedia,
   memoryStorage,
   renderStudio,
+  SAMPLE_HOME,
   STUDIO_ORIGIN,
   signInRequired,
 } from "../testing/index.ts";
 import { PHONE_QUERY } from "./media.ts";
 import { PROJECT_HINT } from "./Rail.tsx";
 import { THEME_KEY } from "./theme.tsx";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 /**
  * The studio's shell on happy-dom with the fake API client: the rail with the eight pages in their
@@ -147,7 +152,34 @@ describe("the rail", () => {
     const failing = new ApiError(500, "internal_error", "Something went wrong.", "Try again.");
     renderStudio({ api: fakeApi({ home: () => Promise.reject(failing) }) });
     const foot = await screen.findByRole("region", { name: "Worker and spending" });
-    expect(await within(foot).findByText("Not known: the worker did not answer")).toBeVisible();
+    expect(await within(foot).findByText("Not known: the worker cannot be reached")).toBeVisible();
+  });
+
+  it("does not call the worker beating once a refresh fails, even with an earlier answer in the cache", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let failing = false;
+    const api = fakeApi({
+      home: () =>
+        failing
+          ? Promise.reject(
+              new ApiError(500, "internal_error", "Something went wrong.", "Try again."),
+            )
+          : Promise.resolve(SAMPLE_HOME),
+    });
+    renderStudio({ api });
+    const foot = await screen.findByRole("region", { name: "Worker and spending" });
+    expect(await within(foot).findByText("Worker beating, 2 s ago")).toBeVisible();
+
+    failing = true;
+    await vi.advanceTimersByTimeAsync(SHELL_REFRESH_MS);
+    expect(await within(foot).findByText("Not known: the worker cannot be reached")).toBeVisible();
+    expect(within(foot).queryByText("Worker beating, 2 s ago")).toBeNull();
+    expect(within(foot).queryByText("$3.20 of $25")).toBeNull();
+    expect(within(foot).getByText("Not known")).toBeVisible();
+
+    failing = false;
+    await vi.advanceTimersByTimeAsync(SHELL_REFRESH_MS);
+    expect(await within(foot).findByText("Worker beating, 2 s ago")).toBeVisible();
   });
 });
 

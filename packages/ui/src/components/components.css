@@ -241,6 +241,14 @@
 .fdb-status[data-size="small"] {
   font-size: 13px;
 }
+/* A word that wraps (its label is a sentence): the square stays beside the first line */
+.fdb-status[data-wrap="true"] {
+  align-items: flex-start;
+  white-space: normal;
+}
+.fdb-status[data-wrap="true"]::before {
+  margin-top: 0.45em;
+}
 .fdb-status::before {
   content: "";
   width: 8px;

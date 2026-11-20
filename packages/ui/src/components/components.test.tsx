@@ -291,6 +291,20 @@ describe("<StatusWord>", () => {
     expect(word.dataset["status"]).toBe("resolved");
     expect(word.dataset["size"]).toBe("small");
   });
+
+  it("merges a surface's class with its own instead of replacing it", () => {
+    render(<StatusWord status="done" className="justify-self-start" />);
+    const word = screen.getByText("done");
+    expect([...word.classList]).toEqual(["fdb-status", "justify-self-start"]);
+  });
+
+  it("is one line unless the label is allowed to wrap, with the square staying on the first line", () => {
+    const { unmount } = render(<StatusWord status="warning" label="One line" />);
+    expect(screen.getByText("One line").dataset["wrap"]).toBe("false");
+    unmount();
+    render(<StatusWord status="warning" label="A sentence that wraps under the square" wrap />);
+    expect(screen.getByText("A sentence that wraps under the square").dataset["wrap"]).toBe("true");
+  });
 });
 
 describe("<Tag>", () => {

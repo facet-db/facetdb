@@ -41,14 +41,31 @@ export type StatusWordProps = Omit<ComponentProps<"span">, "children"> & {
   // 11:09 pm", "Beating, 2 s ago"); a status is never shown without a word.
   label?: string;
   size?: "default" | "small";
+  // The label may be a sentence: it wraps, with the square staying beside its first line. Off by
+  // default, a status is one line that never breaks.
+  wrap?: boolean;
 };
 
 // A status is an 8 px square (the tag's is 6 px) in the status color plus the word in the text
 // color: never color alone, and the status colors pass 3:1 only, so they never set a word.
-export function StatusWord({ status, label, size = "default", ...rest }: StatusWordProps) {
+export function StatusWord({
+  status,
+  label,
+  size = "default",
+  wrap = false,
+  className,
+  ...rest
+}: StatusWordProps) {
   const { word, tone } = statuses[status];
   return (
-    <span className="fdb-status" data-status={status} data-tone={tone} data-size={size} {...rest}>
+    <span
+      className={className === undefined ? "fdb-status" : `fdb-status ${className}`}
+      data-status={status}
+      data-tone={tone}
+      data-size={size}
+      data-wrap={wrap}
+      {...rest}
+    >
       {label ?? word}
     </span>
   );

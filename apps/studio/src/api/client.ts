@@ -58,12 +58,17 @@ const queueSchema = z.object({
 export type ReviewQueue = z.infer<typeof queueSchema>;
 
 /**
- * `GET /v1/home`, the part the rail's instrument reads: the worker's heartbeat check and the
- * month's spending against the cap. The Home page widens this schema to the whole answer; fields it
- * does not name are dropped here, never refused, so the server may add some.
+ * `GET /v1/home` as the rail's instrument and the Home page read it: the health checks, the records
+ * answered today, the review queue, the month's spending against the cap and the recent alerts,
+ * each figure with the words the page shows. Fields the studio does not name are dropped here,
+ * never refused, so the server may add some.
  */
+const figureWords = z.object({ figure: z.string(), sub: z.string() });
+
 const homeSchema = z.object({
   health: z.object({
+    status: z.enum(["running", "attention"]),
+    words: z.string(),
     heartbeatAgeMs: z.number().min(0).nullable(),
     checks: z.array(
       z.object({
@@ -72,16 +77,49 @@ const homeSchema = z.object({
         words: z.string(),
       }),
     ),
+    sources: z.array(
+      z.object({
+        name: z.string(),
+        verdict: z.enum(["healthy", "warning", "failing"]),
+        words: z.string(),
+      }),
+    ),
+  }),
+  answered: z.object({
+    today: z.number().int().min(0),
+    yesterday: z.number().int().min(0),
+    fraction: z.number().min(0).max(1).nullable(),
+    words: figureWords,
+  }),
+  queue: z.object({
+    waiting: z.number().int().min(0),
+    oldestWaitMs: z.number().min(0).nullable(),
+    decidedToday: z.number().int().min(0),
+    reviewersToday: z.number().int().min(0),
+    words: figureWords,
   }),
   spending: z.object({
     status: z.enum(["ok", "warned", "paused", "continuing", "uncapped"]),
+    month: z.string(),
     dollars: z.number().min(0),
     cap: z.object({ inputTokens: z.number(), dollars: z.number().min(0) }).nullable(),
     fraction: z.number().min(0).max(1).nullable(),
-    words: z.object({ figure: z.string(), sub: z.string() }),
+    words: figureWords,
   }),
+  alerts: z.array(
+    z.object({
+      at: z.iso.datetime(),
+      phase: z.enum(["raised", "resolved"]),
+      severity: z.enum(["information", "warning", "critical"]),
+      badge: z.string(),
+      title: z.string(),
+      words: z.string(),
+      link: z.string(),
+    }),
+  ),
 });
 export type Home = z.infer<typeof homeSchema>;
+export type HomeAlert = Home["alerts"][number];
 
 /** `POST /v1/session`: who signed in, and until when. */
 const signedInSchema = z.object({ reviewer: z.string().min(1), expiresAt: z.string() });

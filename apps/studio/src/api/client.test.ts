@@ -24,7 +24,7 @@ describe("the API client", () => {
     const answers: Record<string, unknown> = {
       "/v1/project": SAMPLE_PROJECT,
       "/v1/review/queue?limit=1": SAMPLE_QUEUE,
-      "/v1/home": { ...SAMPLE_HOME, answered: { today: 12_480 } },
+      "/v1/home": { ...SAMPLE_HOME, later: { today: 12_480 } },
     };
     const t = recording((path) => json(answers[path]));
     const api = createApiClient(t.fetch);

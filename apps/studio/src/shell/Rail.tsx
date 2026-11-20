@@ -129,6 +129,8 @@ function money(dollars: number): string {
   return Number.isInteger(dollars) ? `$${String(dollars)}` : `$${dollars.toFixed(2)}`;
 }
 
+const WORKER_UNREACHABLE = "Not known: the worker cannot be reached";
+
 function WorkerLine({
   home,
   failed,
@@ -136,12 +138,14 @@ function WorkerLine({
   readonly home: Home | undefined;
   readonly failed: boolean;
 }) {
+  // The last good answer is not the worker's state now: while the shared query is in error, the
+  // heartbeat it holds is old, so the line says the worker cannot be reached, never "beating".
+  if (failed) {
+    // The sentence is longer than the rail is wide: it wraps, the square staying on its first line.
+    return <StatusWord status="error" size="small" label={WORKER_UNREACHABLE} wrap />;
+  }
   if (home === undefined) {
-    return failed ? (
-      <StatusWord status="error" size="small" label="Not known: the worker did not answer" />
-    ) : (
-      <span className="text-text-3">Reading</span>
-    );
+    return <span className="text-text-3">Reading</span>;
   }
   const worker = home.health.checks.find((check) => check.name === "worker");
   if (worker === undefined) {
@@ -159,7 +163,16 @@ function WorkerLine({
   );
 }
 
-function SpendingLine({ home }: { readonly home: Home | undefined }) {
+function SpendingLine({
+  home,
+  failed,
+}: {
+  readonly home: Home | undefined;
+  readonly failed: boolean;
+}) {
+  if (failed) {
+    return <span className="text-text-3">Not known</span>;
+  }
   if (home === undefined) {
     return <span className="text-text-3">Reading</span>;
   }
@@ -198,7 +211,7 @@ export function Instrument() {
       </div>
       <div className="grid gap-1">
         <span>Spent this month</span>
-        <SpendingLine home={home.data} />
+        <SpendingLine home={home.data} failed={home.isError} />
       </div>
     </section>
   );

@@ -33,20 +33,63 @@ export const SAMPLE_QUEUE: ReviewQueue = {
 
 export const SAMPLE_HOME: Home = {
   health: {
+    status: "running",
+    words: "Running",
     heartbeatAgeMs: 2_000,
     checks: [
       { name: "worker", status: "ok", words: "Worker beating, 2 s ago" },
       { name: "model", status: "ok", words: "Model healthy" },
       { name: "sources", status: "ok", words: "Three sources, logins as installed" },
     ],
+    sources: [
+      { name: "listings", verdict: "healthy", words: "Reachable, login as installed." },
+      { name: "support_messages", verdict: "healthy", words: "Reachable, login as installed." },
+      { name: "profiles", verdict: "healthy", words: "Reachable, login as installed." },
+    ],
+  },
+  answered: {
+    today: 12_480,
+    yesterday: 20_100,
+    fraction: 0.621,
+    words: { figure: "12,480", sub: "62% of yesterday's 20,100." },
+  },
+  queue: {
+    waiting: 37,
+    oldestWaitMs: 14 * 60_000,
+    decidedToday: 212,
+    reviewersToday: 3,
+    words: { figure: "37", sub: "Oldest 14 minutes. Three reviewers decided 212 today." },
   },
   spending: {
     status: "ok",
+    month: "2026-11",
     dollars: 3.2,
     cap: { inputTokens: 25_000_000, dollars: 25 },
     fraction: 0.128,
     words: { figure: "$3.20", sub: "13% of the $25 monthly cap. The project pauses at 100%." },
   },
+  alerts: [
+    {
+      at: "2026-11-05T14:10:00.000Z",
+      phase: "raised",
+      severity: "information",
+      badge: "Information",
+      title: "Backfill finished",
+      words:
+        "listings: 50,000 records in 41 minutes, newest first, for $1.20 of model usage. Every page was settled.",
+      link: "https://docs.facetdb.dev/fix/backfill",
+    },
+    {
+      at: "2026-11-04T23:09:00.000Z",
+      phase: "resolved",
+      severity: "warning",
+      badge: "Resolved",
+      title: "Model failing",
+      words:
+        "support_messages: 6% of calls failed over 5 minutes. FacetDB retried and held 12 records; all were answered.",
+      link: "https://docs.facetdb.dev/fix/worker",
+    },
+  ],
 };
 
 /** What the worker answers a browser on another machine with no session. */
