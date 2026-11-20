@@ -31,8 +31,15 @@ export type SqlClient = {
   close(): Promise<void>;
 };
 
-/** How a client is opened: `max` is the most connections its pool keeps open at once. */
-export type SqlConnectOptions = { readonly max?: number };
+/**
+ * How a client is opened: `max` is the most connections its pool keeps open at once;
+ * `connectTimeoutSeconds` how long a connection may take to open before the call fails (the
+ * driver's own default, 30 s, when absent).
+ */
+export type SqlConnectOptions = {
+  readonly max?: number;
+  readonly connectTimeoutSeconds?: number;
+};
 
 /**
  * Opens a client for a connection string. The composition root passes this (or a fake) around; a
@@ -123,6 +130,9 @@ const PREPARED = { prepare: true } as const;
 export const connectPostgres: SqlConnect = (url, options = {}) => {
   const sql = postgres(url, {
     max: options.max ?? DEFAULT_MAX_CONNECTIONS,
+    ...(options.connectTimeoutSeconds === undefined
+      ? {}
+      : { connect_timeout: options.connectTimeoutSeconds }),
     onnotice: () => undefined,
     types: TEXT_AS_GIVEN_TYPES,
   });

@@ -123,13 +123,40 @@ export function loginOf(
   }
 }
 
+/** The line migrate prints over a source's install script: `-- facetdb migrate: listings (public.listings)`. */
+export function installHeader(source: string, label: string): string {
+  return `-- facetdb migrate: ${source} (${label})`;
+}
+
+/** A note as migrate prints it, after the scripts. */
+export function noteLine(note: string): string {
+  return `note: ${note}`;
+}
+
+/**
+ * One source's install as `facetdb migrate --dry-run` prints it on stdout (the studio's setup flow
+ * shows exactly this): the header, the script, then each note, every line ended as the command's
+ * `print` ends it. The lines a dry run prints around it (the store's part, the source's database by
+ * its host, "Dry run: nothing was changed.") are not the source's install.
+ */
+export function installPrintout(
+  source: string,
+  label: string,
+  script: string,
+  notes: readonly string[],
+): string {
+  return [installHeader(source, label), script, ...notes.map(noteLine)]
+    .map((line) => (line.endsWith("\n") ? line : `${line}\n`))
+    .join("");
+}
+
 /**
  * The worker login's password on the first install, from the source's connection string, which is
  * the worker's (`postgres://facetdb_worker:…@host/db`), so the login migrate creates is the one the
  * worker connects with; or why there is none. Once the login exists it is left as it is (other
  * projects on the server may share it) and the engine asks for no password.
  */
-function passwordOf(
+export function passwordOf(
   engine: DatabaseEngine,
   source: SourceConfig,
 ): { readonly password: string } | { readonly problem: string } {
@@ -156,7 +183,7 @@ function passwordOf(
  * that code when it must create the login and was given no password, and the CLI knows why the
  * source's connection string gave none and how to name the login in it.
  */
-async function planInstall(
+export async function planInstall(
   engine: DatabaseEngine,
   target: TableTarget,
   own: EngineTarget,
@@ -215,7 +242,7 @@ async function runAsShown(
 }
 
 /** What the show says in place of the store's DDL when the store is at this version already. */
-const STORE_CURRENT = "-- the FacetDB store is current: nothing to run there";
+export const STORE_CURRENT = "-- the FacetDB store is current: nothing to run there";
 
 /**
  * A source's failure once the store's own migration has committed: the source's words, without the
@@ -313,7 +340,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         print(`Prune of ${item.label}:`);
         print(lines.join("\n"));
       }
-      print(`-- facetdb migrate: ${item.target.source.name} (${item.label})`);
+      print(installHeader(item.target.source.name, item.label));
       print(item.installScript);
     }
     // Store version 4 rekeys each source id to `<project>:<name>`; a log another project shared
@@ -324,7 +351,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       ...shown.flatMap((item) => item.install.notes),
     ]);
     for (const note of notes) {
-      print(`note: ${note}`);
+      print(noteLine(note));
     }
     // migrate never opens the store's encrypted part, so an unset secret stops nothing here; the
     // worker it installs for refuses to start without it. Said before the run, on stderr, the dry

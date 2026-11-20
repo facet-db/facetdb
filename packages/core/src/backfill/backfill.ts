@@ -189,50 +189,63 @@ export type Backfill = {
  * `scan`, starts records at the pace of the injected clock, and saves the cursor after every page.
  * Pure orchestration: every side effect enters through `deps`.
  */
+/**
+ * What a run over `sample.records` records would cost: the average estimated input tokens of the
+ * sampled states, times the records, at $0.042 per million (`Backfill.estimate`; the studio's setup
+ * flow prices a source's first backfill with it before the install).
+ */
+export function estimateBackfill(
+  set: QuestionSet,
+  sample: BackfillSample,
+  onlyQuestions?: readonly string[],
+): BackfillEstimate {
+  const questions = pickQuestions(set, onlyQuestions);
+  const priced: QuestionSet = { ...set, questions };
+  let tokens = 0;
+  for (const state of sample.states) {
+    tokens += recordTokens(priced, state);
+  }
+  const tokensPerRecord = sample.states.length === 0 ? 0 : tokens / sample.states.length;
+  const total = tokensPerRecord * sample.records;
+  return {
+    records: sample.records,
+    sampled: sample.states.length,
+    tokensPerRecord,
+    tokens: total,
+    dollars: (total * PRICE_PER_MILLION_INPUT_TOKENS) / 1_000_000,
+  };
+}
+
+/**
+ * Walks the pages of `scan` from `from` to the end, counting records and keeping the first 100
+ * states. No model call, and nothing is written.
+ */
+export async function surveyBackfill(
+  connector: Pick<Connector, "scan">,
+  from: ScanCursor | null,
+): Promise<BackfillSample> {
+  const states: State[] = [];
+  let records = 0;
+  let cursor = from;
+  do {
+    const page = await connector.scan(cursor);
+    // A record the source's filter excludes is never asked, so it costs nothing.
+    const included = page.rows.filter((row) => !row.excluded);
+    records += included.length;
+    for (const row of included) {
+      if (states.length < ESTIMATE_SAMPLE_SIZE) {
+        states.push(row.state);
+      }
+    }
+    cursor = page.next;
+  } while (cursor !== null);
+  return { records, states };
+}
+
 export function createBackfill(deps: BackfillDeps): Backfill {
   const { connector, worker, clock, cursorStore, log, questionSet, version, spending } = deps;
-
-  function estimate(
-    set: QuestionSet,
-    sample: BackfillSample,
-    onlyQuestions?: readonly string[],
-  ): BackfillEstimate {
-    const questions = pickQuestions(set, onlyQuestions);
-    const priced: QuestionSet = { ...set, questions };
-    let tokens = 0;
-    for (const state of sample.states) {
-      tokens += recordTokens(priced, state);
-    }
-    const tokensPerRecord = sample.states.length === 0 ? 0 : tokens / sample.states.length;
-    const total = tokensPerRecord * sample.records;
-    return {
-      records: sample.records,
-      sampled: sample.states.length,
-      tokensPerRecord,
-      tokens: total,
-      dollars: (total * PRICE_PER_MILLION_INPUT_TOKENS) / 1_000_000,
-    };
-  }
-
-  /** Walks the pages that remain, counting records and keeping the first 100 states. No model call. */
-  async function survey(from: ScanCursor | null): Promise<BackfillSample> {
-    const states: State[] = [];
-    let records = 0;
-    let cursor = from;
-    do {
-      const page = await connector.scan(cursor);
-      // A record the source's filter excludes is never asked, so it costs nothing.
-      const included = page.rows.filter((row) => !row.excluded);
-      records += included.length;
-      for (const row of included) {
-        if (states.length < ESTIMATE_SAMPLE_SIZE) {
-          states.push(row.state);
-        }
-      }
-      cursor = page.next;
-    } while (cursor !== null);
-    return { records, states };
-  }
+  const estimate = estimateBackfill;
+  const survey = (from: ScanCursor | null) => surveyBackfill(connector, from);
 
   async function run(options: BackfillOptions): Promise<BackfillReport> {
     const pace = options.pace ?? DEFAULT_BACKFILL_PACE;

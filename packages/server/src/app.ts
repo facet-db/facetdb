@@ -11,6 +11,8 @@ import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
 import { reviewRoutes } from "./review/routes.ts";
 import type { ReviewEndpointService } from "./review/service.ts";
+import { setupRoutes } from "./sources/routes.ts";
+import { NO_SETUP, type SetupService } from "./sources/service.ts";
 import type { StudioBuild } from "./studio/build.ts";
 import { projectRoutes, studioAppRoutes } from "./studio/routes.ts";
 
@@ -34,6 +36,11 @@ export type AppDeps = {
   readonly data: DataServices;
   /** The review screen's and the terminal's door: the queue, a card under its lock, a decision, an undo. */
   readonly review: ReviewEndpointService;
+  /**
+   * Adding a source from the studio: inspect, preview, plan and install with the admin connection
+   * string, the operator's on this machine alone. Absent, the page is told it cannot be done here.
+   */
+  readonly setup?: SetupService;
   readonly studio: StudioAccess;
   /**
    * The studio's built app, served after every `/v1` route; absent, no file is served (a worker
@@ -77,6 +84,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   studio.use("*", requireReviewer(deps.studio.sessions, deps.studio.projectId));
   studio.route("/", configRoutes(deps.config));
   studio.route("/", dataRoutes(deps.data));
+  // The setup flow; its writing routes add the operator-only check of their own.
+  studio.route("/", setupRoutes(deps.setup ?? NO_SETUP));
   studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
   studio.route("/", projectRoutes());

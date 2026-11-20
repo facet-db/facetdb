@@ -1,7 +1,7 @@
 import type { QuestionSet } from "../questions/index.ts";
 import type { OnChange } from "../records/index.ts";
 import type { Clock } from "./clock.ts";
-import type { Capabilities, Connector, RecordKey } from "./connector.ts";
+import type { Capabilities, Connector, ReadRow, RecordKey } from "./connector.ts";
 
 /**
  * The database engine contract (anyone can add a database by implementing it): what one database
@@ -385,6 +385,73 @@ export type OpenOptions = EngineDeps & {
   readonly maxConnections?: number;
 };
 
+/** How many rows an inspection samples from the chosen table. */
+export const INSPECT_SAMPLE_ROWS = 5;
+
+/** The most tables an inspection lists; a database with more lists the first by name. */
+export const INSPECT_MAX_TABLES = 500;
+
+/** The longest a sampled value is shown, in characters; a longer one is cut there. */
+export const INSPECT_MAX_VALUE = 500;
+
+/** A column of the inspected table: its name and its type as the database writes it. */
+export type InspectedColumn = { readonly name: string; readonly type: string };
+
+/**
+ * What the studio's setup flow sees of a database before anything is installed: the tables the
+ * admin connection may read, and for the one asked about its columns, its single-column key and a
+ * few rows as the model would read them.
+ */
+export type TableInspection = {
+  /**
+   * The tables, as the config names a table: bare in the engine's default schema (`listings` for
+   * `public.listings` on Postgres), `schema.table` elsewhere. At most `INSPECT_MAX_TABLES`.
+   */
+  readonly tables: readonly string[];
+  /** The table asked about; absent when none was. */
+  readonly table?: {
+    /** As the config names it, as in `tables`. */
+    readonly name: string;
+    /** Its single-column primary key; null when it has none or a composite one. */
+    readonly key: string | null;
+    /** In the table's order, FacetDB's own `facetdb_` columns left out. */
+    readonly columns: readonly InspectedColumn[];
+    /**
+     * Up to `INSPECT_SAMPLE_ROWS` rows, newest first by the key, each column as text the way the
+     * worker reads a state field (null for NULL), a value cut at `INSPECT_MAX_VALUE` characters.
+     */
+    readonly rows: readonly Readonly<Record<string, string | null>>[];
+  };
+};
+
+export type InspectOptions = Pick<EngineDeps, "allowInsecure"> & {
+  /** The table to read the columns and rows of, as `TableInspection.tables` names it. */
+  readonly table?: string;
+};
+
+/** An inspection, or why the engine will not make one (an insecure URL, a table it cannot read). */
+export type InspectResult =
+  | { readonly ok: true; readonly inspection: TableInspection }
+  | { readonly ok: false; readonly refusal: Refusal };
+
+export type ReadRowsOptions = Pick<EngineDeps, "allowInsecure"> & {
+  /** The most rows read, newest first. */
+  readonly limit: number;
+};
+
+/**
+ * A few rows of a table no source runs yet, as `scan` reads a state: the setup flow's preview and
+ * the first backfill's estimate. `estimatedRows` is the database's own estimate of the table's size
+ * from its statistics (no count is run), null when it has none; the where filter is not in it.
+ */
+export type ReadRowsResult =
+  | {
+      readonly ok: true;
+      readonly rows: readonly ReadRow[];
+      readonly estimatedRows: number | null;
+    }
+  | { readonly ok: false; readonly refusal: Refusal };
+
 /** A source's runtime connector as `open` hands it out; whoever opened it closes it. */
 export type OpenConnector = Connector & {
   /** Ends a running `watch` and lets go of the connection. */
@@ -506,4 +573,20 @@ export type DatabaseEngine = {
   open(target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector>;
   /** doctor's checks of a source under the worker login's `url`, in order. Nothing is changed. */
   doctor(target: EngineTarget, url: string, deps: EngineDeps): Promise<readonly DoctorCheck[]>;
+  /**
+   * The tables the admin `url` may read, and with `options.table` that table's columns, key and
+   * sample rows (the studio's setup flow, before any source exists). One connection with a short
+   * timeout, read-only, closed whatever happens; refused before it connects as `planInstall`
+   * refuses an insecure admin URL. Absent on an engine the studio cannot set up a source on yet:
+   * the CLI's `facetdb init` and `facetdb migrate` serve it.
+   */
+  inspect?(url: string, options: InspectOptions): Promise<InspectResult>;
+  /**
+   * The newest `options.limit` rows of a target no worker runs yet, under the admin `url`: each
+   * state as `scan` reads it, the where filter judged as `scan` judges it, and the table's
+   * estimated size. Bounded as `inspect` is: one connection, one read-only transaction, a statement
+   * timeout set for that transaction alone, nothing set on the session. The where filter runs as
+   * the admin role inside those bounds. Absent where `inspect` is.
+   */
+  readRows?(target: EngineTarget, url: string, options: ReadRowsOptions): Promise<ReadRowsResult>;
 };

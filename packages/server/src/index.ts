@@ -94,6 +94,26 @@ export type {
   ReviewEndpointService,
 } from "./review/service.ts";
 export { createReviewEndpointService } from "./review/service.ts";
+export type {
+  InspectOutcome,
+  SetupDoor,
+  SetupInstallOutcome,
+  SetupPlan,
+  SetupPlanOutcome,
+  SetupPreviewOutcome,
+  SetupRefused,
+  ShownPlan,
+  StopReason,
+} from "./sources/door.ts";
+export {
+  INSTALL_NOTHING_RAN,
+  INSTALL_OUTCOME_UNKNOWN,
+  INSTALL_STOPPED,
+} from "./sources/install-codes.ts";
+export type { SecretPart } from "./sources/redact.ts";
+export { HIDDEN, hideSecrets, secretParts } from "./sources/redact.ts";
+export type { SetupAccess, SetupService } from "./sources/service.ts";
+export { createSetupService, PLAN_TOKEN_TTL_MS, SETUP_PREVIEW_ROWS } from "./sources/service.ts";
 export type { StudioBuild, StudioFiles } from "./studio/build.ts";
 export { openStudioBuild, STUDIO_INDEX_FILE, STUDIO_ROUTES_FILE } from "./studio/build.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";

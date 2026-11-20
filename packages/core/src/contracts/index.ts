@@ -29,6 +29,9 @@ export type {
   EngineObject,
   EnginePlan,
   EngineTarget,
+  InspectedColumn,
+  InspectOptions,
+  InspectResult,
   InstallOptions,
   KeptObject,
   KeyText,
@@ -37,13 +40,21 @@ export type {
   OpenOptions,
   PlanResult,
   PlanStatement,
+  ReadRowsOptions,
+  ReadRowsResult,
   Refusal,
   RunOptions,
   RunResult,
   StatementPurpose,
+  TableInspection,
   UninstallOptions,
 } from "./engine.ts";
-export { EngineRefusal } from "./engine.ts";
+export {
+  EngineRefusal,
+  INSPECT_MAX_TABLES,
+  INSPECT_MAX_VALUE,
+  INSPECT_SAMPLE_ROWS,
+} from "./engine.ts";
 export type { PluginKind, PluginManifest } from "./plugin.ts";
 export { PLUGIN_KINDS } from "./plugin.ts";
 export type { ModelProvider, ProviderRequest, ProviderResponse, Usage } from "./provider.ts";

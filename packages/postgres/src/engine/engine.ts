@@ -19,6 +19,7 @@ import {
 import { connectPostgres, quoteIdent, type SqlClient, type SqlConnect } from "../sql/index.ts";
 import { STORE_VERSION_TABLE } from "../store/index.ts";
 import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
+import { inspectDatabase, readTableRows } from "./inspect.ts";
 import { installPlan, prunePlan, refusedPlan, uninstallPlan } from "./plans.ts";
 import { runPlan } from "./run.ts";
 import { adminUrlRefusal, subjectOf, workerUrlRefusal } from "./urls.ts";
@@ -342,6 +343,11 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
     },
 
     doctor: (target, url, deps) => doctorChecks(connect, pgHost, target, url, deps),
+
+    inspect: (url, inspectOptions) => inspectDatabase(connect, pgHost, url, inspectOptions),
+
+    readRows: (target, url, rowsOptions) =>
+      readTableRows(connect, pgHost, target, url, rowsOptions),
   };
 }
 

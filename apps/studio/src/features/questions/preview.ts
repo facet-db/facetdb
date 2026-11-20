@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import type { DraftPreview } from "../../api/index.ts";
+import type { DraftPreview, SourceDraft } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
 import { draftOf, previewKey, type SourceForm } from "./draft.ts";
 
@@ -53,13 +53,19 @@ export type PreviewState = {
 
 /**
  * `edits` counts the person's edits in this panel (SourceEditor): a form that changed without one
- * (the config read again) arms nothing.
+ * (the config read again) arms nothing. `previewOf` asks for one run: the Questions page's is `POST
+ * /v1/preview` over a running source; the setup flow's reads a new source's rows with the admin
+ * connection string the page holds.
  */
-export function usePreview(form: SourceForm, edits: number): PreviewState {
+export function usePreview(
+  form: SourceForm,
+  edits: number,
+  previewOf?: (draft: SourceDraft) => Promise<DraftPreview>,
+): PreviewState {
   const api = useApi();
   const schedule = useSchedule();
   const key = previewKey(form);
-  const ask = useMutation({ mutationFn: api.previewDraft });
+  const ask = useMutation({ mutationFn: previewOf ?? api.previewDraft });
 
   const [armed, setArmed] = useState(false);
   const [running, setRunning] = useState(false);

@@ -90,9 +90,12 @@ async function prompt(question: string, options?: { readonly secret?: boolean })
   const terminal = process.stdin.isTTY === true;
   const lines = createInterface({ input: process.stdin, output, terminal });
   try {
-    process.stderr.write(question);
+    // readline writes the question itself. At a terminal it redraws its line from the first column
+    // before it reads, which wiped a question written to stderr ahead of it: `migrate` and
+    // `backfill` then waited on a blank line. The question is on screen before the echo is muted.
+    const asked = lines.question(question);
     muted = options?.secret === true && terminal;
-    const answer = await lines.question("");
+    const answer = await asked;
     if (muted) {
       process.stderr.write("\n");
     }

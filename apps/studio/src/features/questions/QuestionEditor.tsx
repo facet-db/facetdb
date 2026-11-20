@@ -153,6 +153,85 @@ function LinesEditor({
   );
 }
 
+/**
+ * A question's thresholds: the slider over the preview's figures for this question, counted on the
+ * page with no call, the words of a cut set by hand, and the problems tied to them.
+ */
+export function QuestionThresholds({
+  question,
+  onChange,
+  fileOverride,
+  figures,
+  previewed,
+  problem,
+  heading,
+}: {
+  readonly question: QuestionForm;
+  readonly onChange: (next: QuestionForm) => void;
+  /** The thresholds the file holds for this question; none for a question added here. */
+  readonly fileOverride: ThresholdOverride;
+  readonly figures: readonly number[];
+  readonly previewed: boolean;
+  /** The loader's words about the thresholds; undefined when it has none. */
+  readonly problem: string | undefined;
+  /** What the slider is headed by: "Thresholds" unless given (the setup names the question). */
+  readonly heading?: string;
+}) {
+  const id = useId();
+  const thresholds = thresholdsOf(question);
+  const handSet = handSetWords(question);
+  const crossing = cutProblem(question);
+  return (
+    // A group named by its legend, so each question's sliders are told apart by more than
+    // "Yes at or above" where several questions stand together (the setup's step four).
+    <fieldset className="m-0 grid min-w-0 gap-1.5 border-0 p-0">
+      <legend className="mb-1.5 p-0 text-[13px] text-text-2">
+        {heading ?? (thresholds.kind === "cuts" ? "Thresholds" : "Threshold")}
+      </legend>
+      {crossing === undefined ? (
+        <ThresholdSlider
+          question={question.name}
+          value={thresholds}
+          probabilities={figures}
+          onChange={(next) => {
+            onChange({ ...question, thresholds: movedOverride(question, fileOverride, next) });
+          }}
+        />
+      ) : (
+        // Cut lines that cross are never drawn, nor do they decide a row: the problem stands
+        // in their place until the stakes or the default put them in order.
+        <FieldProblem id={`${id}-crossing`} words={crossing} />
+      )}
+      {handSet === undefined ? null : (
+        <div className="grid gap-1.5">
+          <p className="m-0 text-[13px] text-text-2">{handSet}</p>
+          <div>
+            <Button
+              variant="quiet"
+              size="small"
+              onClick={() => {
+                onChange({ ...question, thresholds: {} });
+              }}
+            >
+              Use the stakes' default
+            </Button>
+          </div>
+        </div>
+      )}
+      {figures.length > 0 ? null : (
+        <p className="m-0 text-[12.5px] text-text-3">
+          {previewed
+            ? "The last preview did not ask this question as it is now; its counts come with the next one."
+            : "The counts come from the preview's rows: run the preview to see them."}
+        </p>
+      )}
+      {problem === undefined ? null : (
+        <FieldProblem id={`${id}-thresholds-problem`} words={problem} />
+      )}
+    </fieldset>
+  );
+}
+
 export function QuestionEditor({
   question,
   onChange,
@@ -162,11 +241,17 @@ export function QuestionEditor({
   fileOverride,
   figures,
   previewed,
+  withThresholds = true,
 }: {
   readonly question: QuestionForm;
   readonly onChange: (next: QuestionForm) => void;
   /** Only for a question added in this draft: one in the file is removed by hand. */
   readonly onRemove: (() => void) | undefined;
+  /**
+   * The threshold slider under the question, as the Questions page shows it; the setup flow sets
+   * the thresholds in a step of their own (`QuestionThresholds`).
+   */
+  readonly withThresholds?: boolean;
   readonly issues: readonly DraftIssue[];
   /** Why this question's name cannot be sent (draft.ts, `nameProblem`); undefined when it can. */
   readonly nameProblem: string | undefined;
@@ -179,14 +264,11 @@ export function QuestionEditor({
 }) {
   const id = useId();
   const problem = problemsByField(issues, question.name);
-  const thresholds = thresholdsOf(question);
   const kind = TYPE_WORDS[question.type];
   const stakesId = `${id}-stakes`;
   const typeId = `${id}-type`;
   const questionProblem = problem("question");
   const thresholdProblem = problem("thresholds");
-  const handSet = handSetWords(question);
-  const crossing = cutProblem(question);
 
   return (
     <article className="grid min-w-0 gap-4" aria-labelledby={`${id}-name`}>
@@ -307,51 +389,16 @@ export function QuestionEditor({
           }}
         />
       </div>
-      <div className="grid min-w-0 gap-1.5">
-        <span className="text-[13px] text-text-2">
-          {thresholds.kind === "cuts" ? "Thresholds" : "Threshold"}
-        </span>
-        {crossing === undefined ? (
-          <ThresholdSlider
-            question={question.name}
-            value={thresholds}
-            probabilities={figures}
-            onChange={(next) => {
-              onChange({ ...question, thresholds: movedOverride(question, fileOverride, next) });
-            }}
-          />
-        ) : (
-          // Cut lines that cross are never drawn, nor do they decide a row: the problem stands
-          // in their place until the stakes or the default put them in order.
-          <FieldProblem id={`${id}-crossing`} words={crossing} />
-        )}
-        {handSet === undefined ? null : (
-          <div className="grid gap-1.5">
-            <p className="m-0 text-[13px] text-text-2">{handSet}</p>
-            <div>
-              <Button
-                variant="quiet"
-                size="small"
-                onClick={() => {
-                  onChange({ ...question, thresholds: {} });
-                }}
-              >
-                Use the stakes' default
-              </Button>
-            </div>
-          </div>
-        )}
-        {figures.length > 0 ? null : (
-          <p className="m-0 text-[12.5px] text-text-3">
-            {previewed
-              ? "The last preview did not ask this question as it is now; its counts come with the next one."
-              : "The counts come from the preview's rows: run the preview to see them."}
-          </p>
-        )}
-        {thresholdProblem === undefined ? null : (
-          <FieldProblem id={`${id}-thresholds-problem`} words={thresholdProblem} />
-        )}
-      </div>
+      {withThresholds ? (
+        <QuestionThresholds
+          question={question}
+          onChange={onChange}
+          fileOverride={fileOverride}
+          figures={figures}
+          previewed={previewed}
+          problem={thresholdProblem}
+        />
+      ) : null}
       {onRemove === undefined ? null : (
         <div>
           <Button variant="quiet" size="small" onClick={onRemove}>

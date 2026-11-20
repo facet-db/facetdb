@@ -6,12 +6,15 @@ import {
   type EnginePlan,
   EngineRefusal,
   type EngineTarget,
+  type InspectOptions,
+  type InspectResult,
   type InstallOptions,
   type KeyText,
   type OpenConnector,
   type OpenOptions,
   type PlanResult,
   type PlanStatement,
+  type ReadRow,
   type Refusal,
   type RunOptions,
   type RunResult,
@@ -62,6 +65,11 @@ export type FakeEngineOptions = {
   readonly keyTextOf?: (target: EngineTarget, url: string) => KeyText;
   /** How it reads a connection string's login (`DatabaseEngine.login`); absent, the URL's. */
   readonly login?: NonNullable<DatabaseEngine["login"]>;
+  /**
+   * What `inspect` finds, for a table or for none; absent, the engine has no `inspect`, as an
+   * engine the studio cannot set up a source on yet. An insecure URL is refused before it.
+   */
+  readonly inspect?: (options: InspectOptions) => InspectResult;
 };
 
 /** One `run` as the fake saw it. */
@@ -161,6 +169,11 @@ export class FakeEngine implements DatabaseEngine {
   readonly keyText?: KeyText;
   readonly keyTextOf?: NonNullable<DatabaseEngine["keyTextOf"]>;
   readonly login?: NonNullable<DatabaseEngine["login"]>;
+  readonly inspect?: NonNullable<DatabaseEngine["inspect"]>;
+  /** With `inspect` and a database: the database's newest rows. */
+  readonly readRows?: NonNullable<DatabaseEngine["readRows"]>;
+  /** The table each `inspect` asked about, `null` for none; the URL is never kept. */
+  readonly inspected: (string | null)[] = [];
   readonly runs: FakeRun[] = [];
   readonly opened: FakeOpenConnector[] = [];
   readonly #label: (target: EngineTarget, url: string) => string;
@@ -200,6 +213,40 @@ export class FakeEngine implements DatabaseEngine {
     }
     if (options.login !== undefined) {
       this.login = options.login;
+    }
+    const inspect = options.inspect;
+    const database = options.database;
+    if (inspect !== undefined && database !== undefined) {
+      // The newest rows of its database, as `scan` reads them, and its size as the estimate.
+      this.readRows = async (_target, url, rowsOptions) => {
+        const refused = plaintextRefusal(url, rowsOptions);
+        if (refused !== undefined) {
+          return { ok: false, refusal: refused };
+        }
+        const rows: ReadRow[] = [];
+        let page = await new FakeConnector(database).scan(null);
+        rows.push(...page.rows);
+        while (rows.length < rowsOptions.limit && page.next !== null) {
+          page = await new FakeConnector(database).scan(page.next);
+          rows.push(...page.rows);
+        }
+        return {
+          ok: true,
+          rows: rows.slice(0, rowsOptions.limit),
+          estimatedRows: database.rows.entries().length,
+        };
+      };
+    }
+    if (inspect !== undefined) {
+      // Like a real engine's, it refuses a plaintext URL to another host before it connects.
+      this.inspect = (url, inspectOptions) => {
+        const refused = plaintextRefusal(url, inspectOptions);
+        if (refused !== undefined) {
+          return Promise.resolve({ ok: false, refusal: refused });
+        }
+        this.inspected.push(inspectOptions.table ?? null);
+        return Promise.resolve(inspect(inspectOptions));
+      };
     }
   }
 

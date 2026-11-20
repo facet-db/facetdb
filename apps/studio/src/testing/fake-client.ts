@@ -9,6 +9,7 @@ import {
   type DraftPreview,
   type DraftValidation,
   type Home,
+  type Inspection,
   type Project,
   type ProjectConfig,
   type ReviewCard,
@@ -16,6 +17,10 @@ import {
   type ReviewerAccounts,
   type ReviewQueue,
   type RunsPage,
+  type SetupAccess,
+  type SetupInstalled,
+  type SetupPlan,
+  type SourceRow,
   type SpendingConfig,
   type StudioAccess,
   type TestEstimate,
@@ -621,6 +626,142 @@ export const SAMPLE_APPLIED: ApplyWritten = {
   },
 };
 
+/*
+ * The Sources page and the setup flow: the mockups' sources, an inspection of the marketplace
+ * database, a plan and an install, shaped as the worker answers.
+ */
+
+export const SAMPLE_SOURCES: readonly SourceRow[] = [
+  {
+    name: "listings",
+    kind: "table",
+    connector: "Postgres, trigger",
+    install: { status: "ok", words: "installed, version 3" },
+    how: {
+      label: "Wakes",
+      words: "Instantly, on the trigger's notification. Last change seen 12 seconds ago.",
+    },
+    lastChangeAt: "2026-11-06T11:59:48.000Z",
+    answers: "Inline columns on public.listings. 2 questions, version 3.",
+    backfill: {
+      state: "finished",
+      fraction: 1,
+      words: "Finished the whole question set: 41,200 records answered under version 3.",
+    },
+    login: {
+      label: "Login",
+      words: "facetdb_worker reads title and price, and writes only FacetDB's own columns.",
+    },
+  },
+  {
+    name: "support_tickets",
+    kind: "api",
+    connector: "API",
+    install: null,
+    how: {
+      label: "Arrives",
+      words:
+        "Your code sends each record to POST /v1/check and gets the answer back in about a second. Last change seen 40 seconds ago.",
+    },
+    lastChangeAt: "2026-11-06T11:59:20.000Z",
+    answers: "Kept in the FacetDB store. 1 question, version 2. Unsure records land in Review.",
+    backfill: { state: "none", fraction: null, words: "None: records arrive one by one." },
+    login: null,
+  },
+];
+
+export const SAMPLE_SETUP_ACCESS: SetupAccess = { open: true };
+
+export const SAMPLE_TABLES: Inspection = {
+  database: "Postgres",
+  tables: ["listings", "sellers", "orders"],
+  table: null,
+};
+
+/** The sellers table as an inspection reads it: its key, its columns and three of its rows. */
+export const SAMPLE_SELLERS: Inspection = {
+  ...SAMPLE_TABLES,
+  table: {
+    name: "sellers",
+    key: "id",
+    columns: [
+      { name: "id", type: "integer" },
+      { name: "bio", type: "text" },
+      { name: "country", type: "text" },
+      { name: "joined", type: "timestamp with time zone" },
+    ],
+    rows: [
+      { id: "203", bio: "New here, cash only, <b>today</b>", country: "BE", joined: null },
+      { id: "202", bio: "Selling my old bikes", country: "NL", joined: "2024-03-01 10:00:00+00" },
+      { id: "201", bio: "Vintage furniture since 2011", country: "BE", joined: null },
+    ],
+  },
+};
+
+/** The plan of the sellers source: the install as `facetdb migrate --dry-run` prints it. */
+export const SAMPLE_SETUP_PLAN: SetupPlan = {
+  token: "plan-token-1",
+  expiresInSeconds: 600,
+  table: "public.sellers",
+  sql: [
+    "-- facetdb migrate: sellers (public.sellers)",
+    "begin;",
+    "",
+    'alter table "public"."sellers" add column "is_fake" boolean',
+    "",
+    "commit;",
+    "note: the worker login reads bio and writes only FacetDB's columns",
+    "",
+  ].join("\n"),
+  transactional: true,
+  path: "facetdb.config.ts",
+  diff: [
+    "--- a/facetdb.config.ts",
+    "+++ b/facetdb.config.ts",
+    "@@ -20,0 +21,4 @@",
+    "+    {",
+    '+      name: "sellers",',
+    "+      database: process.env.DATABASE_URL,",
+    "+    },",
+    "",
+  ].join("\n"),
+  uncommitted: null,
+  warnings: [],
+  backfill: {
+    records: 50_000,
+    inputTokens: 2_000_000,
+    dollars: 0.084,
+    pace: 50,
+    seconds: 1_000,
+    command: "facetdb backfill --source sellers",
+    counted: "statistics",
+  },
+  storeElsewhere: false,
+};
+
+export const SAMPLE_INSTALLED: SetupInstalled = {
+  installed: true,
+  table: "public.sellers",
+  path: "facetdb.config.ts",
+  reload: {
+    loaded: true,
+    sources: [
+      {
+        source: "sellers",
+        outcome: "not-started",
+        version: null,
+        message:
+          "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+      },
+    ],
+    notes: [],
+  },
+  restart:
+    "The worker that is running does not answer sellers yet: stop facetdb worker (Ctrl+C) and start it again, and it answers every change from then on.",
+  backfill:
+    "Then answer the records already in public.sellers: facetdb backfill --source sellers shows its estimate before it asks anything.",
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -644,6 +785,11 @@ export function unexpected(name: string): () => Promise<never> {
 export type FakeApi = ApiClient & {
   readonly calls: readonly string[];
   readonly refs: readonly string[];
+  /**
+   * The admin connection string each setup call carried, in order, kept apart from `calls` so a
+   * failing assertion on the calls never prints it.
+   */
+  readonly admins: readonly string[];
 };
 
 /** A filter in the call log: ` source=listings below=0.6`, nothing for no filter. */
@@ -689,11 +835,49 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     testDraft: () => Promise.resolve(SAMPLE_TEST_RESULT),
     applyDiff: () => Promise.resolve(SAMPLE_APPLY_DIFF),
     applyWrite: () => Promise.resolve(SAMPLE_APPLIED),
+    // The Sources page and the setup flow.
+    sources: () => Promise.resolve(SAMPLE_SOURCES),
+    setupAccess: () => Promise.resolve(SAMPLE_SETUP_ACCESS),
+    setupInspect: (_admin, table) =>
+      Promise.resolve(table === undefined ? SAMPLE_TABLES : SAMPLE_SELLERS),
+    setupPreview: () => Promise.resolve(SAMPLE_PREVIEW),
+    setupPlan: () => Promise.resolve(SAMPLE_SETUP_PLAN),
+    setupInstall: () => Promise.resolve(SAMPLE_INSTALLED),
     ...answers,
   };
+  const admins: string[] = [];
   return {
     calls,
     refs,
+    admins,
+    sources: () => {
+      calls.push("sources");
+      return answer.sources();
+    },
+    setupAccess: () => {
+      calls.push("setupAccess");
+      return answer.setupAccess();
+    },
+    setupInspect: (admin, table) => {
+      admins.push(admin);
+      calls.push(`setupInspect${table === undefined ? "" : ` ${table}`}`);
+      return answer.setupInspect(admin, table);
+    },
+    setupPreview: (admin, draft) => {
+      admins.push(admin);
+      calls.push(`setupPreview ${JSON.stringify(draft)}`);
+      return answer.setupPreview(admin, draft);
+    },
+    setupPlan: (admin, draft) => {
+      admins.push(admin);
+      calls.push(`setupPlan ${JSON.stringify(draft)}`);
+      return answer.setupPlan(admin, draft);
+    },
+    setupInstall: (admin, draft, confirm) => {
+      admins.push(admin);
+      calls.push(`setupInstall ${JSON.stringify({ ...confirm, draft })}`);
+      return answer.setupInstall(admin, draft, confirm);
+    },
     project: () => {
       calls.push("project");
       return answer.project();

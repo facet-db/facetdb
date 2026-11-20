@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { judgeDraftSource, type SourceDraft } from "./draft.ts";
+import { judgeDraftSource, type NewSourceSetup, type SourceDraft } from "./draft.ts";
 import type { ProjectConfig } from "./dsl.ts";
 import { configFileSource } from "./json.ts";
 import type { ConfigIssue } from "./schema.ts";
@@ -75,7 +75,12 @@ export type PlanResult =
  * settings (a webhook's URL among them), which run with the record's state. A draft for a source
  * the file has must carry the file's own; a new source carries none.
  */
-function operatorOnly(file: ProjectConfig, judged: ProjectConfig, name: string): ConfigIssue[] {
+function operatorOnly(
+  file: ProjectConfig,
+  judged: ProjectConfig,
+  name: string,
+  setup: NewSourceSetup | undefined,
+): ConfigIssue[] {
   const index = judged.sources.findIndex((source) => source.name === name);
   const drafted = judged.sources[index];
   if (drafted === undefined) {
@@ -83,7 +88,11 @@ function operatorOnly(file: ProjectConfig, judged: ProjectConfig, name: string):
   }
   const before = file.sources.find((source) => source.name === name);
   const issues: ConfigIssue[] = [];
-  if (drafted.where !== before?.where) {
+  // The operator's own setup of a source the file does not have yet may give it a where filter: the
+  // setup shows it in the install SQL and in this diff, as typed, before anything runs. Actions
+  // stay refused: the setup offers none.
+  const operatorsNewSource = setup !== undefined && before === undefined;
+  if (drafted.where !== before?.where && !operatorsNewSource) {
     issues.push({
       path: `sources[${index}].where`,
       message: `a draft cannot ${before === undefined ? "give a new source" : "change"} the where filter: it is SQL that runs in your database as written; edit the where filter in facetdb.config.ts by hand`,
@@ -152,19 +161,22 @@ function pinVariables(
 /**
  * Judges `draft` within the project as the file loads now (`current.config`), renders the whole
  * project through the exporter and diffs it against the file's text. `env` is the worker's: a draft
- * may name only the connection variables the file already names (`judgeDraftSource`).
+ * may name only the connection variables the file already names (`judgeDraftSource`). `setup` is
+ * the studio's setup flow's alone: the operator on this machine adding a new source, which may name
+ * its own variable and carry a where filter.
  */
 export function planApply(
   current: { readonly path: string; readonly text: string; readonly config: ProjectConfig },
   draft: SourceDraft,
   env: Readonly<Record<string, string | undefined>>,
+  setup?: NewSourceSetup,
 ): PlanResult {
   const pinned = pinVariables(current.config, current.text, env);
   if (!pinned.ok) {
     return pinned;
   }
   const file = pinned.config;
-  const judged = judgeDraftSource(file, draft, env);
+  const judged = judgeDraftSource(file, draft, env, setup);
   if (!judged.ok) {
     return judged;
   }
@@ -181,7 +193,7 @@ export function planApply(
           },
         ],
   );
-  issues.push(...operatorOnly(file, judged.config, draft.name));
+  issues.push(...operatorOnly(file, judged.config, draft.name, setup));
   if (issues.length > 0) {
     return { ok: false, issues };
   }

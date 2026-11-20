@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
-import { bodyProblems, readJson } from "../request.ts";
+import { bodyProblems, readJson, requireOwnPage } from "../request.ts";
 import type { ConfigService, DraftIssue } from "./service.ts";
 
 /** The most rows one preview answers, as `facetdb preview --limit` allows. */
@@ -61,44 +61,12 @@ const unknownProject = () =>
     "Open the studio of the worker that serves this project.",
   );
 
-function hostOf(url: string): string | undefined {
-  try {
-    return new URL(url).host;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Apply writes a file on the operator's machine, so it takes a request only a page of the studio
- * itself, or a program, can send: a JSON body declared as such, which a page on another site cannot
- * send without a preflight this server never approves, and no `Origin` or `Sec-Fetch-Site` of
- * another site. The session's own rules still decide who is asking.
- */
-function requireOwnPage(request: { header(name: string): string | undefined; url: string }): void {
-  const type = request.header("content-type") ?? "";
-  if (!/^application\/json\s*(;|$)/i.test(type)) {
-    throw new ApiError(
-      415,
-      "json_only",
-      "Apply takes a JSON body sent as application/json, which a page on another site cannot send.",
-      "Send the header `Content-Type: application/json` with the body.",
-    );
-  }
-  const origin = request.header("origin");
-  const site = request.header("sec-fetch-site");
-  if (
-    (origin !== undefined && hostOf(origin) !== hostOf(request.url)) ||
-    (site !== undefined && site !== "same-origin" && site !== "none")
-  ) {
-    throw new ApiError(
-      403,
-      "cross_origin",
-      "This request came from a page on another site, and Apply writes facetdb.config.ts on this machine.",
-      "Apply from the studio this worker serves, or from a program on a machine you trust.",
-    );
-  }
-}
+/** Apply writes a file on the operator's machine: `requireOwnPage`'s words for it. */
+const APPLY_PAGE = {
+  what: "Apply",
+  does: "Apply writes facetdb.config.ts on this machine",
+  from: "Apply from the studio this worker serves, or from a program on a machine you trust.",
+} as const;
 
 function issuesInWords(issues: readonly DraftIssue[]): string {
   return issues
@@ -246,7 +214,7 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
   // it; with the plan as `confirm`, the write, and the worker's reload. Show before doing: nothing
   // is written that was not shown.
   route.post("/apply", async (c) => {
-    requireOwnPage(c.req);
+    requireOwnPage(c.req, APPLY_PAGE);
     const body = await parsed(
       applyBody,
       c.req,

@@ -29,19 +29,46 @@ export type DraftJudgement =
     };
 
 /**
+ * The studio's setup flow: the operator on the machine that runs the worker adds a new source,
+ * which reads its connection string from a variable the file may not name yet. Only the setup's own
+ * door passes it, and only for a request from that operator; a reviewer's draft never carries it,
+ * so what a reviewer's draft may name stays as it was.
+ */
+export type NewSourceSetup = {
+  /** The variable the new source reads its connection string from (`LISTINGS_URL`). */
+  readonly variable: string;
+};
+
+/** A variable name as a shell sets one. */
+const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
  * Judges `draft` within `config`. `env` is the environment the connection strings are read from, of
  * which only the variables the config's sources already name are read; a draft naming any other is
- * refused in the same words whether or not it is set. Nothing is written and nothing changes:
- * applying a draft is `planApply`'s.
+ * refused in the same words whether or not it is set. With `setup`, the draft must be a source the
+ * config does not have, naming `setup.variable`, which is then read too. Nothing is written and
+ * nothing changes: applying a draft is `planApply`'s.
  */
 export function judgeDraftSource(
   config: ProjectConfig,
   draft: SourceDraft,
   env: Readonly<Record<string, string | undefined>>,
+  setup?: NewSourceSetup,
 ): DraftJudgement {
+  if (setup !== undefined) {
+    const refusal = setupRefusal(config, draft, setup);
+    if (refusal !== undefined) {
+      return { ok: false, issues: [refusal] };
+    }
+  }
   // A draft comes over HTTP: it sees only the variables the loaded config already names, so naming
   // any other one tells its sender nothing about whether it is set or what it holds.
-  const named = [...new Set(config.sources.flatMap((source) => source.databaseEnv ?? []))].sort();
+  const named = [
+    ...new Set([
+      ...config.sources.flatMap((source) => source.databaseEnv ?? []),
+      ...(setup === undefined ? [] : [setup.variable]),
+    ]),
+  ].sort();
   const refused = (path: string): DraftJudgement => ({
     ok: false,
     issues: [
@@ -106,4 +133,36 @@ export function judgeDraftSource(
     source: source.name,
   }));
   return { ok: true, questionSet, warnings, config: judged };
+}
+
+/** Why a setup's draft is not a new source naming its own variable, or undefined when it is. */
+function setupRefusal(
+  config: ProjectConfig,
+  draft: SourceDraft,
+  setup: NewSourceSetup,
+): ConfigIssue | undefined {
+  if (config.sources.some((source) => source.name === draft.name)) {
+    return {
+      path: "name",
+      message: `facetdb.config.ts already has a source called "${draft.name}": the setup adds a new source; choose another name, or change "${draft.name}" on the Questions page`,
+    };
+  }
+  if (!VARIABLE_NAME.test(setup.variable)) {
+    return {
+      path: "database.env",
+      message: `"${setup.variable}" is not the name of an environment variable: use letters, digits and underscores, not starting with a digit`,
+    };
+  }
+  const database = draft["database"];
+  const named =
+    typeof database === "object" && database !== null && "env" in database
+      ? database.env
+      : undefined;
+  if (named !== setup.variable || draft["databaseEnv"] !== undefined) {
+    return {
+      path: "database.env",
+      message: `the new source reads its connection string from ${setup.variable}, so its draft names that variable and no other`,
+    };
+  }
+  return undefined;
 }

@@ -19,5 +19,7 @@ export {
   createBackfill,
   DEFAULT_BACKFILL_PACE,
   ESTIMATE_SAMPLE_SIZE,
+  estimateBackfill,
   PRICE_PER_MILLION_INPUT_TOKENS,
+  surveyBackfill,
 } from "./backfill.ts";

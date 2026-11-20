@@ -467,6 +467,10 @@ export type ThresholdOverride = z.infer<typeof thresholdOverrideSchema>;
 /** A source of the project JSON, the fields the Questions page reads; the rest are the file's. */
 const configSourceSchema = z.object({
   name: z.string().min(1),
+  /** The variable a table source reads its connection from (the setup flow suggests one, 117). */
+  database: z.object({ env: z.string() }).exactOptional(),
+  /** The table a table source reads, as the config names it (the setup flow reads it, 117). */
+  table: z.string().exactOptional(),
   read: z.array(z.string()),
   where: z.string().exactOptional(),
   model: z.string().exactOptional(),
@@ -661,6 +665,108 @@ const applyWrittenSchema = z.discriminatedUnion("written", [
 ]);
 export type ApplyWritten = z.infer<typeof applyWrittenSchema>;
 
+/*
+ * The Sources page and the setup flow: GET /v1/sources, and the setup's endpoints. The admin
+ * connection string is a body of the setup's four requests and nothing else: in no address, no
+ * error this client makes (they name the path, never the body), and the client keeps no copy.
+ */
+
+/** One labelled line of a source's row: `Wakes`, `Arrives`, `Login`. */
+const sourceLineSchema = z.object({ label: z.string(), words: z.string() });
+
+/** `GET /v1/sources`: a ruled row per source, in the words of the Sources page. */
+const sourcesSchema = z.object({
+  sources: z.array(
+    z.object({
+      name: z.string().min(1),
+      kind: z.enum(["table", "api"]),
+      connector: z.string(),
+      install: z
+        .object({ status: z.enum(["ok", "fail", "skip", "warn"]), words: z.string() })
+        .nullable(),
+      how: sourceLineSchema,
+      lastChangeAt: z.string().nullable(),
+      answers: z.string(),
+      backfill: z.object({
+        state: z.enum(["none", "part-way", "finished"]),
+        fraction: probability.nullable(),
+        words: z.string(),
+      }),
+      login: sourceLineSchema.nullable(),
+    }),
+  ),
+});
+export type SourceRow = z.infer<typeof sourcesSchema>["sources"][number];
+
+/** `GET /v1/sources/setup`: whether this browser may add a source here, and if not why. */
+const setupAccessSchema = z.discriminatedUnion("open", [
+  z.object({ open: z.literal(true) }),
+  z.object({ open: z.literal(false), code: z.string(), message: z.string(), fix: z.string() }),
+]);
+export type SetupAccess = z.infer<typeof setupAccessSchema>;
+
+/** `POST /v1/sources/inspect`: the tables, and for one its columns, its key and five rows. */
+const inspectionSchema = z.object({
+  database: z.string(),
+  tables: z.array(z.string()),
+  table: z
+    .object({
+      name: z.string(),
+      key: z.string().nullable(),
+      columns: z.array(z.object({ name: z.string(), type: z.string() })),
+      rows: z.array(z.record(z.string(), z.string().nullable())),
+    })
+    .nullable(),
+});
+export type Inspection = z.infer<typeof inspectionSchema>;
+export type InspectedTable = NonNullable<Inspection["table"]>;
+
+/** What the setup sends: a new source in the project JSON's shape, its connection by variable. */
+export type SetupDraft = SourceDraft & {
+  readonly table: string;
+  readonly database: { readonly env: string };
+  readonly read: readonly string[];
+  readonly where?: string;
+  readonly storage: "inline" | "side-table";
+};
+
+/** `POST /v1/sources/plan`: the install as `facetdb migrate --dry-run` prints it, and the diff. */
+const setupPlanSchema = z.object({
+  token: z.string().min(1),
+  expiresInSeconds: z.number().int().positive(),
+  table: z.string(),
+  sql: z.string(),
+  transactional: z.boolean(),
+  path: z.string(),
+  diff: z.string(),
+  uncommitted: wordsSchema.nullable(),
+  warnings: z.array(wordingWarningSchema),
+  backfill: z.object({
+    records: z.number().int().min(0),
+    inputTokens: z.number().min(0),
+    dollars: z.number().min(0),
+    pace: z.number().positive(),
+    seconds: z.number().int().min(0),
+    command: z.string(),
+    /** The records counted by the database's statistics (an estimate), or the rows read. */
+    counted: z.enum(["statistics", "rows-read"]),
+  }),
+  /** The store is another database: migrate also prints the store's part above this script. */
+  storeElsewhere: z.boolean(),
+});
+export type SetupPlan = z.infer<typeof setupPlanSchema>;
+
+/** `POST /v1/sources/install`: installed, the file written, and what the operator runs next. */
+const setupInstalledSchema = z.object({
+  installed: z.literal(true),
+  table: z.string(),
+  path: z.string(),
+  reload: reloadSchema,
+  restart: z.string(),
+  backfill: z.string(),
+});
+export type SetupInstalled = z.infer<typeof setupInstalledSchema>;
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -724,6 +830,22 @@ export type ApiClient = {
     draft: SourceDraft,
     confirm: { readonly plan: string; readonly force: boolean },
   ) => Promise<ApplyWritten>;
+  // The Sources page and the setup flow.
+  readonly sources: () => Promise<readonly SourceRow[]>;
+  /** Whether this browser may add a source here: the operator on the worker's machine alone. */
+  readonly setupAccess: () => Promise<SetupAccess>;
+  /** The tables the admin string reaches, and with `table` that table's columns and rows. */
+  readonly setupInspect: (admin: string, table?: string) => Promise<Inspection>;
+  /** The new source's questions asked of its 20 newest rows, read with the admin string. */
+  readonly setupPreview: (admin: string, draft: SetupDraft) => Promise<DraftPreview>;
+  /** The install SQL and the config file's diff, with the token that installs exactly them. */
+  readonly setupPlan: (admin: string, draft: SetupDraft) => Promise<SetupPlan>;
+  /** Writes the file and runs the plan the token names; `force` only when the person chose it. */
+  readonly setupInstall: (
+    admin: string,
+    draft: SetupDraft,
+    confirm: { readonly token: string; readonly force: boolean },
+  ) => Promise<SetupInstalled>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -873,5 +995,23 @@ export function createApiClient(fetch: Fetch): ApiClient {
     applyDiff: (draft) => call(applyDiffSchema, "POST", "/apply", { source: draft }),
     applyWrite: (draft, { plan, force }) =>
       call(applyWrittenSchema, "POST", "/apply", { source: draft, confirm: plan, force }),
+    sources: async () => (await call(sourcesSchema, "GET", "/sources")).sources,
+    setupAccess: () => call(setupAccessSchema, "GET", "/sources/setup"),
+    setupInspect: (admin, table) =>
+      call(inspectionSchema, "POST", "/sources/inspect", {
+        admin,
+        ...(table === undefined ? {} : { table }),
+      }),
+    setupPreview: (admin, draft) =>
+      call(draftPreviewSchema, "POST", "/sources/preview", { admin, source: draft }),
+    setupPlan: (admin, draft) =>
+      call(setupPlanSchema, "POST", "/sources/plan", { admin, source: draft }),
+    setupInstall: (admin, draft, { token, force }) =>
+      call(setupInstalledSchema, "POST", "/sources/install", {
+        admin,
+        source: draft,
+        token,
+        force,
+      }),
   };
 }

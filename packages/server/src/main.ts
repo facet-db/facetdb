@@ -27,6 +27,8 @@ import {
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
+import type { SetupDoor } from "./sources/door.ts";
+import { createSetupService } from "./sources/service.ts";
 import type { StudioBuild } from "./studio/build.ts";
 
 export type ServerDeps = {
@@ -94,6 +96,11 @@ export type ServerDeps = {
    * (`openStudioBuild` over the CLI's disk door); absent under a worker that serves the API alone.
    */
   readonly studioApp?: StudioBuild;
+  /**
+   * The setup flow's door: the engines, `facetdb migrate`'s plan and Apply's write, as only the CLI
+   * has them. Absent, the studio says a source cannot be added here.
+   */
+  readonly setup?: SetupDoor;
 };
 
 /**
@@ -132,6 +139,9 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       access: createAccessService({ host: deps.host, reviewers }),
     },
     review: createReviewEndpointService({ ...deps.review, projectId: deps.config.projectId }),
+    ...(deps.setup === undefined
+      ? {}
+      : { setup: createSetupService({ door: deps.setup, clock: deps.clock, log: deps.log }) }),
     studio: {
       sessions: createSessions({
         secret: deps.sessionSecret,

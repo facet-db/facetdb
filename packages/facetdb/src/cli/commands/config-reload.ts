@@ -90,6 +90,11 @@ export type FleetDeps = {
   readonly print: (line: string) => void;
   /** Sees each pass of a source's loop. */
   readonly onPass: (loop: SourceLoop) => (report: PassReport) => void;
+  /**
+   * The failure a loop stopped with, as the run reports it: the error itself unless the worker
+   * words it for its source (a missing install names the source and the fix).
+   */
+  readonly failure?: (source: string, error: unknown) => unknown;
 };
 
 export type Fleet = {
@@ -317,7 +322,9 @@ export function createFleet(deps: FleetDeps): Fleet {
       .catch((error: unknown) => {
         // One loop failing (its database gone, say) stops the others too, so every claim is
         // settled before the connectors close; the first failure is what the run reports.
-        failure ??= { error };
+        failure ??= {
+          error: deps.failure === undefined ? error : deps.failure(slot.loop.source.name, error),
+        };
         failed.abort();
       });
   }
@@ -663,6 +670,18 @@ export function reviewLookups(
   };
 }
 
+/** Runs the work it is given one at a time, in the order given; a failure does not stop the next. */
+export type FileQueue = <Result>(work: () => Promise<Result>) => Promise<Result>;
+
+export function fileQueue(): FileQueue {
+  let queue: Promise<unknown> = Promise.resolve();
+  return (work) => {
+    const next = queue.then(work);
+    queue = next.catch(() => undefined);
+    return next;
+  };
+}
+
 /**
  * The studio's door to facetdb.config.ts (`ServerDeps.config.file`): the diff a draft makes, and on
  * confirmation the write and the fleet's reload. The draft is judged within the project as the file
@@ -677,9 +696,14 @@ export function configFileDoor(deps: {
   readonly load: () => Promise<ProjectConfig>;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly reload: () => Promise<ReloadSummary>;
+  /**
+   * The queue its applies run in, one at a time; the studio's setup flow writes the same file
+   * through the same queue. Its own when absent.
+   */
+  readonly serial?: FileQueue;
 }): ConfigFileDoor {
   const { path, files } = deps;
-  let queue: Promise<unknown> = Promise.resolve();
+  const serial = deps.serial ?? fileQueue();
 
   async function plan(
     draft: SourceDraft,
@@ -716,12 +740,6 @@ export function configFileDoor(deps: {
     }
     const planned = planApply({ path, text: read.text, config }, draft, deps.env);
     return planned.ok ? planned : { kind: "invalid", issues: planned.issues };
-  }
-
-  function serial<Result>(work: () => Promise<Result>): Promise<Result> {
-    const next = queue.then(work);
-    queue = next.catch(() => undefined);
-    return next;
   }
 
   return {

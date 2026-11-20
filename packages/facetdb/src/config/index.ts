@@ -7,7 +7,7 @@ export type {
   PlanResult,
 } from "./apply.ts";
 export { apply, planApply, uncommittedWords } from "./apply.ts";
-export type { DraftJudgement, SourceDraft } from "./draft.ts";
+export type { DraftJudgement, NewSourceSetup, SourceDraft } from "./draft.ts";
 export { judgeDraftSource } from "./draft.ts";
 export type {
   ActionCall,

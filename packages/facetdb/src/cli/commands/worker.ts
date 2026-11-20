@@ -65,7 +65,13 @@ import {
   storeSharedFor,
   storeSourceId,
 } from "../store-door.ts";
-import { configFileDoor, createFleet, reviewLookups, type SourceLoop } from "./config-reload.ts";
+import {
+  configFileDoor,
+  createFleet,
+  fileQueue,
+  reviewLookups,
+  type SourceLoop,
+} from "./config-reload.ts";
 import { tableFacts } from "./dashboard-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -77,6 +83,7 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
+import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
 
 /**
  * `facetdb worker`: one process that answers every source of the config. Per table source it runs
@@ -475,9 +482,12 @@ export async function runWorkers(
     clock,
     print,
     onPass: tally,
+    failure: (source, error) => installMissing(source, options.config, error),
   });
   // Apply writes the file only for a worker that runs until stopped and reads the file as it is.
   const configFile = options.once ? undefined : parts.configFile;
+  // Apply and the setup flow write the one file, one write at a time.
+  const writes = fileQueue();
   let listener: HttpListener | undefined;
   try {
     await fleet.open(config);
@@ -616,9 +626,29 @@ export async function runWorkers(
                   load: () => configFile.load({ quiet: true }),
                   env: deps.env,
                   reload: () => fleet.reload(),
+                  serial: writes,
                 }),
               }),
         },
+        // The studio's setup flow: a new source added with the admin connection string the operator
+        // pastes on this machine, through migrate's plan and Apply's write; only a worker that
+        // writes its config file offers it.
+        setup:
+          configFile === undefined
+            ? UNAVAILABLE_SETUP_DOOR
+            : createSetupDoor({
+                cli: deps,
+                project,
+                allowInsecureStore: options.allowInsecure === true,
+                path: configFile.path,
+                files: configFile.files,
+                load: () => configFile.load({ quiet: true }),
+                reload: () => fleet.reload(),
+                serial: writes,
+                provider,
+                spending,
+                print,
+              }),
         // A preview reads a running source through the connector its loop holds, asks through the
         // workers' provider (backoff and the in-flight limit) and admits under their spending gate.
         preview: (name) => {
@@ -686,7 +716,12 @@ export async function runWorkers(
         // Pass after pass until the queue is empty, or a pass settles nothing (a record that keeps
         // failing goes back to the queue; it is not asked again in the same run).
         for (;;) {
-          const report = await loop.worker.runOnce();
+          let report: PassReport;
+          try {
+            report = await loop.worker.runOnce();
+          } catch (error) {
+            throw installMissing(loop.source.name, options.config, error);
+          }
           onPass(report);
           const settled =
             report.written.length +
@@ -796,6 +831,34 @@ function alertFailureLine({ event, error, final }: AlertFailure): string {
       ? "That was the alert's last try: the webhook is closed, and this line is its only alert."
       : "FacetDB tries the alert once more on the webhook's next attempt; the webhook itself is not sent again."
   }`;
+}
+
+/**
+ * The database's own codes for a table or a column that is not there: Postgres's SQLSTATE 42P01
+ * and 42703, MySQL's and MariaDB's. A loop meets one when the source's install never ran, when a
+ * column of the customer's own table was dropped or renamed under it, when `where` names a column
+ * that does not exist, or when a separate store was never migrated: the words say only what is
+ * true of all of them.
+ */
+const MISSING_OBJECT = new Set(["42P01", "42703", "ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"]);
+
+/**
+ * A loop's failure as the run reports it: one on a missing table or column names the source and how
+ * to find out which, the database's words kept; anything else is left as it is. The worker starts
+ * as it always did: nothing is checked before the first claim.
+ */
+export function installMissing(source: string, configPath: string, error: unknown): unknown {
+  const code =
+    typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  if (typeof code !== "string" || !MISSING_OBJECT.has(code)) {
+    return error;
+  }
+  const said = error instanceof Error ? error.message : String(error);
+  return new CliError(
+    "missing-object",
+    `the source "${source}" stopped: a table or a column it uses is not there (${said})`,
+    `run facetdb migrate --source ${source} --dry-run on this machine to see what the install is missing, then facetdb migrate --source ${source}; or, if a column of your own table was renamed or dropped, change read or where for "${source}" in ${configPath}`,
+  );
 }
 
 /** Without a model the worker would only fail: it refuses to start, and says what to set. */
