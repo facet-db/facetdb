@@ -114,6 +114,8 @@ function appWith(studioApp: StudioBuild | undefined) {
       },
       home: { home: () => Promise.reject(new Error("these tests read no home")) },
       sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
+      alerts: { alerts: () => Promise.reject(new Error("these tests read no alerts")) },
+      access: { access: () => Promise.reject(new Error("these tests read no studio access")) },
     },
     studio,
     review: NO_REVIEW,

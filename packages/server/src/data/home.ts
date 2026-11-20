@@ -78,7 +78,15 @@ export type Spending = {
   readonly month: string;
   readonly inputTokens: number;
   readonly dollars: number;
-  readonly cap: { readonly inputTokens: number; readonly dollars: number } | null;
+  /**
+   * The cap the worker enforces: the one it started with (a reload of the file changes the cap only
+   * at the next restart), and what it does at 100%. The Settings page compares it with the file.
+   */
+  readonly cap: {
+    readonly inputTokens: number;
+    readonly dollars: number;
+    readonly onCapReached: SpendingCap["onCapReached"];
+  } | null;
   readonly warningAt: number;
   /** The month's share of the cap, at most 1, for the strip; null without a cap. */
   readonly fraction: number | null;
@@ -292,7 +300,11 @@ function spendingOf(inputTokens: number, cap: SpendingCap | undefined, month: st
     month,
     inputTokens,
     dollars,
-    cap: { inputTokens: cap.inputTokens, dollars: dollarsOf(cap.inputTokens) },
+    cap: {
+      inputTokens: cap.inputTokens,
+      dollars: dollarsOf(cap.inputTokens),
+      onCapReached: cap.onCapReached,
+    },
     warningAt: SPENDING_WARNING_PERCENT / 100,
     fraction: Math.min(1, inputTokens / cap.inputTokens),
     words: { figure, sub },

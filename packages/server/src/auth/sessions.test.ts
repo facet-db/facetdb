@@ -112,6 +112,8 @@ function rig(options: { readonly secret?: string; readonly users?: Partial<Users
       },
       home: { home: () => Promise.reject(new Error("no home here")) },
       sources: { sources: () => Promise.reject(new Error("no sources here")) },
+      alerts: { alerts: () => Promise.reject(new Error("no alerts here")) },
+      access: { access: () => Promise.reject(new Error("no studio access here")) },
     },
     studio: { sessions, reviewers: createReviewers({ users, log }), projectId: PROJECT },
     review: NO_REVIEW,

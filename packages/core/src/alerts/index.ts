@@ -21,6 +21,7 @@ export {
   eventKey,
   FAILURE_WINDOW_MS,
   HEARTBEAT_LOSS_MS,
+  RESOLVABLE_ALERT_KINDS,
   resolvedMessage,
   WORKER_NOT_RUNNING_WHAT,
 } from "./events.ts";

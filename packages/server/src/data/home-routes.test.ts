@@ -247,6 +247,8 @@ function rig(
         },
         home: createHomeService(deps),
         sources: createSourcesService(deps),
+        alerts: { alerts: () => Promise.reject(new Error("these tests read no alerts")) },
+        access: { access: () => Promise.reject(new Error("these tests read no studio access")) },
       },
       studio: localStudio(studioProject),
       review: NO_REVIEW,
@@ -375,7 +377,7 @@ describe("GET /v1/home", () => {
       status: "ok",
       month: "2026-11",
       inputTokens: 76_190_477,
-      cap: { inputTokens: 595_238_096 },
+      cap: { inputTokens: 595_238_096, onCapReached: "pause" },
       warningAt: 0.8,
       words: { figure: "$3.20", sub: "13% of the $25 monthly cap. The project pauses at 100%." },
     });
@@ -566,6 +568,8 @@ describe("GET /v1/home", () => {
     expect((await continuing.home()).spending).toMatchObject({
       status: "continuing",
       fraction: 1,
+      // What the worker does at 100%, as it started: the Settings page compares it with the file.
+      cap: { inputTokens: 1_000_000, onCapReached: "continue" },
       words: {
         sub: "The $0.04 monthly cap is reached; the project keeps answering, as the config says.",
       },

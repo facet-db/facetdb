@@ -43,11 +43,18 @@ export function createStudio(deps: StudioDeps, history?: RouterHistory) {
 export function Studio({
   deps,
   history,
+  studio,
 }: {
   readonly deps: StudioDeps;
   readonly history?: RouterHistory;
+  /**
+   * A query client and router made beforehand by `createStudio` with these same dependencies: a
+   * test makes them itself to hold the client (what is in its cache after a sign-out). The app
+   * leaves it out.
+   */
+  readonly studio?: ReturnType<typeof createStudio>;
 }) {
-  const [{ queryClient, router }] = useState(() => createStudio(deps, history));
+  const [{ queryClient, router }] = useState(() => studio ?? createStudio(deps, history));
   return (
     <DepsProvider deps={deps}>
       <ThemeProvider storage={deps.storage} media={deps.media}>

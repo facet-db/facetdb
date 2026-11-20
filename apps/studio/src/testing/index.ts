@@ -3,13 +3,17 @@
 export type { FakeApi } from "./fake-client.ts";
 export {
   fakeApi,
+  SAMPLE_ACCESS,
+  SAMPLE_ALERTS,
   SAMPLE_CARD,
   SAMPLE_DECISIONS,
   SAMPLE_HOME,
   SAMPLE_PROJECT,
   SAMPLE_QUEUE,
+  SAMPLE_REVIEWERS,
   SAMPLE_RUNS,
   SAMPLE_SOURCE_NAMES,
+  SAMPLE_SPENDING_CONFIG,
   sampleHistory,
   signInRequired,
   unexpected,

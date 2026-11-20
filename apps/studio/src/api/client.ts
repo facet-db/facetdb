@@ -183,7 +183,14 @@ const homeSchema = z.object({
     status: z.enum(["ok", "warned", "paused", "continuing", "uncapped"]),
     month: z.string(),
     dollars: z.number().min(0),
-    cap: z.object({ inputTokens: z.number(), dollars: z.number().min(0) }).nullable(),
+    // The cap the worker enforces: as it started, and what it does at 100%.
+    cap: z
+      .object({
+        inputTokens: z.number(),
+        dollars: z.number().min(0),
+        onCapReached: z.enum(["pause", "continue"]),
+      })
+      .nullable(),
     fraction: z.number().min(0).max(1).nullable(),
     words: figureWords,
   }),
@@ -346,6 +353,76 @@ export type Run = RunsPage["runs"][number];
  */
 const sourceNamesSchema = z.object({ sources: z.array(z.object({ name: z.string().min(1) })) });
 
+/*
+ * The Alerts and Settings pages: the alert channels and history, the reviewer accounts, who may
+ * open the studio, and the project's spending cap.
+ */
+
+/** `GET /v1/alerts`: the channels as a kind and a name (never a setting), and the history newest first. */
+const alertsSchema = z.object({
+  /** The channels the worker runs with (the config as it started). */
+  channels: z.array(z.object({ kind: z.string().min(1), name: z.string().nullable() })),
+  /** True when facetdb.config.ts now names other channels, which apply at the next restart. */
+  fileChannelsDiffer: z.boolean(),
+  events: z.array(
+    z.object({
+      at: z.iso.datetime(),
+      kind: z.string(),
+      severity: z.enum(["information", "warning", "critical"]),
+      title: z.string(),
+      what: z.string(),
+      project: z.string(),
+      source: z.string(),
+      question: z.string().nullable(),
+      did: z.string(),
+      link: z.string(),
+      // `raised` is a kind nothing ever resolves: it says when it was raised and nothing more.
+      standing: z.discriminatedUnion("phase", [
+        z.object({ phase: z.literal("open") }),
+        z.object({ phase: z.literal("resolved"), at: z.iso.datetime() }),
+        z.object({ phase: z.literal("raised") }),
+      ]),
+      /** A resolved message whose alert was raised before the history the worker reads. */
+      raisedBeforeHistory: z.boolean(),
+      delivered: z.boolean(),
+    }),
+  ),
+  /** The most history lines the worker reads; `capped` says older ones exist. */
+  limit: z.number().int().positive(),
+  capped: z.boolean(),
+});
+export type Alerts = z.infer<typeof alertsSchema>;
+export type AlertEvent = Alerts["events"][number];
+export type AlertChannel = Alerts["channels"][number];
+
+/** `GET /v1/studio`: the host the studio listens on, whether only this machine can reach it, and the accounts. */
+const studioAccessSchema = z.object({
+  host: z.string().min(1),
+  loopback: z.boolean(),
+  reviewers: z.number().int().min(0),
+});
+export type StudioAccess = z.infer<typeof studioAccessSchema>;
+
+/** `GET /v1/reviewers`: the accounts `facetdb users add` makes; a name and when it was made, never a hash. */
+const reviewersSchema = z.object({
+  reviewers: z.array(z.object({ name: z.string().min(1), createdAt: z.iso.datetime() })),
+});
+export type ReviewerAccounts = z.infer<typeof reviewersSchema>["reviewers"];
+
+/** `POST /v1/reviewers`: the account made. */
+const reviewerAddedSchema = z.object({ name: z.string().min(1), added: z.literal(true) });
+
+/** `GET /v1/config`, the project-level cap only: the rest of the project JSON is other pages' to read. */
+const spendingConfigSchema = z.object({
+  spendingCap: z.number().int().positive().optional(),
+  onCapReached: z.enum(["pause", "continue"]),
+});
+/** The month's cap in billable input tokens (null when the config sets none), and what happens at 100%. */
+export type SpendingConfig = {
+  readonly tokens: number | null;
+  readonly onCapReached: "pause" | "continue";
+};
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -381,6 +458,16 @@ export type ApiClient = {
     readonly source?: string;
     readonly page: number;
   }) => Promise<RunsPage>;
+  // The Alerts and Settings pages.
+  readonly alerts: () => Promise<Alerts>;
+  readonly studioAccess: () => Promise<StudioAccess>;
+  readonly reviewers: () => Promise<ReviewerAccounts>;
+  /**
+   * Makes a reviewer account, as `facetdb users add` does. The password is a request's body and
+   * nothing else: it is in no address, and the client keeps no copy of it.
+   */
+  readonly addReviewer: (name: string, password: string) => Promise<void>;
+  readonly spendingConfig: () => Promise<SpendingConfig>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -508,5 +595,15 @@ export function createApiClient(fetch: Fetch): ApiClient {
         "GET",
         `/runs?${source === undefined ? "" : `source=${encodeURIComponent(source)}&`}page=${String(page)}`,
       ),
+    alerts: () => call(alertsSchema, "GET", "/alerts"),
+    studioAccess: () => call(studioAccessSchema, "GET", "/studio"),
+    reviewers: async () => (await call(reviewersSchema, "GET", "/reviewers")).reviewers,
+    addReviewer: async (name, password) => {
+      await call(reviewerAddedSchema, "POST", "/reviewers", { name, password });
+    },
+    spendingConfig: async () => {
+      const config = await call(spendingConfigSchema, "GET", "/config");
+      return { tokens: config.spendingCap ?? null, onCapReached: config.onCapReached };
+    },
   };
 }

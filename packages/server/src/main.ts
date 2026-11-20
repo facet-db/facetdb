@@ -14,6 +14,8 @@ import {
   type ProjectConfigDoor,
 } from "./config/service.ts";
 import {
+  createAccessService,
+  createAlertsService,
   createDashboardReads,
   createDecisionsService,
   createDoctors,
@@ -72,6 +74,16 @@ export type ServerDeps = {
   /** The project's sources with their engines and doctors, and its cap, as only the CLI knows them. */
   readonly dashboard: DashboardDoor;
   /**
+   * The Alerts and Settings pages: the host this surface listens on (`--host`), and the alert
+   * channel addresses (`alerts.channels`, `slack:#ops`): `alertChannels` the ones the worker runs
+   * with (the config as it started; a reload changes them only at the next restart), and
+   * `fileAlertChannels` the ones the file names now, read on each request, so the page can say they
+   * differ. The addresses alone: no channel setting ever reaches this package.
+   */
+  readonly host: string;
+  readonly alertChannels: () => readonly string[];
+  readonly fileAlertChannels: () => readonly string[];
+  /**
    * What the review endpoints decide with: the store's queue, and per source, keyed by its store
    * id, the decision log, the connector, the actions and the question set in force; the source
    * names are the config's. The project is `config.projectId`.
@@ -96,6 +108,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
     doctors: createDoctors(deps.clock),
     clock: deps.clock,
   };
+  const reviewers = createReviewers({ users: deps.store.users, log: deps.log });
   return createApp({
     keys: createApiKeys(deps.store.apiKeys),
     check: createCheckService({
@@ -110,6 +123,13 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       decisions: createDecisionsService(deps.decisions),
       home: createHomeService(dashboard),
       sources: createSourcesService(dashboard),
+      alerts: createAlertsService({
+        projectId: deps.config.projectId,
+        channels: deps.alertChannels,
+        fileChannels: deps.fileAlertChannels,
+        reads: dashboard.reads,
+      }),
+      access: createAccessService({ host: deps.host, reviewers }),
     },
     review: createReviewEndpointService({ ...deps.review, projectId: deps.config.projectId }),
     studio: {
@@ -120,7 +140,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
         osUser: deps.osUser,
         log: deps.log,
       }),
-      reviewers: createReviewers({ users: deps.store.users, log: deps.log }),
+      reviewers,
       projectId: deps.config.projectId,
     },
     ...(deps.studioApp === undefined ? {} : { studioApp: deps.studioApp }),

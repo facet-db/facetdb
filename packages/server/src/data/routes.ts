@@ -2,9 +2,12 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
+import type { AccessService } from "./access.ts";
+import type { AlertsService } from "./alerts.ts";
 import { decisionsRoutes } from "./decisions.ts";
 import type { DecisionsService } from "./decisions-service.ts";
 import { type HomeService, homeRoutes } from "./home.ts";
+import { unknownProject } from "./project.ts";
 import { RUNS_PER_PAGE, type RunsService } from "./runs.ts";
 import { type SourcesService, sourcesRoutes } from "./sources.ts";
 
@@ -19,6 +22,9 @@ export type DataServices = {
   /** The dashboard's Home and Sources figures. */
   readonly home: HomeService;
   readonly sources: SourcesService;
+  /** The Alerts page's channels and history, and Settings' studio access. */
+  readonly alerts: AlertsService;
+  readonly access: AccessService;
 };
 
 /** A source as the config names one; anything else could never match, so it is refused plainly. */
@@ -77,6 +83,16 @@ export function dataRoutes(services: DataServices): Hono<AppEnv> {
   // Home and Sources.
   route.route("/", homeRoutes(services.home));
   route.route("/", sourcesRoutes(services.sources));
+
+  // The channels the config names with the alert history, and who may open the studio.
+  route.get("/alerts", async (c) => {
+    const outcome = await services.alerts.alerts(c.get("projectId"));
+    if (outcome.kind === "unknown_project") {
+      throw unknownProject();
+    }
+    return c.json(outcome.alerts);
+  });
+  route.get("/studio", async (c) => c.json(await services.access.access()));
 
   return route;
 }

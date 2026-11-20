@@ -4,6 +4,18 @@
  * `dataRoutes` (routes.ts) under `/v1` behind the API key until reviewer sessions, so adding one
  * does not touch another's.
  */
+export type { AccessDeps, AccessService, StudioAccessView } from "./access.ts";
+export { createAccessService } from "./access.ts";
+export type {
+  AlertChannelView,
+  AlertEventView,
+  AlertStanding,
+  AlertsDeps,
+  AlertsOutcome,
+  AlertsService,
+  AlertsView,
+} from "./alerts.ts";
+export { ALERT_HISTORY_LINES, channelOf, createAlertsService, eventsOf } from "./alerts.ts";
 export { decisionsRoutes } from "./decisions.ts";
 export type {
   DecisionRow,

@@ -19,7 +19,14 @@ export type AlertKind = (typeof ALERT_KINDS)[number];
 
 export type AlertSeverity = ChannelMessage["severity"];
 
-/** The severity of each alert kind. */
+/**
+ * The kinds the code resolves: the heartbeat's next beat resolves `worker_not_running`, a healthy
+ * call resolves `model_failing`. Every other kind is raised and never resolved, so a page must not
+ * say it is "not resolved". A kind that gains a resolve path is added here.
+ */
+export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = ["worker_not_running", "model_failing"];
+
+/** The Severity column of the system alerts. */
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   worker_not_running: "critical",
   model_failing: "critical",

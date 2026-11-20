@@ -1,4 +1,5 @@
 import {
+  type Alerts,
   type ApiClient,
   ApiError,
   type DecisionHistory,
@@ -7,8 +8,11 @@ import {
   type Project,
   type ReviewCard,
   type ReviewCardId,
+  type ReviewerAccounts,
   type ReviewQueue,
   type RunsPage,
+  type SpendingConfig,
+  type StudioAccess,
 } from "../api/index.ts";
 
 /**
@@ -120,7 +124,7 @@ export const SAMPLE_HOME: Home = {
     status: "ok",
     month: "2026-11",
     dollars: 3.2,
-    cap: { inputTokens: 25_000_000, dollars: 25 },
+    cap: { inputTokens: 25_000_000, dollars: 25, onCapReached: "pause" },
     fraction: 0.128,
     words: { figure: "$3.20", sub: "13% of the $25 monthly cap. The project pauses at 100%." },
   },
@@ -281,6 +285,99 @@ export const SAMPLE_RUNS: RunsPage = {
   more: false,
 };
 
+/*
+ * The Alerts and Settings pages: the mockups' channels and events, two reviewer accounts, a studio
+ * on this machine alone and the $25 cap. Times are built in the machine's zone, so the words a page
+ * shows for them ("11:02 pm") are the same wherever a test runs.
+ */
+
+/** An instant of the machine's own calendar, as the worker sends one (ISO 8601). */
+function local(month: number, day: number, hour: number, minute: number): string {
+  return new Date(2026, month - 1, day, hour, minute).toISOString();
+}
+
+export const SAMPLE_ALERTS: Alerts = {
+  channels: [
+    { kind: "slack", name: "#ops" },
+    { kind: "email", name: "ops@example.com" },
+  ],
+  events: [
+    {
+      at: local(11, 6, 11, 10),
+      kind: "backfill_finished",
+      severity: "information",
+      title: "Backfill finished",
+      what: "The backfill finished: 50000 records queued for the worker, 0 answered.",
+      project: "marketplace",
+      source: "listings",
+      question: null,
+      did: "Every page was settled; the cursor is cleared.",
+      link: "https://docs.facetdb.dev/fix/backfill",
+      standing: { phase: "raised" },
+      raisedBeforeHistory: false,
+      delivered: true,
+    },
+    {
+      at: local(11, 5, 23, 2),
+      kind: "model_failing",
+      severity: "critical",
+      title: "Model failing",
+      what: "6 of 100 model calls failed in the last 5 minutes.",
+      project: "marketplace",
+      source: "support_messages",
+      question: null,
+      did: "Retrying with backoff; a record that cannot be answered is marked error and asked again.",
+      link: "https://docs.facetdb.dev/fix/worker",
+      standing: { phase: "resolved", at: local(11, 5, 23, 9) },
+      raisedBeforeHistory: false,
+      delivered: true,
+    },
+    {
+      at: local(11, 2, 8, 15),
+      kind: "worker_not_running",
+      severity: "critical",
+      title: "Worker not running",
+      what: "The worker has sent no heartbeat for 2 minutes.",
+      project: "marketplace",
+      source: "all sources",
+      question: null,
+      did: "Records stay queued and are answered when the worker is back.",
+      link: "https://docs.facetdb.dev/fix/worker",
+      standing: { phase: "resolved", at: local(11, 2, 8, 21) },
+      raisedBeforeHistory: false,
+      delivered: true,
+    },
+    {
+      at: local(10, 29, 16, 2),
+      kind: "spending_80",
+      severity: "warning",
+      title: "Spending at 80% of the cap",
+      what: "The month's usage reached 80% of the monthly cap.",
+      project: "marketplace",
+      source: "all sources",
+      question: null,
+      did: "Kept running; the cap pauses the project at 100%.",
+      link: "/settings",
+      standing: { phase: "raised" },
+      raisedBeforeHistory: false,
+      delivered: true,
+    },
+  ],
+  fileChannelsDiffer: false,
+  limit: 100,
+  capped: false,
+};
+
+export const SAMPLE_ACCESS: StudioAccess = { host: "127.0.0.1", loopback: true, reviewers: 2 };
+
+export const SAMPLE_REVIEWERS: ReviewerAccounts = [
+  { name: "sam", createdAt: local(11, 3, 10, 0) },
+  { name: "maya", createdAt: local(11, 4, 9, 30) },
+];
+
+/** $25 at $1 per million input tokens, pausing at the cap, as SAMPLE_HOME has it. */
+export const SAMPLE_SPENDING_CONFIG: SpendingConfig = { tokens: 25_000_000, onCapReached: "pause" };
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -336,6 +433,11 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     decisions: () => Promise.resolve(SAMPLE_DECISIONS),
     decisionHistory: (source, key) => Promise.resolve(sampleHistory(source, key)),
     runs: () => Promise.resolve(SAMPLE_RUNS),
+    alerts: () => Promise.resolve(SAMPLE_ALERTS),
+    studioAccess: () => Promise.resolve(SAMPLE_ACCESS),
+    reviewers: () => Promise.resolve(SAMPLE_REVIEWERS),
+    addReviewer: () => Promise.resolve(),
+    spendingConfig: () => Promise.resolve(SAMPLE_SPENDING_CONFIG),
     ...answers,
   };
   return {
@@ -406,6 +508,27 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     runs: (options) => {
       calls.push(`runs ${JSON.stringify(options)}`);
       return answer.runs(options);
+    },
+    alerts: () => {
+      calls.push("alerts");
+      return answer.alerts();
+    },
+    studioAccess: () => {
+      calls.push("studioAccess");
+      return answer.studioAccess();
+    },
+    reviewers: () => {
+      calls.push("reviewers");
+      return answer.reviewers();
+    },
+    // Only the name is noted: a password is never written where a test log or a failure shows it.
+    addReviewer: (name, password) => {
+      calls.push(`addReviewer ${name}`);
+      return answer.addReviewer(name, password);
+    },
+    spendingConfig: () => {
+      calls.push("spendingConfig");
+      return answer.spendingConfig();
     },
   };
 }

@@ -14,6 +14,7 @@ import {
   type AlertEvent,
   alertMessage,
   eventKey,
+  RESOLVABLE_ALERT_KINDS,
   resolvedMessage,
 } from "./events.ts";
 
@@ -437,8 +438,27 @@ describe("what every alert says", () => {
   });
 });
 
+describe("the kinds the code resolves", () => {
+  it("are the ones the detectors' signals clear, and the list says so", async () => {
+    const { alerts, store } = setup();
+    for (const kind of ALERT_KINDS) {
+      await alerts.raise(eventOf(kind));
+    }
+    const signals = alerts.signals(scope);
+    // The two paths that resolve in code: the next beat, and a healthy model call.
+    await signals.beat();
+    await signals.modelCall(true);
+
+    const stillActive = ALERT_KINDS.filter((kind) => store.active.has(eventKey(eventOf(kind))));
+    expect(stillActive).toEqual(
+      ALERT_KINDS.filter((kind) => !RESOLVABLE_ALERT_KINDS.includes(kind)),
+    );
+    expect([...RESOLVABLE_ALERT_KINDS].sort()).toEqual(["model_failing", "worker_not_running"]);
+  });
+});
+
 describe("severities", () => {
-  it("lists every kind with its severity", () => {
+  it("lists the first kinds with their severities", () => {
     expect(ALERT_SEVERITY).toEqual({
       worker_not_running: "critical",
       model_failing: "critical",

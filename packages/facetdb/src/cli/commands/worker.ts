@@ -567,6 +567,12 @@ export async function runWorkers(
             }));
           },
         },
+        // The Alerts and Settings pages: where this surface listens, the channel addresses the
+        // worker runs with (the config as it started; a reload keeps them until a restart), and the
+        // ones the file names now, so the page can say they differ.
+        host: options.host,
+        alertChannels: () => config.alerts?.channels ?? [],
+        fileAlertChannels: () => fleet.config().alerts?.channels ?? [],
         // The review endpoints: the store's queue, and per source the log, the connector, the
         // actions and the question set and version of the loop in force, read on every call
         // (config-reload.ts, `reviewLookups`).

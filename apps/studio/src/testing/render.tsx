@@ -3,8 +3,9 @@ import { render } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { StrictMode } from "react";
 import type { ApiClient } from "../api/index.ts";
+import type { StudioDeps } from "../deps.tsx";
 import { type KeyValueStorage, LIGHT_QUERY, type Media, PHONE_QUERY } from "../shell/index.ts";
-import { Studio } from "../studio.tsx";
+import { createStudio, Studio } from "../studio.tsx";
 import { fakeApi } from "./fake-client.ts";
 import { FAKE_START, fakeScheduler } from "./fake-scheduler.ts";
 
@@ -87,25 +88,32 @@ export function renderStudio(options: RenderStudioOptions = {}) {
   const history = createMemoryHistory({ initialEntries: [options.path ?? "/"] });
   const user = userEvent.setup();
   const copied: string[] = [];
-  const studio = (
-    <Studio
-      deps={{
-        api,
-        storage,
-        media: screenMedia.media,
-        schedule,
-        origin: STUDIO_ORIGIN,
-        clipboard:
-          options.clipboard ??
-          ((text) => {
-            copied.push(text);
-            return Promise.resolve();
-          }),
-      }}
-      history={history}
-    />
-  );
+  const deps: StudioDeps = {
+    api,
+    storage,
+    media: screenMedia.media,
+    schedule,
+    origin: STUDIO_ORIGIN,
+    clipboard:
+      options.clipboard ??
+      ((text) => {
+        copied.push(text);
+        return Promise.resolve();
+      }),
+  };
+  // Made here, not inside <Studio>, so a test can look into the query cache the pages fill.
+  const made = createStudio(deps, history);
+  const studio = <Studio deps={deps} history={history} studio={made} />;
   // main.tsx mounts under StrictMode, which runs every effect twice in development.
   const rendered = render(options.strict === true ? <StrictMode>{studio}</StrictMode> : studio);
-  return { ...rendered, api, history, media: screenMedia, schedule, user, copied };
+  return {
+    ...rendered,
+    api,
+    history,
+    media: screenMedia,
+    schedule,
+    user,
+    copied,
+    queryClient: made.queryClient,
+  };
 }

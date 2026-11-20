@@ -163,6 +163,10 @@ async function rig() {
       query: () => Promise.reject(new Error("the SDK reads no dashboard figure")),
     },
     dashboard: { projectId: PROJECT, cap: undefined, sources: [] },
+    // Nor the Alerts and Settings pages' channels and access.
+    host: "127.0.0.1",
+    alertChannels: () => [],
+    fileAlertChannels: () => [],
     // Nor does it review: no source is open to a reviewer here.
     review: {
       sources: [],

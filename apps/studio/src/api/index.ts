@@ -1,6 +1,9 @@
 // The API module's door: the client over the worker's HTTP surface, its error, and the queries
 // shared across the studio.
 export type {
+  AlertChannel,
+  AlertEvent,
+  Alerts,
   ApiClient,
   DecisionFilters,
   DecisionHistory,
@@ -16,6 +19,7 @@ export type {
   ReviewCardId,
   ReviewDecided,
   ReviewDecidedQuestion,
+  ReviewerAccounts,
   ReviewFilter,
   ReviewOpened,
   ReviewOpenQuestion,
@@ -25,6 +29,8 @@ export type {
   Run,
   RunsPage,
   SignedIn,
+  SpendingConfig,
+  StudioAccess,
 } from "./client.ts";
 export { ApiError, createApiClient, needsSignIn, SIGN_IN_CODE } from "./client.ts";
 export { homeQuery, projectQuery, reviewCountQuery, SHELL_REFRESH_MS } from "./queries.ts";
