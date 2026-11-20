@@ -1,0 +1,718 @@
+/* The components' skin, over the variables of
+   tokens.css, nothing else. No color value and no face name appears here (tokens.test.ts holds
+   every file but tokens.css to that); every duration is a motion token, so prefers-reduced-motion
+   (which zeroes them) stills the whole file. A surface imports it beside the theme:
+     @import "@facetdb/ui/components.css";
+
+   Names: every class starts with fdb-, so a surface's own Tailwind classes never collide. */
+
+/* Focus: corner brackets drawn by one pseudo-element with four strokes, on the element that
+   takes the focus (never removed). The stroke is facet-text, the amber on dark
+   and its darkened sibling on paper, where the plain amber would fall under 3:1. */
+.fdb-brackets {
+  position: relative;
+}
+.fdb-brackets::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-state);
+  background:
+    linear-gradient(var(--facet-text), var(--facet-text)) left top / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left top / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right top / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right top / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left bottom / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left bottom / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right bottom / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right bottom / 2px 10px no-repeat;
+}
+/* The brackets are backgrounds, which forced-colors mode drops; a transparent outline is
+   invisible normally and becomes a system-colored one when colors are forced, so focus always
+   shows. The same on every element below that takes the brackets' place. */
+.fdb-brackets:focus-visible {
+  outline: 2px solid transparent;
+}
+.fdb-brackets:focus-visible::after {
+  opacity: 1;
+}
+
+/* Button: a plain rectangle; the one filled one per view is primary */
+.fdb-button {
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+  transition:
+    border-color var(--motion-state),
+    background var(--motion-state),
+    color var(--motion-state);
+}
+.fdb-button:hover {
+  border-color: var(--text-3);
+}
+.fdb-button[data-size="small"] {
+  height: 30px;
+  font-size: 13px;
+}
+.fdb-button[data-size="large"] {
+  height: 44px;
+}
+.fdb-button[data-variant="primary"] {
+  background: var(--facet);
+  border-color: var(--facet);
+  color: var(--facet-ink);
+  font-weight: 600;
+}
+.fdb-button[data-variant="primary"]:hover {
+  border-color: var(--facet-ink);
+}
+.fdb-button[data-variant="quiet"] {
+  border-color: transparent;
+  color: var(--text-2);
+}
+.fdb-button[data-variant="quiet"]:hover {
+  color: var(--text);
+  border-color: var(--hairline);
+}
+/* Pressed is told apart by more than color: the word is underlined */
+.fdb-button[aria-pressed="true"] {
+  border-color: var(--facet);
+  color: var(--facet-text);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+.fdb-button:disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.fdb-button:disabled:hover {
+  border-color: var(--hairline);
+}
+.fdb-button[data-variant="primary"]:disabled {
+  background: transparent;
+  border-color: var(--hairline);
+}
+.fdb-button[data-variant="quiet"]:disabled:hover {
+  border-color: transparent;
+}
+
+/* The key hint: the single key a control answers to */
+.fdb-kbd {
+  line-height: 1;
+  padding: 3px 5px;
+  border: 1px solid var(--hairline);
+  color: var(--text-2);
+  font-family: var(--font-measured);
+  font-stretch: var(--font-measured-inline);
+  font-size: 11px;
+}
+.fdb-button[data-variant="primary"] .fdb-kbd {
+  border-color: var(--facet-ink);
+  color: var(--facet-ink);
+}
+
+/* Listbox: Radix Select with the hairline rectangle, the drawn chevron and a ruled list */
+.fdb-listbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 36px 0 12px;
+  border: 1px solid var(--hairline);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--motion-state);
+}
+.fdb-listbox[data-width="full"] {
+  display: flex;
+  width: 100%;
+}
+.fdb-listbox:hover {
+  border-color: var(--text-3);
+}
+.fdb-listbox[data-state="open"] {
+  border-color: var(--facet);
+}
+.fdb-listbox[data-disabled] {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.fdb-listbox[data-placeholder] {
+  color: var(--text-3);
+}
+.fdb-listbox > span:first-child {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fdb-listbox-chevron {
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateY(-50%);
+  color: var(--text-3);
+}
+.fdb-listbox-content {
+  /* Above the dialog (10), so a listbox inside one opens over it; the toasts (13) over both */
+  z-index: 12;
+  min-width: var(--radix-select-trigger-width);
+  max-width: min(420px, calc(100vw - 32px));
+  max-height: min(280px, var(--radix-select-content-available-height));
+  overflow-y: auto;
+  padding: 4px 0;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  color: var(--text-2);
+}
+.fdb-listbox-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: var(--text-2);
+  outline: 2px solid transparent;
+}
+/* The chosen option is told apart by more than color: its text is semi-bold and its square is
+   filled and outlined in the text color, where the others carry none */
+.fdb-listbox-item::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: transparent;
+}
+.fdb-listbox-item[data-state="checked"] {
+  color: var(--text);
+  font-weight: 600;
+}
+.fdb-listbox-item[data-state="checked"]::before {
+  background: var(--facet);
+  box-sizing: content-box;
+  border: 1px solid var(--text);
+  margin: -1px;
+}
+.fdb-listbox-item[data-highlighted] {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.fdb-listbox-item[data-disabled] {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.fdb-listbox-hint {
+  margin: 4px 0 0;
+  padding: 10px 12px 6px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+/* Status: an 8 px square (the brief's size) in the status color and the word in the text color
+   (the status colors pass 3:1 only, so they never set a word) */
+.fdb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  color: var(--text);
+}
+.fdb-status[data-size="small"] {
+  font-size: 13px;
+}
+.fdb-status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: none;
+  background: var(--pending);
+}
+.fdb-status[data-tone="yes"]::before {
+  background: var(--yes);
+}
+.fdb-status[data-tone="review"]::before {
+  background: var(--review);
+}
+.fdb-status[data-tone="no"]::before {
+  background: var(--no);
+}
+.fdb-status[data-tone="skipped"]::before {
+  background: var(--skipped);
+}
+
+/* Tag: a rectangle with a 6 px square at its left colored by role */
+.fdb-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--hairline);
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.fdb-tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: var(--text-3);
+}
+.fdb-tag[data-tone="facet"] {
+  color: var(--facet-text);
+  border-color: var(--facet);
+}
+.fdb-tag[data-tone="facet"]::before {
+  background: var(--facet);
+}
+.fdb-tag[data-tone="yes"]::before {
+  background: var(--yes);
+}
+.fdb-tag[data-tone="no"]::before {
+  background: var(--no);
+}
+.fdb-tag[data-tone="review"]::before {
+  background: var(--review);
+}
+.fdb-tag[data-tone="cloud"] {
+  border-style: dashed;
+  color: var(--text-3);
+}
+
+/* Threshold slider: a dither gradient with the cut lines on it, the tips beneath */
+.fdb-slider {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.fdb-slider-root {
+  position: relative;
+  display: block;
+  height: 44px;
+  margin: 10px 0 2px;
+  touch-action: none;
+  user-select: none;
+}
+.fdb-slider-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 16px;
+  height: 12px;
+  overflow: hidden;
+  /* The canvas is inline-block (the dither's own style): without this the line box could push it down */
+  line-height: 0;
+}
+.fdb-slider-track canvas {
+  display: block;
+}
+/* The thumb is the cut line itself (2 px, so the line stands where the value is); the handle is
+   drawn above it and the focus brackets around both */
+.fdb-slider-thumb {
+  display: block;
+  top: 8px;
+  height: 28px;
+  width: 2px;
+  background: var(--text);
+  cursor: grab;
+}
+.fdb-slider-thumb::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: -6px;
+  width: 14px;
+  height: 14px;
+  background: var(--facet);
+  border: 2px solid var(--canvas);
+}
+.fdb-slider-thumb::after {
+  inset: -9px -12px;
+}
+.fdb-slider-thumb[data-disabled] {
+  cursor: not-allowed;
+}
+.fdb-slider-tips {
+  position: relative;
+  height: 20px;
+  margin-top: 4px;
+}
+.fdb-slider-tips[data-stacked] {
+  height: 40px;
+}
+.fdb-slider-tip[data-row="second"] {
+  top: 20px;
+}
+.fdb-slider-tip {
+  position: absolute;
+  top: 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.fdb-slider-tip[data-anchor="start"] {
+  transform: none;
+}
+.fdb-slider-tip[data-anchor="end"] {
+  transform: translateX(-100%);
+}
+.fdb-slider-counts {
+  display: flex;
+  gap: 20px;
+  margin-top: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.fdb-slider-counts strong {
+  color: var(--text);
+}
+
+/* Self-filling table: a full grid on the canvas, every column readable on its own */
+.fdb-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--hairline);
+}
+/* The scroller takes the focus (a scrollable region must be reachable by keyboard); its frame
+   draws the brackets, since the scroller would clip them */
+.fdb-table-wrap:focus-visible {
+  outline: 2px solid transparent;
+}
+.fdb-table-frame:has(> .fdb-table-wrap:focus-visible)::after {
+  opacity: 1;
+}
+.fdb-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.fdb-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-2);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hairline);
+  border-right: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+.fdb-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--hairline);
+  border-right: 1px solid var(--hairline);
+  vertical-align: middle;
+}
+.fdb-table th:last-child,
+.fdb-table td:last-child {
+  border-right: 0;
+}
+.fdb-table tr:last-child td {
+  border-bottom: 0;
+}
+.fdb-table td[data-numeric] {
+  text-align: right;
+  font-family: var(--font-measured);
+  font-stretch: var(--font-measured-inline);
+  font-size: 13px;
+}
+/* A fill cell keeps its size before its content lands, so nothing else moves */
+.fdb-table td[data-fill] {
+  height: 44px;
+}
+.fdb-table td[data-fill="answer"] {
+  min-width: 96px;
+}
+.fdb-table td[data-fill="measure"] {
+  min-width: 118px;
+}
+.fdb-table td[data-fill="status"] {
+  min-width: 112px;
+}
+.fdb-table td[data-landed] > * {
+  animation: fdb-land var(--motion-state) both;
+}
+.fdb-answer-word {
+  font-weight: 600;
+}
+.fdb-answer-unsure {
+  color: var(--text-3);
+}
+.fdb-measure {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.fdb-measure-figure {
+  font-family: var(--font-measured);
+  font-stretch: var(--font-measured-inline);
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+@keyframes fdb-land {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Decision timeline: a vertical rule with a square at each entry */
+.fdb-timeline {
+  position: relative;
+  margin: 0 0 0 4px;
+  padding: 0 0 0 26px;
+  border-left: 1px solid var(--hairline);
+  list-style: none;
+  display: grid;
+  gap: 22px;
+}
+.fdb-timeline-entry {
+  position: relative;
+  display: grid;
+  gap: 6px;
+}
+.fdb-timeline-entry::before {
+  content: "";
+  position: absolute;
+  left: -31px;
+  top: 7px;
+  width: 8px;
+  height: 8px;
+  background: var(--pending);
+  border: 2px solid var(--canvas);
+}
+.fdb-timeline-entry[data-kind="human"]::before {
+  background: var(--facet);
+}
+.fdb-timeline-entry[data-kind="threshold"]::before,
+.fdb-timeline-entry[data-kind="version"]::before {
+  background: var(--text-3);
+}
+.fdb-timeline-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  font-size: 13px;
+}
+/* The kind in words: the square beside the entry only repeats it in color */
+.fdb-timeline-kind {
+  color: var(--text-2);
+  font-weight: 600;
+}
+.fdb-timeline-when {
+  color: var(--text-3);
+}
+.fdb-timeline-what {
+  font-weight: 600;
+}
+.fdb-timeline-detail {
+  color: var(--text-2);
+}
+
+/* Empty state: a low-density dither cloud, one sentence, one action */
+.fdb-empty {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: 72px 24px;
+}
+.fdb-empty-cloud {
+  display: block;
+  line-height: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.fdb-empty-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.fdb-empty-text {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--text-2);
+}
+
+/* Toast: the alert shape, on the canvas, one rule around it */
+.fdb-toast-viewport {
+  position: fixed;
+  left: 50%;
+  bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 13;
+  display: grid;
+  gap: 8px;
+  width: min(520px, calc(100% - 32px));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fdb-toast {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 16px;
+  align-items: start;
+  padding: 12px 16px;
+  background: var(--canvas);
+  border: 1px solid var(--hairline);
+  color: var(--text);
+  list-style: none;
+}
+.fdb-toast[data-state="open"] {
+  animation: fdb-land var(--motion-state) both;
+}
+.fdb-toast-what {
+  grid-column: 1;
+  margin: 0;
+  font-weight: 600;
+}
+.fdb-toast-detail {
+  grid-column: 1;
+  margin: 0;
+  color: var(--text-2);
+}
+.fdb-toast-link {
+  color: var(--facet-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.fdb-toast-side {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.fdb-toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.fdb-toast-close:hover {
+  color: var(--text);
+  border-color: var(--hairline);
+}
+
+/* Dialog: sharp, the canvas background, one rule around it */
+.fdb-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  background: color-mix(in srgb, var(--canvas) 72%, transparent);
+}
+.fdb-dialog {
+  position: fixed;
+  z-index: 10;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 100%;
+  max-width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 24px;
+  display: grid;
+  gap: 18px;
+  border: 1px solid var(--hairline);
+  background: var(--canvas);
+  color: var(--text);
+}
+.fdb-dialog:focus-visible {
+  outline: 2px solid transparent;
+}
+.fdb-dialog-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.fdb-dialog-description {
+  margin: 0;
+  color: var(--text-2);
+}
+.fdb-dialog-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+@media (max-width: 900px) {
+  .fdb-dialog {
+    padding: 18px;
+  }
+}
+
+/* Kv: key and value lines, JSON laid out and never raw */
+.fdb-kv {
+  display: grid;
+  grid-template-columns: minmax(80px, 140px) minmax(0, 1fr);
+  gap: 6px 16px;
+  align-items: baseline;
+  margin: 0;
+}
+.fdb-kv > div {
+  display: contents;
+}
+.fdb-kv dt {
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.fdb-kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.fdb-kv-measured {
+  font-family: var(--font-measured);
+  font-stretch: var(--font-measured-inline);
+  font-size: 13px;
+}
+.fdb-kv-empty {
+  color: var(--text-3);
+}
+.fdb-kv-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}

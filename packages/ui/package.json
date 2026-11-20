@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./tokens.css": "./src/tokens/tokens.css",
+    "./components.css": "./src/components/components.css",
     "./theme": "./src/tokens/theme.css"
   },
   "scripts": {
@@ -22,7 +23,6 @@
     "@radix-ui/react-visually-hidden": "1.2.13",
     "@tailwindcss/vite": "4.3.3",
     "lucide-react": "1.66.0",
-    "motion": "14.9.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "tailwindcss": "4.3.3"
