@@ -9,7 +9,7 @@ import { runEnding } from "../pipe.ts";
 import { sharePools } from "../pools.ts";
 import type { EngineEntry, HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
-import { hashPassword } from "../store-door.ts";
+import { hashPassword, storeSourceId } from "../store-door.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -851,6 +851,69 @@ describe("facetdb worker", () => {
       page: 1,
       more: false,
     });
+  });
+
+  it("serves the review of a record the model was unsure about, decided under the OS user", async () => {
+    provider = createFakeProvider({ defaults: { noul: 0.5 } });
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const result = await run(["worker", "--once"]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(await listing("r1")).toMatchObject({ facetdb_status: "needs_review" });
+    const [listener] = served;
+    const call = async (method: string, path: string, body?: unknown) => {
+      const response = await listener?.handler(
+        new Request(`http://127.0.0.1:4040${path}`, {
+          method,
+          ...(body === undefined
+            ? {}
+            : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+        }),
+        THIS_MACHINE,
+      );
+      return { status: response?.status, json: (await response?.json()) as unknown };
+    };
+
+    const queue = await call("GET", "/v1/review/queue");
+    expect(queue).toMatchObject({
+      status: 200,
+      json: { count: 1, cards: [{ source: "listings", key: "r1", open: [{ name: "is_scam" }] }] },
+    });
+    const opened = await call("POST", "/v1/review/open", {});
+    expect(opened).toMatchObject({
+      status: 200,
+      json: {
+        card: {
+          source: "listings",
+          key: "r1",
+          state: { title: "A red car" },
+          open: [{ name: "is_scam", said: "50% likely yes" }],
+        },
+      },
+    });
+    const { card } = opened.json as { card: { stateHash: string } };
+    const decided = await call("POST", "/v1/review/r1/decide", {
+      source: "listings",
+      stateHash: card.stateHash,
+      question: "is_scam",
+      value: true,
+      note: "obvious",
+    });
+
+    expect(decided).toMatchObject({
+      status: 200,
+      json: { status: "done", open: [], failedActions: [] },
+    });
+    expect(await listing("r1")).toMatchObject({ is_scam: true, facetdb_status: "done" });
+    const history = await store
+      .log(storeSourceId(projectRef(PROJECT_DIR).id, "listings"))
+      .history("r1");
+    expect(history.at(-1)).toMatchObject({
+      kind: "human",
+      reviewer: "os:alex",
+      value: true,
+      note: "obvious",
+    });
+    expect(await call("GET", "/v1/review/queue")).toMatchObject({ json: { count: 0 } });
   });
 
   it("serves Home and Sources from the store and each source's engine", async () => {

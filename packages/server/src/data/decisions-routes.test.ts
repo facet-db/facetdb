@@ -14,6 +14,7 @@ import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import {
   createDecisionsService,
   DECISIONS_DEFAULT_LIMIT,
@@ -243,6 +244,7 @@ function rig(
         sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
       },
       studio: localStudio(studioProject),
+      review: NO_REVIEW,
       newRequestId: () => "req-1",
     });
   const app = appFor(PROJECT);

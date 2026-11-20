@@ -24,6 +24,7 @@ import {
   type DecisionsServiceDeps,
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
+import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
 
 export type ServerDeps = {
   /**
@@ -69,6 +70,12 @@ export type ServerDeps = {
   readonly storeDatabase: DashboardDatabase;
   /** The project's sources with their engines and doctors, and its cap, as only the CLI knows them. */
   readonly dashboard: DashboardDoor;
+  /**
+   * What the review endpoints decide with: the store's queue, and per source, keyed by its store
+   * id, the decision log, the connector, the actions and the question set in force; the source
+   * names are the config's. The project is `config.projectId`.
+   */
+  readonly review: Omit<ReviewEndpointDeps, "projectId">;
 };
 
 /**
@@ -98,6 +105,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       home: createHomeService(dashboard),
       sources: createSourcesService(dashboard),
     },
+    review: createReviewEndpointService({ ...deps.review, projectId: deps.config.projectId }),
     studio: {
       sessions: createSessions({
         secret: deps.sessionSecret,

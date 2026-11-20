@@ -6,6 +6,7 @@ import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import { createDoctors, DOCTOR_FRESH_MS } from "./doctor.ts";
 import type { DashboardDoor, SourceFacts, TableFacts } from "./door.ts";
 import { createHomeService, type Home } from "./home.ts";
@@ -246,6 +247,7 @@ function rig(
         sources: createSourcesService(deps),
       },
       studio: localStudio(studioProject),
+      review: NO_REVIEW,
       newRequestId: () => "req-1",
     });
   const app = appFor(PROJECT);

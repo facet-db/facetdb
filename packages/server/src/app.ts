@@ -9,6 +9,8 @@ import { configRoutes } from "./config/routes.ts";
 import type { ConfigService } from "./config/service.ts";
 import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
+import { reviewRoutes } from "./review/routes.ts";
+import type { ReviewEndpointService } from "./review/service.ts";
 
 /** The path prefix of every endpoint; a breaking change makes a new one beside it. */
 export const API_VERSION = "v1";
@@ -28,6 +30,8 @@ export type AppDeps = {
   readonly config: ConfigService;
   /** The read endpoints behind the dashboard's pages: runs, decisions and the why page, Home, Sources. */
   readonly data: DataServices;
+  /** The review screen's and the terminal's door: the queue, a card under its lock, a decision, an undo. */
+  readonly review: ReviewEndpointService;
   readonly studio: StudioAccess;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;
@@ -66,6 +70,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   studio.use("*", requireReviewer(deps.studio.sessions, deps.studio.projectId));
   studio.route("/", configRoutes(deps.config));
   studio.route("/", dataRoutes(deps.data));
+  studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
   app.route(`/${API_VERSION}`, studio);
 

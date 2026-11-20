@@ -72,6 +72,15 @@ export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";
 export { createServer } from "./main.ts";
+export { QUEUE_DEFAULT_LIMIT, QUEUE_MAX_LIMIT } from "./review/routes.ts";
+export type {
+  CardView,
+  QueuedCardView,
+  QueueView,
+  ReviewEndpointDeps,
+  ReviewEndpointService,
+} from "./review/service.ts";
+export { createReviewEndpointService } from "./review/service.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
 export type {

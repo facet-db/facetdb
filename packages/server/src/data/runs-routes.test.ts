@@ -4,6 +4,7 @@ import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import { createRunsService, RUNS_PER_PAGE } from "./runs.ts";
 
 /**
@@ -105,6 +106,7 @@ function rig(total: number) {
       sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
     },
     studio: localStudio(PROJECT),
+    review: NO_REVIEW,
     newRequestId: () => "req-1",
   });
   // The pages are the studio's: a call from this machine is the OS user's; `null` is a stranger

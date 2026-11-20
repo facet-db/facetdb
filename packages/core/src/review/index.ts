@@ -20,6 +20,7 @@ export type {
   DecidedQuestion,
   DecideResult,
   OpenedCard,
+  OpenKeyResult,
   OpenQuestion,
   ReviewActionFailure,
   ReviewQuestions,

@@ -3,6 +3,7 @@ import { FakeClock } from "@facetdb/core/testing";
 import { type ReviewerAccount, UsersNotWritableError, type UsersStore } from "@facetdb/postgres";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import { isLoopbackAddress, isLoopbackHost } from "./loopback.ts";
 import { OpenSurfaceError, requireAccountToServe } from "./open-surface.ts";
 import { createReviewers } from "./reviewers.ts";
@@ -111,6 +112,7 @@ function rig(options: { readonly secret?: string; readonly users?: Partial<Users
       sources: { sources: () => Promise.reject(new Error("no sources here")) },
     },
     studio: { sessions, reviewers: createReviewers({ users, log }), projectId: PROJECT },
+    review: NO_REVIEW,
     newRequestId: () => "req-1",
   });
 

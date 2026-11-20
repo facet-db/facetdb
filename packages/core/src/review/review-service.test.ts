@@ -20,7 +20,7 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import { stateHash } from "../records/index.ts";
 import type { Answer } from "../thresholds/index.ts";
 import { configureAction } from "../worker/index.ts";
-import { REVIEW_LOCK_MS, reviewEntryOf } from "./queue.ts";
+import { type LockResult, REVIEW_LOCK_MS, reviewEntryOf } from "./queue.ts";
 import { type CardRef, createReviewService, type OpenedCard } from "./service.ts";
 
 // The low-stakes defaults: a noul is yes at or above 0.70 and no at or below 0.30; a choice decides
@@ -69,6 +69,24 @@ class HookedLog extends FakeDecisionLog {
   }
 }
 
+/** The fake queue, with a hook that runs once right after a lock is taken (the worker's write in between). */
+class HookedQueue extends FakeReviewQueue {
+  afterLock: (() => Promise<void>) | null = null;
+
+  override async lock(
+    source: string,
+    key: RecordKey,
+    viewer: string,
+    nowMs: number,
+  ): Promise<LockResult> {
+    const result = await super.lock(source, key, viewer, nowMs);
+    const hook = this.afterLock;
+    this.afterLock = null;
+    await hook?.();
+    return result;
+  }
+}
+
 /** One source behind the service: the fake table, log, queue, clock and one recorded action. */
 function setup() {
   const clock = new FakeClock(START);
@@ -76,7 +94,7 @@ function setup() {
   db.install();
   const connector = new FakeConnector(db);
   const log = new HookedLog();
-  const queue = new FakeReviewQueue();
+  const queue = new HookedQueue();
   const notify = new FakeAction<Notify>();
   const service = createReviewService({
     queue,
@@ -484,5 +502,75 @@ describe("renew, skip and release", () => {
       ["r1", "bob"],
       ["r2", null],
     ]);
+  });
+});
+
+describe("openKey: one named card, locked for the viewer", () => {
+  it("opens the card of the key whatever its place in the queue, and locks it", async () => {
+    const t = setup();
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const hash = await t.seed("r2", "A flat", { scam: UNSURE_SCAM, team: SURE_BILLING });
+
+    const result = await t.service.openKey("alice", SOURCE, "r2");
+
+    expect(result).toMatchObject({
+      kind: "opened",
+      card: { key: "r2", stateHash: hash, lockedUntil: new Date(t.clock.now() + REVIEW_LOCK_MS) },
+    });
+    expect(t.queue.rows.find((row) => row.key === "r2")?.lock?.by).toBe("alice");
+    // The next card for anyone else is the one nobody holds.
+    expect((await openOrFail(t.service, "bob")).key).toBe("r1");
+  });
+
+  it("answers held, with who and until when, for a card another reviewer holds", async () => {
+    const t = setup();
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const card = await openOrFail(t.service, "alice");
+
+    expect(await t.service.openKey("bob", SOURCE, "r1")).toEqual({
+      kind: "held",
+      by: "alice",
+      until: card.lockedUntil,
+    });
+    // The holder opens it again and the lease is extended, not refused.
+    expect(await t.service.openKey("alice", SOURCE, "r1")).toMatchObject({ kind: "opened" });
+  });
+
+  it("answers gone for a key with no card, and withdraws a card whose record changed", async () => {
+    const t = setup();
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+
+    expect(await t.service.openKey("alice", SOURCE, "nope")).toEqual({ kind: "gone" });
+
+    t.db.edit("r1", { body: "Cheap car, edited" });
+    expect(await t.service.openKey("alice", SOURCE, "r1")).toEqual({ kind: "gone" });
+    expect(t.queue.rows).toEqual([]);
+  });
+
+  it("never returns a card the viewer does not hold: the worker re-answers the record between the lock and the listing", async () => {
+    const t = setup();
+    const oldHash = await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    // Alice takes the lease at the old hash; before the listing the worker upserts the record at a
+    // new hash, which clears the lease (the store's rule), so the card at the new hash is nobody's.
+    let newHash = "";
+    t.queue.afterLock = async () => {
+      newHash = await t.seed("r1", "Cheap car, new wording", {
+        scam: UNSURE_SCAM,
+        team: SURE_BILLING,
+      });
+    };
+
+    const result = await t.service.openKey("alice", SOURCE, "r1");
+
+    expect(result).toEqual({ kind: "gone" });
+    expect(newHash).not.toBe(oldHash);
+    // The card at the new hash waits, unlocked, for whoever opens it next: nobody saw its state.
+    expect(t.queue.rows.map((row) => [row.key, row.stateHash === newHash, row.lock])).toEqual([
+      ["r1", true, null],
+    ]);
+    expect(await t.service.openKey("bob", SOURCE, "r1")).toMatchObject({
+      kind: "opened",
+      card: { stateHash: newHash, state: { body: "Cheap car, new wording" } },
+    });
   });
 });

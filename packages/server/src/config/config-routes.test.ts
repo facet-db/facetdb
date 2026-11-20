@@ -19,6 +19,7 @@ import type { ApiKeys } from "../auth/api-keys.ts";
 import type { Sessions } from "../auth/sessions.ts";
 import type { CheckService } from "../check/service.ts";
 import type { DataServices } from "../data/routes.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import {
   createConfigService,
   type DraftCheck,
@@ -315,6 +316,7 @@ async function rig(
       },
       projectId: options.studioProject ?? PROJECT,
     },
+    review: NO_REVIEW,
     newRequestId: () => "req-1",
   });
 

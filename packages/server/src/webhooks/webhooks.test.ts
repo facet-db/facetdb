@@ -21,6 +21,7 @@ import { createCheckStore } from "../check/store.ts";
 import { onlyRecord } from "../check/target.ts";
 import type { ConfigService } from "../config/service.ts";
 import type { DataServices } from "../data/routes.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import { createWebhookAction, type WebhookPayload } from "./action.ts";
 import {
   ALERT_NOT_RAISED,
@@ -355,6 +356,7 @@ async function rig() {
     config: NO_CONFIG,
     data: NO_DATA,
     studio: NO_STUDIO,
+    review: NO_REVIEW,
     newRequestId: () => "req-1",
   });
   const { secret } = await keys.create(PROJECT, "test");

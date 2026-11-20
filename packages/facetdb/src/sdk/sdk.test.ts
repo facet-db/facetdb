@@ -163,6 +163,16 @@ async function rig() {
       query: () => Promise.reject(new Error("the SDK reads no dashboard figure")),
     },
     dashboard: { projectId: PROJECT, cap: undefined, sources: [] },
+    // Nor does it review: no source is open to a reviewer here.
+    review: {
+      sources: [],
+      queue: new FakeReviewQueue(),
+      log: new Map(),
+      connectors: new Map(),
+      actions: new Map(),
+      questionSets: new Map(),
+      clock,
+    },
     store: {
       ...createCheckStore(
         store,

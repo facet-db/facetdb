@@ -135,9 +135,21 @@ const EDITED =
 const REASKED =
   "the record is waiting for the model to answer it again, so its card left the queue";
 
+/**
+ * What opening a named card did. `opened`: locked for the viewer. `held`: another reviewer's lease
+ * has not expired. `gone`: no card of that record waits in the queue (it was decided, or it
+ * changed, which withdraws the card).
+ */
+export type OpenKeyResult =
+  | { readonly kind: "opened"; readonly card: OpenedCard }
+  | { readonly kind: "held"; readonly by: string; readonly until: Date }
+  | { readonly kind: "gone" };
+
 export type ReviewService = {
   /** The next card for the viewer under `filter`, locked for them; null when none is left. */
   open(viewer: string, filter: ReviewFilter): Promise<OpenedCard | null>;
+  /** The card of one named record, locked for the viewer (`POST /v1/review/open` with a key). */
+  openKey(viewer: string, source: string, key: RecordKey): Promise<OpenKeyResult>;
   /** Extends the viewer's lease on an open card (every 60 seconds). */
   renew(viewer: string, card: CardRef): Promise<LockResult>;
   /** Decides one question of the card the viewer holds. */
@@ -362,6 +374,24 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     return result.written ? writes.at(-1) : undefined;
   }
 
+  /**
+   * The card under the lock the viewer just took, or undefined when it is stale and was withdrawn.
+   * A record edited while it sits in the queue leaves it; the change capture has queued it, and the
+   * worker asks it again.
+   */
+  async function openLocked(
+    source: Source,
+    card: CardRef,
+    lockedUntil: Date,
+  ): Promise<OpenedCard | undefined> {
+    const loaded = await load(source, card, ["needs_review"]);
+    if ("stale" in loaded || !hasOpenQuestion(loaded.decisions)) {
+      await queue.withdraw(card.source, card.key, card.stateHash);
+      return undefined;
+    }
+    return cardOf(source, card, loaded, loaded.decisions, lockedUntil);
+  }
+
   async function open(viewer: string, filter: ReviewFilter): Promise<OpenedCard | null> {
     const nowMs = clock.now();
     for (const listed of await queue.list(filter, viewer, nowMs)) {
@@ -374,21 +404,48 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
         // Another reviewer took it between the list and the lock, or it left the queue.
         continue;
       }
-      const card: CardRef = {
-        source: listed.source,
-        key: listed.key,
-        stateHash: listed.stateHash,
-      };
-      const loaded = await load(source, card, ["needs_review"]);
-      if ("stale" in loaded || !hasOpenQuestion(loaded.decisions)) {
-        // A record edited while it sits in the queue leaves it; the change capture has queued it,
-        // and the worker asks it again.
-        await queue.withdraw(card.source, card.key, card.stateHash);
-        continue;
+      const card = await openLocked(
+        source,
+        { source: listed.source, key: listed.key, stateHash: listed.stateHash },
+        lock.until,
+      );
+      if (card !== undefined) {
+        return card;
       }
-      return cardOf(source, card, loaded, loaded.decisions, lock.until);
     }
     return null;
+  }
+
+  async function openKey(viewer: string, sourceId: string, key: RecordKey): Promise<OpenKeyResult> {
+    const source = requireSource(sourceId);
+    const nowMs = clock.now();
+    const lock = await queue.lock(sourceId, key, viewer, nowMs);
+    if (lock.kind === "held") {
+      return lock;
+    }
+    if (lock.kind !== "locked") {
+      return { kind: "gone" };
+    }
+    // The lease is the viewer's now, so the card is in their listing, and it names the state hash.
+    // But the worker may have re-answered the record since the lock, and a card at a new hash
+    // starts with no lease (the queue's rule): unless the listed card carries the lease just taken,
+    // it is not the viewer's to see, and no state comes back.
+    const listed = (await queue.list({ source: sourceId }, viewer, nowMs)).find(
+      (card) => card.key === key,
+    );
+    if (
+      listed === undefined ||
+      listed.lock?.by !== viewer ||
+      listed.lock.until.getTime() !== lock.until.getTime()
+    ) {
+      return { kind: "gone" };
+    }
+    const card = await openLocked(
+      source,
+      { source: sourceId, key, stateHash: listed.stateHash },
+      lock.until,
+    );
+    return card === undefined ? { kind: "gone" } : { kind: "opened", card };
   }
 
   function renew(viewer: string, card: CardRef): Promise<LockResult> {
@@ -528,7 +585,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     return { kind: "undone", status: written.status, card: reopened, failures };
   }
 
-  return { open, renew, decide, skip, release, undo };
+  return { open, openKey, renew, decide, skip, release, undo };
 }
 
 function hasOpenQuestion(decisions: Readonly<Record<string, Decision>>): boolean {

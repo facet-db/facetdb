@@ -22,6 +22,7 @@ import { createApp, type StudioAccess } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
 import type { ConfigService } from "../config/service.ts";
 import type { DataServices } from "../data/routes.ts";
+import { NO_REVIEW } from "../review/no-review.ts";
 import { CHECK_POLL_MS, CHECK_WAIT_MS, createCheckService } from "./service.ts";
 import { createCheckStore } from "./store.ts";
 import { onlyRecord } from "./target.ts";
@@ -223,6 +224,7 @@ async function rig(
     config: NO_CONFIG,
     data: NO_DATA,
     studio: NO_STUDIO,
+    review: NO_REVIEW,
     newRequestId: () => {
       requestCount += 1;
       return `req-${requestCount}`;
@@ -591,6 +593,7 @@ describe("the error shape", () => {
       config: NO_CONFIG,
       data: NO_DATA,
       studio: NO_STUDIO,
+      review: NO_REVIEW,
       newRequestId: () => "req-x",
     });
     const response = await broken.request("/v1/check", {

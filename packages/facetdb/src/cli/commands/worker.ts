@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  type ActionStep,
   type Connector,
   createAlerts,
   createPreviewService,
@@ -255,6 +256,14 @@ export async function runWorkers(
     return version;
   }
 
+  /**
+   * The actions a source runs after a decision: the worker's own and a reviewer's decision in the
+   * studio run these same ones. None are wired yet (plugin actions come with plugins).
+   */
+  function actionsOf(_source: SourceConfig): readonly ActionStep[] {
+    return [];
+  }
+
   function workerFor(source: SourceConfig, connector: Connector, loop: boolean): Worker {
     const version = versionOf(source);
     return createWorker({
@@ -263,7 +272,7 @@ export async function runWorkers(
       log: store.log(idOf(source)),
       // The store's review queue follows this source's writes, API sources too.
       reviews: reviewsOf(store.reviews, idOf(source)),
-      actions: [],
+      actions: actionsOf(source),
       clock,
       limits: {
         ...DEFAULT_WORKER_LIMITS,
@@ -299,6 +308,8 @@ export async function runWorkers(
   }
 
   const running: Running[] = [];
+  /** Each source's whole connector by its store id: the review endpoints read, write and re-check through it. */
+  const connectors = new Map<string, Connector>();
   const apiSources: {
     readonly name: string;
     readonly fields: readonly string[];
@@ -314,6 +325,7 @@ export async function runWorkers(
           workerId,
         });
         const worker = workerFor(source, connector, true);
+        connectors.set(idOf(source), connector);
         apiSources.push({ name: source.name, fields: source.read });
         running.push({
           source: source.name,
@@ -341,6 +353,7 @@ export async function runWorkers(
         await connector.close();
         throw error;
       }
+      connectors.set(idOf(source), connector);
       running.push({
         source: source.name,
         worker: workerFor(source, connector, true),
@@ -423,6 +436,22 @@ export async function runWorkers(
             version: versionOf(source),
             table: source.api ? undefined : parts.tableFacts(source),
           })),
+        },
+        // The review endpoints: the store's queue, and each source's log, connector, actions (none
+        // yet, as the workers hold none) and question set in force.
+        review: {
+          queue: store.reviews,
+          sources: config.sources.map((source) => source.name),
+          log: new Map(config.sources.map((source) => [idOf(source), store.log(idOf(source))])),
+          connectors,
+          actions: new Map(config.sources.map((source) => [idOf(source), actionsOf(source)])),
+          questionSets: new Map(
+            config.sources.map((source) => [
+              idOf(source),
+              { questionSet: questionSetOf(config, source), version: versionOf(source) },
+            ]),
+          ),
+          clock,
         },
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
