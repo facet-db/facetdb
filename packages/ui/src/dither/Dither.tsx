@@ -30,11 +30,17 @@ const canvasContext: DitherContextFactory = (canvas) => canvas.getContext("2d");
 // factory to the canvas's own.
 type CanvasOptions = { ratio?: number; context?: DitherContextFactory };
 
+// The token a square's cells are painted in: dither-ink for every probability, facet for the brand
+// mark alone ("the dithered square that fills, in facet").
+export type DitherInk = "dither-ink" | "facet";
+
 export type DitherProps = CanvasOptions & {
   value: number;
   label: string;
   // The square's side in CSS px: 24 in a row, 40 on the review card.
   size?: number;
+  // dither-ink, unless this square is the brand mark.
+  ink?: DitherInk;
 };
 
 export type DitherStripProps = CanvasOptions & {
@@ -114,6 +120,7 @@ type DitherCanvasProps = {
   label: string | null;
   ratio: number;
   context: DitherContextFactory;
+  ink: DitherInk;
 };
 
 function DitherCanvas({
@@ -123,6 +130,7 @@ function DitherCanvas({
   label,
   ratio,
   context,
+  ink,
 }: DitherCanvasProps) {
   const ref = useRef<HTMLCanvasElement>(null);
   const theme = useSyncExternalStore(subscribeToTheme, themeSnapshot);
@@ -148,7 +156,7 @@ function DitherCanvas({
     flex: "none",
     width: `${widthCssPx}px`,
     height: `${heightCssPx}px`,
-    color: tokenVar("dither-ink"),
+    color: tokenVar(ink),
     imageRendering: "pixelated",
   };
   const a11y = label === null ? { "aria-hidden": true } : { role: "img", "aria-label": label };
@@ -168,6 +176,7 @@ export function Dither({
   value,
   label,
   size = 24,
+  ink = "dither-ink",
   ratio = window.devicePixelRatio,
   context = canvasContext,
 }: DitherProps) {
@@ -180,6 +189,7 @@ export function Dither({
       label={label}
       ratio={ratio}
       context={context}
+      ink={ink}
     />
   );
 }
@@ -202,6 +212,7 @@ export function DitherStrip({
       label={label}
       ratio={ratio}
       context={context}
+      ink="dither-ink"
     />
   );
 }
@@ -222,6 +233,7 @@ export function DitherGradient({
       label={null}
       ratio={ratio}
       context={context}
+      ink="dither-ink"
     />
   );
 }

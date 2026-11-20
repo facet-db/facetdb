@@ -8,6 +8,7 @@ import { initCommand } from "./init.ts";
 import { migrateCommand } from "./migrate.ts";
 import { previewCommand } from "./preview.ts";
 import { reviewCommand } from "./review.ts";
+import { studioCommand } from "./studio.ts";
 import { testCommand } from "./test.ts";
 import { typesCommand } from "./types.ts";
 import { uninstallCommand } from "./uninstall.ts";
@@ -30,6 +31,7 @@ export const COMMANDS: readonly RegisteredCommand[] = [
   typesCommand,
   usersCommand,
   reviewCommand,
+  studioCommand,
 ];
 
 export { backfillCommand } from "./backfill.ts";
@@ -41,6 +43,7 @@ export { initCommand } from "./init.ts";
 export { migrateCommand } from "./migrate.ts";
 export { previewCommand } from "./preview.ts";
 export { reviewCommand } from "./review.ts";
+export { studioCommand } from "./studio.ts";
 export { testCommand } from "./test.ts";
 export { typesCommand } from "./types.ts";
 export { uninstallCommand } from "./uninstall.ts";

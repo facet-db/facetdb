@@ -12,7 +12,13 @@ import {
   splitTable,
   type TableTarget,
 } from "./database.ts";
-import { DEFAULT_HOST, runWorkers, WORKER_OPTIONS, type WorkerOptions } from "./worker.ts";
+import {
+  DEFAULT_HOST,
+  runWorkers,
+  WORKER_OPTIONS,
+  type WorkerOptions,
+  workerStudio,
+} from "./worker.ts";
 
 /**
  * `facetdb dev`: the worker on an embedded Postgres (PGlite) kept under `.facetdb/dev/`, answered
@@ -64,9 +70,12 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     const { options, deps, print } = context;
     const config = await loadProjectConfig(deps, options.config);
     const dir = join(deps.projectDir, DEV_DIR);
+    // The same studio the worker serves: --studio-dir's build, else the install's own; looked for
+    // before a dry run too, which then says whether it would be served.
+    const studio = await workerStudio(deps, options, print);
     if (options.dryRun) {
       print(
-        `Would ${options.reset === true ? `delete and recreate ${DEV_DIR}/` : `open ${DEV_DIR}/`}, install ${config.sources.map((source) => source.name).join(", ")} there and run the worker. Dry run: nothing was started.`,
+        `Would ${options.reset === true ? `delete and recreate ${DEV_DIR}/` : `open ${DEV_DIR}/`}, install ${config.sources.map((source) => source.name).join(", ")} there and run the worker${studio === undefined ? "" : `, serving the studio from ${studio.dir}`}. Dry run: nothing was started.`,
       );
       return { ok: true, dryRun: true };
     }
@@ -156,6 +165,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
               }),
             provider,
             sessionSecret: secret,
+            ...(studio === undefined ? {} : { studio: studio.build }),
           },
         );
       } finally {

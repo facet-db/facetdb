@@ -25,6 +25,7 @@ import {
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
+import type { StudioBuild } from "./studio/build.ts";
 
 export type ServerDeps = {
   /**
@@ -76,6 +77,11 @@ export type ServerDeps = {
    * names are the config's. The project is `config.projectId`.
    */
   readonly review: Omit<ReviewEndpointDeps, "projectId">;
+  /**
+   * The studio's build the surface serves beside the API: opened by the caller on its directory
+   * (`openStudioBuild` over the CLI's disk door); absent under a worker that serves the API alone.
+   */
+  readonly studioApp?: StudioBuild;
 };
 
 /**
@@ -117,6 +123,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       reviewers: createReviewers({ users: deps.store.users, log: deps.log }),
       projectId: deps.config.projectId,
     },
+    ...(deps.studioApp === undefined ? {} : { studioApp: deps.studioApp }),
     newRequestId: randomUUID,
   });
 }

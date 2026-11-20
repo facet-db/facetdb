@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { isIPv4, isIPv6 } from "node:net";
+import { resolve } from "node:path";
 import {
   type ActionStep,
   type Connector,
@@ -32,7 +34,9 @@ import {
   type DeliveryReport,
   OpenSurfaceError,
   onlyRecord,
+  openStudioBuild,
   requireAccountToServe,
+  type StudioBuild,
   type TableFacts,
 } from "@facetdb/server";
 import {
@@ -45,6 +49,7 @@ import {
 import { projectSpending } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
+  type CliDeps,
   CliError,
   type CommandContext,
   defineCommand,
@@ -79,11 +84,11 @@ import {
  * source the store's queue. Every worker shares the resilient provider (backoff and the in-flight
  * limit), the project's spending gate and its alerts, and beats the heartbeat `facetdb doctor`
  * reads. Next to the loops it delivers the webhook outbox and serves the HTTP surface (the check
- * API) on `--port` unless `--no-http`. SIGINT stops it after the pass in hand, so every claim is
- * acked or released before it exits; `--once` answers what is queued and exits. The sources run as
- * a fleet (config-reload.ts): when the studio's Apply has written facetdb.config.ts, the worker
- * reloads it, a changed source restarting after its batch in hand under its new question-set
- * version.
+ * API, the studio's endpoints and, once built, the studio itself) on `--port` unless `--no-http`.
+ * SIGINT stops it after the pass in hand, so every claim is acked or released before it exits;
+ * `--once` answers what is queued and exits. The sources run as a fleet (config-reload.ts): when
+ * the studio's Apply has written facetdb.config.ts, the worker reloads it, a changed source
+ * restarting after its batch in hand under its new question-set version.
  */
 
 /**
@@ -124,6 +129,11 @@ export type WorkerOptions = {
   readonly once: boolean;
   /** `--allow-insecure`: the store may be reached without TLS, on a network the operator trusts. */
   readonly allowInsecure?: boolean;
+  /**
+   * `--studio-dir`: the studio build to serve, relative to the project directory. Absent, the
+   * install's own build is served when it is built, and the API alone otherwise.
+   */
+  readonly studioDir?: string;
 };
 
 /** Everything the loops run on, opened by `worker` from the environment or by `dev` on PGlite. */
@@ -170,6 +180,13 @@ export type WorkerParts = {
   readonly provider: ModelProvider;
   /** `FACETDB_SECRET`: it signs the reviewers' session cookie. `worker` refuses to start without it. */
   readonly sessionSecret: string;
+  /** The studio build the surface serves beside the API; absent, the API alone. */
+  readonly studio?: StudioBuild;
+  /**
+   * Called once the surface listens, with the host it was told and the port it got: `facetdb studio`
+   * opens the browser there.
+   */
+  readonly listening?: (host: string, port: number) => Promise<void>;
 };
 
 /** What a run hands back under `--json`: what was answered per source, and whether HTTP was served. */
@@ -193,6 +210,11 @@ const OPTIONS = [
   },
   { flags: "--no-http", description: "serve nothing: a worker-only replica" },
   { flags: "--once", description: "answer what is queued, then exit" },
+  {
+    flags: "--studio-dir <path>",
+    description:
+      "the studio build to serve beside the API (a built apps/studio dist/); by default this install's own, when it is built",
+  },
 ] as const;
 
 export function parsePort(text: string): number {
@@ -206,6 +228,28 @@ export function parsePort(text: string): number {
     );
   }
   return port;
+}
+
+/** A host name: labels of letters, digits and hyphens, joined by dots (RFC 1123). */
+const HOST_NAME =
+  /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+
+/**
+ * `--host`: an IPv4 or IPv6 address, or a plain host name, and nothing else. The address reaches
+ * the browser opener (`facetdb studio`), and on Windows that is `cmd /c start`, which reads `&`,
+ * `|`, `^` and `%` as its own syntax; refusing them here is simpler and surer than escaping them
+ * there. An IPv6 zone id (`fe80::1%eth0`) is refused for the same `%`.
+ */
+export function parseHost(text: string): string {
+  if (isIPv4(text) || (isIPv6(text) && !text.includes("%")) || HOST_NAME.test(text)) {
+    return text;
+  }
+  throw new CliError(
+    "host",
+    `--host is an IP address or a host name, not "${text}"`,
+    `pass --host ${DEFAULT_HOST} for this machine only, 0.0.0.0 for every interface, an IPv6 address without brackets or a zone id (::1), or a host name of letters, digits, dots and hyphens`,
+    EXIT_USAGE,
+  );
 }
 
 /** What one source's loops answered over the run, its restarts after a reload included. */
@@ -536,6 +580,8 @@ export async function runWorkers(
           }),
           clock,
         },
+        // The built studio, served after the API; without it the API alone.
+        ...(parts.studio === undefined ? {} : { studioApp: parts.studio }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
@@ -608,10 +654,13 @@ export async function runWorkers(
         },
       });
       listener = await deps.serve((request, peer) => app.fetch(request, peer), port, options.host);
-      const shown = options.host.includes(":") ? `[${options.host}]` : options.host;
+      const address = `http://${hostInUrl(options.host)}:${listener.port}`;
       print(
-        `Serving the check API and the studio's endpoints on http://${shown}:${listener.port}.`,
+        parts.studio === undefined
+          ? `Serving the check API and the studio's endpoints on ${address}.`
+          : `Serving the studio, its endpoints and the check API on ${address}.`,
       );
+      await parts.listening?.(options.host, listener.port);
     }
 
     if (options.once) {
@@ -733,7 +782,7 @@ function alertFailureLine({ event, error, final }: AlertFailure): string {
 }
 
 /** Without a model the worker would only fail: it refuses to start, and says what to set. */
-function requireModel(
+export function requireModel(
   config: ProjectConfig,
   env: Readonly<Record<string, string | undefined>>,
 ): void {
@@ -747,137 +796,249 @@ function requireModel(
   }
 }
 
+/** A host as an address writes it: an IPv6 one in brackets. */
+export function hostInUrl(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+/** A studio build to serve, and the directory it was found in (for the words). */
+export type ServedStudio = { readonly dir: string; readonly build: StudioBuild };
+
+/**
+ * The build in `dir` (relative to the project directory), or undefined when it holds none. The
+ * surface reads it through the install's door from then on.
+ */
+async function openBuild(deps: CliDeps, dir: string): Promise<ServedStudio | undefined> {
+  const absolute = resolve(deps.projectDir, dir);
+  const build = await openStudioBuild(deps.studio.files(absolute));
+  return build === undefined ? undefined : { dir: absolute, build };
+}
+
+/**
+ * No build where one was asked for: say how to make it (the server never starts Vite). `dir` is
+ * undefined in an install with no studio package, `named` when `--studio-dir` gave it.
+ */
+export function notBuilt(dir: string | undefined, named: boolean): CliError {
+  if (dir === undefined) {
+    return new CliError(
+      "studio-not-built",
+      "this install of facetdb holds no studio to serve",
+      "run pnpm build in the FacetDB repository, then pass --studio-dir with the apps/studio/dist directory it made",
+    );
+  }
+  return new CliError(
+    "studio-not-built",
+    `${dir} holds no studio build (an index.html and a routes.json from vite build)`,
+    named
+      ? "run pnpm build in the FacetDB repository and pass --studio-dir the apps/studio/dist directory it made, or leave --studio-dir out to serve this install's own"
+      : `run pnpm build in the FacetDB repository (it builds the studio into ${dir}), then run this command again`,
+  );
+}
+
+/**
+ * The studio `facetdb studio` serves: the build `--studio-dir` names, else the install's own;
+ * refused when there is none, since serving it is the command's whole point.
+ */
+export async function requiredStudio(
+  deps: CliDeps,
+  studioDir: string | undefined,
+): Promise<ServedStudio> {
+  const dir = studioDir ?? deps.studio.defaultDir;
+  if (dir === undefined) {
+    throw notBuilt(undefined, false);
+  }
+  const served = await openBuild(deps, dir);
+  if (served === undefined) {
+    throw notBuilt(resolve(deps.projectDir, dir), studioDir !== undefined);
+  }
+  return served;
+}
+
+/**
+ * The studio `facetdb worker` and `facetdb dev` serve beside the API: the build `--studio-dir`
+ * names, refused when it holds none (it was asked for); else the install's own when it is built,
+ * and the API alone otherwise, said once. Under `--no-http` nothing is served, and a `--studio-dir`
+ * given anyway is said to be unused, on stderr so `--json` keeps it.
+ */
+export async function workerStudio(
+  deps: CliDeps,
+  options: { readonly http: boolean; readonly studioDir?: string | undefined },
+  print: (text: string) => void,
+): Promise<ServedStudio | undefined> {
+  const { studioDir } = options;
+  if (!options.http) {
+    if (studioDir !== undefined) {
+      deps.io.stderr(
+        `note: --studio-dir ${studioDir} is unused under --no-http, which serves nothing\n`,
+      );
+    }
+    return undefined;
+  }
+  if (studioDir !== undefined) {
+    return requiredStudio(deps, studioDir);
+  }
+  const dir = deps.studio.defaultDir;
+  const served = dir === undefined ? undefined : await openBuild(deps, dir);
+  if (served === undefined) {
+    print(
+      "note: the studio is not built, so only the API is served; run pnpm build in the FacetDB repository to serve it here too",
+    );
+  }
+  return served;
+}
+
+/**
+ * The worker as a process: the store and every table source opened from the environment, then
+ * `runWorkers` until stopped. `facetdb worker` runs it, and `facetdb studio` runs it with the
+ * studio and the browser opened.
+ */
+export async function runWorkerProcess(
+  context: CommandContext<WorkerOptions>,
+  config: ProjectConfig,
+  surface: Pick<WorkerParts, "listening"> & { readonly studio: ServedStudio | undefined },
+): Promise<WorkerSummary> {
+  const { options, deps } = context;
+  const storeUrl = deps.env[STORE_VARIABLE] ?? "";
+  const allowInsecure = options.allowInsecure === true;
+  const project = projectRef(deps.projectDir);
+  // Before the store opens or anything connects: no worker password in the clear to another
+  // machine, by the store door's rule for the store and each source's engine for its own URL.
+  if (storeUrl !== "") {
+    requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
+  }
+  const tables = new Map<
+    string,
+    {
+      /** Under the source's question set in `from`: a reload opens it anew with the new one. */
+      readonly open: (
+        source: SourceConfig,
+        from: ProjectConfig,
+        workerId: string,
+        maxConnections: number,
+      ) => Promise<OpenConnector>;
+      readonly keyText: () => Promise<KeyText | undefined>;
+      readonly facts: TableFacts;
+    }
+  >();
+  for (const source of config.sources) {
+    if (source.table === undefined) {
+      continue;
+    }
+    const url = sourceUrlOf(
+      source,
+      "the worker login's connection string (postgres://facetdb_worker:…@host/db)",
+    );
+    const engine = await engineFor(deps.engines, url, source.connector);
+    const target = engineTarget(config, { source, ...splitTable(source.table) }, project);
+    requireUsableUrl(engine, target, url, allowInsecure);
+    const storeShared = storeSharedFor(deps.env, source);
+    tables.set(source.name, {
+      // The type its database records for its keys, read once the table opened.
+      keyText: () => tableKeyText(engine, target, url, allowInsecure),
+      facts: tableFacts({
+        engine,
+        target,
+        url,
+        source,
+        deps: { clock: deps.clock, allowInsecure, storeShared },
+      }),
+      // The connection is the one checked above: a reload restarts a source only when its
+      // table, database and install are unchanged (config-reload.ts), so only the question set moves.
+      open: (opened, from, workerId, maxConnections) =>
+        openConnector(
+          engine,
+          engineTarget(from, { source: opened, ...splitTable(source.table ?? "") }, project),
+          url,
+          { clock: deps.clock, allowInsecure, storeShared, workerId, maxConnections },
+        ),
+    });
+  }
+  // One pool for the store, the outbox, and every table source on the store's own database (the
+  // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. The composition root's
+  // connect lends it to the engine's connector of such a source (cli/pools.ts); the store's
+  // borrower closes nothing. The session cookie is signed under the store's secret: refused here,
+  // in the store door's words, before the store opens or the surface could start.
+  const sessionSecret = requireStoreSecret(deps.env);
+  const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
+  const borrowed = (): StoreClient => ({ ...storeClient, close: () => Promise.resolve() });
+  try {
+    const store = await deps.store({
+      allowInsecure,
+      connect: borrowed,
+      // A reviewer account whose stored hash cannot be read cannot sign in: say so where the
+      // operator looks (the hash itself is never in the line).
+      warn: (message) => deps.io.stderr(`warning: ${message}\n`),
+    });
+    try {
+      return await runWorkers(context, {
+        config,
+        project,
+        store,
+        storeClient,
+        openTable: (source, open, from) => {
+          const table = tables.get(source.name);
+          if (table === undefined) {
+            throw new Error(`the source ${source.name} reads no table`);
+          }
+          return table.open(source, from, open.workerId, open.maxConnections);
+        },
+        // Apply writes the file this worker loaded, and the worker reloads it.
+        configFile: {
+          path: options.config,
+          load: (load) => deps.loadConfig(options.config, load),
+          files: deps.configFiles,
+        },
+        keyTextOf: async (source) => tables.get(source.name)?.keyText(),
+        tableFacts: (source) => {
+          const table = tables.get(source.name);
+          if (table === undefined) {
+            throw new Error(`the source ${source.name} reads no table`);
+          }
+          return table.facts;
+        },
+        provider: deps.provider(config),
+        sessionSecret,
+        ...(surface.studio === undefined ? {} : { studio: surface.studio.build }),
+        ...(surface.listening === undefined ? {} : { listening: surface.listening }),
+      });
+    } finally {
+      await store.close();
+    }
+  } finally {
+    await storeClient.close();
+  }
+}
+
+/** `--host`, as the worker and the studio take it (this machine by default). */
+export const HOST_OPTION = {
+  flags: "--host <address>",
+  description:
+    "the address the HTTP surface listens on: this machine only by default; any other address needs a reviewer account first (facetdb users add <name>)",
+  defaultValue: DEFAULT_HOST,
+} as const;
+
 export const workerCommand = defineCommand<WorkerOptions>("worker", {
   description:
-    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API; run it next to the database, in the same region, because every record costs a few round trips to it",
-  options: [
-    ...OPTIONS,
-    {
-      flags: "--host <address>",
-      description:
-        "the address the HTTP surface listens on: this machine only by default; any other address needs a reviewer account first (facetdb users add <name>)",
-      defaultValue: DEFAULT_HOST,
-    },
-    ALLOW_INSECURE_OPTION,
-  ],
+    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API and the studio; run it next to the database, in the same region, because every record costs a few round trips to it",
+  options: [...OPTIONS, HOST_OPTION, ALLOW_INSECURE_OPTION],
   run: async (context) => {
     const { options, deps, print } = context;
     const config = await loadProjectConfig(deps, options.config);
     requireModel(config, deps.env);
     parsePort(options.port);
+    parseHost(options.host);
+    const studio = await workerStudio(deps, options, print);
     if (options.dryRun) {
+      const served =
+        studio === undefined
+          ? "the check API and the studio's endpoints"
+          : `the studio from ${studio.dir}, its endpoints and the check API`;
       print(
-        `Would answer ${config.sources.map((source) => source.name).join(", ")}${options.http ? ` and serve the check API and the studio's endpoints on ${options.host}, port ${options.port}` : ""}. Dry run: nothing was started.`,
+        `Would answer ${config.sources.map((source) => source.name).join(", ")}${options.http ? ` and serve ${served} on ${options.host}, port ${options.port}` : ""}. Dry run: nothing was started.`,
       );
       return { ok: true, dryRun: true };
     }
-    const storeUrl = deps.env[STORE_VARIABLE] ?? "";
-    const allowInsecure = options.allowInsecure === true;
-    const project = projectRef(deps.projectDir);
-    // Before the store opens or anything connects: no worker password in the clear to another
-    // machine, by the store door's rule for the store and each source's engine for its own URL.
-    if (storeUrl !== "") {
-      requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
-    }
-    const tables = new Map<
-      string,
-      {
-        /** Under the source's question set in `from`: a reload opens it anew with the new one. */
-        readonly open: (
-          source: SourceConfig,
-          from: ProjectConfig,
-          workerId: string,
-          maxConnections: number,
-        ) => Promise<OpenConnector>;
-        readonly keyText: () => Promise<KeyText | undefined>;
-        readonly facts: TableFacts;
-      }
-    >();
-    for (const source of config.sources) {
-      if (source.table === undefined) {
-        continue;
-      }
-      const url = sourceUrlOf(
-        source,
-        "the worker login's connection string (postgres://facetdb_worker:…@host/db)",
-      );
-      const engine = await engineFor(deps.engines, url, source.connector);
-      const target = engineTarget(config, { source, ...splitTable(source.table) }, project);
-      requireUsableUrl(engine, target, url, allowInsecure);
-      const storeShared = storeSharedFor(deps.env, source);
-      tables.set(source.name, {
-        // The type its database records for its keys, read once the table opened.
-        keyText: () => tableKeyText(engine, target, url, allowInsecure),
-        facts: tableFacts({
-          engine,
-          target,
-          url,
-          source,
-          deps: { clock: deps.clock, allowInsecure, storeShared },
-        }),
-        // The connection is the one checked above: a reload restarts a source only when its
-        // table, database and install are unchanged (config-reload.ts), so only the question set moves.
-        open: (opened, from, workerId, maxConnections) =>
-          openConnector(
-            engine,
-            engineTarget(from, { source: opened, ...splitTable(source.table ?? "") }, project),
-            url,
-            { clock: deps.clock, allowInsecure, storeShared, workerId, maxConnections },
-          ),
-      });
-    }
-    // One pool for the store, the outbox, and every table source on the store's own database (the
-    // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. The composition root's
-    // connect lends it to the engine's connector of such a source (cli/pools.ts); the store's
-    // borrower closes nothing. The session cookie is signed under the store's secret: refused here,
-    // in the store door's words, before the store opens or the surface could start.
-    const sessionSecret = requireStoreSecret(deps.env);
-    const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
-    const borrowed = (): StoreClient => ({ ...storeClient, close: () => Promise.resolve() });
-    try {
-      const store = await deps.store({
-        allowInsecure,
-        connect: borrowed,
-        // A reviewer account whose stored hash cannot be read cannot sign in: say so where the
-        // operator looks (the hash itself is never in the line).
-        warn: (message) => deps.io.stderr(`warning: ${message}\n`),
-      });
-      try {
-        return await runWorkers(context, {
-          config,
-          project,
-          store,
-          storeClient,
-          openTable: (source, open, from) => {
-            const table = tables.get(source.name);
-            if (table === undefined) {
-              throw new Error(`the source ${source.name} reads no table`);
-            }
-            return table.open(source, from, open.workerId, open.maxConnections);
-          },
-          // Apply writes the file this worker loaded, and the worker reloads it.
-          configFile: {
-            path: options.config,
-            load: (load) => deps.loadConfig(options.config, load),
-            files: deps.configFiles,
-          },
-          keyTextOf: async (source) => tables.get(source.name)?.keyText(),
-          tableFacts: (source) => {
-            const table = tables.get(source.name);
-            if (table === undefined) {
-              throw new Error(`the source ${source.name} reads no table`);
-            }
-            return table.facts;
-          },
-          provider: deps.provider(config),
-          sessionSecret,
-        });
-      } finally {
-        await store.close();
-      }
-    } finally {
-      await storeClient.close();
-    }
+    return runWorkerProcess(context, config, { studio });
   },
 });
 

@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { BackfillDeps, Clock, DatabaseEngine, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
-import type { Peer, WebhookFetch } from "@facetdb/server";
+import type { Peer, StudioFiles, WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
 import type { ConfigFiles, ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
@@ -230,6 +230,24 @@ export type CliDeps = {
   readonly examples: ExampleShelf;
   /** Single keys and a card's width and colour, for `facetdb review`. */
   readonly terminal: ReviewTerminal;
+  /** The studio's build the worker serves beside the API. */
+  readonly studio: StudioInstall;
+  /**
+   * Opens an address in the user's browser (`facetdb studio`): the platform's opener in the
+   * process (`cli/browser.ts`), a recording fake in a test. Rejects when no browser could be started.
+   */
+  readonly openBrowser: (url: string) => Promise<void>;
+};
+
+/** Where this install keeps the studio's build, and how a build directory's files are read. */
+export type StudioInstall = {
+  /**
+   * The build `facetdb studio` serves unless `--studio-dir` names another: `@facetdb/studio`'s
+   * `dist/`, absolute; undefined when this install holds no studio package.
+   */
+  readonly defaultDir: string | undefined;
+  /** The files of a build directory (absolute), as the HTTP surface reads them. */
+  readonly files: (dir: string) => StudioFiles;
 };
 
 /** One request in, one response out: the shape of a Hono app's `fetch`, told who is on the other end. */
@@ -493,7 +511,9 @@ type OptionalInTests =
   | "embedded"
   | "examples"
   | "terminal"
-  | "configFiles";
+  | "configFiles"
+  | "studio"
+  | "openBrowser";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -587,6 +607,14 @@ export async function runInProcess(
         replace: () => Promise.reject(new Error("this test gave the command no config file")),
         gitState: () => Promise.reject(new Error("this test gave the command no config file")),
       },
+      // No studio in this install: a worker serves the API alone, and `facetdb studio` refuses.
+      studio: {
+        defaultDir: undefined,
+        files: () => ({
+          read: () => Promise.reject(new Error("this test gave the command no studio build")),
+        }),
+      },
+      openBrowser: () => Promise.reject(new Error("this test gave the command no browser")),
       ...rest,
       io,
     },

@@ -156,6 +156,8 @@ async function runSeeingPrompts(
       examples: { read: unused },
       terminal: NO_TERMINAL,
       configFiles: { read: unused, replace: unused, gitState: unused },
+      studio: { defaultDir: undefined, files: () => ({ read: unused }) },
+      openBrowser: unused,
     },
     COMMANDS,
   );

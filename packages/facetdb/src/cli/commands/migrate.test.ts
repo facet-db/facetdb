@@ -239,6 +239,11 @@ async function runSeeingPrompts(
         replace: () => Promise.reject(new Error("no config file door")),
         gitState: () => Promise.reject(new Error("no config file door")),
       },
+      studio: {
+        defaultDir: undefined,
+        files: () => ({ read: () => Promise.reject(new Error("no studio build")) }),
+      },
+      openBrowser: () => Promise.reject(new Error("no browser")),
     },
     COMMANDS,
   );

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync } from "node:fs";
 import {
@@ -17,6 +18,7 @@ import { userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import type { Clock, OpenConnector } from "@facetdb/core";
 import { selectProvider } from "@facetdb/model";
 import {
@@ -27,6 +29,7 @@ import {
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
+import { systemBrowser } from "./browser.ts";
 import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
 import { diskConfigFiles, gitCommand } from "./config-files.ts";
@@ -46,6 +49,7 @@ import {
 } from "./program.ts";
 import { serveHttp } from "./serve.ts";
 import { requireStoreSecret, requireStoreUrl, storeSharedFor } from "./store-door.ts";
+import { diskStudioFiles } from "./studio-files.ts";
 import { processTerminal } from "./terminal.ts";
 import { quietTypelessPackageWarning } from "./warnings.ts";
 
@@ -534,6 +538,9 @@ export function processDeps(
     embedded: diskEmbedded,
     examples: diskExamples,
     terminal: processTerminal({ input: process.stdin, output: process.stdout, env }),
+    // The studio's build: @facetdb/studio's dist/, read through the disk door.
+    studio: { defaultDir: studioDistDir(), files: diskStudioFiles },
+    openBrowser: systemBrowser(process.platform, spawn),
     backfill: async (config, source, mode) => {
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
@@ -578,6 +585,22 @@ export function processDeps(
     },
   };
   return deps;
+}
+
+/**
+ * Where `pnpm build` writes the studio: the dist/ beside `@facetdb/studio`'s package.json, a
+ * workspace dependency of this package (a published package bundles the build into it). Undefined
+ * when the package is not installed, and `facetdb studio` then says how to get a build.
+ */
+function studioDistDir(): string | undefined {
+  try {
+    return join(
+      dirname(fileURLToPath(import.meta.resolve("@facetdb/studio/package.json"))),
+      "dist",
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function provider(config: ProjectConfig, env: Readonly<Record<string, string | undefined>>) {

@@ -11,6 +11,8 @@ import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
 import { reviewRoutes } from "./review/routes.ts";
 import type { ReviewEndpointService } from "./review/service.ts";
+import type { StudioBuild } from "./studio/build.ts";
+import { projectRoutes, studioAppRoutes } from "./studio/routes.ts";
 
 /** The path prefix of every endpoint; a breaking change makes a new one beside it. */
 export const API_VERSION = "v1";
@@ -33,6 +35,11 @@ export type AppDeps = {
   /** The review screen's and the terminal's door: the queue, a card under its lock, a decision, an undo. */
   readonly review: ReviewEndpointService;
   readonly studio: StudioAccess;
+  /**
+   * The studio's built app, served after every `/v1` route; absent, no file is served (a worker
+   * whose studio is not built, and every test that leaves it out).
+   */
+  readonly studioApp?: StudioBuild;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;
 };
@@ -72,7 +79,14 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   studio.route("/", dataRoutes(deps.data));
   studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
+  studio.route("/", projectRoutes());
   app.route(`/${API_VERSION}`, studio);
+  //  4. Last, and public: the built app's files and its pages. The sign-in page must
+  //     load before anyone has signed in, and the files hold the build alone; never a path under
+  //     /v1, which the groups above answer or leave to the JSON 404 below.
+  if (deps.studioApp !== undefined) {
+    app.route("/", studioAppRoutes(deps.studioApp, `/${API_VERSION}`));
+  }
 
   app.notFound((c) =>
     c.json(

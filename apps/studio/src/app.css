@@ -1,0 +1,32 @@
+/* The studio's stylesheet: Tailwind over FacetDB's tokens (packages/ui: the theme imports
+   tokens.css, so every utility reads a token and the theme switch repaints without a rebuild) and
+   the components' skin. No color, face or duration is named here or in any file of the app
+   (src/no-literals.test.ts holds it to that); the shell's own layout is Tailwind utilities in the
+   components. */
+@import "tailwindcss";
+@import "@facetdb/ui/theme";
+@import "@facetdb/ui/components.css";
+
+@layer base {
+  html {
+    background: var(--canvas);
+    color: var(--text);
+    font-family: var(--font-text);
+    /* The product's text size (14 px in the product) */
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    min-height: 100vh;
+    background: var(--canvas);
+  }
+  a {
+    color: var(--facet-text);
+  }
+  /* Every figure lines up: tabular numerals for the measured face */
+  .font-mono {
+    font-stretch: var(--font-measured-inline);
+    font-variant-numeric: tabular-nums;
+  }
+}

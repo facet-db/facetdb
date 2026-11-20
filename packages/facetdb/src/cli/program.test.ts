@@ -159,6 +159,11 @@ describe("the facetdb program", () => {
           replace: () => Promise.reject(new Error("unused")),
           gitState: () => Promise.reject(new Error("unused")),
         },
+        studio: {
+          defaultDir: undefined,
+          files: () => ({ read: () => Promise.reject(new Error("unused")) }),
+        },
+        openBrowser: () => Promise.reject(new Error("unused")),
       },
       COMMANDS,
       { code: 0 },
@@ -179,6 +184,7 @@ describe("the facetdb program", () => {
       "types",
       "users",
       "review",
+      "studio",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

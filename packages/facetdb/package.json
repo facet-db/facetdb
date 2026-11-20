@@ -26,6 +26,7 @@
     "@facetdb/server": "workspace:*",
     "@facetdb/sql-polling": "workspace:*",
     "@facetdb/sqlite": "workspace:*",
+    "@facetdb/studio": "workspace:*",
     "commander": "15.0.0",
     "zod": "4.6.7"
   }

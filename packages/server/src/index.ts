@@ -87,6 +87,8 @@ export type {
   ReviewEndpointService,
 } from "./review/service.ts";
 export { createReviewEndpointService } from "./review/service.ts";
+export type { StudioBuild, StudioFiles } from "./studio/build.ts";
+export { openStudioBuild, STUDIO_INDEX_FILE, STUDIO_ROUTES_FILE } from "./studio/build.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
 export type {

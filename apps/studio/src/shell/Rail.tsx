@@ -1,0 +1,243 @@
+import {
+  Button,
+  Dither,
+  DitherStrip,
+  focusBrackets,
+  Listbox,
+  type StatusKind,
+  StatusWord,
+} from "@facetdb/ui";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { type Home, homeQuery, projectQuery, reviewCountQuery } from "../api/index.ts";
+import { useApi } from "../deps.tsx";
+import { useTheme } from "./theme.tsx";
+
+/**
+ * The rail (the mockups' rail): the brand mark, the project listbox, the eight pages in their order
+ * without icons or a box, the current one in `text` at a heavier weight and nothing else, the
+ * worker's heartbeat and the month's spending at the foot over a rule, and the theme switch. On a
+ * phone the same parts sit in the top bar and the drawer (Drawer.tsx).
+ */
+
+/** The eight pages, in their order. */
+export const PAGES = [
+  { to: "/", title: "Home" },
+  { to: "/sources", title: "Sources" },
+  { to: "/questions", title: "Questions" },
+  { to: "/review", title: "Review" },
+  { to: "/decisions", title: "Decisions" },
+  { to: "/plugins", title: "Plugins" },
+  { to: "/alerts", title: "Alerts" },
+  { to: "/settings", title: "Settings" },
+] as const;
+
+/** Review 4 of the mockups: the switcher is never dead; it says how another project opens. */
+export const PROJECT_HINT =
+  "This studio serves one project. Another opens by running facetdb studio in its folder; FacetDB Cloud lists every project of your account here.";
+
+/** The dithered square that fills, in `facet`, and the name. */
+export function Brand() {
+  return (
+    <div className="flex items-center gap-2.5 text-base font-extrabold tracking-tight">
+      <span aria-hidden="true" className="inline-flex">
+        <Dither value={0.75} size={16} ink="facet" label="FacetDB" />
+      </span>
+      <span>FacetDB</span>
+    </div>
+  );
+}
+
+/** The project listbox: the one project of an open-source studio, and how another opens. */
+export function ProjectPicker() {
+  const api = useApi();
+  const project = useQuery(projectQuery(api)).data?.project;
+  if (project === undefined) {
+    // The listbox's height, so nothing moves when the name arrives.
+    return <span aria-hidden="true" className="block h-9" />;
+  }
+  return (
+    <Listbox
+      label="Project"
+      options={[{ value: project, label: project }]}
+      value={project}
+      hint={PROJECT_HINT}
+      width="full"
+    />
+  );
+}
+
+/**
+ * The count beside Review: the number in the text color with the review square before it. Never
+ * small colored text: on paper the status colors pass 3:1 only.
+ */
+function ReviewCount({ count }: { readonly count: number }) {
+  return (
+    <span className="ml-auto inline-flex items-center gap-1.5 font-mono text-xs text-text">
+      <span aria-hidden="true" className="size-1.5 bg-review" />
+      <span>{count.toLocaleString("en-US")}</span>
+      <span className="sr-only"> waiting</span>
+    </span>
+  );
+}
+
+const LINK_CLASSES = {
+  rail: "py-[7px]",
+  drawer: "border-b border-hairline py-3 text-base",
+} as const;
+
+/** The eight pages; the drawer's are at tap size and close it when one is chosen. */
+export function PageLinks({
+  size,
+  onNavigate,
+}: {
+  readonly size: "rail" | "drawer";
+  readonly onNavigate?: () => void;
+}) {
+  const api = useApi();
+  const count = useQuery(reviewCountQuery(api)).data;
+  return (
+    <nav aria-label="Pages" className={size === "rail" ? "grid gap-0.5 py-4" : "grid"}>
+      {PAGES.map((page) => (
+        <Link
+          key={page.to}
+          to={page.to}
+          // Home is current on its own path only; every other page also on the paths under it
+          // (Sources for the setup flow, Decisions for the why page).
+          activeOptions={{ exact: page.to === "/" }}
+          onClick={onNavigate}
+          className={`${focusBrackets} ${LINK_CLASSES[size]} flex items-center gap-2.5 font-medium text-text-2 no-underline transition-colors hover:text-text aria-[current=page]:font-bold aria-[current=page]:text-text`}
+        >
+          <span>{page.title}</span>{" "}
+          {page.to === "/review" && count !== undefined && count > 0 ? (
+            <ReviewCount count={count} />
+          ) : null}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+const CHECK_STATUS: Readonly<Record<Home["health"]["checks"][number]["status"], StatusKind>> = {
+  ok: "done",
+  warn: "warning",
+  fail: "error",
+};
+
+/** Dollars as the rail shows a cap: whole when whole, cents otherwise. */
+function money(dollars: number): string {
+  return Number.isInteger(dollars) ? `$${String(dollars)}` : `$${dollars.toFixed(2)}`;
+}
+
+function WorkerLine({
+  home,
+  failed,
+}: {
+  readonly home: Home | undefined;
+  readonly failed: boolean;
+}) {
+  if (home === undefined) {
+    return failed ? (
+      <StatusWord status="error" size="small" label="Not known: the worker did not answer" />
+    ) : (
+      <span className="text-text-3">Reading</span>
+    );
+  }
+  const worker = home.health.checks.find((check) => check.name === "worker");
+  if (worker === undefined) {
+    return <span className="text-text-3">No heartbeat yet</span>;
+  }
+  // The check's first sentence: "Worker beating, 2 s ago", or the alert's title when it fails.
+  const [line = worker.words] = worker.words.split(". ");
+  return (
+    <StatusWord
+      status={CHECK_STATUS[worker.status]}
+      size="small"
+      label={line}
+      title={worker.words}
+    />
+  );
+}
+
+function SpendingLine({ home }: { readonly home: Home | undefined }) {
+  if (home === undefined) {
+    return <span className="text-text-3">Reading</span>;
+  }
+  const { spending } = home;
+  return (
+    <>
+      <span className="font-mono text-xs whitespace-nowrap text-text">
+        {spending.cap === null
+          ? spending.words.figure
+          : `${spending.words.figure} of ${money(spending.cap.dollars)}`}
+      </span>
+      {spending.fraction === null ? (
+        <span className="text-text-3">No monthly cap</span>
+      ) : (
+        <DitherStrip value={spending.fraction} width={160} rows={4} label={spending.words.sub} />
+      )}
+    </>
+  );
+}
+
+/**
+ * The instrument at the rail's foot: two stacked lines over a rule, always visible. Not a live
+ * region: it changes every few seconds, and a screen reader would read every change.
+ */
+export function Instrument() {
+  const api = useApi();
+  const home = useQuery(homeQuery(api));
+  return (
+    <section
+      aria-label="Worker and spending"
+      className="grid gap-3 border-t border-hairline pt-4 text-[13px] text-text-2"
+    >
+      <div className="grid gap-1">
+        <span>Worker</span>
+        <WorkerLine home={home.data} failed={home.isError} />
+      </div>
+      <div className="grid gap-1">
+        <span>Spent this month</span>
+        <SpendingLine home={home.data} />
+      </div>
+    </section>
+  );
+}
+
+/** Both themes, the system's by default; the switch names the one it turns on. */
+export function ThemeSwitch() {
+  const { theme, toggle } = useTheme();
+  const other = theme === "dark" ? "light" : "dark";
+  return (
+    <Button
+      variant="quiet"
+      size="small"
+      onClick={toggle}
+      aria-label={`Switch to the ${other} theme`}
+    >
+      {other === "light" ? "Light theme" : "Dark theme"}
+    </Button>
+  );
+}
+
+/** The rail of a screen wider than a phone's. */
+export function Rail() {
+  return (
+    <aside
+      aria-label="Navigation"
+      className="sticky top-0 flex h-screen flex-col border-r border-hairline px-5 pt-5.5 pb-5"
+    >
+      <Brand />
+      <div className="mt-2.5">
+        <ProjectPicker />
+      </div>
+      <PageLinks size="rail" />
+      <div className="mt-auto grid gap-4">
+        <Instrument />
+        <div>
+          <ThemeSwitch />
+        </div>
+      </div>
+    </aside>
+  );
+}

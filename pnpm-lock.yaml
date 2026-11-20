@@ -127,6 +127,9 @@ importers:
       '@facetdb/sqlite':
         specifier: workspace:*
         version: link:../sqlite
+      '@facetdb/studio':
+        specifier: workspace:*
+        version: link:../../apps/studio
       commander:
         specifier: 15.0.0
         version: 15.0.0

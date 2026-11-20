@@ -144,6 +144,24 @@ describe("<Dither>", () => {
     expect(screen.getByRole("img", { name: "Half" }).style.color).toBe(tokenVar("dither-ink"));
   });
 
+  it("paints the brand mark in the facet token, and nothing else unless asked", () => {
+    const mark = fakeCanvas();
+    render(
+      <Dither
+        value={0.75}
+        size={16}
+        ink="facet"
+        label="FacetDB"
+        ratio={1}
+        context={mark.factory}
+      />,
+    );
+    expect(screen.getByRole("img", { name: "FacetDB" }).style.color).toBe(tokenVar("facet"));
+    expect(mark.styles).toEqual(["currentcolor"]);
+    render(<DitherStrip value={0.5} width={16} label="Strip" ratio={1} context={mark.factory} />);
+    expect(screen.getByRole("img", { name: "Strip" }).style.color).toBe(tokenVar("dither-ink"));
+  });
+
   it("repaints when the theme switch changes the ink", async () => {
     const canvas = fakeCanvas();
     render(<Dither value={0.5} label="Half" ratio={1} context={canvas.factory} />);

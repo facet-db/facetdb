@@ -5,6 +5,7 @@ export { clampProbability, ditherLevel, ditherSteps } from "./bayer.ts";
 export type {
   DitherContextFactory,
   DitherGradientProps,
+  DitherInk,
   DitherProps,
   DitherStripProps,
 } from "./Dither.tsx";
