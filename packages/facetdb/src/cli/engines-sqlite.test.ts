@@ -124,7 +124,11 @@ function runWorker(stop: AbortSignal) {
     ["worker", "--no-http"],
     {
       projectDir: PROJECT_DIR,
-      env: { DATABASE_URL: "postgres://localhost:5432/facetdb", TYPESAFE_API_KEY: "ts-test-key" },
+      env: {
+        DATABASE_URL: "postgres://localhost:5432/facetdb",
+        FACETDB_SECRET: TEST_SECRET,
+        TYPESAFE_API_KEY: "ts-test-key",
+      },
       loadConfig: () => Promise.resolve(config),
       // The composition root's own registration: the SQLite engine is loaded for the .db path.
       engines: processDeps().engines,

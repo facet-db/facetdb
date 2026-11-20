@@ -133,6 +133,7 @@ describe("the facetdb program", () => {
         clock: { now: () => 0, sleep: () => Promise.resolve() },
         backfill: () => Promise.reject(new Error("unused")),
         serve: () => Promise.reject(new Error("unused")),
+        osUser: () => "tester",
         stopSignal: () => {
           throw new Error("unused");
         },

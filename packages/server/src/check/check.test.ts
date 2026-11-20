@@ -18,7 +18,7 @@ import {
   resetPglite,
 } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createApp } from "../app.ts";
+import { createApp, type StudioAccess } from "../app.ts";
 import { createApiKeys } from "../auth/api-keys.ts";
 import type { ConfigService } from "../config/service.ts";
 import type { DataServices } from "../data/routes.ts";
@@ -53,6 +53,19 @@ const NO_DATA: DataServices = {
   },
   home: { home: () => Promise.reject(new Error("these tests read no home")) },
   sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
+};
+
+/** Nobody signs in here: the check API is behind an API key, and a call to the studio fails the test. */
+const NO_STUDIO: StudioAccess = {
+  sessions: {
+    signIn: () => Promise.reject(new Error("these tests sign nobody in")),
+    reviewerFor: () => Promise.reject(new Error("these tests have no reviewer")),
+  },
+  reviewers: {
+    list: () => Promise.reject(new Error("these tests list no reviewers")),
+    add: () => Promise.reject(new Error("these tests add no reviewer")),
+  },
+  projectId: "project-1",
 };
 
 const UNLIMITED: SpendingGate = {
@@ -209,6 +222,7 @@ async function rig(
     check,
     config: NO_CONFIG,
     data: NO_DATA,
+    studio: NO_STUDIO,
     newRequestId: () => {
       requestCount += 1;
       return `req-${requestCount}`;
@@ -576,6 +590,7 @@ describe("the error shape", () => {
       },
       config: NO_CONFIG,
       data: NO_DATA,
+      studio: NO_STUDIO,
       newRequestId: () => "req-x",
     });
     const response = await broken.request("/v1/check", {

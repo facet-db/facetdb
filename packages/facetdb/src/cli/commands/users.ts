@@ -1,5 +1,11 @@
 import { type CliDeps, CliError, defineCommand, EXIT_USAGE, type OpenStore } from "../program.ts";
-import { hashPassword, isUserName, USER_NAME_RULE, UsersNotWritableError } from "../store-door.ts";
+import {
+  hashPassword,
+  isUserName,
+  MIN_PASSWORD_LENGTH,
+  USER_NAME_RULE,
+  UsersNotWritableError,
+} from "../store-door.ts";
 import { ALLOW_INSECURE_OPTION } from "./database.ts";
 
 /**
@@ -21,9 +27,6 @@ type UsersOptions = {
 
 const ACTIONS = ["add", "list", "remove"] as const;
 type Action = (typeof ACTIONS)[number];
-
-/** The shortest password `add` takes: a guess at an account that guards the review screen. */
-const MIN_PASSWORD_LENGTH = 8;
 
 /** What the studio does with no account, said wherever the last one goes or none exists. */
 const LOOPBACK_ONLY =

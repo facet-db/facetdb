@@ -12,7 +12,7 @@ import {
   splitTable,
   type TableTarget,
 } from "./database.ts";
-import { runWorkers, WORKER_OPTIONS, type WorkerOptions } from "./worker.ts";
+import { DEFAULT_HOST, runWorkers, WORKER_OPTIONS, type WorkerOptions } from "./worker.ts";
 
 /**
  * `facetdb dev`: the worker on an embedded Postgres (PGlite) kept under `.facetdb/dev/`, answered
@@ -43,7 +43,7 @@ const DEV_URL = "pglite://facetdb-dev";
  */
 const DEV_ANSWERS = { noul: 0, choice: 0, score: 0 } as const;
 
-type DevOptions = WorkerOptions & {
+type DevOptions = Omit<WorkerOptions, "host"> & {
   readonly modelUrl?: string;
   readonly reset?: boolean;
 };
@@ -87,8 +87,9 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     );
     const embedded = await deps.embedded.open(dir);
     try {
+      const secret = deps.env["FACETDB_SECRET"] ?? DEV_SECRET;
       const { store, client, engine } = await embeddedParts(embedded, {
-        secret: deps.env["FACETDB_SECRET"] ?? DEV_SECRET,
+        secret,
         clock: deps.clock,
       });
       try {
@@ -127,30 +128,36 @@ export const devCommand = defineCommand<DevOptions>("dev", {
           installed.push(source);
           print(`Installed ${source.name} on ${named} in ${DEV_DIR}/.`);
         }
-        return await runWorkers(context, {
-          config: { ...devConfig, sources: installed },
-          project,
-          store,
-          storeClient: client,
-          // The embedded database is a directory of files with one user: its login is the file's.
-          tableFacts: (source) => ({
-            ...tableFacts({
-              engine,
-              target: targetOf({ source, ...splitTable(source.table ?? "") }),
-              url: DEV_URL,
-              source,
-              deps: engineDeps,
+        // Offline and on this machine only: no --host, because the secret above may be the
+        // constant this file publishes, and a cookie signed under it would be forgeable.
+        return await runWorkers(
+          { ...context, options: { ...context.options, host: DEFAULT_HOST } },
+          {
+            config: { ...devConfig, sources: installed },
+            project,
+            store,
+            storeClient: client,
+            // The embedded database is a directory of files with one user: its login is the file's.
+            tableFacts: (source) => ({
+              ...tableFacts({
+                engine,
+                target: targetOf({ source, ...splitTable(source.table ?? "") }),
+                url: DEV_URL,
+                source,
+                deps: engineDeps,
+              }),
+              database: "PGlite",
+              login: { kind: "file" },
             }),
-            database: "PGlite",
-            login: { kind: "file" },
-          }),
-          openTable: (source, open) =>
-            engine.open(targetOf({ source, ...splitTable(source.table ?? "") }), DEV_URL, {
-              ...engineDeps,
-              ...open,
-            }),
-          provider,
-        });
+            openTable: (source, open) =>
+              engine.open(targetOf({ source, ...splitTable(source.table ?? "") }), DEV_URL, {
+                ...engineDeps,
+                ...open,
+              }),
+            provider,
+            sessionSecret: secret,
+          },
+        );
       } finally {
         await store.close();
       }

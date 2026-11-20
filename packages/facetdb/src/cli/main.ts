@@ -13,6 +13,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -477,10 +478,20 @@ export function processDeps(
         clock,
         connect: options?.connect ?? connect,
         ...(options?.allowInsecure === true ? { allowInsecure: true } : {}),
+        ...(options?.warn === undefined ? {} : { warn: options.warn }),
       });
     },
     provider: (config) => provider(config, env),
     serve: serveHttp,
+    osUser: () => {
+      try {
+        return userInfo().username;
+      } catch {
+        // The OS has no entry for this uid (a container run as an arbitrary user): the review
+        // log still needs a name, and says plainly that it does not know it.
+        return "unknown";
+      }
+    },
     stopSignal: run.stopSignal,
     webhookFetch: (url, init) => globalThis.fetch(url, init),
     // Unref'd by the platform: a pending timeout keeps no idle process alive.

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Clock } from "@facetdb/core";
-import type { ApiKeyStore, RunsReader } from "@facetdb/postgres";
+import type { ApiKeyStore, RunsReader, UsersStore } from "@facetdb/postgres";
 import type { Hono } from "hono";
 import { createApp } from "./app.ts";
 import { createApiKeys } from "./auth/api-keys.ts";
 import type { AppEnv } from "./auth/middleware.ts";
+import { createReviewers } from "./auth/reviewers.ts";
+import { createSessions } from "./auth/sessions.ts";
 import { type CheckStore, type CheckWorkers, createCheckService } from "./check/service.ts";
 import {
   createConfigService,
@@ -25,10 +27,23 @@ import { createRunsService } from "./data/runs.ts";
 
 export type ServerDeps = {
   /**
-   * The API keys, the API sources' records and queues, and the run log's read side (the dashboard's
-   * run log), from the FacetDB store.
+   * The API keys, the reviewer accounts, the API sources' records and queues, and the run log's
+   * read side (the dashboard's run log), from the FacetDB store.
    */
-  readonly store: CheckStore & { readonly apiKeys: ApiKeyStore; readonly runs: RunsReader };
+  readonly store: CheckStore & {
+    readonly apiKeys: ApiKeyStore;
+    readonly runs: RunsReader;
+    readonly users: UsersStore;
+  };
+  /**
+   * `FACETDB_SECRET`, which signs the session cookie. The caller read it from the environment and
+   * refused to start without it (the store door); this package never reads the environment.
+   */
+  readonly sessionSecret: string;
+  /** The operating system's user name: the reviewer on record for a request on this machine. */
+  readonly osUser: () => string;
+  /** One line per sign-in, refusal, lockout and account made; names only, never a password. */
+  readonly log: (line: string) => void;
   /** The workers that answer each API source's queue. */
   readonly worker: CheckWorkers;
   readonly clock: Clock;
@@ -82,6 +97,17 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       decisions: createDecisionsService(deps.decisions),
       home: createHomeService(dashboard),
       sources: createSourcesService(dashboard),
+    },
+    studio: {
+      sessions: createSessions({
+        secret: deps.sessionSecret,
+        clock: deps.clock,
+        users: deps.store.users,
+        osUser: deps.osUser,
+        log: deps.log,
+      }),
+      reviewers: createReviewers({ users: deps.store.users, log: deps.log }),
+      projectId: deps.config.projectId,
     },
     newRequestId: randomUUID,
   });

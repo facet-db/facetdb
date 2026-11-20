@@ -131,6 +131,7 @@ describe("facetdb users add", () => {
       provider: unused,
       backfill: unused,
       serve: unused,
+      osUser: () => "tester",
       stopSignal: unused,
       webhookFetch: unused,
       abortAfter: unused,

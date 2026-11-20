@@ -3,9 +3,23 @@
  * signed webhooks and the review endpoints. Routes parse,
  * authenticate, call one service and map the result; they never touch the database.
  */
-export { API_VERSION } from "./app.ts";
+export { API_VERSION, type StudioAccess } from "./app.ts";
 export type { ApiKeys } from "./auth/api-keys.ts";
 export { createApiKeys } from "./auth/api-keys.ts";
+export { isLoopbackAddress, isLoopbackHost } from "./auth/loopback.ts";
+export type { Peer } from "./auth/middleware.ts";
+export { OpenSurfaceError, requireAccountToServe } from "./auth/open-surface.ts";
+export type { AddOutcome, Reviewers } from "./auth/reviewers.ts";
+export { createReviewers } from "./auth/reviewers.ts";
+export type { ReviewerLookup, Sessions, SignIn } from "./auth/sessions.ts";
+export {
+  createSessions,
+  FAILURE_WINDOW_MS,
+  MAX_FAILURES,
+  OS_REVIEWER_PREFIX,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+} from "./auth/sessions.ts";
 export type {
   ApiSource,
   CheckedAnswer,

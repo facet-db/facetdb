@@ -213,6 +213,7 @@ async function runSeeingPrompts(
       clock: { now: () => 0, sleep: () => Promise.resolve() },
       backfill: () => Promise.reject(new Error("no backfill")),
       serve: () => Promise.reject(new Error("no HTTP server")),
+      osUser: () => "tester",
       stopSignal: () => {
         throw new Error("no stop signal");
       },

@@ -60,6 +60,7 @@ export {
   createUsersStore,
   hashPassword,
   isUserName,
+  MIN_PASSWORD_LENGTH,
   type ReviewerAccount,
   USER_NAME_RULE,
   UsersNotWritableError,

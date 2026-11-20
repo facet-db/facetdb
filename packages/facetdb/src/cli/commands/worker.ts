@@ -27,7 +27,9 @@ import {
   createOutbox,
   createServer,
   type DeliveryReport,
+  OpenSurfaceError,
   onlyRecord,
+  requireAccountToServe,
   type TableFacts,
 } from "@facetdb/server";
 import {
@@ -48,6 +50,7 @@ import {
   type StoreClient,
 } from "../program.ts";
 import {
+  requireStoreSecret,
   requireUsableStoreUrl,
   STORE_VARIABLE,
   storeSharedFor,
@@ -75,7 +78,14 @@ import {
  * acked or released before it exits; `--once` answers what is queued and exits.
  */
 
-export const DEFAULT_PORT = 7411;
+/**
+ * The port of the HTTP surface: the check API and the studio's endpoints share it. It was 7411 for
+ * the check API alone.
+ */
+export const DEFAULT_PORT = 4040;
+
+/** Where the surface listens unless told otherwise: this machine only. */
+export const DEFAULT_HOST = "127.0.0.1";
 
 /** How often the outbox looks for webhooks that are due. */
 export const OUTBOX_EVERY_MS = 2_000;
@@ -96,6 +106,11 @@ export const WORKER_CONNECTIONS = DEFAULT_WORKER_LIMITS.maxInFlight + 2;
 export type WorkerOptions = {
   readonly config: string;
   readonly port: string;
+  /**
+   * The address the surface listens on. Not an option of `dev`, which always serves this machine
+   * only (its store's secret is a constant the source code publishes).
+   */
+  readonly host: string;
   /** False under `--no-http`. */
   readonly http: boolean;
   readonly once: boolean;
@@ -132,12 +147,14 @@ export type WorkerParts = {
   readonly tableFacts: (source: SourceConfig) => TableFacts;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
+  /** `FACETDB_SECRET`: it signs the reviewers' session cookie. `worker` refuses to start without it. */
+  readonly sessionSecret: string;
 };
 
 /** What a run hands back under `--json`: what was answered per source, and whether HTTP was served. */
 export type WorkerSummary = {
   readonly ok: true;
-  readonly http: { readonly port: number } | null;
+  readonly http: { readonly host: string; readonly port: number } | null;
   readonly sources: readonly {
     readonly source: string;
     readonly answered: number;
@@ -150,7 +167,7 @@ const OPTIONS = [
   { flags: "--config <path>", description: "the config file", defaultValue: "facetdb.config.ts" },
   {
     flags: "--port <port>",
-    description: "the port of the HTTP surface (the check API)",
+    description: "the port of the HTTP surface (the check API and the studio's endpoints)",
     defaultValue: String(DEFAULT_PORT),
   },
   { flags: "--no-http", description: "serve nothing: a worker-only replica" },
@@ -198,6 +215,17 @@ export async function runWorkers(
   const { config, project, store } = parts;
   const { clock } = deps;
   const port = parsePort(options.port);
+  // Before anything starts: a surface open to other machines needs an account to sign in with.
+  if (options.http) {
+    try {
+      await requireAccountToServe(options.host, store.users);
+    } catch (error) {
+      if (error instanceof OpenSurfaceError) {
+        throw new CliError("no-account", error.message, error.fix);
+      }
+      throw error;
+    }
+  }
   const workerId = `worker-${randomUUID()}`;
   const provider = createResilientProvider(parts.provider, {
     backoff: createBackoff({ clock, random: deps.random }),
@@ -356,7 +384,12 @@ export async function runWorkers(
           ),
           apiKeys: store.apiKeys,
           runs: store.runs,
+          users: store.users,
         },
+        sessionSecret: parts.sessionSecret,
+        osUser: deps.osUser,
+        // Sign-ins, refusals and accounts made: names and counts, never a password.
+        log: (line) => print(line),
         worker: {
           forRecord: (projectId, name, key) => {
             const source = config.sources.find(
@@ -449,8 +482,11 @@ export async function runWorkers(
           },
         },
       });
-      listener = await deps.serve((request) => app.fetch(request), port);
-      print(`Serving the check API on port ${listener.port}.`);
+      listener = await deps.serve((request, peer) => app.fetch(request, peer), port, options.host);
+      const shown = options.host.includes(":") ? `[${options.host}]` : options.host;
+      print(
+        `Serving the check API and the studio's endpoints on http://${shown}:${listener.port}.`,
+      );
     }
 
     const tally = (entry: Running) => (report: PassReport) => {
@@ -540,7 +576,7 @@ export async function runWorkers(
   }
   return {
     ok: true,
-    http: listener === undefined ? null : { port: listener.port },
+    http: listener === undefined ? null : { host: options.host, port: listener.port },
     sources: running.map(({ source, answered, alreadyAnswered, failed }) => ({
       source,
       answered,
@@ -617,7 +653,16 @@ function requireModel(
 export const workerCommand = defineCommand<WorkerOptions>("worker", {
   description:
     "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API; run it next to the database, in the same region, because every record costs a few round trips to it",
-  options: [...OPTIONS, ALLOW_INSECURE_OPTION],
+  options: [
+    ...OPTIONS,
+    {
+      flags: "--host <address>",
+      description:
+        "the address the HTTP surface listens on: this machine only by default; any other address needs a reviewer account first (facetdb users add <name>)",
+      defaultValue: DEFAULT_HOST,
+    },
+    ALLOW_INSECURE_OPTION,
+  ],
   run: async (context) => {
     const { options, deps, print } = context;
     const config = await loadProjectConfig(deps, options.config);
@@ -625,7 +670,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     parsePort(options.port);
     if (options.dryRun) {
       print(
-        `Would answer ${config.sources.map((source) => source.name).join(", ")}${options.http ? ` and serve the check API on port ${options.port}` : ""}. Dry run: nothing was started.`,
+        `Would answer ${config.sources.map((source) => source.name).join(", ")}${options.http ? ` and serve the check API and the studio's endpoints on ${options.host}, port ${options.port}` : ""}. Dry run: nothing was started.`,
       );
       return { ok: true, dryRun: true };
     }
@@ -680,11 +725,19 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     // One pool for the store, the outbox, and every table source on the store's own database (the
     // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. The composition root's
     // connect lends it to the engine's connector of such a source (cli/pools.ts); the store's
-    // borrower closes nothing.
+    // borrower closes nothing. The session cookie is signed under the store's secret: refused here,
+    // in the store door's words, before the store opens or the surface could start.
+    const sessionSecret = requireStoreSecret(deps.env);
     const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
     const borrowed = (): StoreClient => ({ ...storeClient, close: () => Promise.resolve() });
     try {
-      const store = await deps.store({ allowInsecure, connect: borrowed });
+      const store = await deps.store({
+        allowInsecure,
+        connect: borrowed,
+        // A reviewer account whose stored hash cannot be read cannot sign in: say so where the
+        // operator looks (the hash itself is never in the line).
+        warn: (message) => deps.io.stderr(`warning: ${message}\n`),
+      });
       try {
         return await runWorkers(context, {
           config,
@@ -707,6 +760,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
             return table.facts;
           },
           provider: deps.provider(config),
+          sessionSecret,
         });
       } finally {
         await store.close();

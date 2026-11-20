@@ -137,6 +137,7 @@ async function runSeeingPrompts(
       clock: { now: () => 0, sleep: unused },
       backfill: unused,
       serve: unused,
+      osUser: () => "tester",
       stopSignal: () => {
         throw new Error("no stop signal");
       },

@@ -16,6 +16,7 @@ import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetd
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
+import type { Sessions } from "../auth/sessions.ts";
 import type { CheckService } from "../check/service.ts";
 import type { DataServices } from "../data/routes.ts";
 import {
@@ -27,27 +28,39 @@ import {
 } from "./service.ts";
 
 /**
- * The config routes on fakes: API keys for two projects, the CLI's door to the configuration as a
- * handwritten judge, and a running source whose preview is core's preview service over the fake
- * database, a scripted provider and the project's spending gate.
+ * The config routes on fakes: the studio's routes, so a reviewer (this machine, or a signed-in
+ * session) and never a project API key; the CLI's door to the configuration as a handwritten
+ * judge, and a running source whose preview is core's preview service over the fake database, a
+ * scripted provider and the project's spending gate.
  */
 
 const PROJECT = "listings-app";
 const OTHER = "another-app";
 const KEY = "Bearer fdb_listings";
-const OTHER_KEY = "Bearer fdb_another";
 
+/** A live key of the project: it opens the check API, and nothing of the studio. */
 const keys: ApiKeys = {
   create: () => Promise.reject(new Error("the routes never create a key")),
   verify: (header) =>
-    Promise.resolve(
-      header === KEY
-        ? { id: "key-1", projectId: PROJECT }
-        : header === OTHER_KEY
-          ? { id: "key-2", projectId: OTHER }
-          : undefined,
-    ),
+    Promise.resolve(header === KEY ? { id: "key-1", projectId: PROJECT } : undefined),
   revoke: () => Promise.reject(new Error("the routes never revoke a key")),
+};
+
+const MAYA = "maya";
+const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
+const ELSEWHERE = { remoteAddress: "203.0.113.7" };
+
+/** The sessions as the middleware sees them: this machine is the OS user, a cookie `maya` is maya. */
+const sessions: Sessions = {
+  signIn: () => Promise.reject(new Error("these tests sign nobody in")),
+  reviewerFor: ({ local, cookie }) =>
+    Promise.resolve(
+      cookie === `${MAYA}.valid`
+        ? { kind: "reviewer", name: MAYA }
+        : cookie === undefined && local
+          ? { kind: "reviewer", name: "os:alex" }
+          : { kind: "sign-in", why: cookie === undefined ? "no-cookie" : "invalid" },
+    ),
 };
 
 const NO_CHECK: CheckService = {
@@ -222,6 +235,8 @@ async function rig(
     readonly used?: number;
     /** The source's `where` as its SQL would judge a row: true leaves it out. */
     readonly excludes?: (state: Readonly<Record<string, string | null>>) => boolean;
+    /** The project the studio believes it serves; the configuration door's own is `PROJECT`. */
+    readonly studioProject?: string;
   } = {},
 ) {
   const database = new FakeDatabase({
@@ -292,6 +307,14 @@ async function rig(
       preview: (source) => (source === "listings" ? running : undefined),
     }),
     data: NO_DATA,
+    studio: {
+      sessions,
+      reviewers: {
+        list: () => Promise.reject(new Error("these tests list no reviewers")),
+        add: () => Promise.reject(new Error("these tests add no reviewer")),
+      },
+      projectId: options.studioProject ?? PROJECT,
+    },
     newRequestId: () => "req-1",
   });
 
@@ -299,19 +322,23 @@ async function rig(
     method: "GET" | "POST",
     path: string,
     body?: unknown,
-    authorization: string | null = KEY,
+    who: {
+      readonly peer?: { readonly remoteAddress: string };
+      readonly headers?: Readonly<Record<string, string>>;
+    } = {},
   ) {
-    const response = await app.request(path, {
-      method,
-      headers: {
-        "content-type": "application/json",
-        ...(authorization === null ? {} : { authorization }),
+    const response = await app.request(
+      path,
+      {
+        method,
+        headers: { "content-type": "application/json", ...who.headers },
+        // A GET carries no body.
+        ...(body === undefined || method === "GET"
+          ? {}
+          : { body: typeof body === "string" ? body : JSON.stringify(body) }),
       },
-      // A GET carries no body.
-      ...(body === undefined || method === "GET"
-        ? {}
-        : { body: typeof body === "string" ? body : JSON.stringify(body) }),
-    });
+      who.peer ?? THIS_MACHINE,
+    );
     return {
       status: response.status,
       headers: response.headers,
@@ -323,7 +350,7 @@ async function rig(
 }
 
 describe("the config routes", () => {
-  it("refuse every request without a valid API key, in the one error shape", async () => {
+  it("refuse every request that is not a reviewer's, in the one error shape, and a project API key is not one", async () => {
     const t = await rig();
     for (const [method, path] of [
       ["GET", "/v1/config"],
@@ -331,11 +358,16 @@ describe("the config routes", () => {
       ["POST", "/v1/preview"],
       ["POST", "/v1/test"],
     ] as const) {
-      const response = await t.call(method, path, { source: { name: "listings" } }, null);
-      expect(response.status).toBe(401);
-      expect(response.json).toMatchObject({
-        error: { code: "invalid_api_key", message: expect.any(String), fix: expect.any(String) },
-      });
+      for (const who of [{}, { headers: { authorization: KEY } }].map((extra) => ({
+        peer: ELSEWHERE,
+        ...extra,
+      }))) {
+        const response = await t.call(method, path, { source: { name: "listings" } }, who);
+        expect(response.status).toBe(401);
+        expect(response.json).toMatchObject({
+          error: { code: "sign-in", message: expect.any(String), fix: expect.any(String) },
+        });
+      }
     }
     expect(t.provider.requests).toHaveLength(0);
   });
@@ -348,15 +380,15 @@ describe("the config routes", () => {
     expect(response.json).toEqual(PROJECT_JSON);
   });
 
-  it("shows nothing of the project to a key of another project in the same store", async () => {
-    const t = await rig();
+  it("answers a studio wired to another project than the configuration's with nothing of the project", async () => {
+    const t = await rig({ studioProject: OTHER });
     for (const [method, path] of [
       ["GET", "/v1/config"],
       ["POST", "/v1/config/validate"],
       ["POST", "/v1/preview"],
       ["POST", "/v1/test"],
     ] as const) {
-      const response = await t.call(method, path, { source: { name: "listings" } }, OTHER_KEY);
+      const response = await t.call(method, path, { source: { name: "listings" } });
       expect(response.status).toBe(404);
       expect(response.json).toMatchObject({ error: { code: "unknown_project" } });
     }

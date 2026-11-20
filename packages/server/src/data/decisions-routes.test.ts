@@ -10,7 +10,7 @@ import {
 import type { DecisionSearch, DecisionSearchPage, FoundDecision } from "@facetdb/postgres";
 import { sourceIdOf } from "@facetdb/postgres";
 import { describe, expect, it } from "vitest";
-import { createApp } from "../app.ts";
+import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
@@ -43,6 +43,27 @@ const keys: ApiKeys = {
     ),
   revoke: () => Promise.reject(new Error("the routes never revoke a key")),
 };
+
+const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
+const ELSEWHERE = { remoteAddress: "203.0.113.7" };
+
+/** The studio as the reviewer middleware sees it: this machine is the OS user, anyone else signs in. */
+function localStudio(projectId: string): StudioAccess {
+  return {
+    sessions: {
+      signIn: () => Promise.reject(new Error("these tests sign nobody in")),
+      reviewerFor: ({ local }) =>
+        Promise.resolve(
+          local ? { kind: "reviewer", name: "os:alex" } : { kind: "sign-in", why: "no-cookie" },
+        ),
+    },
+    reviewers: {
+      list: () => Promise.reject(new Error("these tests list no reviewers")),
+      add: () => Promise.reject(new Error("these tests add no reviewer")),
+    },
+    projectId,
+  };
+}
 
 const NO_CHECK: CheckService = {
   check: () => Promise.reject(new Error("these tests make no check call")),
@@ -205,28 +226,37 @@ function rig(
   } = {},
 ) {
   const log = fakeStore(rows, options.versions ?? { 1: V1, 2: V2 });
-  const app = createApp({
-    keys,
-    check: NO_CHECK,
-    config: NO_CONFIG,
-    data: {
-      runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
-      decisions: createDecisionsService({
-        store: log.store,
-        projectId: PROJECT,
-        sources: ["listings", "support_messages"],
-        keyText: (source) => (source === "listings" ? options.keyText : undefined),
-      }),
-      home: { home: () => Promise.reject(new Error("these tests read no home")) },
-      sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
-    },
-    newRequestId: () => "req-1",
-  });
-
-  async function get(path: string, authorization: string | null = KEY) {
-    const response = await app.request(path, {
-      headers: authorization === null ? {} : { authorization },
+  const appFor = (studioProject: string) =>
+    createApp({
+      keys,
+      check: NO_CHECK,
+      config: NO_CONFIG,
+      data: {
+        runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
+        decisions: createDecisionsService({
+          store: log.store,
+          projectId: PROJECT,
+          sources: ["listings", "support_messages"],
+          keyText: (source) => (source === "listings" ? options.keyText : undefined),
+        }),
+        home: { home: () => Promise.reject(new Error("these tests read no home")) },
+        sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
+      },
+      studio: localStudio(studioProject),
+      newRequestId: () => "req-1",
     });
+  const app = appFor(PROJECT);
+  // A studio wired to another project than the log's, as another project's key once was.
+  const other = appFor("another-app");
+
+  // The pages are the studio's: a call from this machine is the OS user's; `null` is a stranger
+  // elsewhere with no session.
+  async function get(path: string, authorization: string | null = KEY) {
+    const response = await (authorization === OTHER_KEY ? other : app).request(
+      path,
+      { headers: authorization === null ? {} : { authorization } },
+      authorization === null ? ELSEWHERE : THIS_MACHINE,
+    );
     return { status: response.status, body: (await response.json()) as Reply };
   }
 
@@ -246,11 +276,11 @@ const LOG: readonly LogEntry[] = [
 ];
 
 describe("GET /v1/decisions", () => {
-  it("needs an API key, as every endpoint under /v1 does", async () => {
+  it("needs a reviewer, as every studio endpoint under /v1 does", async () => {
     const { get } = rig(LOG);
     const response = await get("/v1/decisions?source=listings", null);
     expect(response.status).toBe(401);
-    expect(response.body.error.code).toBe("invalid_api_key");
+    expect(response.body.error.code).toBe("sign-in");
   });
 
   it("lists a source's log newest first in the export's shape, each answer with its decision", async () => {
@@ -387,7 +417,7 @@ describe("GET /v1/decisions", () => {
     expect(searches).toEqual([]);
   });
 
-  it("answers 404 with the fix for a source the project does not have, and for another project's key", async () => {
+  it("answers 404 with the fix for a source the project does not have, and for a studio of another project", async () => {
     const { get } = rig(LOG);
     const unknown = await get("/v1/decisions?source=orders");
     expect(unknown.status).toBe(404);

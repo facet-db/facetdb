@@ -2,7 +2,7 @@ import type { AlertEvent, AlertRecord, DoctorCheck } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { sourceIdOf } from "@facetdb/postgres";
 import { describe, expect, it } from "vitest";
-import { createApp } from "../app.ts";
+import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
@@ -38,6 +38,27 @@ const keys: ApiKeys = {
     ),
   revoke: () => Promise.reject(new Error("the routes never revoke a key")),
 };
+
+const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
+const ELSEWHERE = { remoteAddress: "203.0.113.7" };
+
+/** The studio as the reviewer middleware sees it: this machine is the OS user, anyone else signs in. */
+function localStudio(projectId: string): StudioAccess {
+  return {
+    sessions: {
+      signIn: () => Promise.reject(new Error("these tests sign nobody in")),
+      reviewerFor: ({ local }) =>
+        Promise.resolve(
+          local ? { kind: "reviewer", name: "os:alex" } : { kind: "sign-in", why: "no-cookie" },
+        ),
+    },
+    reviewers: {
+      list: () => Promise.reject(new Error("these tests list no reviewers")),
+      add: () => Promise.reject(new Error("these tests add no reviewer")),
+    },
+    projectId,
+  };
+}
 
 const NO_CHECK: CheckService = {
   check: () => Promise.reject(new Error("these tests make no check call")),
@@ -210,25 +231,35 @@ function rig(
     sources,
   };
   const deps = { door, reads: readsOf(world), doctors: createDoctors(clock), clock };
-  const app = createApp({
-    keys,
-    check: NO_CHECK,
-    config: NO_CONFIG,
-    data: {
-      runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
-      decisions: {
-        search: () => Promise.reject(new Error("these tests search no decisions")),
-        why: () => Promise.reject(new Error("these tests explain no record")),
+  const appFor = (studioProject: string) =>
+    createApp({
+      keys,
+      check: NO_CHECK,
+      config: NO_CONFIG,
+      data: {
+        runs: { list: () => Promise.reject(new Error("these tests read no runs")) },
+        decisions: {
+          search: () => Promise.reject(new Error("these tests search no decisions")),
+          why: () => Promise.reject(new Error("these tests explain no record")),
+        },
+        home: createHomeService(deps),
+        sources: createSourcesService(deps),
       },
-      home: createHomeService(deps),
-      sources: createSourcesService(deps),
-    },
-    newRequestId: () => "req-1",
-  });
-  async function get(path: string, authorization: string | null = KEY) {
-    const response = await app.request(path, {
-      headers: authorization === null ? {} : { authorization },
+      studio: localStudio(studioProject),
+      newRequestId: () => "req-1",
     });
+  const app = appFor(PROJECT);
+  // A studio wired to another project than the door's, as another project's key once was.
+  const other = appFor("another");
+
+  // The pages are the studio's: a call from this machine is the OS user's; `null` is a stranger
+  // elsewhere with no session.
+  async function get(path: string, authorization: string | null = KEY) {
+    const response = await (authorization === OTHER_KEY ? other : app).request(
+      path,
+      { headers: authorization === null ? {} : { authorization } },
+      authorization === null ? ELSEWHERE : THIS_MACHINE,
+    );
     return { status: response.status, json: (await response.json()) as unknown };
   }
   return {
@@ -556,7 +587,7 @@ describe("GET /v1/home", () => {
     });
     expect(await t.get("/v1/home", null)).toMatchObject({
       status: 401,
-      json: { error: { code: "invalid_api_key" } },
+      json: { error: { code: "sign-in" } },
     });
     expect(t.doctors.listings.runs).toBe(0);
   });

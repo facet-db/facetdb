@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import type { ApiKeys } from "./auth/api-keys.ts";
 import { type AppEnv, requireApiKey } from "./auth/middleware.ts";
+import { type Reviewers, reviewersRoutes } from "./auth/reviewers.ts";
+import { requireReviewer, type Sessions, sessionRoutes } from "./auth/sessions.ts";
 import { checkRoute } from "./check/route.ts";
 import type { CheckService } from "./check/service.ts";
 import { configRoutes } from "./config/routes.ts";
@@ -11,6 +13,14 @@ import { ApiError } from "./errors.ts";
 /** The path prefix of every endpoint; a breaking change makes a new one beside it. */
 export const API_VERSION = "v1";
 
+/** What the studio's routes need to know who is asking. */
+export type StudioAccess = {
+  readonly sessions: Sessions;
+  readonly reviewers: Reviewers;
+  /** The one project this open-source worker serves; every reviewer request belongs to it. */
+  readonly projectId: string;
+};
+
 export type AppDeps = {
   readonly keys: ApiKeys;
   readonly check: CheckService;
@@ -18,6 +28,7 @@ export type AppDeps = {
   readonly config: ConfigService;
   /** The read endpoints behind the dashboard's pages: runs, decisions and the why page, Home, Sources. */
   readonly data: DataServices;
+  readonly studio: StudioAccess;
   /** Makes a request id; the composition root passes the real one, a test a counter. */
   readonly newRequestId: () => string;
 };
@@ -38,11 +49,25 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     await next();
   });
 
-  app.use(`/${API_VERSION}/*`, requireApiKey(deps.keys));
+  // Who may call what is decided here and nowhere else, in three groups. Registration order is
+  // the contract: a request answered by an earlier group never reaches a later group's middleware.
+  //  1. Public: signing in and out (the cookie is the credential, and the password is checked).
+  app.route(`/${API_VERSION}/session`, sessionRoutes(deps.studio.sessions));
+  //  2. A project API key (`facetdb keys add`): the SDK and other servers calling the check API.
+  //     Any route a program calls with a key joins this group, with `requireApiKey` on its path.
+  app.use(`/${API_VERSION}/check/*`, requireApiKey(deps.keys));
   app.route(`/${API_VERSION}/check`, checkRoute(deps.check));
-  // Behind the API key for now; reviewer sessions join them with the studio's accounts.
-  app.route(`/${API_VERSION}`, configRoutes(deps.config));
-  app.route(`/${API_VERSION}`, dataRoutes(deps.data));
+  //  3. Everything else under /v1 is the studio's and needs a reviewer: the OS user on this machine's loopback address, a signed session elsewhere.
+  //     A route added below is reviewer-only without any further line, so a forgotten line can
+  //     only close a route, never open one. The pages' read routes (runs, decisions, the why
+  //     page, Home, Sources) and the review routes are mounted on `studio`; a project key
+  //     does not reach them.
+  const studio = new Hono<AppEnv>();
+  studio.use("*", requireReviewer(deps.studio.sessions, deps.studio.projectId));
+  studio.route("/", configRoutes(deps.config));
+  studio.route("/", dataRoutes(deps.data));
+  studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
+  app.route(`/${API_VERSION}`, studio);
 
   app.notFound((c) =>
     c.json(

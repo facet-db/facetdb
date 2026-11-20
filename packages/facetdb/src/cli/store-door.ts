@@ -31,6 +31,7 @@ import { CliError, databaseLabel, plainMessage } from "./program.ts";
 export {
   hashPassword,
   isUserName,
+  MIN_PASSWORD_LENGTH,
   USER_NAME_RULE,
   UsersNotWritableError,
 } from "@facetdb/postgres";

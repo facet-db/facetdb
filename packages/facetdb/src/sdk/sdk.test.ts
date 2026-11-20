@@ -171,7 +171,12 @@ async function rig() {
       ),
       apiKeys: store.apiKeys,
       runs: store.runs,
+      users: store.users,
     },
+    // The SDK signs nobody in: only the check API is called here.
+    sessionSecret: "a-long-random-secret-for-tests-only",
+    osUser: () => "tester",
+    log: () => undefined,
     worker: { forRecord: (_project, _name, key) => worker(key) },
     clock,
   });

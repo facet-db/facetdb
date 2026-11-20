@@ -3,8 +3,10 @@ import type { AddressInfo } from "node:net";
 import type { HttpHandler, HttpListener } from "./program.ts";
 
 /**
- * Serves a fetch-shaped handler (the Hono app of `@facetdb/server`) on a port with `node:http`: each
- * request becomes a `Request`, each `Response` is written back as it came.
+ * Serves a fetch-shaped handler (the Hono app of `@facetdb/server`) on a host and port with
+ * `node:http`: each request becomes a `Request`, each `Response` is written back as it came. The
+ * handler is told the address of the socket's other end, which the reviewer sessions read to know a
+ * request from this machine's loopback address.
  */
 
 function requestOf(incoming: IncomingMessage, body: Buffer): Request {
@@ -22,14 +24,20 @@ function requestOf(incoming: IncomingMessage, body: Buffer): Request {
   });
 }
 
-export async function serveHttp(handler: HttpHandler, port: number): Promise<HttpListener> {
+export async function serveHttp(
+  handler: HttpHandler,
+  port: number,
+  host: string,
+): Promise<HttpListener> {
   const server = createServer((incoming, outgoing) => {
     const chunks: Buffer[] = [];
     incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
     incoming.on("end", () => {
       void (async () => {
         try {
-          const response = await handler(requestOf(incoming, Buffer.concat(chunks)));
+          const response = await handler(requestOf(incoming, Buffer.concat(chunks)), {
+            remoteAddress: incoming.socket.remoteAddress,
+          });
           outgoing.writeHead(response.status, [...response.headers.entries()].flat());
           outgoing.end(Buffer.from(await response.arrayBuffer()));
         } catch {
@@ -42,7 +50,7 @@ export async function serveHttp(handler: HttpHandler, port: number): Promise<Htt
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve();
     });

@@ -9,6 +9,7 @@ import { runEnding } from "../pipe.ts";
 import { sharePools } from "../pools.ts";
 import type { EngineEntry, HttpHandler } from "../program.ts";
 import { runInProcess } from "../program.ts";
+import { hashPassword } from "../store-door.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -23,19 +24,21 @@ import {
 } from "../testing.ts";
 import { engineTarget, projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
-import { DEFAULT_PORT, deliverUntil, WORKER_CONNECTIONS } from "./worker.ts";
+import { DEFAULT_HOST, DEFAULT_PORT, deliverUntil, WORKER_CONNECTIONS } from "./worker.ts";
 
 /**
  * `facetdb worker` through the in-process runner on PGlite: the table is installed as `facetdb
  * migrate` would, an insert queues a record through the trigger, and the worker answers it with the
  * fake provider through the Postgres capture connector and writes the columns. `--no-http` binds
- * nothing, the default binds the check API on 7411, a missing key refuses to start, and the
+ * nothing, the default binds the HTTP surface on 127.0.0.1:4040, a missing key refuses to start, and the
  * heartbeat `facetdb doctor` reads advances with the clock while the worker runs until stopped.
  */
 
 const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
 const PROJECT_DIR = "/work/listings-app";
 const START = 1_700_000_000_000;
+/** The socket a request on this machine's loopback address arrives on. */
+const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
 
 const config: ProjectConfig = facetdb({
   model: "jev-1.14.0",
@@ -79,7 +82,11 @@ let world: PgliteWorld;
 let store: Store;
 let clock: SteppedClock;
 let provider: FakeProvider;
-let served: { readonly handler: HttpHandler; readonly port: number }[];
+let served: {
+  readonly handler: HttpHandler;
+  readonly port: number;
+  readonly host: string;
+}[];
 let closedListeners: number;
 /** Whether each store the commands asked for was allowed to be plaintext. */
 let storeAsked: boolean[];
@@ -149,6 +156,10 @@ function run(
     readonly record?: string[];
     /** The engines registered; the Postgres engine over the test's driver when absent. */
     readonly engines?: readonly EngineEntry[];
+    /** Opens the store as the composition root does, with the `warn` the command hands it. */
+    readonly warnings?: boolean;
+    /** Calls the surface the moment it is bound, while the command is still running. */
+    readonly whileServing?: (handler: HttpHandler) => Promise<void>;
   } = {},
 ) {
   const { record } = options;
@@ -182,10 +193,15 @@ function run(
     argv,
     {
       projectDir: PROJECT_DIR,
-      env: options.env ?? {
-        DATABASE_URL: "postgres://localhost:5432/facetdb",
-        TYPESAFE_API_KEY: "ts-test-key",
+      // The store's secret is set unless a test says `FACETDB_SECRET: undefined`.
+      env: {
+        FACETDB_SECRET: TEST_SECRET,
+        ...(options.env ?? {
+          DATABASE_URL: "postgres://localhost:5432/facetdb",
+          TYPESAFE_API_KEY: "ts-test-key",
+        }),
       },
+      osUser: () => "alex",
       loadConfig: () => Promise.resolve(options.config ?? config),
       engines: options.engines ?? postgresEngines(connect),
       connect,
@@ -193,6 +209,14 @@ function run(
       store: (storeOptions) => {
         storeAsked.push(storeOptions?.allowInsecure === true);
         poolsAsked.store.push(storeOptions?.connect !== undefined);
+        if (options.warnings === true) {
+          return createStore({
+            pglite: world.db,
+            secret: TEST_SECRET,
+            clock,
+            ...(storeOptions?.warn === undefined ? {} : { warn: storeOptions.warn }),
+          });
+        }
         if (record !== undefined && storeOptions?.connect !== undefined) {
           return createStore({
             url: "postgres://localhost:5432/facetdb",
@@ -208,8 +232,9 @@ function run(
       clock,
       random: () => 0.5,
       webhookFetch: () => Promise.reject(new Error("no webhook is queued in these tests")),
-      serve: (handler, port) => {
-        served.push({ handler, port });
+      serve: async (handler, port, host) => {
+        served.push({ handler, port, host });
+        await options.whileServing?.(handler);
         return Promise.resolve({
           port,
           close: () => {
@@ -605,19 +630,96 @@ describe("facetdb worker", () => {
     expect(result.stdout).not.toContain("Serving");
   });
 
-  it("serves the check API on port 7411 by default, and stops serving on exit", async () => {
+  it("serves on 127.0.0.1 port 4040 by default, and stops serving on exit", async () => {
     const result = await run(["worker", "--once"]);
 
     expect(result.code).toBe(0);
-    expect(served.map((one) => one.port)).toEqual([DEFAULT_PORT]);
-    expect(result.stdout).toContain(`Serving the check API on port ${DEFAULT_PORT}.`);
+    expect(served.map((one) => [one.host, one.port])).toEqual([[DEFAULT_HOST, DEFAULT_PORT]]);
+    expect([DEFAULT_HOST, DEFAULT_PORT]).toEqual(["127.0.0.1", 4040]);
+    expect(result.stdout).toContain(
+      `Serving the check API and the studio's endpoints on http://${DEFAULT_HOST}:${DEFAULT_PORT}.`,
+    );
     expect(closedListeners).toBe(1);
     // The handler is the server's app: a check call without an API key is refused, not routed.
     const [listener] = served;
     const response = await listener?.handler(
       new Request("http://localhost/v1/check", { method: "POST", body: "{}" }),
+      THIS_MACHINE,
     );
     expect(response?.status).toBe(401);
+  });
+
+  it("opens the studio's routes to this machine as the OS user, and to nobody else without a session", async () => {
+    await run(["worker", "--once"]);
+    const [listener] = served;
+    const get = (peer: { readonly remoteAddress: string | undefined }) =>
+      listener?.handler(new Request("http://127.0.0.1:4040/v1/reviewers"), peer);
+
+    const here = await get(THIS_MACHINE);
+    expect(here?.status).toBe(200);
+    expect(await here?.json()).toEqual({ reviewers: [] });
+    const elsewhere = await get({ remoteAddress: "203.0.113.7" });
+    expect(elsewhere?.status).toBe(401);
+    expect(await elsewhere?.json()).toMatchObject({ error: { code: "sign-in" } });
+  });
+
+  it("--host on another address refuses to start until an account exists, and starts once one does", async () => {
+    const refused = await run(["worker", "--once", "--host", "0.0.0.0"]);
+
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("--host 0.0.0.0 opens the review screen to other machines");
+    expect(refused.stderr).toContain("facetdb users add <name>");
+    expect(served).toEqual([]);
+    expect(await heartbeat()).toBeUndefined();
+
+    await store.users.add("maya", await hashPassword("a long enough password"));
+    const started = await run(["worker", "--once", "--host", "0.0.0.0"]);
+
+    expect(started.code, started.stderr).toBe(0);
+    expect(served.map((one) => one.host)).toEqual(["0.0.0.0"]);
+    // The loopback host and --no-http never need an account.
+    await store.users.remove("maya");
+    expect((await run(["worker", "--once", "--host", "localhost"])).code).toBe(0);
+    expect((await run(["worker", "--once", "--no-http", "--host", "::"])).code).toBe(0);
+  });
+
+  it("refuses to start without FACETDB_SECRET before anything is served, in the store door's words", async () => {
+    const result = await run(["worker", "--once"], {
+      env: {
+        DATABASE_URL: "postgres://localhost:5432/facetdb",
+        FACETDB_SECRET: undefined,
+        TYPESAFE_API_KEY: "ts-test-key",
+      },
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("FACETDB_SECRET is not set");
+    expect(result.stderr).toContain("openssl rand -hex 32");
+    expect(served).toEqual([]);
+  });
+
+  it("wires a reviewer account's unreadable hash to stderr, never the hash itself", async () => {
+    await world.client.query(
+      "insert into facetdb.users (name, password_hash) values ('maya', 'not-a-hash-NEEDLE')",
+    );
+    let status: number | undefined;
+    const result = await run(["worker", "--once"], {
+      warnings: true,
+      whileServing: async (handler) => {
+        const response = await handler(
+          new Request("http://127.0.0.1/v1/session", {
+            method: "POST",
+            body: JSON.stringify({ name: "maya", password: "a long enough password" }),
+          }),
+          THIS_MACHINE,
+        );
+        status = response.status;
+      },
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(status).toBe(401);
+    expect(result.stderr).toContain('the reviewer account "maya" has a stored password hash');
+    expect(result.stderr).not.toContain("NEEDLE");
   });
 
   it("serves the project JSON, a draft's judgement and the preview of a running source", async () => {
@@ -636,15 +738,15 @@ describe("facetdb worker", () => {
       },
     });
     expect(result.code, result.stderr).toBe(0);
-    const { secret } = await store.apiKeys.create(projectRef(PROJECT_DIR).id, "studio");
     const [listener] = served;
     const call = async (method: string, path: string, body?: unknown) => {
       const response = await listener?.handler(
         new Request(`http://localhost${path}`, {
           method,
-          headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+          headers: { "content-type": "application/json" },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         }),
+        THIS_MACHINE,
       );
       return { status: response?.status, json: (await response?.json()) as unknown };
     };
@@ -730,6 +832,7 @@ describe("facetdb worker", () => {
       new Request("http://localhost/v1/runs?source=listings", {
         headers: { authorization: `Bearer ${secret}` },
       }),
+      THIS_MACHINE,
     );
     expect(response?.status).toBe(200);
     // One pass claimed r1 and answered it; the pass that found the queue empty wrote no row.
@@ -759,6 +862,7 @@ describe("facetdb worker", () => {
     const get = async (path: string) => {
       const response = await listener?.handler(
         new Request(`http://localhost${path}`, { headers: { authorization: `Bearer ${secret}` } }),
+        THIS_MACHINE,
       );
       return { status: response?.status, json: (await response?.json()) as unknown };
     };

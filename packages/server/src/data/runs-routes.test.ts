@@ -1,6 +1,6 @@
 import type { RunsQuery, RunsReader, StoredRun } from "@facetdb/postgres";
 import { describe, expect, it } from "vitest";
-import { createApp } from "../app.ts";
+import { createApp, type StudioAccess } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
 import type { CheckService } from "../check/service.ts";
 import type { ConfigService } from "../config/service.ts";
@@ -26,6 +26,27 @@ const keys: ApiKeys = {
 const NO_CHECK: CheckService = {
   check: () => Promise.reject(new Error("these tests make no check call")),
 };
+
+const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
+const ELSEWHERE = { remoteAddress: "203.0.113.7" };
+
+/** The studio as the reviewer middleware sees it: this machine is the OS user, anyone else signs in. */
+function localStudio(projectId: string): StudioAccess {
+  return {
+    sessions: {
+      signIn: () => Promise.reject(new Error("these tests sign nobody in")),
+      reviewerFor: ({ local }) =>
+        Promise.resolve(
+          local ? { kind: "reviewer", name: "os:alex" } : { kind: "sign-in", why: "no-cookie" },
+        ),
+    },
+    reviewers: {
+      list: () => Promise.reject(new Error("these tests list no reviewers")),
+      add: () => Promise.reject(new Error("these tests add no reviewer")),
+    },
+    projectId,
+  };
+}
 
 const NO_CONFIG: ConfigService = {
   json: () => {
@@ -83,12 +104,17 @@ function rig(total: number) {
       home: { home: () => Promise.reject(new Error("these tests read no home")) },
       sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
     },
+    studio: localStudio(PROJECT),
     newRequestId: () => "req-1",
   });
+  // The pages are the studio's: a call from this machine is the OS user's; `null` is a stranger
+  // elsewhere with no session.
   const get = async (path: string, authorization: string | null = KEY) => {
-    const response = await app.request(path, {
-      headers: authorization === null ? {} : { authorization },
-    });
+    const response = await app.request(
+      path,
+      { headers: authorization === null ? {} : { authorization } },
+      authorization === null ? ELSEWHERE : THIS_MACHINE,
+    );
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   };
   return { reader, get };
@@ -145,7 +171,7 @@ describe("GET /v1/runs", () => {
     const { status, body } = await t.get("/v1/runs", null);
 
     expect(status).toBe(401);
-    expect(body["error"]).toMatchObject({ code: "invalid_api_key" });
+    expect(body["error"]).toMatchObject({ code: "sign-in" });
     expect(t.reader.queries).toEqual([]);
   });
 

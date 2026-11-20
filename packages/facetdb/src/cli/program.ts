@@ -1,7 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { BackfillDeps, Clock, DatabaseEngine, ModelProvider } from "@facetdb/core";
 import type { SqlConnect, Store } from "@facetdb/postgres";
-import type { WebhookFetch } from "@facetdb/server";
+import type { Peer, WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
@@ -173,6 +173,8 @@ export type CliDeps = {
      * sources on its database use one; one-off commands leave it out and get the driver's own.
      */
     readonly connect?: SqlConnect;
+    /** Hears of a stored row the store cannot trust (a reviewer's unreadable hash); never a secret. */
+    readonly warn?: (message: string) => void;
   }) => Promise<Store>;
   /** The model provider for a config: `modelUrl`'s server, else TypeSafe with `TYPESAFE_API_KEY`. */
   readonly provider: (config: ProjectConfig) => ModelProvider;
@@ -187,8 +189,13 @@ export type CliDeps = {
     source: SourceConfig,
     mode: { readonly dryRun: boolean; readonly allowInsecure?: boolean },
   ) => Promise<BackfillSetup>;
-  /** Binds the HTTP surface on a port (`facetdb worker`); the composition root uses `node:http`. */
-  readonly serve: (handler: HttpHandler, port: number) => Promise<HttpListener>;
+  /**
+   * Binds the HTTP surface on a host and port (`facetdb worker --host --port`); the composition
+   * root uses `node:http`. The handler is told the address of each connection's other end.
+   */
+  readonly serve: (handler: HttpHandler, port: number, host: string) => Promise<HttpListener>;
+  /** The operating system's user name: the reviewer on record on this machine's loopback address. */
+  readonly osUser: () => string;
   /** Aborts when the process is asked to stop (SIGINT, SIGTERM); a test aborts its own. */
   readonly stopSignal: () => AbortSignal;
   /** Sends a webhook from the outbox: `fetch` in the process, a recording fake in a test. */
@@ -206,8 +213,8 @@ export type CliDeps = {
   readonly examples: ExampleShelf;
 };
 
-/** One request in, one response out: the shape of a Hono app's `fetch`. */
-export type HttpHandler = (request: Request) => Response | Promise<Response>;
+/** One request in, one response out: the shape of a Hono app's `fetch`, told who is on the other end. */
+export type HttpHandler = (request: Request, peer: Peer) => Response | Promise<Response>;
 
 /** A bound HTTP server: the port it listens on, and how to stop listening. */
 export type HttpListener = {
@@ -459,6 +466,7 @@ type OptionalInTests =
   | "clock"
   | "backfill"
   | "serve"
+  | "osUser"
   | "stopSignal"
   | "webhookFetch"
   | "abortAfter"
@@ -529,6 +537,9 @@ export async function runInProcess(
         sleep: () => Promise.reject(new Error("this test gave the command no clock")),
       },
       serve: () => Promise.reject(new Error("this test gave the command no HTTP server")),
+      osUser: () => {
+        throw new Error("this test gave the command no operating system user");
+      },
       stopSignal: () => {
         throw new Error("this test gave the command no stop signal");
       },

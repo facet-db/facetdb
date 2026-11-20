@@ -19,6 +19,9 @@ export function isUserName(name: string): boolean {
   return USER_NAME.test(name);
 }
 
+/** The shortest password an account takes: a guess at an account that guards the review screen. */
+export const MIN_PASSWORD_LENGTH = 8;
+
 // scrypt's cost: N = 2^15, r = 8, p = 1 is about 32 MiB and 70 ms, a sound setting for an
 // interactive login. The cost is written into every hash, so raising it later leaves older hashes
 // checkable under the cost they were made with.

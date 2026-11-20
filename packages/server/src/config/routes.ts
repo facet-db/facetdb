@@ -48,8 +48,8 @@ const unknownProject = () =>
   new ApiError(
     404,
     "unknown_project",
-    "This API key belongs to a project this worker does not serve.",
-    "Use a key made by `facetdb keys add` in this project's directory.",
+    "This request belongs to a project this worker does not serve.",
+    "Open the studio of the worker that serves this project.",
   );
 
 function issuesInWords(issues: readonly DraftIssue[]): string {
@@ -60,7 +60,7 @@ function issuesInWords(issues: readonly DraftIssue[]): string {
 
 /**
  * `GET /v1/config`, `POST /v1/config/validate`, `POST /v1/preview` and `POST /v1/test`: parse, one
- * service call, map the result; the API key was checked by the middleware. Nothing here reads a
+ * service call, map the result; the reviewer was checked by the middleware. Nothing here reads a
  * file, a database or the model.
  */
 export function configRoutes(service: ConfigService): Hono<AppEnv> {

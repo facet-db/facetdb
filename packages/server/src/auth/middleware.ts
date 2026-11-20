@@ -2,12 +2,24 @@ import { createMiddleware } from "hono/factory";
 import { ApiError } from "../errors.ts";
 import type { ApiKeys } from "./api-keys.ts";
 
+/**
+ * The other end of the connection, which only the server's socket knows: the adapter that serves
+ * the app passes it as `app.fetch(request, peer)`. Undefined (no socket, no address) is never local.
+ */
+export type Peer = { readonly remoteAddress: string | undefined };
+
 /** What the middleware chain leaves on the context for the routes. */
 export type AppEnv = {
+  Bindings: Peer;
   Variables: {
     requestId: string;
-    /** The project the request's API key belongs to; set by `requireApiKey`. */
+    /**
+     * The project of the request: its API key's (`requireApiKey`), or the one project this
+     * worker serves (`requireReviewer`).
+     */
     projectId: string;
+    /** The reviewer on record, `maya` or `os:alex`; set by `requireReviewer` only. */
+    reviewer: string;
   };
 };
 
