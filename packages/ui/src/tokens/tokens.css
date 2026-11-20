@@ -1,0 +1,117 @@
+/* FacetDB's design tokens. The only file in packages/ui that names a color or a
+   face; every component and stylesheet reads these variables (tokens.test.ts holds it to that).
+   Dark first: a warm near-black ink the amber belongs to. Light is the same roles on a neutral
+   paper, picked by prefers-color-scheme and overridden by data-theme on the root (the rail's
+   switch). */
+
+/* The faces, self-hosted (no third-party font requests); the files and their OFL
+   copies sit in packages/ui/fonts/, whose README names them. */
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("../../fonts/schibsted-grotesk-variable.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../../fonts/martian-mono-variable.woff2") format("woff2");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Colors: one role per line of the brief's table */
+  --canvas: #141311;
+  --surface: #1a1815;
+  --surface-2: #23201b;
+  --hairline: #2f2b25;
+  --text: #f3f1ec;
+  --text-2: #b5afa3;
+  /* The mockups' value: the brief's #837c70 reads 4.49:1 on the canvas, under its own 4.5:1 rule */
+  --text-3: #8c8577;
+  --facet: #ffb020;
+  --facet-ink: #1a1200;
+  --facet-text: #ffb020;
+  --yes: #4ade80;
+  --no: #fb7185;
+  --review: #ffb020;
+  --pending: #9a9388;
+  --skipped: #5e584f;
+  --dither-ink: #f3f1ec;
+
+  /* Type: one family for everything read, one for everything measured */
+  --font-text: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-measured: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /* Martian Mono's widths: figures inline at 87.5%, the wide cut for the big figures */
+  --font-measured-inline: 87.5%;
+  --font-measured-wide: 112.5%;
+
+  /* Space and shape: a 4 px grid, square corners everywhere */
+  --space: 4px;
+  --radius: 0;
+
+  /* Motion: state, layout, the column fill and the interval between its cells */
+  --motion-state: 150ms;
+  --motion-layout: 250ms;
+  --motion-fill: 600ms;
+  --motion-fill-step: 40ms;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --canvas: #f3f2ef;
+    --surface: #ffffff;
+    --surface-2: #e9e7e2;
+    --hairline: #d6d2ca;
+    --text: #171512;
+    --text-2: #5a554c;
+    --text-3: #726d60;
+    --facet: #ffb020;
+    --facet-ink: #1a1200;
+    --facet-text: #8a4b00;
+    --yes: #15803d;
+    --no: #be123c;
+    --review: #b45309;
+    --pending: #6b655a;
+    --skipped: #9a948a;
+    --dither-ink: #171512;
+  }
+}
+
+/* The rail's switch: the same light values chosen by hand (tokens.test.ts keeps the two equal) */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --canvas: #f3f2ef;
+  --surface: #ffffff;
+  --surface-2: #e9e7e2;
+  --hairline: #d6d2ca;
+  --text: #171512;
+  --text-2: #5a554c;
+  --text-3: #726d60;
+  --facet: #ffb020;
+  --facet-ink: #1a1200;
+  --facet-text: #8a4b00;
+  --yes: #15803d;
+  --no: #be123c;
+  --review: #b45309;
+  --pending: #6b655a;
+  --skipped: #9a948a;
+  --dither-ink: #171512;
+}
+
+/* Reduced motion: every transition reads its duration from these tokens, so zeroing them stills
+   the page and the column fill renders at once. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-state: 0ms;
+    --motion-layout: 0ms;
+    --motion-fill: 0ms;
+    --motion-fill-step: 0ms;
+  }
+}

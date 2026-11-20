@@ -1,3 +1,4 @@
 // The design system's barrel: the tokens' names and the components every FacetDB surface is built
-// from. The tokens, the dither and the components are not here yet.
-export {};
+// from. The components are not here yet.
+export * from "./dither/index.ts";
+export * from "./tokens/index.ts";

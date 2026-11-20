@@ -1,0 +1,45 @@
+/* The Tailwind v4 theme over the tokens: a surface's stylesheet starts with
+     @import "tailwindcss";
+     @import "@facetdb/ui/theme";
+   and gets bg-canvas, text-text-2, border-hairline, font-mono, p-4 (16 px on the 4 px grid) and
+   the rest from the variables of tokens.css. `inline` makes every utility read the variable
+   itself, so the theme switch repaints without a rebuild. Tailwind's own palette, radii, shadows
+   and animations are cleared: a class the brief has no token for does not exist (one accent,
+   square corners, no shadows, nothing moves but the column fill). */
+
+@import "./tokens.css";
+
+@theme inline {
+  --color-*: initial;
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-hairline: var(--hairline);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-text-3: var(--text-3);
+  --color-facet: var(--facet);
+  --color-facet-ink: var(--facet-ink);
+  --color-facet-text: var(--facet-text);
+  --color-yes: var(--yes);
+  --color-no: var(--no);
+  --color-review: var(--review);
+  --color-pending: var(--pending);
+  --color-skipped: var(--skipped);
+  --color-dither-ink: var(--dither-ink);
+
+  --font-*: initial;
+  --font-sans: var(--font-text);
+  --font-mono: var(--font-measured);
+
+  --spacing: var(--space);
+
+  --radius-*: initial;
+  --shadow-*: initial;
+  --inset-shadow-*: initial;
+  --drop-shadow-*: initial;
+  --text-shadow-*: initial;
+  --animate-*: initial;
+
+  --default-transition-duration: var(--motion-state);
+}
