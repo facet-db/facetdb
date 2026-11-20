@@ -45,6 +45,11 @@ describe("judging a draft source", () => {
         thresholds: { is_scam: { yesAbove: 0.8 } },
       },
       warnings: [],
+      // The whole project with the draft in place, its connection's variable kept.
+      config: {
+        ...CONFIG,
+        sources: [{ ...CONFIG.sources[0], thresholds: { is_scam: { yesAbove: 0.8 } } }],
+      },
     });
   });
 

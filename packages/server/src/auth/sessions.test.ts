@@ -101,6 +101,8 @@ function rig(options: { readonly secret?: string; readonly users?: Partial<Users
       },
       preview: () => Promise.reject(new Error("no preview here")),
       test: () => Promise.reject(new Error("no test here")),
+      diff: () => Promise.reject(new Error("no apply here")),
+      apply: () => Promise.reject(new Error("no apply here")),
     },
     data: {
       runs: { list: () => Promise.reject(new Error("no runs here")) },

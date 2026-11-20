@@ -1,4 +1,5 @@
-import { realpath, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { QuestionSet } from "@facetdb/core";
@@ -118,13 +119,18 @@ export async function loadConfig(path: string, options: LoadOptions): Promise<Lo
       },
     ]);
   }
-  const { mtimeMs } = await stat(file);
-  // The modification time in the URL makes an edited file load afresh in a long-running process. In
-  // a project whose package.json has no "type", Node warns here that it reparsed the file as an ES
+  // A digest of the text in the URL makes an edited file load afresh in a long-running process (the
+  // worker's reload after Apply), even when two writes share a modification time, as they can
+  // within a coarse filesystem's tick; an unchanged text reuses the module already loaded. In a
+  // project whose package.json has no "type", Node warns here that it reparsed the file as an ES
   // module (MODULE_TYPELESS_PACKAGE_JSON); the composition root drops that one warning
   // (cli/warnings.ts), so no command's output starts with it.
+  const digest = createHash("sha256")
+    .update(await readFile(file))
+    .digest("hex")
+    .slice(0, 16);
   const loaded: unknown = await import(
-    /* @vite-ignore */ `${pathToFileURL(file).href}?v=${mtimeMs}`
+    /* @vite-ignore */ `${pathToFileURL(file).href}?v=${digest}`
   );
   const exported = (loaded as { default?: unknown }).default;
   if (exported === undefined) {

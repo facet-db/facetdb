@@ -35,13 +35,19 @@ export { createCheckStore } from "./check/store.ts";
 export { onlyRecord } from "./check/target.ts";
 export { PREVIEW_MAX_LIMIT } from "./config/routes.ts";
 export type {
+  ConfigFileDoor,
   ConfigService,
   DraftCheck,
   DraftIssue,
   DraftWarning,
+  FileApply,
+  FileDiff,
   PreviewSource,
   ProjectConfigDoor,
+  ReloadSummary,
   SourceDraft,
+  SourceReload,
+  Words,
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";
 export type {

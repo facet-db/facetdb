@@ -152,6 +152,7 @@ async function runSeeingPrompts(
       embedded: { open: unused, wipe: unused },
       examples: { read: unused },
       terminal: NO_TERMINAL,
+      configFiles: { read: unused, replace: unused, gitState: unused },
     },
     COMMANDS,
   );

@@ -19,6 +19,8 @@ export type DraftJudgement =
       readonly questionSet: QuestionSet;
       /** The wording warnings of the draft source, in the shape the CLI prints (`formatWarnings`). */
       readonly warnings: readonly ConfigWarning[];
+      /** The whole project with the draft in place: what Apply renders into the file. */
+      readonly config: ProjectConfig;
     }
   | {
       /** Every problem with its field path as the config file writes it: `sources[0].thresholds.urgency`. */
@@ -30,7 +32,7 @@ export type DraftJudgement =
  * Judges `draft` within `config`. `env` is the environment the connection strings are read from, of
  * which only the variables the config's sources already name are read; a draft naming any other is
  * refused in the same words whether or not it is set. Nothing is written and nothing changes:
- * applying a draft is not built yet.
+ * applying a draft is `planApply`'s.
  */
 export function judgeDraftSource(
   config: ProjectConfig,
@@ -40,21 +42,28 @@ export function judgeDraftSource(
   // A draft comes over HTTP: it sees only the variables the loaded config already names, so naming
   // any other one tells its sender nothing about whether it is set or what it holds.
   const named = [...new Set(config.sources.flatMap((source) => source.databaseEnv ?? []))].sort();
+  const refused = (path: string): DraftJudgement => ({
+    ok: false,
+    issues: [
+      {
+        path,
+        message: `a draft reads only the connection variables facetdb.config.ts already names (${named.length === 0 ? "none" : named.join(", ")}); name one of those, or add the source to facetdb.config.ts`,
+      },
+    ],
+  });
   const database = draft["database"];
   const variable =
     typeof database === "object" && database !== null && "env" in database
       ? database.env
       : undefined;
   if (typeof variable === "string" && !named.includes(variable)) {
-    return {
-      ok: false,
-      issues: [
-        {
-          path: "database.env",
-          message: `a draft reads only the connection variables facetdb.config.ts already names (${named.length === 0 ? "none" : named.join(", ")}); name one of those, or add the source to facetdb.config.ts`,
-        },
-      ],
-    };
+    return refused("database.env");
+  }
+  // By whichever key it arrives (`databaseEnv` is a source key the schema takes too): no variable
+  // the file does not already name, said in the same words, set or not.
+  const direct = draft["databaseEnv"];
+  if (direct !== undefined && (typeof direct !== "string" || !named.includes(direct))) {
+    return refused("databaseEnv");
   }
   const seen = Object.fromEntries(named.map((name) => [name, env[name]]));
   const json = toProjectJson(config);
@@ -72,6 +81,14 @@ export function judgeDraftSource(
     }
     throw error;
   }
+  // The judged project as a whole, whatever key carried it: every connection variable is one the
+  // file names already.
+  const stray = judged.sources.findIndex(
+    (candidate) => candidate.databaseEnv !== undefined && !named.includes(candidate.databaseEnv),
+  );
+  if (stray !== -1) {
+    return refused(`sources[${stray}].databaseEnv`);
+  }
   const source = judged.sources.find((candidate) => candidate.name === draft.name);
   if (source === undefined) {
     throw new Error(`the judged project lost the draft source ${draft.name}`);
@@ -88,5 +105,5 @@ export function judgeDraftSource(
     ...warning,
     source: source.name,
   }));
-  return { ok: true, questionSet, warnings };
+  return { ok: true, questionSet, warnings, config: judged };
 }

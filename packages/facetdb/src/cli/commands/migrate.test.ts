@@ -231,6 +231,11 @@ async function runSeeingPrompts(
       },
       examples: { read: () => Promise.reject(new Error("no example projects")) },
       terminal: NO_TERMINAL,
+      configFiles: {
+        read: () => Promise.reject(new Error("no config file door")),
+        replace: () => Promise.reject(new Error("no config file door")),
+        gitState: () => Promise.reject(new Error("no config file door")),
+      },
     },
     COMMANDS,
   );

@@ -11,6 +11,7 @@ import {
   type ModelProvider,
   type OpenConnector,
   type PassReport,
+  type QuestionSet,
   reviewsOf,
   type SpendingGate,
   type Worker,
@@ -21,6 +22,7 @@ import {
   createOutagePolicy,
   createResilientProvider,
   DEFAULT_MAX_MS,
+  type OutagePolicyHandle,
 } from "@facetdb/model";
 import {
   type AlertFailure,
@@ -34,6 +36,7 @@ import {
   type TableFacts,
 } from "@facetdb/server";
 import {
+  type ConfigFiles,
   judgeDraftSource,
   type ProjectConfig,
   type SourceConfig,
@@ -57,6 +60,7 @@ import {
   storeSharedFor,
   storeSourceId,
 } from "../store-door.ts";
+import { configFileDoor, createFleet, reviewLookups, type SourceLoop } from "./config-reload.ts";
 import { tableFacts } from "./dashboard-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -76,7 +80,10 @@ import {
  * limit), the project's spending gate and its alerts, and beats the heartbeat `facetdb doctor`
  * reads. Next to the loops it delivers the webhook outbox and serves the HTTP surface (the check
  * API) on `--port` unless `--no-http`. SIGINT stops it after the pass in hand, so every claim is
- * acked or released before it exits; `--once` answers what is queued and exits.
+ * acked or released before it exits; `--once` answers what is queued and exits. The sources run as
+ * a fleet (config-reload.ts): when the studio's Apply has written facetdb.config.ts, the worker
+ * reloads it, a changed source restarting after its batch in hand under its new question-set
+ * version.
  */
 
 /**
@@ -127,13 +134,26 @@ export type WorkerParts = {
   /** The store's own database, for the webhook outbox. */
   readonly storeClient: StoreClient;
   /**
-   * Opens a table source's connector through its engine, under the worker login; the caller
-   * closes it. `worker` checked every source's URL before the store opened; `dev` is in-process.
+   * Opens a table source's connector through its engine, under the worker login; the caller closes
+   * it. `worker` checked every source's URL before the store opened; `dev` is in-process. `config`
+   * is the project the source is read from: after a reload, the new one.
    */
   readonly openTable: (
     source: SourceConfig,
     options: { readonly workerId: string; readonly maxConnections: number },
+    config: ProjectConfig,
   ) => Promise<OpenConnector>;
+  /**
+   * The config file the studio's Apply writes and the worker reloads: absent in `dev`, whose config
+   * is not the file's alone (its sources are the installed ones, its model may be `--model-url`'s).
+   */
+  readonly configFile?: {
+    /** As `--config` names it. */
+    readonly path: string;
+    /** The loader over that file; `quiet` keeps its wording warnings unprinted. */
+    readonly load: (options?: { readonly quiet?: boolean }) => Promise<ProjectConfig>;
+    readonly files: ConfigFiles;
+  };
   /**
    * How a table source's keys are written in the log lines: its engine's key text for its table, so
    * MongoDB's `n:1` prints `answered 1`, and a collection whose marker records string `_id`s prints
@@ -188,15 +208,9 @@ export function parsePort(text: string): number {
   return port;
 }
 
-/** One source's loop, with what it holds open. */
-type Running = {
+/** What one source's loops answered over the run, its restarts after a reload included. */
+type Tally = {
   readonly source: string;
-  readonly worker: Worker;
-  /** What the studio's preview and test read through: `scan` for the newest rows, `read` for the reviewed ones. */
-  readonly connector: Pick<Connector, "scan" | "read">;
-  /** How its keys print; undefined where a key is its own text. */
-  readonly keyText: KeyText | undefined;
-  close(): Promise<void>;
   answered: number;
   /** Queued again at a state already answered under this version: written again, no model call. */
   alreadyAnswered: number;
@@ -241,21 +255,6 @@ export async function runWorkers(
   const idOf = (source: SourceConfig) => storeSourceId(project.id, source.name);
   const spending: SpendingGate = projectSpending(config, store, alerts, clock, project.id);
 
-  /** The question-set version each source runs under, recorded once at start. */
-  const versions = new Map<string, number>();
-
-  /**
-   * One source's worker. The loop's worker carries the alerts and the outage policy; a check call's
-   * worker (one record, `forRecord`) leaves both to the loop, which answers the record if it fails.
-   */
-  function versionOf(source: SourceConfig): number {
-    const version = versions.get(source.name);
-    if (version === undefined) {
-      throw new Error(`the source ${source.name} was not started by this worker`);
-    }
-    return version;
-  }
-
   /**
    * The actions a source runs after a decision: the worker's own and a reviewer's decision in the
    * studio run these same ones. None are wired yet (plugin actions come with plugins).
@@ -264,8 +263,18 @@ export async function runWorkers(
     return [];
   }
 
-  function workerFor(source: SourceConfig, connector: Connector, loop: boolean): Worker {
-    const version = versionOf(source);
+  /**
+   * One source's worker, under the question set and version its loop runs. The loop's worker
+   * carries the alerts and `outage`, the loop's outage policy; a check call's worker (one record,
+   * `forRecord`, no policy) leaves both to the loop, which answers the record if it fails.
+   */
+  function workerFor(
+    source: SourceConfig,
+    questionSet: QuestionSet,
+    version: number,
+    connector: Connector,
+    outage: OutagePolicyHandle | undefined,
+  ): Worker {
     return createWorker({
       connector,
       provider,
@@ -278,16 +287,16 @@ export async function runWorkers(
         ...DEFAULT_WORKER_LIMITS,
         ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
       },
-      questionSet: questionSetOf(config, source),
+      questionSet,
       version,
-      ...(loop
+      ...(outage !== undefined
         ? {
             alerts: alerts.signals({
               project: project.id,
               source: source.name,
               link: "https://docs.facetdb.dev/fix/worker",
             }),
-            outage: createOutagePolicy({ onOutage: source.onOutage, clock }),
+            outage,
             // The loop's passes fill the run log; a check call's one record is not a pass.
             runs: { log: store.runs, source: idOf(source) },
           }
@@ -296,75 +305,145 @@ export async function runWorkers(
     });
   }
 
-  async function start(source: SourceConfig, kind: "api" | "plugin"): Promise<void> {
+  /**
+   * Registers a source and records its question set: a new version only when the set's content
+   * changed (`store.questionSets.record`), at start and when a reload restarts it.
+   */
+  async function start(
+    source: SourceConfig,
+    kind: "api" | "plugin",
+    questionSet: QuestionSet,
+  ): Promise<number> {
     await store.ensureSource({ projectId: project.id, name: source.name, kind });
-    const recorded = await store.questionSets.record(idOf(source), questionSetOf(config, source));
-    versions.set(source.name, recorded.version);
+    const recorded = await store.questionSets.record(idOf(source), questionSet);
     if (source.actions.length > 0) {
       print(
         `note: ${source.name} lists ${source.actions.length} action(s); plugin actions run once plugins are resolved (a later version), the answer columns are written meanwhile`,
       );
     }
+    return recorded.version;
   }
 
-  const running: Running[] = [];
-  /** Each source's whole connector by its store id: the review endpoints read, write and re-check through it. */
-  const connectors = new Map<string, Connector>();
-  const apiSources: {
-    readonly name: string;
-    readonly fields: readonly string[];
-  }[] = [];
+  /** One source's loop: its version recorded, its connector opened, its worker built. */
+  async function openLoop(source: SourceConfig, from: ProjectConfig): Promise<SourceLoop> {
+    const questionSet = questionSetOf(from, source);
+    // The loop's own policy, kept on the loop so a restart hands its held records on.
+    const outage = createOutagePolicy({ onOutage: source.onOutage, clock });
+    if (source.api) {
+      const version = await start(source, "api", questionSet);
+      const connector = store.connector({ sourceId: idOf(source), fields: source.read, workerId });
+      return {
+        source,
+        questionSet,
+        version,
+        worker: workerFor(source, questionSet, version, connector, outage),
+        connector,
+        keyText: undefined,
+        outage,
+        close: () => Promise.resolve(),
+      };
+    }
+    const connector = await parts.openTable(
+      source,
+      { workerId, maxConnections: WORKER_CONNECTIONS },
+      from,
+    );
+    // Its log and versions are kept in the store under the source's name, registered as a
+    // plugin-kind source, as backfill does (the store has no third kind).
+    try {
+      const version = await start(source, "plugin", questionSet);
+      return {
+        source,
+        questionSet,
+        version,
+        worker: workerFor(source, questionSet, version, connector, outage),
+        connector,
+        keyText: await parts.keyTextOf?.(source),
+        outage,
+        close: () => connector.close(),
+      };
+    } catch (error) {
+      await connector.close();
+      throw error;
+    }
+  }
+
+  /** What each source answered over the run, by name, across its restarts. */
+  const tallies = new Map<string, Tally>();
+  const tallyOf = (name: string): Tally => {
+    const known = tallies.get(name);
+    if (known !== undefined) {
+      return known;
+    }
+    const made = { source: name, answered: 0, alreadyAnswered: 0, failed: 0 };
+    tallies.set(name, made);
+    return made;
+  };
+  const tally = (loop: SourceLoop) => (report: PassReport) => {
+    const entry = tallyOf(loop.source.name);
+    entry.answered += report.written.length + report.skipped.length;
+    entry.alreadyAnswered += report.alreadyAnswered.length;
+    entry.failed += report.failures.length;
+    // Keys as the user writes them, the form `explain` reads back.
+    const shown = (keys: readonly string[]) =>
+      keys.map((key) => keyWords(loop.keyText, key)).join(", ");
+    if (report.written.length > 0) {
+      print(`${entry.source}: answered ${shown(report.written)}`);
+    }
+    if (report.alreadyAnswered.length > 0) {
+      print(
+        `${entry.source}: already answered ${shown(report.alreadyAnswered)} at this state, so the model was not asked again`,
+      );
+    }
+    for (const failure of report.failures) {
+      const message =
+        failure.error instanceof Error ? failure.error.message : String(failure.error);
+      print(
+        failure.stage === "log"
+          ? `${entry.source}: the decision log could not be read: ${message}`
+          : `${entry.source}: ${failure.key === null ? "the pass" : keyWords(loop.keyText, failure.key)} failed at ${failure.stage}: ${message}`,
+      );
+    }
+  };
+
+  /** A table source's facts for the dashboard, made once per source (its doctor's cache with them). */
+  const facts = new Map<string, TableFacts>();
+  const factsOf = (source: SourceConfig): TableFacts => {
+    const known = facts.get(source.name) ?? parts.tableFacts(source);
+    facts.set(source.name, known);
+    return known;
+  };
+
+  // The sources as one fleet: every loop under its own stop, so a reload after Apply restarts the
+  // changed ones and leaves the others running.
+  const fleet = createFleet({
+    open: openLoop,
+    load: () => {
+      if (parts.configFile === undefined) {
+        return Promise.reject(new Error("this worker has no config file to reload"));
+      }
+      return parts.configFile.load();
+    },
+    beat: (source) =>
+      alerts
+        .signals({ project: project.id, source, link: "https://docs.facetdb.dev/fix/worker" })
+        .beat(),
+    clock,
+    print,
+    onPass: tally,
+  });
+  // Apply writes the file only for a worker that runs until stopped and reads the file as it is.
+  const configFile = options.once ? undefined : parts.configFile;
   let listener: HttpListener | undefined;
   try {
-    for (const source of config.sources) {
-      if (source.api) {
-        await start(source, "api");
-        const connector = store.connector({
-          sourceId: idOf(source),
-          fields: source.read,
-          workerId,
-        });
-        const worker = workerFor(source, connector, true);
-        connectors.set(idOf(source), connector);
-        apiSources.push({ name: source.name, fields: source.read });
-        running.push({
-          source: source.name,
-          worker,
-          connector,
-          keyText: undefined,
-          close: () => Promise.resolve(),
-          answered: 0,
-          alreadyAnswered: 0,
-          failed: 0,
-        });
-        continue;
-      }
-      const connector = await parts.openTable(source, {
-        workerId,
-        maxConnections: WORKER_CONNECTIONS,
-      });
-      // Its log and versions are kept in the store under the source's name, registered as a
-      // plugin-kind source, as backfill does (the store has no third kind).
-      let keyText: KeyText | undefined;
-      try {
-        await start(source, "plugin");
-        keyText = await parts.keyTextOf?.(source);
-      } catch (error) {
-        await connector.close();
-        throw error;
-      }
-      connectors.set(idOf(source), connector);
-      running.push({
-        source: source.name,
-        worker: workerFor(source, connector, true),
-        connector,
-        keyText,
-        close: () => connector.close(),
-        answered: 0,
-        alreadyAnswered: 0,
-        failed: 0,
-      });
+    await fleet.open(config);
+    for (const loop of fleet.loops()) {
+      tallyOf(loop.source.name);
     }
+    const apiSources = fleet
+      .loops()
+      .filter((loop) => loop.source.api)
+      .map((loop) => ({ name: loop.source.name, fields: loop.source.read }));
 
     const outbox = createOutbox({
       client: parts.storeClient,
@@ -405,23 +484,28 @@ export async function runWorkers(
         log: (line) => print(line),
         worker: {
           forRecord: (projectId, name, key) => {
-            const source = config.sources.find(
-              (candidate) => candidate.name === name && candidate.api,
-            );
-            if (source === undefined || projectId !== project.id) {
+            const loop = fleet.loop(name);
+            if (loop === undefined || !loop.source.api || projectId !== project.id) {
               throw new Error(`the project ${projectId} has no API source named ${name}`);
             }
             const connector = store.connector({
-              sourceId: idOf(source),
-              fields: source.read,
+              sourceId: idOf(loop.source),
+              fields: loop.source.read,
               workerId,
             });
-            return workerFor(source, onlyRecord(connector, key), false);
+            return workerFor(
+              loop.source,
+              loop.questionSet,
+              loop.version,
+              onlyRecord(connector, key),
+              undefined,
+            );
           },
         },
         clock,
         // The dashboard's Home and Sources: the store's figures through the worker's own store
-        // client, and each source as only this package knows it.
+        // client, and each source as only this package knows it. Read on every request, so a
+        // reload's versions show.
         storeDatabase: parts.storeClient,
         dashboard: {
           projectId: project.id,
@@ -429,55 +513,65 @@ export async function runWorkers(
             config.spendingCap === undefined
               ? undefined
               : { inputTokens: config.spendingCap, onCapReached: config.onCapReached },
-          sources: config.sources.map((source) => ({
-            name: source.name,
-            read: source.read,
-            questions: source.questions.length,
-            version: versionOf(source),
-            table: source.api ? undefined : parts.tableFacts(source),
-          })),
+          get sources() {
+            return fleet.loops().map((loop) => ({
+              name: loop.source.name,
+              read: loop.source.read,
+              questions: loop.questionSet.questions.length,
+              version: loop.version,
+              table: loop.source.api ? undefined : factsOf(loop.source),
+            }));
+          },
         },
-        // The review endpoints: the store's queue, and each source's log, connector, actions (none
-        // yet, as the workers hold none) and question set in force.
+        // The review endpoints: the store's queue, and per source the log, the connector, the
+        // actions and the question set and version of the loop in force, read on every call
+        // (config-reload.ts, `reviewLookups`).
         review: {
           queue: store.reviews,
           sources: config.sources.map((source) => source.name),
-          log: new Map(config.sources.map((source) => [idOf(source), store.log(idOf(source))])),
-          connectors,
-          actions: new Map(config.sources.map((source) => [idOf(source), actionsOf(source)])),
-          questionSets: new Map(
-            config.sources.map((source) => [
-              idOf(source),
-              { questionSet: questionSetOf(config, source), version: versionOf(source) },
-            ]),
-          ),
+          ...reviewLookups(fleet, {
+            idOf: (name) => storeSourceId(project.id, name),
+            log: (name) => store.log(storeSourceId(project.id, name)),
+            actionsOf,
+          }),
           clock,
         },
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
-        // The studio's door to the configuration: the loader's export and judgement, which only
-        // this package has; applying a draft is not built yet.
+        // The studio's door to the configuration: the loader's export and judgement of the file as
+        // last loaded, which only this package has, and Apply's write and reload.
         config: {
           projectId: project.id,
-          json: () => toProjectJson(config),
-          validate: (draft) => judgeDraftSource(config, draft, deps.env),
+          json: () => toProjectJson(fleet.config()),
+          validate: (draft) => judgeDraftSource(fleet.config(), draft, deps.env),
+          ...(configFile === undefined
+            ? {}
+            : {
+                file: configFileDoor({
+                  path: configFile.path,
+                  files: configFile.files,
+                  load: () => configFile.load({ quiet: true }),
+                  env: deps.env,
+                  reload: () => fleet.reload(),
+                }),
+              }),
         },
         // A preview reads a running source through the connector its loop holds, asks through the
         // workers' provider (backoff and the in-flight limit) and admits under their spending gate.
         preview: (name) => {
-          const source = config.sources.find((candidate) => candidate.name === name);
-          const entry = running.find((candidate) => candidate.source === name);
-          if (source === undefined || entry === undefined) {
+          const loop = fleet.loop(name);
+          if (loop === undefined) {
             return undefined;
           }
+          const { source } = loop;
           const maxStateTokens =
             source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens };
           return {
             read: source.read,
             where: source.where,
-            keyText: entry.keyText,
+            keyText: loop.keyText,
             preview: createPreviewService({
-              connector: entry.connector,
+              connector: loop.connector,
               provider,
               spending,
               log: (line) => print(`${name}: preview: ${line}`),
@@ -486,9 +580,9 @@ export async function runWorkers(
             }).preview,
             // The test's "now" is what this worker runs; its reviewed records and the answers they
             // were given are in the source's log.
-            current: questionSetOf(config, source),
+            current: loop.questionSet,
             testQuestionSet: createQuestionTestService({
-              connector: entry.connector,
+              connector: loop.connector,
               decisions: store.log(idOf(source)),
               provider,
               spending,
@@ -502,8 +596,10 @@ export async function runWorkers(
         // explain` words, by the project-scoped source id.
         decisions: {
           projectId: project.id,
-          sources: config.sources.map((source) => source.name),
-          keyText: (name) => running.find((entry) => entry.source === name)?.keyText,
+          get sources() {
+            return fleet.loops().map((loop) => loop.source.name);
+          },
+          keyText: (name) => fleet.loop(name)?.keyText,
           store: {
             search: (search) => store.searchDecisions(search),
             history: (sourceId, key) => store.log(sourceId).history(key),
@@ -518,39 +614,13 @@ export async function runWorkers(
       );
     }
 
-    const tally = (entry: Running) => (report: PassReport) => {
-      entry.answered += report.written.length + report.skipped.length;
-      entry.alreadyAnswered += report.alreadyAnswered.length;
-      entry.failed += report.failures.length;
-      // Keys as the user writes them, the form `explain` reads back.
-      const shown = (keys: readonly string[]) =>
-        keys.map((key) => keyWords(entry.keyText, key)).join(", ");
-      if (report.written.length > 0) {
-        print(`${entry.source}: answered ${shown(report.written)}`);
-      }
-      if (report.alreadyAnswered.length > 0) {
-        print(
-          `${entry.source}: already answered ${shown(report.alreadyAnswered)} at this state, so the model was not asked again`,
-        );
-      }
-      for (const failure of report.failures) {
-        const message =
-          failure.error instanceof Error ? failure.error.message : String(failure.error);
-        print(
-          failure.stage === "log"
-            ? `${entry.source}: the decision log could not be read: ${message}`
-            : `${entry.source}: ${failure.key === null ? "the pass" : keyWords(entry.keyText, failure.key)} failed at ${failure.stage}: ${message}`,
-        );
-      }
-    };
-
     if (options.once) {
-      for (const entry of running) {
-        const onPass = tally(entry);
+      for (const loop of fleet.loops()) {
+        const onPass = tally(loop);
         // Pass after pass until the queue is empty, or a pass settles nothing (a record that keeps
         // failing goes back to the queue; it is not asked again in the same run).
         for (;;) {
-          const report = await entry.worker.runOnce();
+          const report = await loop.worker.runOnce();
           onPass(report);
           const settled =
             report.written.length +
@@ -568,22 +638,22 @@ export async function runWorkers(
       printAlertFailures(await outbox.deliverDue(clock.now()), print);
     } else {
       // One loop failing (its database gone, say) stops the others too, so every claim is settled
-      // before the connectors close; the first failure is what the run reports.
+      // before the connectors close; the first failure is what the run reports (the fleet's run
+      // throws it once every loop has stopped).
       const stopped = deps.stopSignal();
       const stopAll = new AbortController();
       const signal = AbortSignal.any([stopped, stopAll.signal]);
-      const untilStopped = (loop: Promise<void>) =>
-        loop.catch((error: unknown) => {
-          stopAll.abort();
-          throw error;
-        });
+      const names = fleet.loops().map((loop) => loop.source.name);
       print(
-        running.length === 0
+        names.length === 0
           ? "Worker running with no source to answer (none is installed). Press Ctrl+C to stop."
-          : `Worker running for ${running.map((entry) => entry.source).join(", ")}. Press Ctrl+C to stop.`,
+          : `Worker running for ${names.join(", ")}. Press Ctrl+C to stop.`,
       );
       const loops = await Promise.allSettled([
-        ...running.map((entry) => untilStopped(entry.worker.run(signal, tally(entry)))),
+        fleet.run(signal).catch((error: unknown) => {
+          stopAll.abort();
+          throw error;
+        }),
         deliverUntil(signal, () => outbox.deliverDue(clock.now()), clock, print),
       ]);
       const failed = loops.find((loop) => loop.status === "rejected");
@@ -592,21 +662,19 @@ export async function runWorkers(
       }
       print("Stopped: every claim was settled.");
     }
-    for (const entry of running) {
+    for (const entry of tallies.values()) {
       print(
         `${entry.source}: answered ${entry.answered}, already answered ${entry.alreadyAnswered}, failed ${entry.failed}`,
       );
     }
   } finally {
     await listener?.close();
-    for (const entry of running) {
-      await entry.close();
-    }
+    await fleet.close();
   }
   return {
     ok: true,
     http: listener === undefined ? null : { host: options.host, port: listener.port },
-    sources: running.map(({ source, answered, alreadyAnswered, failed }) => ({
+    sources: [...tallies.values()].map(({ source, answered, alreadyAnswered, failed }) => ({
       source,
       answered,
       alreadyAnswered,
@@ -714,7 +782,13 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     const tables = new Map<
       string,
       {
-        readonly open: (workerId: string, maxConnections: number) => Promise<OpenConnector>;
+        /** Under the source's question set in `from`: a reload opens it anew with the new one. */
+        readonly open: (
+          source: SourceConfig,
+          from: ProjectConfig,
+          workerId: string,
+          maxConnections: number,
+        ) => Promise<OpenConnector>;
         readonly keyText: () => Promise<KeyText | undefined>;
         readonly facts: TableFacts;
       }
@@ -741,14 +815,15 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
           source,
           deps: { clock: deps.clock, allowInsecure, storeShared },
         }),
-        open: (workerId, maxConnections) =>
-          openConnector(engine, target, url, {
-            clock: deps.clock,
-            allowInsecure,
-            storeShared,
-            workerId,
-            maxConnections,
-          }),
+        // The connection is the one checked above: a reload restarts a source only when its
+        // table, database and install are unchanged (config-reload.ts), so only the question set moves.
+        open: (opened, from, workerId, maxConnections) =>
+          openConnector(
+            engine,
+            engineTarget(from, { source: opened, ...splitTable(source.table ?? "") }, project),
+            url,
+            { clock: deps.clock, allowInsecure, storeShared, workerId, maxConnections },
+          ),
       });
     }
     // One pool for the store, the outbox, and every table source on the store's own database (the
@@ -773,12 +848,18 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
           project,
           store,
           storeClient,
-          openTable: (source, open) => {
+          openTable: (source, open, from) => {
             const table = tables.get(source.name);
             if (table === undefined) {
               throw new Error(`the source ${source.name} reads no table`);
             }
-            return table.open(open.workerId, open.maxConnections);
+            return table.open(source, from, open.workerId, open.maxConnections);
+          },
+          // Apply writes the file this worker loaded, and the worker reloads it.
+          configFile: {
+            path: options.config,
+            load: (load) => deps.loadConfig(options.config, load),
+            files: deps.configFiles,
           },
           keyTextOf: async (source) => tables.get(source.name)?.keyText(),
           tableFacts: (source) => {

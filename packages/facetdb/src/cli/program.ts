@@ -3,7 +3,7 @@ import type { BackfillDeps, Clock, DatabaseEngine, ModelProvider } from "@facetd
 import type { SqlConnect, Store } from "@facetdb/postgres";
 import type { Peer, WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
-import type { ProjectConfig, SourceConfig } from "../config/index.ts";
+import type { ConfigFiles, ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
 import { NO_TERMINAL, type ReviewTerminal } from "./terminal.ts";
 
@@ -148,8 +148,19 @@ export type CliDeps = {
   /** The directory the command runs in; its name is the project's name for now (see `projectRef`). */
   readonly projectDir: string;
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** Loads and validates the config file at a path relative to the project directory. */
-  readonly loadConfig: (path: string) => Promise<ProjectConfig>;
+  /**
+   * Loads and validates the config file at a path relative to the project directory; `quiet` keeps
+   * its wording warnings unprinted (Apply's diff loads the file on every look).
+   */
+  readonly loadConfig: (
+    path: string,
+    options?: { readonly quiet?: boolean },
+  ) => Promise<ProjectConfig>;
+  /**
+   * The config file as Apply reads, judges with `git status` and replaces it: the disk and the
+   * `git` command in the process, a fake in a test.
+   */
+  readonly configFiles: ConfigFiles;
   /**
    * The database engines a source's connection string picks from by its scheme (`cli/engines.ts`),
    * each loaded on first use only, so a driver no source needs is never imported: the composition
@@ -476,7 +487,8 @@ type OptionalInTests =
   | "random"
   | "embedded"
   | "examples"
-  | "terminal";
+  | "terminal"
+  | "configFiles";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -562,6 +574,11 @@ export async function runInProcess(
         read: () => Promise.reject(new Error("this test gave the command no example projects")),
       },
       terminal: NO_TERMINAL,
+      configFiles: {
+        read: () => Promise.reject(new Error("this test gave the command no config file")),
+        replace: () => Promise.reject(new Error("this test gave the command no config file")),
+        gitState: () => Promise.reject(new Error("this test gave the command no config file")),
+      },
       ...rest,
       io,
     },

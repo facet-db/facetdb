@@ -49,10 +49,89 @@ export type DraftCheck =
 export type ProjectConfigDoor = {
   /** The project the worker serves; a key of another project in the same store sees none of it. */
   readonly projectId: string;
-  /** The project JSON (`toProjectJson` of the loaded config): no connection string is ever in it. */
+  /** The project JSON (`toProjectJson` of the config in force): no connection string is ever in it. */
   json(): unknown;
   /** Judges a draft source, merged over the source of that name or added as a new one. */
   validate(draft: SourceDraft): DraftCheck;
+  /**
+   * Apply: the diff a draft makes to `facetdb.config.ts`, and the write and the worker's reload.
+   * Absent where nothing may write the file: `facetdb dev` and `facetdb worker --once`.
+   */
+  readonly file?: ConfigFileDoor;
+};
+
+/** A refusal in plain words, with what to do about it. */
+export type Words = { readonly message: string; readonly fix: string };
+
+/** What happened to one source when the worker reloaded the config. */
+export type SourceReload = {
+  readonly source: string;
+  /**
+   * `unchanged` keeps running; `restarted` runs the new question set from its next batch; `stopped`
+   * was removed from the file; `not-started` is new and needs `facetdb migrate` and a restart;
+   * `kept` changed in a way that needs `facetdb migrate` or a restart, and runs what it ran;
+   * `failed` could not be opened anew and runs what it ran.
+   */
+  readonly outcome: "unchanged" | "restarted" | "stopped" | "not-started" | "kept" | "failed";
+  /** The question-set version it answers under now; null when it does not run. */
+  readonly version: number | null;
+  /** What happened and what to do, in plain words; null when there is nothing to say. */
+  readonly message: string | null;
+};
+
+/** The worker's reload of the written file: per source, or the reason the file did not load. */
+export type ReloadSummary =
+  | {
+      readonly loaded: true;
+      readonly sources: readonly SourceReload[];
+      /** Changes to the project as a whole, which take a restart of the worker. */
+      readonly notes: readonly string[];
+    }
+  | ({ readonly loaded: false } & Words);
+
+/** The diff a draft would make, shown before anything is written. */
+export type FileDiff =
+  | {
+      readonly kind: "planned";
+      /** The config file, as the worker was started with it (`--config`). */
+      readonly path: string;
+      /** Unified, `--- a/facetdb.config.ts` first; empty when the draft changes nothing. */
+      readonly diff: string;
+      readonly changed: boolean;
+      /** Sent back to confirm: names this exact change, so what is written is what was shown. */
+      readonly plan: string;
+      /** Why the write would be refused without `force` (git keeps no copy of what is there now). */
+      readonly uncommitted: Words | null;
+      readonly warnings: readonly DraftWarning[];
+    }
+  | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
+  /** The file is missing, is a link, or does not load as it is now. */
+  | ({ readonly kind: "unreadable" } & Words);
+
+/** How a confirmed apply went. */
+export type FileApply =
+  | {
+      readonly kind: "applied";
+      readonly path: string;
+      readonly diff: string;
+      readonly reload: ReloadSummary;
+    }
+  | { readonly kind: "unchanged"; readonly path: string }
+  /** The file or the draft changed since the diff was made: nothing was written. */
+  | { readonly kind: "stale" }
+  /** The written file did not load, so the text it replaced was put back: nothing changed. */
+  | ({ readonly kind: "reverted" } & Words)
+  | ({ readonly kind: "uncommitted" } & Words)
+  | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
+  | ({ readonly kind: "unreadable" } & Words);
+
+/** The CLI's door to `facetdb.config.ts`: the loader, the exporter, git and the reload are its. */
+export type ConfigFileDoor = {
+  diff(draft: SourceDraft): Promise<FileDiff>;
+  apply(
+    draft: SourceDraft,
+    options: { readonly plan: string; readonly force: boolean },
+  ): Promise<FileApply>;
 };
 
 /** A running source the preview can read: the fields its connector reads, and the preview over it. */
@@ -130,7 +209,21 @@ export type ConfigService = {
     draft: SourceDraft,
     options: { readonly sample: number; readonly estimateOnly: boolean },
   ): Promise<TestOutcome>;
+  /** The diff a draft makes to the config file; nothing is written. */
+  diff(projectId: string, draft: SourceDraft): Promise<FileOutcome<FileDiff>>;
+  /** Writes the file the confirmed plan names, and the worker reloads it. */
+  apply(
+    projectId: string,
+    draft: SourceDraft,
+    options: { readonly plan: string; readonly force: boolean },
+  ): Promise<FileOutcome<FileApply>>;
 };
+
+/** A file door's outcome, or why this worker has none to ask. */
+export type FileOutcome<Outcome> =
+  | Outcome
+  | { readonly kind: "unknown_project" }
+  | { readonly kind: "unavailable" };
 
 export type ConfigServiceDeps = {
   readonly config: ProjectConfigDoor;
@@ -288,6 +381,24 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
         }
         throw error;
       }
+    },
+
+    diff(projectId, draft) {
+      if (!ours(projectId)) {
+        return Promise.resolve({ kind: "unknown_project" });
+      }
+      return config.file === undefined
+        ? Promise.resolve({ kind: "unavailable" })
+        : config.file.diff(draft);
+    },
+
+    apply(projectId, draft, options) {
+      if (!ours(projectId)) {
+        return Promise.resolve({ kind: "unknown_project" });
+      }
+      return config.file === undefined
+        ? Promise.resolve({ kind: "unavailable" })
+        : config.file.apply(draft, options);
     },
   };
 }

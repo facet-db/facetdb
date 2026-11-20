@@ -58,6 +58,8 @@ const NO_CONFIG: ConfigService = {
   },
   preview: () => Promise.reject(new Error("these tests preview nothing")),
   test: () => Promise.reject(new Error("these tests test nothing")),
+  diff: () => Promise.reject(new Error("these tests apply nothing")),
+  apply: () => Promise.reject(new Error("these tests apply nothing")),
 };
 
 /** A reader over `total` runs of `listings`, newest first a second apart, noting every query. */

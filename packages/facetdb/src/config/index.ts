@@ -1,3 +1,12 @@
+export type {
+  ApplyPlan,
+  ApplyResult,
+  ConfigFileRead,
+  ConfigFiles,
+  GitState,
+  PlanResult,
+} from "./apply.ts";
+export { apply, planApply, uncommittedWords } from "./apply.ts";
 export type { DraftJudgement, SourceDraft } from "./draft.ts";
 export { judgeDraftSource } from "./draft.ts";
 export type {
@@ -23,5 +32,6 @@ export type { LoadedConfig, LoadOptions } from "./load.ts";
 export { loadConfig } from "./load.ts";
 export type { ConfigIssue, ConfigParseResult } from "./schema.ts";
 export { ConfigError, parseProjectConfig } from "./schema.ts";
+export { unifiedDiff } from "./text-diff.ts";
 export type { ConfigWarning, WordingWarning, WordingWarningCode } from "./warnings.ts";
 export { formatWarnings, wordingWarnings } from "./warnings.ts";

@@ -140,6 +140,7 @@ describe("facetdb users add", () => {
       embedded: { open: unused, wipe: unused },
       examples: { read: unused },
       terminal: NO_TERMINAL,
+      configFiles: { read: unused, replace: unused, gitState: unused },
     };
     expect(await runProgram(["users", "add", "maya"], deps, COMMANDS)).toBe(0);
     expect(asked).toEqual([

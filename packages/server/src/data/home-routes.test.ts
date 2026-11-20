@@ -74,6 +74,8 @@ const NO_CONFIG: ConfigService = {
   },
   preview: () => Promise.reject(new Error("these tests preview nothing")),
   test: () => Promise.reject(new Error("these tests test nothing")),
+  diff: () => Promise.reject(new Error("these tests apply nothing")),
+  apply: () => Promise.reject(new Error("these tests apply nothing")),
 };
 
 const ok = (name: string, detail: string): DoctorCheck => ({ name, status: "ok", detail });

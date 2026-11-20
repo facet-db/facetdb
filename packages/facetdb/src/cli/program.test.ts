@@ -151,6 +151,11 @@ describe("the facetdb program", () => {
         },
         examples: { read: () => Promise.reject(new Error("unused")) },
         terminal: NO_TERMINAL,
+        configFiles: {
+          read: () => Promise.reject(new Error("unused")),
+          replace: () => Promise.reject(new Error("unused")),
+          gitState: () => Promise.reject(new Error("unused")),
+        },
       },
       COMMANDS,
       { code: 0 },

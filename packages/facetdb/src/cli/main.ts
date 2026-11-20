@@ -29,6 +29,7 @@ import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/ind
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
 import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
+import { diskConfigFiles, gitCommand } from "./config-files.ts";
 import { diskEmbedded } from "./embedded.ts";
 import { engineFor, lazyEngine, openConnector } from "./engines.ts";
 import { diskExamples } from "./examples.ts";
@@ -349,14 +350,25 @@ export function processDeps(
   // One driver for the store and the Postgres engine, its pools shared by URL: the worker's store
   // pool is lent to the engine's connector of a table on the store's own database (cli/pools.ts).
   const connect = sharePools(connectPostgres);
+  const workspace = diskWorkspace(projectDir, env);
   const deps: CliDeps = {
     io: processIo(output),
-    workspace: diskWorkspace(projectDir, env),
+    workspace,
     clock,
     projectDir,
     env,
-    loadConfig: async (path) =>
-      (await loadConfig(path, { projectDir, env, stderr: process.stderr })).config,
+    loadConfig: async (path, options) =>
+      (
+        await loadConfig(path, {
+          projectDir,
+          env,
+          stderr: process.stderr,
+          ...(options?.quiet === true ? { quiet: true } : {}),
+        })
+      ).config,
+    // Apply's door to facetdb.config.ts: read without following a link, replaced aside and renamed
+    // into place, judged by the git on this PATH.
+    configFiles: diskConfigFiles(projectDir, workspace, gitCommand(env)),
     // Each engine is made on first use for a source of its key only, so a driver no source needs is
     // never imported (later engines load their package here with `import()`). Never the default
     // `postgresEngine`: without PGHOST a hostless URL with a remote PGHOST would pass the TLS
