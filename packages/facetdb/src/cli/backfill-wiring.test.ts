@@ -58,6 +58,8 @@ describe("the backfill's wiring", () => {
           ask: () => Promise.reject(new Error("a whole-set run asks the model nothing")),
         },
         clock,
+        channels: [],
+        report: () => undefined,
       });
 
       const report = await createBackfill(deps).run({ onEstimate: () => true });

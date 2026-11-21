@@ -19,6 +19,7 @@ import {
   type TestEstimate,
 } from "@facetdb/core";
 import { createBackoff, createInFlightLimiter, createResilientProvider } from "@facetdb/model";
+import { bindChannels, deliveryFailureLine } from "../../plugin/index.ts";
 import { projectSpending } from "../backfill-wiring.ts";
 import { keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import { CliError, defineCommand, EXIT_USAGE, percent } from "../program.ts";
@@ -26,6 +27,7 @@ import { requireUsableStoreUrl, storeSharedFor, storeSourceId, storeUrlOf } from
 import {
   ALLOW_INSECURE_OPTION,
   loadProjectConfig,
+  pluginHostForAlerts,
   projectRef,
   questionSetOf,
   reachedOf,
@@ -312,9 +314,15 @@ export const testCommand = defineCommand<TestOptions>("test", {
       );
       try {
         // Made on the first request only, so a test that asks nothing needs no model key. The
-        // backoff and the in-flight limit are the worker's: a test is a thousand requests.
-        // A plugin's provider needs its plugin host, built here so a refusal comes before any row.
-        const plugins = await pluginHostForProvider(deps, config, options.config);
+        // backoff and the in-flight limit are the worker's: a test is a thousand requests. A
+        // plugin's provider needs its plugin host, built here so a refusal comes before any row.
+        // The alert channels need it too: a spending alert this run raises goes to them.
+        const plugins = await pluginHostForAlerts(
+          deps,
+          config,
+          options.config,
+          await pluginHostForProvider(deps, config, options.config),
+        );
         let provider: ModelProvider | undefined;
         const lazyProvider: ModelProvider = {
           ask: (request) => {
@@ -325,7 +333,21 @@ export const testCommand = defineCommand<TestOptions>("test", {
             return provider.ask(request);
           },
         };
-        const alerts = createAlerts({ store: store.alerts, clock: deps.clock, channels: [] });
+        const alerts = createAlerts({
+          store: store.alerts,
+          clock: deps.clock,
+          channels:
+            plugins === undefined
+              ? []
+              : bindChannels({
+                  config,
+                  host: plugins,
+                  env: deps.env,
+                  clock: deps.clock,
+                  stop: deps.stopSignal,
+                }),
+          report: (failure) => print(deliveryFailureLine(failure)),
+        });
         const service = createQuestionTestService({
           connector,
           decisions: store.log(sourceId),

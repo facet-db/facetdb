@@ -96,6 +96,15 @@ function record(
   };
 }
 
+/** What a channel of the rig answers beside its kind, name and address: as written, bound, never tried. */
+const UNTRIED = {
+  sends: "everything",
+  quiet: null,
+  bound: true,
+  delivering: null,
+  last: null,
+} as const;
+
 const ACCOUNTS: readonly ReviewerAccount[] = [
   { name: "sam", createdAt: new Date(NOW - 5 * HOUR) },
   { name: "maya", createdAt: new Date(NOW - 2 * HOUR) },
@@ -129,13 +138,24 @@ function rig(
       sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
       alerts: createAlertsService({
         projectId: options.alertsProject ?? PROJECT,
-        channels: () => options.channels ?? [],
-        fileChannels: () => options.fileChannels ?? options.channels ?? [],
+        // An address alone, as the config writes it: sends everything, no quiet hours, bound.
+        channels: () =>
+          (options.channels ?? []).map((address) => ({
+            address,
+            sends: "everything" as const,
+            bound: true,
+          })),
+        fileChannels: () =>
+          (options.fileChannels ?? options.channels ?? []).map((address) => ({
+            address,
+            sends: "everything" as const,
+          })),
         reads: {
           recentAlerts: (_project, limit) => {
             asked.push(limit);
             return Promise.resolve(history.slice(0, limit));
           },
+          lastDeliveries: () => Promise.resolve(new Map()),
         },
       }),
       access: createAccessService({
@@ -196,14 +216,17 @@ describe("GET /v1/alerts", () => {
     const { status, text, json } = await t.get("/v1/alerts");
 
     expect(status).toBe(200);
-    expect(json["channels"]).toEqual([
-      { kind: "slack", name: "#ops" },
-      { kind: "email", name: "ops@example.com" },
-      { kind: "webhook", name: null },
-      { kind: "slack", name: null },
-      { kind: "telegram", name: "-100123" },
-      { kind: "webhook", name: null },
-    ]);
+    // Every field of each channel: nothing beyond these is answered.
+    expect(json["channels"]).toEqual(
+      [
+        { kind: "slack", name: "#ops", address: "slack:#ops" },
+        { kind: "email", name: "ops@example.com", address: "email:ops@example.com" },
+        { kind: "webhook", name: null, address: null },
+        { kind: "slack", name: null, address: null },
+        { kind: "telegram", name: "-100123", address: "telegram:-100123" },
+        { kind: "webhook", name: null, address: null },
+      ].map((channel) => ({ ...channel, ...UNTRIED })),
+    );
     for (const secret of secrets) {
       expect(text).not.toContain(secret);
     }
@@ -228,7 +251,9 @@ describe("GET /v1/alerts", () => {
     });
     const { json, text } = await changed.get("/v1/alerts");
     expect(json["fileChannelsDiffer"]).toBe(true);
-    expect(json["channels"]).toEqual([{ kind: "slack", name: "#ops" }]);
+    expect(json["channels"]).toEqual([
+      { kind: "slack", name: "#ops", address: "slack:#ops", ...UNTRIED },
+    ]);
     expect(text).not.toContain("-100999");
   });
 
@@ -269,6 +294,7 @@ describe("GET /v1/alerts", () => {
         standing: { phase: "raised" },
         raisedBeforeHistory: false,
         delivered: true,
+        pending: false,
       },
       {
         at: "2026-11-04T22:10:00.000Z",
@@ -284,6 +310,7 @@ describe("GET /v1/alerts", () => {
         standing: { phase: "resolved", at: "2026-11-04T23:10:00.000Z" },
         raisedBeforeHistory: false,
         delivered: true,
+        pending: false,
       },
     ]);
   });

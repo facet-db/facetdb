@@ -20,6 +20,9 @@ export type {
 export { judgeDraftProject, judgeDraftSource } from "./draft.ts";
 export type {
   ActionCall,
+  AlertChannel,
+  AlertSends,
+  AlertsConfig,
   CaptureMode,
   ChoiceOptions,
   ConnectorChoice,
@@ -31,12 +34,23 @@ export type {
   ProjectConfig,
   ProjectInput,
   QuestionDraft,
+  QuietHours,
   ScoreOptions,
   SourceConfig,
   SourceInput,
   StorageMode,
 } from "./dsl.ts";
-export { actionCall, choice, env, facetdb, isEnvReference, noul, score } from "./dsl.ts";
+export {
+  actionCall,
+  channelAddressOf,
+  channelSendsOf,
+  choice,
+  env,
+  facetdb,
+  isEnvReference,
+  noul,
+  score,
+} from "./dsl.ts";
 export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";
 export type { LoadedConfig, LoadOptions, PluginVariable } from "./load.ts";

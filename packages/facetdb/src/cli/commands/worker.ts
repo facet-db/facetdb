@@ -57,9 +57,12 @@ import {
 import { VERSION } from "../../index.ts";
 import {
   actionSteps,
+  bindChannels,
+  channelsOf,
   checkPluginProvider,
   checkSourceActions,
   createActionRunner,
+  deliveryFailureLine,
   type PluginHost,
   PluginProviderError,
 } from "../../plugin/index.ts";
@@ -410,7 +413,22 @@ export async function runWorkers(
     backoff: createBackoff({ clock, random: deps.random }),
     limiter: createInFlightLimiter({ clock }),
   });
-  const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
+  // Every alert of this process goes to the channels the config names, bound to their plugins when
+  // the config loaded (`loadWorkerConfig` refused any it could not bind). A channel that fails is a
+  // printed line and a line of the alert's history, never a stopped pass. A reload keeps these
+  // until a restart (changing them live is not built yet).
+  const alerts = createAlerts({
+    store: store.alerts,
+    clock,
+    channels: bindChannels({
+      config,
+      host: parts.plugins,
+      env: deps.env,
+      clock,
+      stop: deps.stopSignal,
+    }),
+    report: (failure) => print(deliveryFailureLine(failure)),
+  });
   for (const note of store.migrationNotes) {
     print(`note: ${note}`);
   }
@@ -833,8 +851,8 @@ export async function runWorkers(
         // worker runs with (the config as it started; a reload keeps them until a restart), and the
         // ones the file names now, so the page can say they differ.
         host: options.host,
-        alertChannels: () => config.alerts?.channels ?? [],
-        fileAlertChannels: () => fleet.config().alerts?.channels ?? [],
+        alertChannels: () => channelsOf(config).map((channel) => ({ ...channel, bound: true })),
+        fileAlertChannels: () => channelsOf(fleet.config()),
         // The review endpoints: the store's queue, the sources the fleet runs now, and per source
         // the log, the connector, the actions and the question set and version of the loop in
         // force, all read on every call (config-reload.ts, `reviewLookups`).
@@ -1101,6 +1119,9 @@ export async function runWorkers(
     // A --once run that threw leaves no timer behind; its row stays (see above).
     onceBeats.abort();
     await onceBeating;
+    // A resolved message still on its way, before the store closes; a stop has already cut its
+    // delivery off, so this waits no longer than the channel's bound.
+    await alerts.drain();
     await listener?.close();
     // Before the connectors and the store close: every job's page in hand settled and saved.
     await jobs?.close();

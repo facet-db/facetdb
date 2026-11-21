@@ -8,7 +8,13 @@ import {
 import { requireUsableUrl } from "../engines.ts";
 import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
-import { ALLOW_INSECURE_OPTION, loadProjectConfig, singleTarget, sourceTable } from "./database.ts";
+import {
+  ALLOW_INSECURE_OPTION,
+  loadProjectConfig,
+  pluginHostForAlerts,
+  singleTarget,
+  sourceTable,
+} from "./database.ts";
 import { pluginHostForProvider } from "./model-provider.ts";
 
 /**
@@ -134,8 +140,14 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
     if (!options.dryRun && storeUrl !== undefined) {
       requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
     }
-    // A plugin's provider needs its plugin host, built as the worker builds it; no other does.
-    const plugins = await pluginHostForProvider(deps, config, options.config);
+    // A plugin's provider needs its plugin host, built as the worker builds it, and so do the alert
+    // channels the backfill's alerts go to; a config with neither builds none.
+    const plugins = await pluginHostForAlerts(
+      deps,
+      config,
+      options.config,
+      await pluginHostForProvider(deps, config, options.config),
+    );
     const setup = await deps.backfill(config, source, {
       dryRun: options.dryRun,
       ...(options.allowInsecure === true ? { allowInsecure: true } : {}),

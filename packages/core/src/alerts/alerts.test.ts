@@ -1,6 +1,6 @@
 import { FakeAlertStore, FakeChannel, FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import { type AlertScope, type BoundChannel, createAlerts } from "./alerts.ts";
+import { type AlertScope, type BoundChannel, createAlerts, RETRY_EVERY_MS } from "./alerts.ts";
 import {
   ALERT_KINDS,
   ALERT_SEVERITY,
@@ -101,13 +101,17 @@ describe("one alert per event per 30 minutes", () => {
     expect(working?.delivered).toHaveLength(1);
   });
 
-  it("tries again at the next raise when no channel took the message", async () => {
-    const { alerts, channel, store } = setup();
+  it("tries again at the next raise past the retry interval when no channel took the message", async () => {
+    const { alerts, channel, store, clock } = setup();
     channel.failNextWith(new Error("webhook 500"));
     const first = await alerts.raise(eventOf("worker_not_running"));
     expect(first.failures).toHaveLength(1);
     expect(store.history[0]?.delivered).toBe(false);
 
+    // Paced: within the retry interval a raise tries no channel and records nothing.
+    expect((await alerts.raise(eventOf("worker_not_running"))).status).toBe("suppressed");
+    expect(channel.delivered).toHaveLength(1);
+    clock.advance(RETRY_EVERY_MS);
     expect((await alerts.raise(eventOf("worker_not_running"))).status).toBe("sent");
     expect(channel.delivered).toHaveLength(2);
     expect((await alerts.raise(eventOf("worker_not_running"))).status).toBe("suppressed");
@@ -139,12 +143,16 @@ describe("resolution", () => {
   });
 
   it("keeps the alert active when no channel took the resolved message", async () => {
-    const { alerts, channel } = setup();
+    const { alerts, channel, clock } = setup();
     const event = eventOf("spending_paused");
     await alerts.raise(event);
     channel.failNextWith(new Error("slack 503"));
     const failed = await alerts.resolve(eventKey(event));
     expect(failed.failures).toHaveLength(1);
+    // Paced: no channel is tried again until the retry interval has passed.
+    expect(await alerts.resolve(eventKey(event))).toEqual({ status: "idle", failures: [] });
+    expect(channel.delivered).toHaveLength(2);
+    clock.advance(RETRY_EVERY_MS);
     expect((await alerts.resolve(eventKey(event))).status).toBe("resolved");
   });
 });
@@ -261,20 +269,29 @@ describe("the failure-rate window", () => {
     expect(reads).toBe(1);
   });
 
-  it("keeps resolving on healthy calls while no channel takes the resolved message", async () => {
+  it("keeps resolving on healthy calls, once per retry interval, while no channel takes the resolved message", async () => {
     const { clock, alerts, channel } = setup();
     await calls(alerts, clock, 0, 3);
     expect(channel.delivered).toHaveLength(1);
     clock.advance(5 * MINUTE);
     channel.failNextWith(new Error("slack 503"));
-    // The first healthy call's resolved message is refused, so the next one tries again.
+    // The first healthy call's resolved message is refused, off the call's path; the next calls
+    // within the retry interval try nothing.
+    await calls(alerts, clock, 2, 0);
+    await alerts.drain();
     await calls(alerts, clock, 2, 0);
     expect(
       channel.delivered.map((delivery) => delivery.message.text.startsWith("Resolved:")),
-    ).toEqual([false, true, true]);
-    // Taken the second time: the alert is resolved, and later healthy calls send nothing more.
+    ).toEqual([false, true]);
+    // Past the interval, taken: the alert is resolved, and later healthy calls send nothing more.
+    clock.advance(RETRY_EVERY_MS);
+    await calls(alerts, clock, 1, 0);
+    await alerts.drain();
     await calls(alerts, clock, 3, 0);
-    expect(channel.delivered).toHaveLength(3);
+    await alerts.drain();
+    expect(
+      channel.delivered.map((delivery) => delivery.message.text.startsWith("Resolved:")),
+    ).toEqual([false, true, true]);
   });
 
   it("stays quiet while every call succeeds", async () => {
@@ -347,6 +364,8 @@ describe("the kinds the code resolves", () => {
     // The one path that resolves in code: a healthy model call. A beat resolves nothing.
     await signals.beat();
     await signals.modelCall(true);
+    // The resolved message goes out off the call's path.
+    await alerts.drain();
 
     const stillActive = ALERT_KINDS.filter((kind) => store.active.has(eventKey(eventOf(kind))));
     expect(stillActive).toEqual(

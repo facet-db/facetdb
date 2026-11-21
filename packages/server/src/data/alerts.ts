@@ -4,6 +4,8 @@ import {
   type AlertKind,
   type AlertRecord,
   type AlertSeverity,
+  DELIVERY_ERROR_NOT_KEPT,
+  deliveryWords,
   RESOLVABLE_ALERT_KINDS,
   readableTokenCounts,
 } from "@facetdb/core";
@@ -12,21 +14,75 @@ import type { DashboardReads } from "./reads.ts";
 /**
  * `GET /v1/alerts`: the channels the config names and the alert history, newest first. Reads only.
  *
- * The channels are answered as a kind and a name ("slack", "#ops") and nothing else: the address in
- * the config is `<channel>:<where>`, and the config refuses a webhook URL or a credential in it, but
- * this surface does not rely on that: a "where" that reads as a URL or carries credentials is
- * answered with no name, and no setting of a channel plugin (its webhook, token or headers) is ever
- * handed to this module, which receives the addresses alone.
+ * The channels are answered as a kind and a name ("slack", "#ops"), what each sends, its quiet
+ * hours, whether it was bound, and its newest delivery, and nothing else: the address in the config
+ * is `<channel>:<where>`, and the config refuses a webhook URL or a credential in it, but this
+ * surface does not rely on that: a "where" that reads as a URL or carries credentials is answered
+ * with no name and no address, and no setting of a channel plugin (its webhook, token or headers)
+ * is ever handed to this module, which receives the config's channels alone. A delivery's words are
+ * the history's, which never keeps what a plugin threw.
  */
 
 /** The history is capped, not paged: the newest lines, because the page answers "what has happened lately". */
 export const ALERT_HISTORY_LINES = 100;
+
+/** Which system alerts a channel is sent: critical alone, critical and warnings, or all. */
+export type ChannelSends = "critical" | "warnings" | "everything";
+
+/** A channel's quiet hours as the config writes them (`HH:MM`, an IANA zone); nothing acts on them yet. */
+export type ChannelQuietHours = {
+  readonly from: string;
+  readonly to: string;
+  readonly zone?: string;
+};
+
+/**
+ * A channel as the config names it: its address, what it sends and its quiet hours. Nothing of its
+ * plugin's settings (a webhook URL, a token) is ever handed to this module.
+ */
+export type ConfiguredChannel = {
+  readonly address: string;
+  readonly sends: ChannelSends;
+  readonly quiet?: ChannelQuietHours;
+};
+
+/** A channel the worker runs with, and whether it was bound to its plugin's channel at the start. */
+export type RunningChannel = ConfiguredChannel & { readonly bound: boolean };
+
+/** A channel's newest delivery: when, of which event, and whether it went through. */
+export type ChannelDeliveryView = {
+  /** When the event's line was recorded, ISO 8601: the delivery was tried then. */
+  readonly at: string;
+  readonly kind: AlertKind;
+  /** The event's name: `Model failing`. */
+  readonly title: string;
+  /** Whether the message was the alert or its resolved message. */
+  readonly phase: "raised" | "resolved";
+  readonly ok: boolean;
+  /** Why it failed, in the words the history keeps (never a plugin's own error); null when it went through. */
+  readonly error: string | null;
+};
 
 /** A channel as the config names it: `slack:#ops` is the kind `slack` and the name `#ops`. */
 export type AlertChannelView = {
   readonly kind: string;
   /** Where it posts; null when the address held something that must not be repeated (a URL, a credential). */
   readonly name: string | null;
+  /** `<kind>:<name>`; null when the name is not repeated. */
+  readonly address: string | null;
+  readonly sends: ChannelSends;
+  /** Its quiet hours, with a null zone for the worker's own; null when it has none. */
+  readonly quiet: {
+    readonly from: string;
+    readonly to: string;
+    readonly zone: string | null;
+  } | null;
+  /** Whether the worker bound it to its plugin's channel when it started. */
+  readonly bound: boolean;
+  /** Whether its newest delivery went through; null before its first. */
+  readonly delivering: boolean | null;
+  /** Its newest delivery; null when the history holds none. */
+  readonly last: ChannelDeliveryView | null;
 };
 
 /**
@@ -62,12 +118,21 @@ export type AlertEventView = {
   readonly raisedBeforeHistory: boolean;
   /** False when every configured channel refused the message. */
   readonly delivered: boolean;
+  /**
+   * True when the line's channels were still being tried when it was read, or its worker stopped
+   * before they answered: whether any took it is not known, so `delivered` says nothing then. False
+   * for every line written by an earlier version and for every settled one.
+   */
+  readonly pending: boolean;
 };
 
 export type AlertsView = {
   /** The channels the worker runs with: the config as it started. */
   readonly channels: readonly AlertChannelView[];
-  /** True when facetdb.config.ts now names other channels, which apply at the next restart. */
+  /**
+   * True when facetdb.config.ts now names other channels, or gives one other `sends` or quiet
+   * hours, which apply at the next restart.
+   */
   readonly fileChannelsDiffer: boolean;
   readonly events: readonly AlertEventView[];
   /** How many history lines were read at most. */
@@ -87,11 +152,11 @@ export type AlertsService = {
 export type AlertsDeps = {
   /** The project the worker serves. */
   readonly projectId: string;
-  /** The channel addresses the worker runs with (`alerts.channels` as it started). */
-  readonly channels: () => readonly string[];
-  /** The channel addresses facetdb.config.ts names now, read on each request; a reload changes them. */
-  readonly fileChannels: () => readonly string[];
-  readonly reads: Pick<DashboardReads, "recentAlerts">;
+  /** The channels the worker runs with (`alerts.channels` as it started), each bound or not. */
+  readonly channels: () => readonly RunningChannel[];
+  /** The channels facetdb.config.ts names now, read on each request; a reload changes them. */
+  readonly fileChannels: () => readonly ConfiguredChannel[];
+  readonly reads: Pick<DashboardReads, "recentAlerts" | "lastDeliveries">;
 };
 
 const ADDRESS = /^([a-z][a-z0-9-]*):(\S.*)$/;
@@ -102,7 +167,7 @@ const ADDRESS = /^([a-z][a-z0-9-]*):(\S.*)$/;
 const NOT_A_NAME = /:\/\/|[^\s@/]+:[^\s@/]+@|[?/=]/;
 
 /** A configured address as its kind and its name; the rest of a long or odd address is never repeated. */
-export function channelOf(address: string): AlertChannelView {
+export function channelOf(address: string): Pick<AlertChannelView, "kind" | "name"> {
   const found = ADDRESS.exec(address);
   if (found === null) {
     return { kind: "unknown", name: null };
@@ -165,15 +230,68 @@ export function eventsOf(records: readonly AlertRecord[]): readonly AlertEventVi
         standing,
         raisedBeforeHistory: record.phase === "resolved",
         delivered: record.delivered,
+        pending: record.pending === true,
       };
     });
 }
 
-/** Whether two lists name the same channels, in any order. Only the answer leaves; no address does. */
-function sameAddresses(a: readonly string[], b: readonly string[]): boolean {
-  const left = [...a].sort();
-  const right = [...b].sort();
-  return left.length === right.length && left.every((address, index) => address === right[index]);
+/** A channel as one comparable text: its address, what it sends and its quiet hours. */
+function settingsOf(channel: ConfiguredChannel): string {
+  const { quiet } = channel;
+  return JSON.stringify([
+    channel.address,
+    channel.sends,
+    quiet === undefined ? null : [quiet.from, quiet.to, quiet.zone ?? null],
+  ]);
+}
+
+/**
+ * Whether two lists name the same channels with the same settings, in any order. Only the answer
+ * leaves; no address does.
+ */
+function sameChannels(a: readonly ConfiguredChannel[], b: readonly ConfiguredChannel[]): boolean {
+  const left = a.map(settingsOf).sort();
+  const right = b.map(settingsOf).sort();
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+/**
+ * A channel's newest delivery from the history line that holds it. The line is a database row, a
+ * boundary: the words are cleaned and held to a length again (core's `deliveryWords`).
+ */
+function lastOf(address: string, record: AlertRecord | undefined): ChannelDeliveryView | null {
+  const delivery = record?.deliveries?.find((entry) => entry.channel === address);
+  if (record === undefined || delivery === undefined) {
+    return null;
+  }
+  const words = deliveryWords(delivery.error ?? "");
+  return {
+    at: new Date(record.at).toISOString(),
+    kind: record.event.kind,
+    title: ALERT_TITLES[record.event.kind],
+    phase: record.phase,
+    ok: delivery.ok,
+    error: delivery.ok ? null : words === "" ? DELIVERY_ERROR_NOT_KEPT : words,
+  };
+}
+
+/** A running channel as the endpoint answers it: nothing but the config's own words and the history's. */
+function channelView(channel: RunningChannel, record: AlertRecord | undefined): AlertChannelView {
+  const { kind, name } = channelOf(channel.address);
+  const last = lastOf(channel.address, record);
+  return {
+    kind,
+    name,
+    address: name === null ? null : `${kind}:${name}`,
+    sends: channel.sends,
+    quiet:
+      channel.quiet === undefined
+        ? null
+        : { from: channel.quiet.from, to: channel.quiet.to, zone: channel.quiet.zone ?? null },
+    bound: channel.bound,
+    delivering: last === null ? null : last.ok,
+    last,
+  };
 }
 
 export function createAlertsService(deps: AlertsDeps): AlertsService {
@@ -182,13 +300,22 @@ export function createAlertsService(deps: AlertsDeps): AlertsService {
       if (projectId !== deps.projectId) {
         return { kind: "unknown_project" };
       }
+      const channels = deps.channels();
       // One line more than the limit tells whether older ones exist.
-      const records = await deps.reads.recentAlerts(projectId, ALERT_HISTORY_LINES + 1);
+      const [records, lastLines] = await Promise.all([
+        deps.reads.recentAlerts(projectId, ALERT_HISTORY_LINES + 1),
+        channels.length === 0
+          ? Promise.resolve(new Map<string, AlertRecord>())
+          : deps.reads.lastDeliveries(
+              projectId,
+              channels.map((channel) => channel.address),
+            ),
+      ]);
       return {
         kind: "alerts",
         alerts: {
-          channels: deps.channels().map(channelOf),
-          fileChannelsDiffer: !sameAddresses(deps.channels(), deps.fileChannels()),
+          channels: channels.map((channel) => channelView(channel, lastLines.get(channel.address))),
+          fileChannelsDiffer: !sameChannels(channels, deps.fileChannels()),
           events: eventsOf(records.slice(0, ALERT_HISTORY_LINES)),
           limit: ALERT_HISTORY_LINES,
           capped: records.length > ALERT_HISTORY_LINES,

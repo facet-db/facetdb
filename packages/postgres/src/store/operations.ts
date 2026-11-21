@@ -1,6 +1,7 @@
 import type {
   ActiveAlert,
   AlertRecord,
+  AlertSettlement,
   AlertStore,
   BackfillProgress,
   CursorStore,
@@ -136,9 +137,25 @@ export function createAlertStore(client: SqlClient): AlertStore {
     },
 
     async append(record: AlertRecord) {
-      await client.query("insert into facetdb.alert_history (record) values ($1::jsonb)", [
-        JSON.stringify(record),
-      ]);
+      const rows = await client.query(
+        "insert into facetdb.alert_history (record) values ($1::jsonb) returning id::text as id",
+        [JSON.stringify(record)],
+      );
+      const row = rows[0];
+      if (row === undefined) {
+        throw new Error("the alert history did not answer the id of the line it recorded");
+      }
+      return text(row, "id");
+    },
+
+    // The channels' outcomes, written into the line recorded before they were tried, and its
+    // `pending` mark dropped. The history is jsonb, so a new field is a merge into the record and
+    // needs no migration.
+    async settle(id, settlement: AlertSettlement) {
+      await client.query(
+        "update facetdb.alert_history set record = (record - 'pending') || $2::jsonb where id = $1::bigint",
+        [id, JSON.stringify(settlement)],
+      );
     },
 
     async lastHeartbeat(project) {

@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  channelAddressOf,
   formatPath,
   isEnvReference,
   type JsonValue,
@@ -95,6 +96,10 @@ export type PluginRefusal =
   | "plugin-secret-literal"
   | "plugin-variable-unset"
   | "plugin-settings"
+  /** An alert channel whose plugin provides no channel for its kind (channel-host.ts). */
+  | "plugin-no-channel"
+  /** An alert channel's `where` that the channel's own schema, or its `check`, refuses (channel-host.ts). */
+  | "channel-where"
   /** An action the config names that its plugin does not provide (action-host.ts). */
   | "plugin-no-action"
   /** An action's settings, or its `else`, that the action's own schema refuses (action-host.ts). */
@@ -235,7 +240,8 @@ function usesOf(config: ProjectConfig): Use[] {
       });
     });
   });
-  (config.alerts?.channels ?? []).forEach((address, index) => {
+  (config.alerts?.channels ?? []).forEach((channel, index) => {
+    const address = channelAddressOf(channel);
     uses.push({ name: address.slice(0, address.indexOf(":")), where: `alerts.channels[${index}]` });
   });
   const seen = new Set<string>();

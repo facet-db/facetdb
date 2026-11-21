@@ -14,6 +14,11 @@ export type {
   AlertsOutcome,
   AlertsService,
   AlertsView,
+  ChannelDeliveryView,
+  ChannelQuietHours,
+  ChannelSends,
+  ConfiguredChannel,
+  RunningChannel,
 } from "./alerts.ts";
 export { ALERT_HISTORY_LINES, channelOf, createAlertsService, eventsOf } from "./alerts.ts";
 export { decisionsRoutes } from "./decisions.ts";

@@ -30,7 +30,9 @@ import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/ind
 import { VERSION } from "../index.ts";
 import {
   BUILTIN_PLUGINS,
+  bindChannels,
   createPluginHost,
+  deliveryFailureLine,
   importFromProject,
   type PluginHost,
 } from "../plugin/index.ts";
@@ -618,6 +620,21 @@ export function processDeps(
           connector,
           provider: provider(config, env, run.stopSignal, mode.plugins),
           clock,
+          // The backfill's alerts go to the channels the config names; the command built the host
+          // and checked them when the config loaded.
+          channels:
+            mode.plugins === undefined
+              ? []
+              : bindChannels({
+                  config,
+                  host: mode.plugins,
+                  env,
+                  clock,
+                  stop: run.stopSignal,
+                }),
+          report: (failure) => {
+            process.stderr.write(`${deliveryFailureLine(failure)}\n`);
+          },
         });
         const opened = connector;
         return {

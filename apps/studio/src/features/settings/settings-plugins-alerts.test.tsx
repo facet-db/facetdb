@@ -190,10 +190,38 @@ describe("the Alerts page", () => {
   it("shows a channel whose name the worker withheld by its kind alone", async () => {
     const withheld: Alerts = {
       ...SAMPLE_ALERTS,
-      channels: [{ kind: "webhook", name: null }],
+      channels: [
+        {
+          kind: "webhook",
+          name: null,
+          address: null,
+          sends: "everything",
+          quiet: null,
+          bound: true,
+          delivering: null,
+          last: null,
+        },
+      ],
     };
     renderStudio({ path: "/alerts", api: fakeApi({ alerts: () => Promise.resolve(withheld) }) });
     expect(await screen.findByRole("article", { name: "Webhook" })).toBeInTheDocument();
+  });
+
+  it("tells an alert still being delivered from one no channel took", async () => {
+    const [first, second] = SAMPLE_ALERTS.events;
+    if (first === undefined || second === undefined) {
+      throw new Error("the sample has two events");
+    }
+    const lines: Alerts = {
+      ...SAMPLE_ALERTS,
+      events: [
+        { ...first, delivered: false, pending: true },
+        { ...second, delivered: false, pending: false },
+      ],
+    };
+    renderStudio({ path: "/alerts", api: fakeApi({ alerts: () => Promise.resolve(lines) }) });
+    expect(await screen.findByText("not yet known whether a channel took it")).toBeInTheDocument();
+    expect(screen.getAllByText("no channel took it")).toHaveLength(1);
   });
 
   it("says an alert the worker does resolve is not resolved while it is open", async () => {

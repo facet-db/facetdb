@@ -1,6 +1,8 @@
 import {
   type Alerts,
   type BackfillDeps,
+  type BoundChannel,
+  type ChannelFailure,
   type Clock,
   type Connector,
   createAlerts,
@@ -30,6 +32,10 @@ export type BackfillWiring = {
   readonly connector: Connector;
   readonly provider: ModelProvider;
   readonly clock: Clock;
+  /** The alert channels the config names, bound by the composition root; none without `alerts`. */
+  readonly channels: readonly BoundChannel[];
+  /** Told of each delivery that failed; the alert is recorded with it either way. */
+  readonly report: (failure: ChannelFailure) => void;
 };
 
 /** No spending cap in the config: a gate that never refuses (the count is still kept). */
@@ -104,7 +110,12 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
   await store.ensureSource({ projectId: project.id, name: source.name, kind: "plugin" });
   const sourceId = sourceIdOf(project.id, source.name);
   const version = await store.questionSets.record(sourceId, questionSet);
-  const alerts = createAlerts({ store: store.alerts, clock, channels: [] });
+  const alerts = createAlerts({
+    store: store.alerts,
+    clock,
+    channels: wiring.channels,
+    report: wiring.report,
+  });
   return {
     // The run's key in the store's cursors carries both: two sources at one question-set version
     // never resume from each other's place.

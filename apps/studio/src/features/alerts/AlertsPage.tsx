@@ -116,7 +116,11 @@ function Standing({ event, now }: { readonly event: AlertEvent; readonly now: Da
       {event.raisedBeforeHistory ? (
         <span className="text-text-2">raised before the history shown</span>
       ) : null}
-      {event.delivered ? null : <span className="text-text-2">no channel took it</span>}
+      {event.pending ? (
+        <span className="text-text-2">not yet known whether a channel took it</span>
+      ) : event.delivered ? null : (
+        <span className="text-text-2">no channel took it</span>
+      )}
     </div>
   );
 }

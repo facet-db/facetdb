@@ -1,6 +1,7 @@
 import type { Question, ThresholdOverride } from "@facetdb/core";
 import {
   type ActionCall,
+  type AlertsConfig,
   type CaptureMode,
   type ConnectorChoice,
   isEnvReference,
@@ -47,7 +48,7 @@ export type ProjectJson = {
   readonly modelUrl?: string;
   readonly provider?: string;
   readonly studioUrl?: string;
-  readonly alerts?: { readonly channels: readonly string[] };
+  readonly alerts?: AlertsConfig;
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
   /** Each plugin's settings as the file writes them, a variable as `{ "env": "NAME" }`, never its value. */
@@ -95,11 +96,37 @@ export function toProjectJson(config: ProjectConfig): ProjectJson {
     ...(config.modelUrl === undefined ? {} : { modelUrl: config.modelUrl }),
     ...(config.provider === undefined ? {} : { provider: config.provider }),
     ...(config.studioUrl === undefined ? {} : { studioUrl: config.studioUrl }),
-    ...(config.alerts === undefined ? {} : { alerts: config.alerts }),
+    ...(config.alerts === undefined ? {} : { alerts: alertsJson(config.alerts) }),
     ...(config.spendingCap === undefined ? {} : { spendingCap: config.spendingCap }),
     onCapReached: config.onCapReached,
     ...(config.plugins === undefined ? {} : { plugins: config.plugins }),
     sources: config.sources.map(sourceJson),
+  };
+}
+
+/**
+ * `alerts` as the export writes it, each channel in the form the file used (an address stays an
+ * address), each key named here: nothing the config carries beside them is written.
+ */
+function alertsJson(alerts: AlertsConfig): AlertsConfig {
+  return {
+    channels: alerts.channels.map((channel) =>
+      typeof channel === "string"
+        ? channel
+        : {
+            to: channel.to,
+            ...(channel.sends === undefined ? {} : { sends: channel.sends }),
+            ...(channel.quiet === undefined
+              ? {}
+              : {
+                  quiet: {
+                    from: channel.quiet.from,
+                    to: channel.quiet.to,
+                    ...(channel.quiet.zone === undefined ? {} : { zone: channel.quiet.zone }),
+                  },
+                }),
+          },
+    ),
   };
 }
 
@@ -301,7 +328,7 @@ export function configFileSource(config: ProjectConfig): string {
   if (config.modelUrl !== undefined) head.push(`modelUrl: ${text(config.modelUrl)}`);
   if (config.provider !== undefined) head.push(`provider: ${text(config.provider)}`);
   if (config.studioUrl !== undefined) head.push(`studioUrl: ${text(config.studioUrl)}`);
-  if (config.alerts !== undefined) head.push(`alerts: ${text(config.alerts)}`);
+  if (config.alerts !== undefined) head.push(`alerts: ${text(alertsJson(config.alerts))}`);
   if (config.spendingCap !== undefined) head.push(`spendingCap: ${config.spendingCap}`);
   if (config.onCapReached !== "pause") head.push(`onCapReached: ${text(config.onCapReached)}`);
   if (config.plugins !== undefined) head.push(pluginsSource(config.plugins));

@@ -25,6 +25,19 @@ export {
   SUPERSEDED,
   WAITS_FOR_PERSON,
 } from "./action-host.ts";
+export type { ChannelBinding, ChannelHostDeps } from "./channel-host.ts";
+export {
+  bindChannels,
+  channelsOf,
+  checkChannels,
+  DELIVERY_BOUND_MS,
+  DELIVERY_STOPPED,
+  DELIVERY_TIMED_OUT,
+  deliveryFailedWords,
+  deliveryFailureLine,
+  revealsSecret,
+  sendsSeverity,
+} from "./channel-host.ts";
 export type { Plugin, PluginDefinition, PluginIssue } from "./define.ts";
 export { definePlugin, isPlugin, PluginError, packageNames, shortName } from "./define.ts";
 export type {

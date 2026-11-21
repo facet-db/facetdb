@@ -1,6 +1,7 @@
 import type {
   ActiveAlert,
   AlertRecord,
+  AlertSettlement,
   AlertStore,
   DeadWorkers,
   WorkerBeat,
@@ -50,8 +51,20 @@ export class FakeAlertStore implements AlertStore {
     return Promise.resolve();
   }
 
-  append(record: AlertRecord): Promise<void> {
+  /** The id of a line is its place in `history`; `settle` writes the outcome into it. */
+  append(record: AlertRecord): Promise<string> {
     this.history.push(record);
+    return Promise.resolve(String(this.history.length - 1));
+  }
+
+  settle(id: string, settlement: AlertSettlement): Promise<void> {
+    const index = Number(id);
+    const record = this.history[index];
+    if (record === undefined) {
+      return Promise.reject(new Error(`no history line ${id} to settle`));
+    }
+    const { pending: _pending, ...rest } = record;
+    this.history[index] = { ...rest, ...settlement };
     return Promise.resolve();
   }
 

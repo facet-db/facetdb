@@ -1,6 +1,11 @@
 import { FakeAlertStore, FakeChannel, FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import { type AlertScope, createAlerts } from "./alerts.ts";
+import {
+  type AlertScope,
+  type ChannelFailure,
+  createAlerts,
+  DELIVERY_ERROR_NOT_KEPT,
+} from "./alerts.ts";
 import { createWorkerWatch, type WorkerWatch, type WorkerWatchStep } from "./dead-worker.ts";
 import {
   type AlertEvent,
@@ -491,13 +496,15 @@ describe("an error in the watch is reported and never stops it", () => {
     expect(raised).toHaveLength(1);
   });
 
-  it("@timing a channel that refused the message is reported, and the alert is recorded", async () => {
+  it("@timing a channel that refused the message is reported once, by the alerts module, and the alert is recorded", async () => {
     const clock = new FakeClock(START);
     const store = new FakeAlertStore(clock);
+    const failures: ChannelFailure[] = [];
     const alerts = createAlerts({
       store,
       clock,
       channels: [{ name: "slack", deliver: () => Promise.reject(new Error("channel is down")) }],
+      report: (failure) => failures.push(failure),
     });
     const reported: Reported[] = [];
     const watcher = createWorkerWatch({
@@ -515,8 +522,17 @@ describe("an error in the watch is reported and never stops it", () => {
     clock.advance(HEARTBEAT_LOSS_MS);
     await watcher.check();
 
-    expect(reported.map((line) => line.step)).toEqual(["alert"]);
-    expect(store.history).toMatchObject([{ phase: "raised", delivered: false }]);
+    // The watch itself reports nothing: the alert was raised; the channel's failure is reported
+    // once, where every failed delivery is, and kept with the history line.
+    expect(reported).toEqual([]);
+    expect(failures).toEqual([{ channel: "slack", error: DELIVERY_ERROR_NOT_KEPT }]);
+    expect(store.history).toMatchObject([
+      {
+        phase: "raised",
+        delivered: false,
+        deliveries: [{ channel: "slack", ok: false, error: DELIVERY_ERROR_NOT_KEPT }],
+      },
+    ]);
   });
 
   it("does not take its own row when its saves have been failing", async () => {

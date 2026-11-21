@@ -6,7 +6,13 @@ import {
   RECORD_STATUSES,
 } from "@facetdb/core";
 import { z } from "zod";
-import { type ActionCall, isEnvReference, type ProjectConfig, type SourceConfig } from "./dsl.ts";
+import {
+  type ActionCall,
+  type AlertChannel,
+  isEnvReference,
+  type ProjectConfig,
+  type SourceConfig,
+} from "./dsl.ts";
 import { providerIssues } from "./provider.ts";
 
 /**
@@ -232,6 +238,103 @@ const channelAddress = z
   .refine((address) => stringSecretKind(address.slice(address.indexOf(":") + 1)) === undefined, {
     message:
       'an alert channel names where to post ("slack:#ops"), never a webhook URL or a credential: this file and its JSON export carry no secret. The channel plugin reads its webhook or token from the environment.',
+  });
+
+/** `HH:MM` on a 24-hour clock: `22:00`, `07:30`. */
+const CLOCK_TIME = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+const clockTime = (field: string) =>
+  z
+    .string({ error: `${field} is a time of day as "HH:MM" on a 24-hour clock, such as "22:00"` })
+    .regex(CLOCK_TIME, `${field} is a time of day as "HH:MM" on a 24-hour clock, such as "22:00"`);
+
+/** Whether the runtime knows `zone` as an IANA time zone (`Europe/Berlin`, `UTC`). */
+function isTimeZone(zone: string): boolean {
+  if (!/^[A-Za-z][A-Za-z0-9_+\-/]*$/.test(zone)) {
+    return false;
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Parsed and carried; nothing holds messages in them yet.
+const quietHours = strict({
+  from: clockTime("quiet.from"),
+  to: clockTime("quiet.to"),
+  zone: z
+    .string({ error: 'quiet.zone is a time zone name, such as "Europe/Berlin" or "UTC"' })
+    .refine(
+      isTimeZone,
+      'quiet.zone is not a time zone this machine knows: write an IANA name such as "Europe/Berlin", "America/New_York" or "UTC"',
+    )
+    .exactOptional(),
+}).refine((quiet) => quiet.from !== quiet.to, {
+  message:
+    "quiet.from and quiet.to are the same time, which makes quiet hours of no length: give two different times, or take quiet out",
+});
+
+const channelSends = z.enum(["critical", "warnings", "everything"], {
+  error:
+    'sends is "critical" (critical alerts only), "warnings" (critical alerts and warnings) or "everything" (the default)',
+});
+
+const alertChannelObject = strict({
+  to: channelAddress,
+  sends: channelSends.exactOptional(),
+  quiet: quietHours.exactOptional(),
+});
+
+/**
+ * One alert channel: an address, or `{ to, sends?, quiet? }`, kept in the form the file wrote. The
+ * form is chosen by what the file wrote, so a refusal names the field that is wrong (a union would
+ * say only that neither form fits).
+ */
+const alertChannel = z.unknown().transform((value, context): AlertChannel => {
+  const schema =
+    typeof value === "string"
+      ? channelAddress
+      : typeof value === "object" && value !== null && !Array.isArray(value)
+        ? alertChannelObject
+        : undefined;
+  if (schema === undefined) {
+    context.addIssue({
+      code: "custom",
+      message:
+        'an alert channel is an address such as "slack:#ops", or { to: "slack:#ops", sends: "warnings", quiet: { from: "22:00", to: "07:00" } }',
+    });
+    return z.NEVER;
+  }
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      context.addIssue({ code: "custom", message: issue.message, path: issue.path });
+    }
+    return z.NEVER;
+  }
+  return result.data;
+});
+
+const alertChannels = z
+  .array(alertChannel)
+  .min(1, "alerts.channels needs at least one channel")
+  .superRefine((channels, context) => {
+    // Each address once: one written twice would be sent every alert twice.
+    const seen = new Set<string>();
+    channels.forEach((channel, index) => {
+      const address = typeof channel === "string" ? channel : channel.to;
+      if (seen.has(address)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: `${address} is named twice: name each channel once, so it is sent each alert once`,
+        });
+      }
+      seen.add(address);
+    });
   });
 
 // Plugin names: `@facetdb/<name>` first-party, `facetdb-plugin-<name>` community.
@@ -530,9 +633,7 @@ const projectSchema = strict({
   provider: z
     .string({ error: 'provider is text: a preset such as "openrouter", or "<plugin>/<entry>"' })
     .exactOptional(),
-  alerts: strict({
-    channels: z.array(channelAddress).min(1, "alerts.channels needs at least one channel"),
-  }).exactOptional(),
+  alerts: strict({ channels: alertChannels }).exactOptional(),
   spendingCap: z
     .number()
     .int("spendingCap must be a whole number of billable input tokens")

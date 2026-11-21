@@ -204,6 +204,49 @@ export type SourceInput = {
   readonly model?: string;
 };
 
+/**
+ * Which system alerts a channel is sent: `critical` alone, `warnings` (critical alerts and
+ * warnings) or `everything`, the default.
+ */
+export type AlertSends = "critical" | "warnings" | "everything";
+
+/**
+ * A channel's quiet hours: `from` and `to` as `HH:MM` on a 24-hour clock, in `zone` (an IANA time
+ * zone, `Europe/Berlin`; absent, the worker's own). Carried here; holding messages in them is not
+ * built yet.
+ */
+export type QuietHours = {
+  readonly from: string;
+  readonly to: string;
+  readonly zone?: string;
+};
+
+/**
+ * One alert channel: an address `"<kind>:<where>"` (`"slack:#ops"`), or the address under `to` with
+ * what it sends and its quiet hours. The kind is a plugin's short name; `where` is handed to that
+ * plugin's channel as its one setting. The file's form is kept by the export.
+ */
+export type AlertChannel =
+  | string
+  | {
+      readonly to: string;
+      readonly sends?: AlertSends;
+      readonly quiet?: QuietHours;
+    };
+
+/** `alerts` in a config file: the channels every system alert goes to. */
+export type AlertsConfig = { readonly channels: readonly AlertChannel[] };
+
+/** The address of a channel as the file writes it either way: `slack:#ops`. */
+export function channelAddressOf(channel: AlertChannel): string {
+  return typeof channel === "string" ? channel : channel.to;
+}
+
+/** What a channel sends: its own `sends`, or everything. */
+export function channelSendsOf(channel: AlertChannel): AlertSends {
+  return typeof channel === "string" ? "everything" : (channel.sends ?? "everything");
+}
+
 export type ProjectInput = {
   readonly model: string;
   readonly modelUrl?: string;
@@ -221,7 +264,7 @@ export type ProjectInput = {
    * address the worker serves the studio on; with no studio an alert keeps its docs fix page.
    */
   readonly studioUrl?: string;
-  readonly alerts?: { readonly channels: readonly string[] };
+  readonly alerts?: AlertsConfig;
   readonly spendingCap?: number;
   readonly onCapReached?: OnCapReached;
   /**
@@ -273,7 +316,7 @@ export type ProjectConfig = {
   readonly provider?: string;
   /** The studio's address as the file writes it; absent when the file names none. */
   readonly studioUrl?: string;
-  readonly alerts?: { readonly channels: readonly string[] };
+  readonly alerts?: AlertsConfig;
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
   /** Each plugin's settings as written, `env("NAME")` kept as `{ env: "NAME" }`; absent when the file has none. */

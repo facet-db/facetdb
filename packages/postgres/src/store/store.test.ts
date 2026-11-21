@@ -660,6 +660,41 @@ describe("alerts, cursors and question-set versions", () => {
     });
     expect(await scalar(db, "select count(*)::int from facetdb.alert_history")).toBe(1);
 
+    // A line recorded before its channels are tried, then settled with their outcomes.
+    const id = await store.alerts.append({
+      at: 2,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: false,
+      deliveries: [],
+      pending: true,
+    });
+    await store.alerts.settle(id, {
+      delivered: true,
+      deliveries: [
+        { channel: "slack:#ops", ok: true },
+        { channel: "email:ops@example.com", ok: false, error: "the channel did not answer" },
+      ],
+    });
+    const settled = await db.query<{ record: string }>(
+      "select record::text as record from facetdb.alert_history where id = $1::bigint",
+      [id],
+    );
+    expect(JSON.parse(String(settled.rows[0]?.record))).toEqual({
+      at: 2,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: true,
+      deliveries: [
+        { channel: "slack:#ops", ok: true },
+        { channel: "email:ops@example.com", ok: false, error: "the channel did not answer" },
+      ],
+    });
+
     expect(await store.alerts.lastHeartbeat("p")).toBeUndefined();
     await store.alerts.saveHeartbeat("p", 1_700_000_000_000);
     await store.alerts.saveHeartbeat("p", 1_700_000_060_000);

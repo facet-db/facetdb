@@ -419,8 +419,9 @@ function recordingAlertStore(): AlertStore & { readonly history: AlertRecord[] }
     clearActive: () => Promise.resolve(),
     append: (record) => {
       history.push(record);
-      return Promise.resolve();
+      return Promise.resolve(String(history.length - 1));
     },
+    settle: () => Promise.resolve(),
     lastHeartbeat: () => Promise.resolve(undefined),
     saveHeartbeat: () => Promise.resolve(),
     saveWorkerBeat: () => Promise.resolve(0),
@@ -474,6 +475,8 @@ describe("the alerts of a command that serves no studio", () => {
       connector: {} as never,
       provider: { ask: () => Promise.reject(new Error("never asked")) },
       clock,
+      channels: [],
+      report: () => undefined,
     });
     await deps.alerts?.backfillFinished({ answered: 3, queued: 0, question: null });
     return eventOf(alertStore.history[0]).link;

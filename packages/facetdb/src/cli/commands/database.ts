@@ -6,7 +6,12 @@ import {
   type QuestionSet,
 } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { checkActions, type PluginHost, PluginHostError } from "../../plugin/index.ts";
+import {
+  checkActions,
+  checkChannels,
+  type PluginHost,
+  PluginHostError,
+} from "../../plugin/index.ts";
 import { databaseOf, engineFor, schemeOf } from "../engines.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -67,6 +72,34 @@ export async function loadPluginHost(
 }
 
 /**
+ * The plugin host of a command that raises alerts beside the worker (`facetdb backfill`, `facetdb
+ * test`), when it needs one: the host `provided` already built for a plugin's provider, else one
+ * built now when the config names alert channels, whose plugins deliver what the command raises.
+ * Every channel is checked as the worker checks it at its start; with no channel and no host given,
+ * none is built, as before.
+ */
+export async function pluginHostForAlerts(
+  deps: CliDeps,
+  config: ProjectConfig,
+  path: string,
+  provided: PluginHost | undefined,
+): Promise<PluginHost | undefined> {
+  if ((config.alerts?.channels ?? []).length === 0) {
+    return provided;
+  }
+  const plugins = provided ?? (await loadPluginHost(deps, config, path));
+  try {
+    checkChannels(config, plugins, deps.env);
+  } catch (error) {
+    if (error instanceof PluginHostError) {
+      throw new CliError(error.code, error.message, error.fix);
+    }
+    throw error;
+  }
+  return plugins;
+}
+
+/**
  * The config a running worker starts from, and its plugin host: what `facetdb worker`, `facetdb
  * studio` and `facetdb dev` each load first, a dry run included, so the three refuse a bad plugin
  * setting alike before anything starts. Every source's actions are checked against the plugins the
@@ -80,6 +113,8 @@ export async function loadWorkerConfig(
   const plugins = await loadPluginHost(deps, config, path);
   try {
     checkActions(config, plugins, deps.env);
+    // Each alert channel bound to its plugin's channel, refused here when it cannot be.
+    checkChannels(config, plugins, deps.env);
   } catch (error) {
     if (error instanceof PluginHostError) {
       throw new CliError(error.code, error.message, error.fix);

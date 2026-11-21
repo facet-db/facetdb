@@ -406,8 +406,31 @@ const sourceNamesSchema = z.object({ sources: z.array(z.object({ name: z.string(
 
 /** `GET /v1/alerts`: the channels as a kind and a name (never a setting), and the history newest first. */
 const alertsSchema = z.object({
-  /** The channels the worker runs with (the config as it started). */
-  channels: z.array(z.object({ kind: z.string().min(1), name: z.string().nullable() })),
+  /**
+   * The channels the worker runs with (the config as it started): what each sends, its quiet hours,
+   * whether the worker bound it, and its newest delivery.
+   */
+  channels: z.array(
+    z.object({
+      kind: z.string().min(1),
+      name: z.string().nullable(),
+      address: z.string().nullable(),
+      sends: z.enum(["critical", "warnings", "everything"]),
+      quiet: z.object({ from: z.string(), to: z.string(), zone: z.string().nullable() }).nullable(),
+      bound: z.boolean(),
+      delivering: z.boolean().nullable(),
+      last: z
+        .object({
+          at: z.iso.datetime(),
+          kind: z.string(),
+          title: z.string(),
+          phase: z.enum(["raised", "resolved"]),
+          ok: z.boolean(),
+          error: z.string().nullable(),
+        })
+        .nullable(),
+    }),
+  ),
   /** True when facetdb.config.ts now names other channels, which apply at the next restart. */
   fileChannelsDiffer: z.boolean(),
   events: z.array(
@@ -431,6 +454,8 @@ const alertsSchema = z.object({
       /** A resolved message whose alert was raised before the history the worker reads. */
       raisedBeforeHistory: z.boolean(),
       delivered: z.boolean(),
+      /** Its channels were still being tried, or the worker stopped first: not known whether any took it. */
+      pending: z.boolean(),
     }),
   ),
   /** The most history lines the worker reads; `capped` says older ones exist. */

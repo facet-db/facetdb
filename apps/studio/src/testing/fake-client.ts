@@ -348,8 +348,40 @@ function local(month: number, day: number, hour: number, minute: number): string
 
 export const SAMPLE_ALERTS: Alerts = {
   channels: [
-    { kind: "slack", name: "#ops" },
-    { kind: "email", name: "ops@example.com" },
+    {
+      kind: "slack",
+      name: "#ops",
+      address: "slack:#ops",
+      sends: "warnings",
+      quiet: { from: "22:00", to: "07:00", zone: null },
+      bound: true,
+      delivering: true,
+      last: {
+        at: local(11, 5, 23, 9),
+        kind: "model_failing",
+        title: "Model failing",
+        phase: "resolved",
+        ok: true,
+        error: null,
+      },
+    },
+    {
+      kind: "email",
+      name: "ops@example.com",
+      address: "email:ops@example.com",
+      sends: "everything",
+      quiet: null,
+      bound: true,
+      delivering: true,
+      last: {
+        at: local(11, 6, 14, 10),
+        kind: "backfill_finished",
+        title: "Backfill finished",
+        phase: "raised",
+        ok: true,
+        error: null,
+      },
+    },
   ],
   events: [
     {
@@ -366,6 +398,7 @@ export const SAMPLE_ALERTS: Alerts = {
       standing: { phase: "raised" },
       raisedBeforeHistory: false,
       delivered: true,
+      pending: false,
     },
     {
       at: local(11, 5, 23, 2),
@@ -381,6 +414,7 @@ export const SAMPLE_ALERTS: Alerts = {
       standing: { phase: "resolved", at: local(11, 5, 23, 9) },
       raisedBeforeHistory: false,
       delivered: true,
+      pending: false,
     },
     {
       at: local(11, 2, 8, 15),
@@ -397,6 +431,7 @@ export const SAMPLE_ALERTS: Alerts = {
       standing: { phase: "raised" },
       raisedBeforeHistory: false,
       delivered: true,
+      pending: false,
     },
     {
       at: local(10, 29, 16, 2),
@@ -412,6 +447,7 @@ export const SAMPLE_ALERTS: Alerts = {
       standing: { phase: "raised" },
       raisedBeforeHistory: false,
       delivered: true,
+      pending: false,
     },
   ],
   fileChannelsDiffer: false,

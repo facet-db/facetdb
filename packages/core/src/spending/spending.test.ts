@@ -14,6 +14,7 @@ import {
   type Alerts,
   type BoundChannel,
   createAlerts,
+  RETRY_EVERY_MS,
 } from "../alerts/index.ts";
 import type {
   ModelProvider,
@@ -229,8 +230,8 @@ class FakeAlerts implements Pick<Alerts, "raise"> {
     const failures =
       this.outage === "refuse"
         ? [
-            { channel: "email", error: new Error("smtp down") },
-            { channel: "slack", error: new Error("webhook 503") },
+            { channel: "email", error: "smtp down" },
+            { channel: "slack", error: "webhook 503" },
           ]
         : [];
     return Promise.resolve({ status: "sent", failures });
@@ -705,7 +706,7 @@ describe("spending: the 80% warning and the cap", () => {
     expect(alerts.kinds()).toEqual(["spending_80", "spending_80"]);
   });
 
-  it("with every channel down, each alert is attempted at each check until a channel takes it, then holds for the month", async () => {
+  it("with every channel down, each alert is attempted once per retry interval until a channel takes it, then holds for the month", async () => {
     const clock = new FakeClock(OCT_15);
     const usage = new MemoryUsageStore();
     let channelDown = true;
@@ -732,20 +733,27 @@ describe("spending: the 80% warning and the cap", () => {
       clock.advance(POLL_MS);
     };
 
-    // Each poll tries both alerts again: the alerts module retries at the next raise, and a refused
-    // alert gives its claim back.
+    // A refused alert gives its claim back, so each poll raises both again, but the alerts module
+    // tries the channels once per retry interval: the polls between cost no attempt.
     await poll();
     await poll();
     await poll();
-    expect(attempts).toBe(6);
+    expect(attempts).toBe(2);
+    clock.advance(RETRY_EVERY_MS);
+    await poll();
+    expect(attempts).toBe(4);
 
-    // A channel that is back takes the next attempt, and the claim then holds for the month.
+    // A channel that is back takes the next paced attempt, and the claim then holds for the month.
     channelDown = false;
     await poll();
-    expect(attempts).toBe(8);
+    expect(attempts).toBe(4);
+    clock.advance(RETRY_EVERY_MS);
     await poll();
+    expect(attempts).toBe(6);
     await poll();
-    expect(attempts).toBe(8);
+    clock.advance(RETRY_EVERY_MS);
+    await poll();
+    expect(attempts).toBe(6);
   });
 
   it("a changed cap takes effect at once: raising it resumes a paused project", async () => {

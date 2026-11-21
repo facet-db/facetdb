@@ -14,6 +14,7 @@ import {
   type ProjectConfigDoor,
 } from "./config/service.ts";
 import {
+  type ConfiguredChannel,
   createAccessService,
   createAlertsService,
   createDashboardReads,
@@ -24,6 +25,7 @@ import {
   type DashboardDatabase,
   type DashboardDoor,
   type DecisionsServiceDeps,
+  type RunningChannel,
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 import type { PluginsDoor } from "./plugins/index.ts";
@@ -79,14 +81,15 @@ export type ServerDeps = {
   readonly dashboard: DashboardDoor;
   /**
    * The Alerts and Settings pages: the host this surface listens on (`--host`), and the alert
-   * channel addresses (`alerts.channels`, `slack:#ops`): `alertChannels` the ones the worker runs
-   * with (the config as it started; a reload changes them only at the next restart), and
-   * `fileAlertChannels` the ones the file names now, read on each request, so the page can say they
-   * differ. The addresses alone: no channel setting ever reaches this package.
+   * channels (`alerts.channels`, `slack:#ops`): `alertChannels` the ones the worker runs with (the
+   * config as it started; a reload changes them only at the next restart), each with what it sends,
+   * its quiet hours and whether it was bound, and `fileAlertChannels` the ones the file names now,
+   * read on each request, so the page can say they differ. The config's own words alone: no setting
+   * of a channel's plugin ever reaches this package.
    */
   readonly host: string;
-  readonly alertChannels: () => readonly string[];
-  readonly fileAlertChannels: () => readonly string[];
+  readonly alertChannels: () => readonly RunningChannel[];
+  readonly fileAlertChannels: () => readonly ConfiguredChannel[];
   /**
    * What the review endpoints decide with: the store's queue, and per source, keyed by its store
    * id, the decision log, the connector, the actions and the question set in force; the source

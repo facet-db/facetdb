@@ -31,6 +31,14 @@ export type DashboardReads = {
   modelFailing(projectId: string): Promise<readonly AlertEvent[]>;
   /** The project's newest alert history lines, newest first. */
   recentAlerts(projectId: string, limit: number): Promise<readonly AlertRecord[]>;
+  /**
+   * Per channel address, the project's newest history line that holds a delivery to it; an address
+   * no line holds is left out.
+   */
+  lastDeliveries(
+    projectId: string,
+    channels: readonly string[],
+  ): Promise<ReadonlyMap<string, AlertRecord>>;
   /** Model answers logged for these sources within the day. */
   answered(sourceIds: readonly string[], day: Day): Promise<number>;
   /** People's decisions logged for these sources within the day: records decided, and by how many people. */
@@ -78,6 +86,14 @@ const alertEvent = z.object({
   link: z.string(),
 });
 
+// Each channel tried; absent from a line no channel was tried for, and from every line written
+// before channels were delivered to, which reads as it always did.
+const alertDelivery = z.object({
+  channel: z.string(),
+  ok: z.boolean(),
+  error: z.string().exactOptional(),
+});
+
 const alertRecord = z.object({
   at: z.number(),
   key: z.string(),
@@ -85,6 +101,8 @@ const alertRecord = z.object({
   severity: z.enum(["information", "warning", "critical"]),
   event: alertEvent,
   delivered: z.boolean(),
+  deliveries: z.array(alertDelivery).exactOptional(),
+  pending: z.literal(true).exactOptional(),
 });
 
 const activeAlert = z.object({ event: alertEvent });
@@ -144,6 +162,33 @@ export function createDashboardReads(database: DashboardDatabase): DashboardRead
         [projectId, limit],
       );
       return rows.map((row) => parsedJson(alertRecord, row, "record"));
+    },
+
+    async lastDeliveries(projectId, channels) {
+      // A line written by an earlier version, or one no channel was tried for, has no `deliveries`
+      // and holds nothing here; a line whose channels are still being tried has an empty list.
+      const rows = await query(
+        `select distinct on (delivery->>'channel') delivery->>'channel' as channel,
+                h.record::text as record
+           from facetdb.alert_history h,
+                jsonb_array_elements(
+                  case when jsonb_typeof(h.record->'deliveries') = 'array'
+                       then h.record->'deliveries' else '[]'::jsonb end
+                ) as delivery
+          where h.record->'event'->>'project' = $1
+            and delivery->>'channel' in (select jsonb_array_elements_text($2::jsonb))
+          order by delivery->>'channel', h.id desc`,
+        [projectId, JSON.stringify(channels)],
+      );
+      const lines = new Map<string, AlertRecord>();
+      for (const row of rows) {
+        const channel = row["channel"];
+        if (typeof channel !== "string") {
+          throw new Error(`column "channel" came back as ${typeof channel}, expected text`);
+        }
+        lines.set(channel, parsedJson(alertRecord, row, "record"));
+      }
+      return lines;
     },
 
     async answered(sourceIds, day) {

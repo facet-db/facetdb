@@ -152,11 +152,10 @@ export function createWorkerWatch(deps: WorkerWatchDeps): WorkerWatch {
     }
     for (const [id, { dead, beating }] of unraised) {
       try {
-        const outcome = await alerts.raise(deadWorkerEvent(dead, beating, project, link()));
+        // A channel that did not take it is the alerts module's to report: the alert is raised and
+        // recorded all the same.
+        await alerts.raise(deadWorkerEvent(dead, beating, project, link()));
         unraised.delete(id);
-        for (const failure of outcome.failures) {
-          reported(failure.error, "alert");
-        }
       } catch (error) {
         reported(error, "alert");
       }

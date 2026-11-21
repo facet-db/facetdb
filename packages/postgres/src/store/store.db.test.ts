@@ -602,3 +602,71 @@ describe("the take of dead workers on a real Postgres", () => {
     expect([...taken].sort()).toEqual(dead);
   });
 });
+
+describe("the alert history's deliveries on a real Postgres", () => {
+  const event = {
+    kind: "model_failing" as const,
+    what: "6 of 100 model calls failed.",
+    project: "proj_listings",
+    source: "listings",
+    question: null,
+    did: "Retrying.",
+    link: "https://docs.facetdb.dev/fix/model",
+  };
+
+  it("records a line through postgres.js's jsonb binding, then settles it in place, an old line untouched", async () => {
+    const { alerts } = await newStore();
+    const old = await alerts.append({
+      at: 1,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: true,
+    });
+    const id = await alerts.append({
+      at: 2,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: false,
+      deliveries: [],
+      pending: true,
+    });
+    expect(Number(id)).toBeGreaterThan(Number(old));
+    await alerts.settle(id, {
+      delivered: true,
+      deliveries: [
+        { channel: "slack:#ops", ok: true },
+        { channel: "email:ops@example.com", ok: false, error: "the channel did not answer" },
+      ],
+    });
+
+    const rows = await open().query(
+      "select id::text as id, record::text as record, jsonb_typeof(record) as type from facetdb.alert_history order by id",
+    );
+    // An object in the column, never a JSON string inside it (the binding the store relies on).
+    expect(rows.map((row) => row["type"])).toEqual(["object", "object"]);
+    expect(JSON.parse(String(rows[0]?.["record"]))).toEqual({
+      at: 1,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: true,
+    });
+    expect(JSON.parse(String(rows[1]?.["record"]))).toEqual({
+      at: 2,
+      key: "k",
+      phase: "raised",
+      severity: "critical",
+      event,
+      delivered: true,
+      deliveries: [
+        { channel: "slack:#ops", ok: true },
+        { channel: "email:ops@example.com", ok: false, error: "the channel did not answer" },
+      ],
+    });
+  });
+});
