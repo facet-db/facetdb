@@ -77,6 +77,13 @@ export function action<Config = unknown, Settings extends ZodType = ZodType>(
 
 export type ChannelSpec<Config, Settings extends ZodType> = {
   config: Settings;
+  /**
+   * Why this use of the channel can never deliver with the plugin's settings, in words that name
+   * the fix and never a secret; undefined when it can. Optional: the host calls it when it binds an
+   * address, so an address the plugin cannot reach is refused when the config loads, not at its
+   * first alert. `settings` has already passed `config`.
+   */
+  check?(ctx: PluginContext<Config>, settings: Infer<Settings>): string | undefined;
   deliver(
     ctx: PluginContext<Config>,
     message: ChannelMessage,

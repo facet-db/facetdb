@@ -302,6 +302,13 @@ function checkEntry(kind: PluginKind, name: string, value: unknown, issues: Plug
     }
   }
   if (
+    kind === "channel" &&
+    definition["check"] !== undefined &&
+    typeof definition["check"] !== "function"
+  ) {
+    issues.push({ field: `${field}.check`, message: "must be a function, or be left out" });
+  }
+  if (
     (kind === "action" || kind === "channel" || kind === "provider") &&
     !(definition["config"] instanceof ZodObject)
   ) {

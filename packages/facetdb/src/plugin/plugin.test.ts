@@ -408,6 +408,34 @@ describe("definePlugin", () => {
     ]);
   });
 
+  it("takes a channel's optional check as a function, and refuses one that is not", () => {
+    const deliver = async () => {};
+    const plugin = definePlugin({
+      name: "chat",
+      version: "1.0.0",
+      facetdb: "^0.0.0",
+      config: z.object({}),
+      channels: {
+        post: channel({ config: z.object({}), check: () => undefined, deliver }),
+        bare: channel({ config: z.object({}), deliver }),
+      },
+    });
+    expect(typeof plugin.channels["post"]?.check).toBe("function");
+    expect(plugin.channels["bare"]?.check).toBeUndefined();
+    const issues = catchIssues(() =>
+      definePlugin({
+        name: "chat",
+        version: "1.0.0",
+        facetdb: "^0.0.0",
+        config: z.object({}),
+        channels: { post: channel({ config: z.object({}), check: "no" as never, deliver }) },
+      }),
+    );
+    expect(issues).toEqual([
+      { field: "channels.post.check", message: "must be a function, or be left out" },
+    ]);
+  });
+
   it("checks a question pack with the config's own question rules", () => {
     const good = definePlugin({
       name: "triage",
