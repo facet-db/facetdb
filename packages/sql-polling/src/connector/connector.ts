@@ -120,7 +120,9 @@ function isRestart(error: unknown): boolean {
 
 /**
  * What a polled database can do: the answers in the table's own columns, no push (the poll is the
- * wake-up), and one worker, because the queue is this process's own.
+ * wake-up), and one worker, because the claims are this process's own. The queue itself lives in
+ * the table: a record waits while its stored `facetdb_state_hash` differs from the hash of its
+ * state (`enqueue` writes it in capitals, the old hash still readable), so it outlives the process.
  */
 export const POLLING_CAPABILITIES: Capabilities = {
   inlineColumns: true,
@@ -139,8 +141,11 @@ type Polled = ReadRow & { readonly stored: string | null; readonly changed: stri
  * core's `stateHash` and yields only the keys whose hash differs from the stored
  * `facetdb_state_hash`. `write` stores that hash with the decision, so a restart, an `updated_at`
  * bump or FacetDB's own status update never asks a row again for a state it already answered. The
- * queue is an in-process set; the stored hash is the only durable memory. The connector owns
- * `client` from here on: `close` closes it.
+ * stored hash is the queue's only durable memory: `enqueue` writes it in capitals, so a record
+ * queued by a backfill is re-found at the first poll after a stop, a crash or a reload, as a
+ * changed row is, while the old hash still tells a record edited meanwhile from one merely queued;
+ * the in-process sets are a cache over it. The connector owns `client` from here on: `close` closes
+ * it.
  */
 export function createPollingConnector(
   dialect: SqlDialect,
@@ -169,7 +174,8 @@ export function createPollingConnector(
     lastChangedColumn === undefined ? undefined : dialect.quoteIdent(lastChangedColumn);
   const placeholder = (index: number) => dialect.placeholder(index);
 
-  // The in-process queue: one entry per record, waiting or claimed by this worker.
+  // The in-process queue, a cache over the stored hash: one entry per record, waiting or claimed
+  // by this worker.
   const waiting = new Set<RecordKey>();
   const claimed = new Set<RecordKey>();
   // `close()` sets the flag while `watch` awaits; the loop reads it through a call because
@@ -341,7 +347,22 @@ export function createPollingConnector(
       const fresh = batch.filter(
         (row) => row.stored !== row.hash && !waiting.has(row.key) && !claimed.has(row.key),
       );
-      await markPending(fresh.map((row) => row.key));
+      // A stored hash that differs from the state's is a change, and the source's `onChange`
+      // applies; `enqueue` writes the stored hash in capitals, so the old hash still reads and a
+      // record edited after it was queued is a change too. Not a change: a NULL hash (a record
+      // never answered, marked pending only while it has no status) and a marked hash of the state
+      // as it is (queued and unchanged: the record keeps its status and its answers until the new
+      // answer lands).
+      await markPending(
+        fresh
+          .filter((row) => row.stored !== null && row.stored.toLowerCase() !== row.hash)
+          .map((row) => row.key),
+        onChange,
+      );
+      await markPending(
+        fresh.filter((row) => row.stored === null).map((row) => row.key),
+        "keep",
+      );
       for (const row of fresh) {
         waiting.add(row.key);
         found.push(row.key);
@@ -360,14 +381,17 @@ export function createPollingConnector(
   }
 
   /** A changed record is pending until its new decision lands (`keep` leaves a decided one). */
-  async function markPending(keys: readonly RecordKey[]): Promise<void> {
+  async function markPending(
+    keys: readonly RecordKey[],
+    policy: PollingTarget["onChange"],
+  ): Promise<void> {
     if (keys.length === 0) {
       return;
     }
     const status = dialect.quoteIdent(STATUS_COLUMN);
     const pending = dialect.quoteLiteral("pending");
     const condition =
-      onChange === "reset" ? `(${status} is null or ${status} <> ${pending})` : `${status} is null`;
+      policy === "reset" ? `(${status} is null or ${status} <> ${pending})` : `${status} is null`;
     for (const chunk of inChunks(keys, dialect.maxInList)) {
       await client.query(
         `update ${table} set ${status} = ${pending} where ${keyColumn} ${dialect.inList(chunk.length)} and ${condition}`,
@@ -614,13 +638,32 @@ export function createPollingConnector(
     write,
     current,
     scan,
-    enqueue(keys) {
-      for (const key of keys) {
-        if (!claimed.has(key)) {
-          waiting.add(key);
+    async enqueue(keys) {
+      // A key this worker holds is left whole, as a jobs table's `on conflict do nothing` leaves a
+      // claimed job: the loop's write stores the hash it answered at.
+      const wanted = [...new Set(keys)].filter((key) => !claimed.has(key));
+      const hash = dialect.quoteIdent(STATE_HASH_COLUMN);
+      for (const chunk of inChunks(wanted, dialect.maxInList)) {
+        // The stored hash is the queue's durable half: written in capitals (core's `stateHash` is
+        // lowercase hex, so the mark differs from any hash the poll computes and the old hash still
+        // reads), the record is re-found by the first poll of any later worker, as a changed row
+        // is, and a change made meanwhile is still told from a record merely queued. A NULL hash
+        // (never answered) stays NULL and is re-found as before. A failed update queues nothing of
+        // its chunk, so a backfill reports it and leaves its page unsaved. No status moves, then or
+        // after a restart: the poll marks pending only a change or a record with no status.
+        await transaction((query) =>
+          query(
+            `update ${table} set ${hash} = upper(${hash}) where ${keyColumn} ${dialect.inList(chunk.length)}`,
+            chunk,
+          ),
+        );
+        for (const key of chunk) {
+          // A claim taken while the update ran keeps its key out of `waiting`.
+          if (!claimed.has(key)) {
+            waiting.add(key);
+          }
         }
       }
-      return Promise.resolve();
     },
     claim(limit) {
       const taken = [...waiting].slice(0, limit);

@@ -1,4 +1,5 @@
 import type { SqlClient, SqlQuery, SqlRow } from "./client.ts";
+import { unlessRelation } from "./ddl.ts";
 import { quoteIdent } from "./identifier.ts";
 
 /**
@@ -36,7 +37,13 @@ export function jobsTableSql(): string[] {
   claimed_at timestamptz,
   claimed_by text
 )`,
-    `create index if not exists ${quoteIdent("jobs_queue")} on ${JOBS_TABLE} (enqueued_at, record_key)`,
+    // Looked up first, never `create index if not exists`: that takes a share lock on the queue
+    // even when the index exists, and waits behind every application transaction a trigger queued
+    // from (ddl.ts).
+    unlessRelation(
+      `${quoteIdent(SCHEMA)}.${quoteIdent("jobs_queue")}`,
+      `create index ${quoteIdent("jobs_queue")} on ${JOBS_TABLE} (enqueued_at, record_key)`,
+    ),
   ];
 }
 

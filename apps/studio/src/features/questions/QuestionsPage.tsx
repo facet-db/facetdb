@@ -189,6 +189,7 @@ export function QuestionsPage({
                   why={waiting.message}
                   migrate={waiting.migrate}
                   added={waiting.added}
+                  checkAgain={waiting.checkAgain}
                 />
               </div>
             )}

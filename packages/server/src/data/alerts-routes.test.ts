@@ -41,6 +41,7 @@ const NO_CONFIG: ConfigService = {
   test: () => Promise.reject(new Error("these tests test nothing")),
   diff: () => Promise.reject(new Error("these tests apply nothing")),
   apply: () => Promise.reject(new Error("these tests apply nothing")),
+  reload: () => Promise.reject(new Error("these tests reload nothing")),
 };
 
 const THIS_MACHINE = { remoteAddress: "127.0.0.1" };

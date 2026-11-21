@@ -72,6 +72,12 @@ function rig() {
       };
       return Promise.resolve(loop);
     },
+    // PostgreSQL's doctor has no check of the worker login's rights (install-check.ts).
+    installed: () =>
+      Promise.resolve({
+        kind: "cannot-tell",
+        why: "the worker's checks of PostgreSQL cannot tell whether the worker login may write them",
+      }),
     load: () => Promise.resolve(state.file),
     beat: () => Promise.resolve(),
     clock: NEVER_SLEEPS,
@@ -119,10 +125,11 @@ describe("the sources that do not run the file as last loaded", () => {
         source: "listings",
         outcome: "kept",
         message:
-          "the change reaches what facetdb migrate installed (a question added or removed, a type, options or levels, read, where, the table, storage or capture), so it keeps answering with version 1 until you run facetdb migrate and restart facetdb worker.",
+          "the question is_vehicle needs its columns, and the worker's checks of PostgreSQL cannot tell whether the worker login may write them, so it keeps answering with version 1 until you run facetdb migrate --source listings and restart facetdb worker.",
         migrate: true,
         added: ["is_vehicle"],
         removed: [],
+        checkAgain: false,
       },
     ]);
     // The list says what the reload said, word for word.
@@ -196,6 +203,7 @@ describe("the sources that do not run the file as last loaded", () => {
         migrate: true,
         added: [],
         removed: [],
+        checkAgain: false,
       },
     ]);
   });

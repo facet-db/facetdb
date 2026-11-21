@@ -6,6 +6,8 @@ set local lock_timeout = '10s';
 
 select pg_advisory_xact_lock(hashtext('facetdb:login:facetdb_worker'));
 
+lock table "public"."listings" in access exclusive mode;
+
 create schema if not exists "facetdb";
 
 create table if not exists facetdb.store_migrations (
@@ -61,7 +63,12 @@ create table if not exists facetdb.decisions (
       or (kind = 'human' and question is not null and value is not null and reviewer is not null))
 );
 
-create index if not exists decisions_by_record on facetdb.decisions (source_id, record_key, id);
+do $$
+begin
+  if to_regclass('facetdb.decisions_by_record') is null then
+    create index decisions_by_record on facetdb.decisions (source_id, record_key, id);
+  end if;
+end $$;
 
 create schema if not exists "facetdb";
 
@@ -72,7 +79,12 @@ create table if not exists "facetdb"."jobs" (
   claimed_by text
 );
 
-create index if not exists "jobs_queue" on "facetdb"."jobs" (enqueued_at, record_key);
+do $$
+begin
+  if to_regclass('"facetdb"."jobs_queue"') is null then
+    create index "jobs_queue" on "facetdb"."jobs" (enqueued_at, record_key);
+  end if;
+end $$;
 
 create table if not exists facetdb.records (
   source_id text not null,
@@ -118,7 +130,12 @@ create table if not exists facetdb.usage_reservations (
   expires_at bigint not null
 );
 
-create index if not exists usage_reservations_by_month on facetdb.usage_reservations (project_id, month);
+do $$
+begin
+  if to_regclass('facetdb.usage_reservations_by_month') is null then
+    create index usage_reservations_by_month on facetdb.usage_reservations (project_id, month);
+  end if;
+end $$;
 
 create table if not exists facetdb.usage_alerts (
   project_id text not null,
@@ -164,10 +181,22 @@ create table if not exists facetdb.webhook_outbox (
   claimed_by text
 );
 
-alter table facetdb.webhook_outbox add column if not exists claimed_by text;
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'claimed_by'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column claimed_by text;
+  end if;
+end $$;
 
-create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
+do $$
+begin
+  if to_regclass('facetdb.webhook_outbox_due') is null then
+    create index webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
   where delivered_at is null and gave_up_at is null;
+  end if;
+end $$;
 
 insert into facetdb.store_migrations (version) values (2) on conflict (version) do nothing;
 
@@ -235,7 +264,12 @@ $$;
 
 insert into facetdb.store_migrations (version) values (4) on conflict (version) do nothing;
 
-create index if not exists decisions_by_source on facetdb.decisions (source_id, id);
+do $$
+begin
+  if to_regclass('facetdb.decisions_by_source') is null then
+    create index decisions_by_source on facetdb.decisions (source_id, id);
+  end if;
+end $$;
 
 insert into facetdb.store_migrations (version) values (5) on conflict (version) do nothing;
 
@@ -272,7 +306,12 @@ create table if not exists facetdb.runs (
   tokens bigint not null
 );
 
-create index if not exists decisions_by_time on facetdb.decisions (source_id, at desc, id);
+do $$
+begin
+  if to_regclass('facetdb.decisions_by_time') is null then
+    create index decisions_by_time on facetdb.decisions (source_id, at desc, id);
+  end if;
+end $$;
 
 insert into facetdb.store_migrations (version) values (6) on conflict (version) do nothing;
 

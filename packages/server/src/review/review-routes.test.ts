@@ -94,6 +94,7 @@ const NO_CONFIG: ConfigService = {
   test: () => Promise.reject(new Error("these tests test nothing")),
   diff: () => Promise.reject(new Error("these tests apply nothing")),
   apply: () => Promise.reject(new Error("these tests apply nothing")),
+  reload: () => Promise.reject(new Error("these tests reload nothing")),
 };
 const NO_DATA: DataServices = {
   runs: { list: () => Promise.reject(new Error("these tests read no runs")) },

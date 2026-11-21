@@ -494,6 +494,8 @@ const pendingSourceSchema = z.object({
   added: z.array(z.string()),
   /** Questions the loop runs that the file no longer holds. */
   removed: z.array(z.string()),
+  /** A reload switches it once its database holds the change: "Check again" asks for one. */
+  checkAgain: z.boolean(),
 });
 export type PendingSource = z.infer<typeof pendingSourceSchema>;
 
@@ -852,6 +854,8 @@ export type ApiClient = {
     draft: SourceDraft,
     confirm: { readonly plan: string; readonly force: boolean },
   ) => Promise<ApplyWritten>;
+  /** `POST /v1/reload`, Check again: the worker reads the file and its databases again. */
+  readonly reload: () => Promise<ApplyReload>;
   // The Sources page and the setup flow.
   readonly sources: () => Promise<readonly SourceRow[]>;
   /** Whether this browser may add a source here: the operator on the worker's machine alone. */
@@ -1017,6 +1021,8 @@ export function createApiClient(fetch: Fetch): ApiClient {
     applyDiff: (draft) => call(applyDiffSchema, "POST", "/apply", { source: draft }),
     applyWrite: (draft, { plan, force }) =>
       call(applyWrittenSchema, "POST", "/apply", { source: draft, confirm: plan, force }),
+    // An empty JSON body: the header is the guard the route takes (Apply's), nothing in it is read.
+    reload: () => call(reloadSchema, "POST", "/reload", {}),
     sources: async () => (await call(sourcesSchema, "GET", "/sources")).sources,
     setupAccess: () => call(setupAccessSchema, "GET", "/sources/setup"),
     setupInspect: (admin, table) =>

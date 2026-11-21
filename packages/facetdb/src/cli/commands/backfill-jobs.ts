@@ -33,7 +33,9 @@ import type { SourceLoop } from "./config-reload.ts";
  *  - it reads, claims and writes over a connector of its own, opened under a worker id of its own,
  *    as `facetdb backfill` does: a queue kept in the database tells a job's claim from a loop's by
  *    that id. The records of a whole set, which the loop asks, go to the queue of the loop in
- *    force and not to the job's connector, whose queue may be its own memory (the polling engine's);
+ *    force and not to the job's connector: the polling engine's connector keeps a memory of its
+ *    queue, a cache over the stored state hash, so the loop's own connector asks them at once
+ *    where the job's would leave them to the loop's next whole-table poll;
  *  - a stop, a reload that restarts or removes the source, and the worker stopping each stop it
  *    after the page in hand, with that page's place saved (core's `BackfillOptions.signal`).
  * Every write goes through core's backfill, which writes a decision only while the state hash still
@@ -72,9 +74,12 @@ export type BackfillJobsDeps = {
   /**
    * Where the loop in force of a source takes the records it is to ask (its own connector's
    * `enqueue`, through `Fleet.connector`), or undefined when the worker runs no such source. A
-   * whole set's records are handed there: the polling engine keeps its queue in the connector's own
-   * memory, so records queued through the job's connector would wait for a worker that never looks,
-   * and the job would call them queued.
+   * whole set's records are handed there: the polling engine's connector keeps a memory of its
+   * queue, a cache over the stored state hash its `enqueue` marks (the old hash written in
+   * capitals, so an edit made meanwhile still reads as a change), so records queued through the
+   * job's connector would wait for a poll that reads the whole table (the loop's next start, or
+   * its hourly scan without a last-changed column) to be found, where the loop's own connector
+   * asks them at once.
    */
   readonly queue: (name: string) => Pick<Connector, "enqueue"> | undefined;
   /** The workers' provider: backoff and the in-flight limit around the model, shared with the loops. */

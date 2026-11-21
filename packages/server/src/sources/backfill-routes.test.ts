@@ -62,6 +62,7 @@ const NO_CONFIG: ConfigService = {
   test: () => Promise.reject(new Error("these tests test no draft")),
   diff: () => Promise.reject(new Error("these tests ask for no diff")),
   apply: () => Promise.reject(new Error("these tests apply nothing")),
+  reload: () => Promise.reject(new Error("these tests reload nothing")),
 };
 
 const NO_DATA: DataServices = {

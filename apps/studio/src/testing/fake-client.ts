@@ -837,6 +837,7 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     testDraft: () => Promise.resolve(SAMPLE_TEST_RESULT),
     applyDiff: () => Promise.resolve(SAMPLE_APPLY_DIFF),
     applyWrite: () => Promise.resolve(SAMPLE_APPLIED),
+    reload: () => Promise.resolve({ loaded: true, sources: [], notes: [] }),
     // The Sources page and the setup flow.
     sources: () => Promise.resolve(SAMPLE_SOURCES),
     setupAccess: () => Promise.resolve(SAMPLE_SETUP_ACCESS),
@@ -995,6 +996,10 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     applyWrite: (draft, confirm) => {
       calls.push(`applyWrite ${JSON.stringify({ ...confirm, draft })}`);
       return answer.applyWrite(draft, confirm);
+    },
+    reload: () => {
+      calls.push("reload");
+      return answer.reload();
     },
   };
 }

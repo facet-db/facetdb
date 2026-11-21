@@ -1,10 +1,23 @@
-import { jobsTableSql, quoteIdent, type SqlClient, type SqlQuery } from "../sql/index.ts";
+import {
+  jobsTableSql,
+  quoteIdent,
+  type SqlClient,
+  type SqlQuery,
+  unlessColumn,
+  unlessRelation,
+} from "../sql/index.ts";
 
 /**
  * The store's own migrations. Each is a numbered list of statements written to be idempotent (`if
- * not exists`); `facetdb.store_migrations` records which numbers ran, so a restart runs only what
- * is new, and two processes starting at once take turns on an advisory lock. A migration is only
- * ever appended to the list, never edited once released.
+ * not exists`; an index or a column looked up first, by `unlessRelation` and `unlessColumn`, so a
+ * repeat run locks nothing: the install runs these again beside a live application, with the same
+ * effect as the `if not exists` they replaced); `facetdb.store_migrations` records which numbers
+ * ran, so a restart runs only what is new, and two processes starting at once take turns on an
+ * advisory lock. A migration is only ever appended to the list, never edited once released, with
+ * one exception made once: a later version rewrote the index and column statements of the released
+ * migrations into their looked-up form, the same effect on every store and the version numbers
+ * untouched, because the install re-runs every migration's text beside a live application and a new
+ * migration would have left the locking text in it.
  */
 type Migration = { readonly version: number; readonly statements: readonly string[] };
 
@@ -69,7 +82,10 @@ const MIGRATIONS: readonly Migration[] = [
   check ((kind = 'answer' and model is not null and answers is not null and usage is not null)
       or (kind = 'human' and question is not null and value is not null and reviewer is not null))
 )`,
-      `create index if not exists decisions_by_record on facetdb.decisions (source_id, record_key, id)`,
+      unlessRelation(
+        "facetdb.decisions_by_record",
+        `create index decisions_by_record on facetdb.decisions (source_id, record_key, id)`,
+      ),
       ...jobsTableSql(),
       // Records of plugin and API sources: the state the model is shown, its hash, and the decision.
       `create table if not exists facetdb.records (
@@ -113,7 +129,10 @@ const MIGRATIONS: readonly Migration[] = [
   tokens bigint not null,
   expires_at bigint not null
 )`,
-      `create index if not exists usage_reservations_by_month on facetdb.usage_reservations (project_id, month)`,
+      unlessRelation(
+        "facetdb.usage_reservations_by_month",
+        `create index usage_reservations_by_month on facetdb.usage_reservations (project_id, month)`,
+      ),
       `create table if not exists facetdb.usage_alerts (
   project_id text not null,
   month text not null,
@@ -160,9 +179,16 @@ const MIGRATIONS: readonly Migration[] = [
   claimed_by text
 )`,
       // An outbox a worker made before outcomes were checked against the claim has no `claimed_by`.
-      `alter table facetdb.webhook_outbox add column if not exists claimed_by text`,
-      `create index if not exists webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "claimed_by",
+        `alter table facetdb.webhook_outbox add column claimed_by text`,
+      ),
+      unlessRelation(
+        "facetdb.webhook_outbox_due",
+        `create index webhook_outbox_due on facetdb.webhook_outbox (next_attempt_at)
   where delivered_at is null and gave_up_at is null`,
+      ),
     ],
   },
   {
@@ -260,7 +286,10 @@ $$`,
       // without this index that page reads every row of the source. A plain `create index` (not
       // `concurrently`, which cannot run inside the migration's transaction) holds off the
       // worker's appends to the log while it builds, once, during `facetdb migrate`.
-      `create index if not exists decisions_by_source on facetdb.decisions (source_id, id)`,
+      unlessRelation(
+        "facetdb.decisions_by_source",
+        `create index decisions_by_source on facetdb.decisions (source_id, id)`,
+      ),
     ],
   },
   {
@@ -307,7 +336,10 @@ $$`,
       // The Decisions page searches one source's log by a time range, newest first, paged by the
       // log's id; neither `decisions_by_record` nor `decisions_by_source` orders by time. A plain
       // `create index` inside the migration's transaction, as migration 5's.
-      `create index if not exists decisions_by_time on facetdb.decisions (source_id, at desc, id)`,
+      unlessRelation(
+        "facetdb.decisions_by_time",
+        `create index decisions_by_time on facetdb.decisions (source_id, at desc, id)`,
+      ),
     ],
   },
 ];

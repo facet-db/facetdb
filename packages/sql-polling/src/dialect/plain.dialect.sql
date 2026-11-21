@@ -218,7 +218,7 @@ delete from "facetdb_table_owners" where table_schema = 'main' and table_name = 
 -- connector, watch: the first poll by updated_at, over two pages
 select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, cast("description" as varchar(4000)) as s1, "facetdb_state_hash" as h, false as x, cast("updated_at" as varchar(4000)) as c from "main"."listings" order by "updated_at", "id" fetch first :1 rows only;
 -- binds: [2]
-update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, cast("description" as varchar(4000)) as s1, "facetdb_state_hash" as h, false as x, cast("updated_at" as varchar(4000)) as c from "main"."listings" where ("updated_at" > :1 or ("updated_at" = :1 and "id" > :2)) order by "updated_at", "id" fetch first :3 rows only;
 -- binds: ["2026-11-03 10:00:00+00","2",2]
@@ -226,13 +226,13 @@ select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, c
 -- connector, watch: the next poll, from the last updated_at seen
 select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, cast("description" as varchar(4000)) as s1, "facetdb_state_hash" as h, false as x, cast("updated_at" as varchar(4000)) as c from "main"."listings" where "updated_at" >= :1 order by "updated_at", "id" fetch first :2 rows only;
 -- binds: ["2026-11-03 10:00:00+00",2]
-update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1) and "facetdb_status" is null;
 -- binds: ["3"]
 
 -- connector, watch: the hourly full scan, without a last-changed column
 select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, cast("description" as varchar(4000)) as s1, "facetdb_state_hash" as h, false as x from "main"."listings" order by "id" fetch first :1 rows only;
 -- binds: [2]
-update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "main"."listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select cast("id" as varchar(4000)) as k, cast("title" as varchar(4000)) as s0, cast("description" as varchar(4000)) as s1, "facetdb_state_hash" as h, false as x from "main"."listings" where "id" > :1 order by "id" fetch first :2 rows only;
 -- binds: ["2",2]

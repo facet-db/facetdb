@@ -89,6 +89,7 @@ const APPLIED: FileApply = {
 function fileDoor(outcomes: { diff?: FileDiff; apply?: FileApply } = {}) {
   const calls: { kind: string; draft: SourceDraft; options?: unknown }[] = [];
   const door: ConfigFileDoor = {
+    reload: () => Promise.reject(new Error("Apply reloads inside its own write")),
     diff: (draft) => {
       calls.push({ kind: "diff", draft });
       return Promise.resolve(outcomes.diff ?? PLANNED);

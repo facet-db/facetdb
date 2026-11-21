@@ -68,6 +68,13 @@ const APPLY_PAGE = {
   from: "Apply from the studio this worker serves, or from a program on a machine you trust.",
 } as const;
 
+/** Check again makes the worker reload on the operator's machine: Apply's guard, in its words. */
+const RELOAD_PAGE = {
+  what: "Check again",
+  does: "Check again makes this worker reload facetdb.config.ts on this machine",
+  from: "Check again from the studio this worker serves, or from a program on a machine you trust.",
+} as const;
+
 function issuesInWords(issues: readonly DraftIssue[]): string {
   return issues
     .map((issue) => (issue.path === "" ? issue.message : `${issue.path}: ${issue.message}`))
@@ -274,6 +281,27 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
           "plan_changed",
           "facetdb.config.ts or the draft changed since the diff that was confirmed, so nothing was written.",
           "Ask for the diff again (POST /v1/apply without confirm), look at it, and confirm the plan it answers with.",
+        );
+    }
+  });
+
+  // Check again: the worker reads facetdb.config.ts and its databases again, as after Apply, and
+  // answers the reload. Guarded as Apply is: whoever may Apply may ask, from the studio's own page
+  // or a program; no body is read (the JSON header is the guard).
+  route.post("/reload", async (c) => {
+    requireOwnPage(c.req, RELOAD_PAGE);
+    const outcome = await service.reload(c.get("projectId"));
+    switch (outcome.kind) {
+      case "reloaded":
+        return c.json(outcome.reload);
+      case "unknown_project":
+        throw unknownProject();
+      case "unavailable":
+        throw new ApiError(
+          409,
+          "reload_unavailable",
+          "This worker does not reload facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+          "Restart the worker to run the file as it is, or run facetdb worker to check again from the studio.",
         );
     }
   });

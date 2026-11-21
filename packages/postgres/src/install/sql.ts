@@ -426,8 +426,8 @@ export function installSql(
     // The literal rules this script relies on, pinned for the transaction whatever the server's
     // default: a backslash inside a quoted name is a backslash.
     plain("settings", "set local standard_conforming_strings = on"),
-    // The `alter table` statements take ACCESS EXCLUSIVE on the customer's table: better a failed
-    // migrate after ten seconds than the application's queries piling up behind it.
+    // The script takes ACCESS EXCLUSIVE on the customer's table (its first lock, below): better a
+    // failed migrate after ten seconds than the application's queries piling up behind it.
     plain("settings", "set local lock_timeout = '10s'"),
     // A script that creates the worker login (it was absent when planned) holds the login's lock
     // for its whole transaction, first of all, so two first installs on one server (two projects)
@@ -435,6 +435,26 @@ export function installSql(
     // password statement (the engine's run) instead of resetting the first's password. The store's
     // migrations take a lock of the same family (`hashtext`).
     ...(options.workerPassword === undefined ? [] : [plain("settings", loginLock(workerName))]),
+    // The customer's table, before any statement on the store's tables. Two rules keep a migrate
+    // beside a live application from ever closing a lock cycle with it:
+    // - This table first: its trigger takes the table, then the queue (an application insert holds
+    //   the table and inserts into `facetdb.jobs`), so an application write commits before this
+    //   line or waits here, at the table, holding nothing of this script's. A script that locked
+    //   the queue first and the table after met a live insert in the reverse order, and Postgres
+    //   ended the application's write as a deadlock victim (a live suite).
+    // - After it, nothing locks what any trigger writes: every installed table of the database
+    //   queues into the one `facetdb.jobs`, and an application transaction that wrote another
+    //   installed table holds its lock until it commits. A statement here that waited for it (the
+    //   share lock of `create index if not exists`) while holding this table would deadlock with
+    //   that transaction's next write to this table, so the store's indexes and columns are looked
+    //   up first and created only when missing (sql/ddl.ts), and the grants on the queue take no
+    //   lock on it.
+    // Access exclusive, the mode the `alter table`, `drop trigger` and policies below need anyway
+    // (side-table mode too), so no later statement upgrades it. An application transaction left
+    // open on this table makes this statement fail after the ten seconds above, never the
+    // application's. The login's lock above stays first: it is on a name, not a table, and only
+    // install takes it.
+    plain("settings", `lock table ${table} in access exclusive mode`),
     // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
     // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
     ...storeInstallStatements().map(storeStatement),

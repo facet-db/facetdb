@@ -256,6 +256,8 @@ describe("polling connector contract", () => {
     const connector = world.connector({ pageSize: 10 });
     return {
       connector,
+      // The worker that starts after it, on the same database.
+      peer: world.connector({ pageSize: 10 }),
       fields: world.questionSet.read,
       edit: (key, state) => world.edit(key, state),
       decisionOf: (key) => world.decisionOf(key),

@@ -116,7 +116,7 @@ alter table "listings" drop ("is_scam", "is_scam_probability");
 -- connector, watch: the first poll by updated_at, over two pages
 select to_char("id") as k, to_char("title") as s0, to_char("description") as s1, "facetdb_state_hash" as h, 0 as x, to_char("updated_at") as c from "listings" order by "updated_at", "id" fetch first :1 rows only;
 -- binds: [2]
-update "listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select to_char("id") as k, to_char("title") as s0, to_char("description") as s1, "facetdb_state_hash" as h, 0 as x, to_char("updated_at") as c from "listings" where ("updated_at" > :1 or ("updated_at" = :1 and "id" > :2)) order by "updated_at", "id" fetch first :3 rows only;
 -- binds: ["2026-11-03 10:00:00+00","2",2]
@@ -124,13 +124,13 @@ select to_char("id") as k, to_char("title") as s0, to_char("description") as s1,
 -- connector, watch: the next poll, from the last updated_at seen
 select to_char("id") as k, to_char("title") as s0, to_char("description") as s1, "facetdb_state_hash" as h, 0 as x, to_char("updated_at") as c from "listings" where "updated_at" >= :1 order by "updated_at", "id" fetch first :2 rows only;
 -- binds: ["2026-11-03 10:00:00+00",2]
-update "listings" set "facetdb_status" = 'pending' where "id" in (:1) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "listings" set "facetdb_status" = 'pending' where "id" in (:1) and "facetdb_status" is null;
 -- binds: ["3"]
 
 -- connector, watch: the hourly full scan, without a last-changed column
 select to_char("id") as k, to_char("title") as s0, to_char("description") as s1, "facetdb_state_hash" as h, 0 as x from "listings" order by "id" fetch first :1 rows only;
 -- binds: [2]
-update "listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "listings" set "facetdb_status" = 'pending' where "id" in (:1, :2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select to_char("id") as k, to_char("title") as s0, to_char("description") as s1, "facetdb_state_hash" as h, 0 as x from "listings" where "id" > :1 order by "id" fetch first :2 rows only;
 -- binds: ["2",2]

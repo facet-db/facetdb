@@ -109,6 +109,11 @@ export type PendingSource = {
   readonly added: readonly string[];
   /** Questions the loop runs that the file no longer holds. */
   readonly removed: readonly string[];
+  /**
+   * True when a reload switches the source once its database holds the change (questions added, and
+   * nothing else, on an engine whose checks can tell): "Check again" asks for that reload.
+   */
+  readonly checkAgain: boolean;
 };
 
 /** The worker's reload of the written file: per source, or the reason the file did not load. */
@@ -159,6 +164,8 @@ export type FileApply =
 
 /** The CLI's door to `facetdb.config.ts`: the loader, the exporter, git and the reload are its. */
 export type ConfigFileDoor = {
+  /** Reads the file again and applies it to the running loops, as after a write. */
+  reload(): Promise<ReloadSummary>;
   diff(draft: SourceDraft): Promise<FileDiff>;
   apply(
     draft: SourceDraft,
@@ -259,7 +266,12 @@ export type ConfigService = {
     draft: SourceDraft,
     options: { readonly plan: string; readonly force: boolean },
   ): Promise<FileOutcome<FileApply>>;
+  /** Check again: the worker reads the file and its databases again; nothing is written. */
+  reload(projectId: string): Promise<FileOutcome<FileReload>>;
 };
+
+/** The reload Check again asked for. */
+export type FileReload = { readonly kind: "reloaded"; readonly reload: ReloadSummary };
 
 /** A file door's outcome, or why this worker has none to ask. */
 export type FileOutcome<Outcome> =
@@ -469,6 +481,16 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
       return config.file === undefined
         ? Promise.resolve({ kind: "unavailable" })
         : config.file.apply(draft, options);
+    },
+
+    async reload(projectId) {
+      if (!ours(projectId)) {
+        return { kind: "unknown_project" };
+      }
+      if (config.file === undefined) {
+        return { kind: "unavailable" };
+      }
+      return { kind: "reloaded", reload: await config.file.reload() };
     },
   };
 }

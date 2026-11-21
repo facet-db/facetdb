@@ -305,7 +305,7 @@ commit;
 -- connector, watch: the first poll by updated_at, over two pages
 select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb_state_hash" as h, false as x, "updated_at"::text as c from "public"."listings" order by "updated_at", "id" limit $1;
 -- binds: [2]
-update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1, $2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1, $2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb_state_hash" as h, false as x, "updated_at"::text as c from "public"."listings" where ("updated_at", "id") > ($1, $2) order by "updated_at", "id" limit $3;
 -- binds: ["2026-11-03 10:00:00+00","2",2]
@@ -313,13 +313,13 @@ select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb
 -- connector, watch: the next poll, from the last updated_at seen
 select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb_state_hash" as h, false as x, "updated_at"::text as c from "public"."listings" where "updated_at" >= $1 order by "updated_at", "id" limit $2;
 -- binds: ["2026-11-03 10:00:00+00",2]
-update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1) and "facetdb_status" is null;
 -- binds: ["3"]
 
 -- connector, watch: the hourly full scan, without a last-changed column
 select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb_state_hash" as h, false as x from "public"."listings" order by "id" limit $1;
 -- binds: [2]
-update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1, $2) and ("facetdb_status" is null or "facetdb_status" <> 'pending');
+update "public"."listings" set "facetdb_status" = 'pending' where "id" in ($1, $2) and "facetdb_status" is null;
 -- binds: ["1","2"]
 select "id"::text as k, "title"::text as s0, "description"::text as s1, "facetdb_state_hash" as h, false as x from "public"."listings" where "id" > $1 order by "id" limit $2;
 -- binds: ["2",2]

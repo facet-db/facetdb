@@ -45,6 +45,7 @@ const NO_CONFIG: ConfigService = {
   test: () => Promise.reject(new Error("these tests test nothing")),
   diff: () => Promise.reject(new Error("these tests apply nothing")),
   apply: () => Promise.reject(new Error("these tests apply nothing")),
+  reload: () => Promise.reject(new Error("these tests reload nothing")),
 };
 
 /** Nor are the dashboard's read endpoints: any call to them fails the test. */

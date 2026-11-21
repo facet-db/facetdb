@@ -523,6 +523,7 @@ describe("the config routes", () => {
         outcome: "kept",
         message: "it keeps answering with version 2 until you run facetdb migrate and restart.",
         migrate: true,
+        checkAgain: false,
         added: ["is_vehicle"],
         removed: [],
       },

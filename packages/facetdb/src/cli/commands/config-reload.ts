@@ -41,7 +41,12 @@ import {
  *    pass in hand (`Worker.run` checks its signal between passes only, so every claim of that pass is
  *    acked or released), its connector closed, and the new loop started; nothing is queued, so no
  *    record already answered is asked again;
- *  - a change that reaches the database's install (a question added or removed, a type, options or
+ *  - a change whose only reach into the install is questions added
+ *    switches like a changed set once the worker's own check of the database (`installed`: the
+ *    engine's doctor under the worker login, for the new set) finds their columns and its right to
+ *    write them; until then, or when the check cannot be made, the source keeps running what it ran
+ *    and the worker says what is missing and what to do; a reload asked for again checks again;
+ *  - any other change that reaches the database's install (a question removed, a type, options or
  *    levels, read, where, the table, storage, capture) needs `facetdb migrate` and a restart: the
  *    source keeps running what it ran, and the worker says so; so does a new source;
  *  - a source removed from the file stops after the pass in hand;
@@ -77,12 +82,28 @@ export type SourceLoop = {
   close(): Promise<void>;
 };
 
+/**
+ * The worker's own reading of a source's database for a question set: the install holds it (its
+ * columns are there and the worker login may write them), something is missing, or the engine's
+ * checks cannot tell. A check that could not be made at all throws.
+ */
+export type InstallCheck =
+  | { readonly kind: "holds" }
+  | { readonly kind: "missing"; readonly missing: string }
+  | { readonly kind: "cannot-tell"; readonly why: string };
+
 export type FleetDeps = {
   /**
    * Records the source's question-set version, opens what it reads and builds its worker. The fleet
    * closes what it returns.
    */
   readonly open: (source: SourceConfig, config: ProjectConfig) => Promise<SourceLoop>;
+  /**
+   * Whether the source's database holds the install of `source`'s question set, as the worker reads
+   * it under its own login. Asked only for a source whose one change to the install is questions
+   * added; never taken from the page's word.
+   */
+  readonly installed: (source: SourceConfig, config: ProjectConfig) => Promise<InstallCheck>;
   /** Reads facetdb.config.ts again through the loader; a `ConfigError` when it does not load. */
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
@@ -134,6 +155,13 @@ export type Fleet = {
 export type ReloadStep =
   | { readonly kind: "unchanged"; readonly name: string }
   | { readonly kind: "restart"; readonly name: string; readonly source: SourceConfig }
+  /** Questions added and nothing else reaching the install: switched once `installed` holds. */
+  | {
+      readonly kind: "added";
+      readonly name: string;
+      readonly source: SourceConfig;
+      readonly questions: readonly string[];
+    }
   | { readonly kind: "remove"; readonly name: string }
   | { readonly kind: "add"; readonly name: string }
   /** The change reaches the install (`facetdb migrate`) or the check API's fields (a restart). */
@@ -141,6 +169,11 @@ export type ReloadStep =
 
 function sourceJsonOf(config: ProjectConfig, source: SourceConfig): unknown {
   return toProjectJson({ ...config, sources: [source] }).sources[0];
+}
+
+/** The source as the file holds it, with its model: what one reading of its database was for. */
+function sourceKey(config: ProjectConfig, source: SourceConfig): string {
+  return JSON.stringify([sourceJsonOf(config, source), source.model ?? config.model]);
 }
 
 /** A question as the install sees it: its column's name and type, never its wording. */
@@ -170,10 +203,15 @@ function columnOf(question: Question): unknown {
  * reach the install waits for migrate and a restart, rather than writing a column that is not there.
  */
 function installShape(source: SourceConfig): string {
+  return JSON.stringify(installFields(source, true));
+}
+
+/** The install's fields, its questions' columns among them only when `questions` says so. */
+function installFields(source: SourceConfig, questions: boolean): unknown {
   if (source.api) {
-    return JSON.stringify({ api: true, read: source.read });
+    return { api: true, read: source.read };
   }
-  return JSON.stringify({
+  return {
     databaseEnv: source.databaseEnv,
     connector: source.connector,
     capture: source.capture,
@@ -183,8 +221,39 @@ function installShape(source: SourceConfig): string {
     read: source.read,
     storage: source.storage,
     onChange: source.onChange,
-    questions: [...source.questions].sort((a, b) => a.name.localeCompare(b.name)).map(columnOf),
+    ...(questions
+      ? {
+          questions: [...source.questions]
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map(columnOf),
+        }
+      : {}),
+  };
+}
+
+/**
+ * The questions `next` adds to what `ran` runs, when that is its only change to the install: every
+ * question the loop runs is in the file's set with the same column, and every other field the
+ * install depends on is equal. Undefined for any other change, and for an API source (no install).
+ */
+function questionsAdded(ran: SourceConfig, next: SourceConfig): readonly string[] | undefined {
+  if (ran.api || next.api) {
+    return undefined;
+  }
+  if (JSON.stringify(installFields(ran, false)) !== JSON.stringify(installFields(next, false))) {
+    return undefined;
+  }
+  const kept = ran.questions.every((question) => {
+    const found = next.questions.find((candidate) => candidate.name === question.name);
+    return (
+      found !== undefined && JSON.stringify(columnOf(found)) === JSON.stringify(columnOf(question))
+    );
   });
+  const names = new Set(ran.questions.map((question) => question.name));
+  const added = next.questions
+    .filter((question) => !names.has(question.name))
+    .map((question) => question.name);
+  return kept && added.length > 0 ? added : undefined;
 }
 
 /**
@@ -210,7 +279,12 @@ export function planReload(
     if (same) {
       steps.push({ kind: "unchanged", name: source.name });
     } else if (installShape(loop.source) !== installShape(source)) {
-      steps.push({ kind: "keep", name: source.name, migrate: !source.api });
+      const added = questionsAdded(loop.source, source);
+      steps.push(
+        added === undefined
+          ? { kind: "keep", name: source.name, migrate: !source.api }
+          : { kind: "added", name: source.name, source, questions: added },
+      );
     } else {
       steps.push({ kind: "restart", name: source.name, source });
     }
@@ -247,6 +321,42 @@ function keptMessage(migrate: boolean, version: number | null): string {
     : `the fields it reads changed, so it keeps answering with version ${version} until you restart facetdb worker.`;
 }
 
+/** The questions a source adds, named for a sentence: "the question a", "the questions a and b". */
+function namesOf(questions: readonly string[]): string {
+  return questions.length === 1
+    ? `the question ${questions[0]}`
+    : `the questions ${questions.slice(0, -1).join(", ")} and ${questions.at(-1)}`;
+}
+
+/** What a reload says of a source it switches once its added questions are installed. */
+function switchedMessage(questions: readonly string[], version: number): string {
+  return `the columns of ${namesOf(questions)} are in its database and the worker login may write them: it finishes the batch in hand, then answers with version ${version}; nothing already answered is asked again.`;
+}
+
+/** Why a source with questions added was not switched: the check's finding, or the read that failed. */
+type Unswitched =
+  | Exclude<InstallCheck, { readonly kind: "holds" }>
+  | { readonly kind: "unread"; readonly why: string };
+
+/** What a reload says of a source whose added questions it does not switch to, and what to do. */
+function addedMessage(
+  name: string,
+  questions: readonly string[],
+  check: Unswitched,
+  version: number | null,
+): string {
+  const keeps = `so it keeps answering with version ${version}`;
+  const one = questions.length === 1;
+  switch (check.kind) {
+    case "missing":
+      return `${namesOf(questions)} ${one ? "is" : "are"} not installed in its database yet (${check.missing}), ${keeps}. Install ${one ? "it" : "them"} from the Questions page, or run facetdb migrate --source ${name}, then Check again.`;
+    case "unread":
+      return `its database could not be read to check ${namesOf(questions)} (${check.why}), ${keeps}. Check again once the database answers; facetdb doctor says what is wrong.`;
+    case "cannot-tell":
+      return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and ${check.why}, ${keeps} until you run facetdb migrate --source ${name} and restart facetdb worker.`;
+  }
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -274,6 +384,11 @@ export function createFleet(deps: FleetDeps): Fleet {
   let failure: { readonly error: unknown } | undefined;
   /** Reloads one at a time, each after the swap of the one before. */
   let queue: Promise<void> = Promise.resolve();
+  /**
+   * The last reading of each source whose added questions were not switched to, for the file's
+   * source as it was then: `pending()` says the same until a reload reads the database again.
+   */
+  const unswitched = new Map<string, { readonly file: string; readonly check: Unswitched }>();
 
   const slotOf = (loop: SourceLoop): Slot => ({
     loop,
@@ -458,6 +573,33 @@ export function createFleet(deps: FleetDeps): Fleet {
         deps.print(`${reload.source}: ${reload.message}`);
       }
     };
+    /** Opens the source anew under `source`; on success its loop swaps after the batch in hand. */
+    const openAnew = async (
+      slot: Slot,
+      source: SourceConfig,
+      words: (version: number) => string,
+    ): Promise<void> => {
+      const version = slot.loop.version;
+      let fresh: SourceLoop;
+      try {
+        fresh = await deps.open(source, next);
+      } catch (error) {
+        say({
+          source: source.name,
+          outcome: "failed",
+          version,
+          message: `could not start with the new question set (${messageOf(error)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
+        });
+        return;
+      }
+      restarts.push({ slot, fresh });
+      say({
+        source: source.name,
+        outcome: "restarted",
+        version: fresh.version,
+        message: words(fresh.version),
+      });
+    };
     for (const step of steps) {
       const slot = slots.get(step.name);
       const version = slot?.loop.version ?? null;
@@ -493,29 +635,40 @@ export function createFleet(deps: FleetDeps): Fleet {
               "no longer in facetdb.config.ts, so it stops after the batch in hand; its answers and log stay.",
           });
           break;
-        case "restart": {
+        case "restart":
+          if (slot !== undefined) {
+            await openAnew(
+              slot,
+              step.source,
+              (fresh) =>
+                `the question set changed: it finishes the batch in hand, then answers with version ${fresh}; nothing already answered is asked again.`,
+            );
+          }
+          break;
+        case "added": {
           if (slot === undefined) {
             break;
           }
-          let fresh: SourceLoop;
+          // The switch is made on the worker's own reading of the database, never on the page's
+          // word: a loop started on missing columns would fail every write.
+          let check: InstallCheck | Unswitched;
           try {
-            fresh = await deps.open(step.source, next);
+            check = await deps.installed(step.source, next);
           } catch (error) {
+            check = { kind: "unread", why: messageOf(error) };
+          }
+          if (check.kind !== "holds") {
+            unswitched.set(step.name, { file: sourceKey(next, step.source), check });
             say({
               source: step.name,
-              outcome: "failed",
+              outcome: "kept",
               version,
-              message: `could not start with the new question set (${messageOf(error)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
+              message: addedMessage(step.name, step.questions, check, version),
             });
             break;
           }
-          restarts.push({ slot, fresh });
-          say({
-            source: step.name,
-            outcome: "restarted",
-            version: fresh.version,
-            message: `the question set changed: it finishes the batch in hand, then answers with version ${fresh.version}; nothing already answered is asked again.`,
-          });
+          unswitched.delete(step.name);
+          await openAnew(slot, step.source, (fresh) => switchedMessage(step.questions, fresh));
           break;
         }
       }
@@ -556,6 +709,24 @@ export function createFleet(deps: FleetDeps): Fleet {
           migrate: !wanted.api,
           added: [],
           removed: [],
+          checkAgain: false,
+        });
+      } else if (step.kind === "added" && wanted !== undefined) {
+        const version = slots.get(step.name)?.loop.version ?? null;
+        const read = unswitched.get(step.name);
+        // Read for the file as it is now, or not since it changed: a reload reads it again.
+        const check: Unswitched =
+          read !== undefined && read.file === sourceKey(file, wanted)
+            ? read.check
+            : { kind: "missing", missing: "not checked since the file changed" };
+        pending.push({
+          source: step.name,
+          outcome: "kept",
+          message: addedMessage(step.name, step.questions, check, version),
+          migrate: true,
+          added: [...step.questions],
+          removed: [],
+          checkAgain: check.kind !== "cannot-tell",
         });
       } else if (step.kind === "keep" && wanted !== undefined) {
         const running = slots.get(step.name)?.loop;
@@ -568,6 +739,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           migrate: step.migrate,
           added: [...held].filter((name) => !ran.has(name)),
           removed: [...ran].filter((name) => !held.has(name)),
+          checkAgain: false,
         });
       }
     }
@@ -794,6 +966,9 @@ export function configFileDoor(deps: {
   }
 
   return {
+    // Check again: the file as it is, read again in the same queue as the writes.
+    reload: () => serial(() => deps.reload()),
+
     diff: (draft) =>
       serial(async (): Promise<FileDiff> => {
         const planned = await plan(draft);

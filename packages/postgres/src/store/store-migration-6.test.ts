@@ -178,12 +178,21 @@ describe("store migration 6", () => {
       "insert into facetdb.store_migrations (version) values (6) on conflict (version) do nothing",
     );
     const migration6 = statements.slice(from + 1, to);
-    expect(migration6.map((text) => text.split(" (")[0])).toEqual([
+    // The index is looked up first and created only when missing (sql/ddl.ts): its `create` line is
+    // the one inside the `do` block.
+    const creation = (text: string) =>
+      text
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.startsWith("create "))
+        ?.split(" (")[0];
+    expect(migration6.map(creation)).toEqual([
       "create table if not exists facetdb.reviews",
       "create table if not exists facetdb.users",
       "create table if not exists facetdb.runs",
-      "create index if not exists decisions_by_time on facetdb.decisions",
+      "create index decisions_by_time on facetdb.decisions",
     ]);
+    expect(migration6[3]).toContain("if to_regclass('facetdb.decisions_by_time') is null then");
 
     // In the install script, they and the worker's grants on them are the store's, not the source's.
     const listings: QuestionSet = {

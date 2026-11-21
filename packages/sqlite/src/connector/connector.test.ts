@@ -24,16 +24,18 @@ import {
   createSqliteConnector,
   LOCK_FRESH_MS,
   LOCK_HEARTBEAT_MS,
+  type OpenSqlite,
   openNodeSqlite,
   POLL_MS,
   type SqliteConnector,
+  sharedClients,
 } from "./index.ts";
 
 /**
- * The SQLite runtime connector on a temporary file: the connector contract suite (one worker, so no
- * peer), then what only SQLite does: the 15-minute lease under the fake clock, the one worker's
- * lock with its refusal and its stale takeover, and an application write from a handle of its own
- * re-queueing a claimed key while `write` refuses the stale answer.
+ * The SQLite runtime connector on a temporary file: the connector contract suite (one worker, its
+ * peer over the same client), then what only SQLite does: the 15-minute lease under the fake clock,
+ * the one worker's lock with its refusal and its stale takeover, and an application write from a
+ * handle of its own re-queueing a claimed key while `write` refuses the stale answer.
  */
 
 const START = Date.parse("2026-11-04T09:00:00.000Z");
@@ -114,11 +116,20 @@ class World {
     }
   }
 
-  async connector(workerId: string, scanPageSize?: number): Promise<SqliteConnector> {
+  /**
+   * A worker on the file. `open` is how it opens the file: a handle of its own by default, or one
+   * client shared with the other connectors of this process (`sharedClients`), as the engine does.
+   */
+  async connector(
+    workerId: string,
+    scanPageSize?: number,
+    open?: OpenSqlite,
+  ): Promise<SqliteConnector> {
     const connector = await createSqliteConnector(this.target, this.file.path, {
       clock: this.clock,
       repeat: this.beats.repeat,
       workerId,
+      ...(open === undefined ? {} : { open }),
       installer: { install: () => this.install(), uninstall: () => this.uninstall() },
       ...(scanPageSize === undefined ? {} : { scanPageSize }),
     });
@@ -200,10 +211,15 @@ afterEach(async () => {
 describe("sqlite connector contract", () => {
   runConnectorContract(async () => {
     const made = world();
+    // The worker and the peer that starts after it share one client: two node:sqlite handles in one
+    // thread would wait on each other's write lock.
+    const open = sharedClients(openNodeSqlite, (path) => path);
     // Pages of 10, so the 25 seeded records cross page boundaries.
-    const connector = await made.connector("w1", 10);
+    const connector = await made.connector("w1", 10, open);
+    const peer = await made.connector("w2", 10, open);
     return {
       connector,
+      peer,
       fields: [...FIELDS],
       edit: (key, state) => Promise.resolve(made.edit(key, state)),
       decisionOf: (key) => Promise.resolve(made.decisionOf(key)),

@@ -127,6 +127,7 @@ function NotRunningFromReload({
           why={entry.message}
           migrate={entry.migrate}
           added={entry.added}
+          checkAgain={entry.checkAgain}
         />
       );
     }
@@ -140,6 +141,7 @@ function NotRunningFromReload({
         why={source.message ?? "the worker does not run the change yet."}
         migrate
         added={[]}
+        checkAgain={false}
       />
     ) : null;
   });

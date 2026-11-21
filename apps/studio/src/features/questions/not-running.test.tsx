@@ -35,6 +35,7 @@ const LISTINGS_BEHIND: PendingSource = {
   outcome: "kept",
   message: KEPT_WORDS,
   migrate: true,
+  checkAgain: false,
   added: ["is_vehicle"],
   removed: [],
 };
@@ -111,6 +112,7 @@ describe("the Questions page when a source does not run the file", () => {
         outcome: "not-started",
         message: NOT_STARTED_WORDS,
         migrate: true,
+        checkAgain: false,
         added: [],
         removed: [],
       },
@@ -470,6 +472,7 @@ describe("the Apply dialog when the file is written and the worker does not run 
             outcome: "not-started",
             message: NOT_STARTED_WORDS,
             migrate: true,
+            checkAgain: false,
             added: [],
             removed: [],
           },

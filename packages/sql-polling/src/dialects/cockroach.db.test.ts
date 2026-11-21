@@ -599,31 +599,36 @@ describe.skipIf(skipUnless("COCKROACH_URL"))("the CockroachDB dialect on COCKROA
         "create table tickets (id text primary key, subject text, body text, updated_at timestamptz not null default now())",
       );
       const contractClock = new TurningClock(START);
-      // The admin's connection: the suite installs and uninstalls through the connector itself.
-      const connector = createPollingConnector(
-        cockroachDialect,
-        connectCockroach(adminUrl),
-        {
-          project: { id: "proj_tickets", name: "Tickets" },
-          table: "tickets",
-          key: "id",
-          onChange: "keep",
-          questionSet: {
-            questions: CONTRACT_QUESTIONS,
-            read: ["subject", "body"],
-            model: "jev-1.14.0",
-            thresholds: {},
+      // The admin's connection: the suite installs and uninstalls through the connector itself. The
+      // peer is the worker that starts after it, on a connection of its own.
+      const make = () =>
+        createPollingConnector(
+          cockroachDialect,
+          connectCockroach(adminUrl),
+          {
+            project: { id: "proj_tickets", name: "Tickets" },
+            table: "tickets",
+            key: "id",
+            onChange: "keep",
+            questionSet: {
+              questions: CONTRACT_QUESTIONS,
+              read: ["subject", "body"],
+              model: "jev-1.14.0",
+              thresholds: {},
+            },
           },
-        },
-        {
-          lastChangedColumn: "updated_at",
-          pageSize: 10,
-          clock: contractClock,
-          warn: () => undefined,
-        },
-      );
+          {
+            lastChangedColumn: "updated_at",
+            pageSize: 10,
+            clock: contractClock,
+            warn: () => undefined,
+          },
+        );
+      const connector = make();
+      const peer = make();
       return {
         connector,
+        peer,
         fields: ["subject", "body"],
         edit: async (key: RecordKey, state: Readonly<Record<string, StateValue>>) => {
           tick += 1;
@@ -660,6 +665,7 @@ describe.skipIf(skipUnless("COCKROACH_URL"))("the CockroachDB dialect on COCKROA
         clock: contractClock,
         close: async () => {
           await connector.close();
+          await peer.close();
           await admin.query("drop table if exists tickets");
         },
       };

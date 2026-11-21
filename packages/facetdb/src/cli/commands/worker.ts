@@ -84,6 +84,7 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
+import { installVerdict } from "./install-check.ts";
 import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
 
 /**
@@ -181,9 +182,10 @@ export type WorkerParts = {
   readonly keyTextOf?: (source: SourceConfig) => Promise<KeyText | undefined>;
   /**
    * A table source as the dashboard's Home and Sources endpoints show it: its engine's words, its
-   * login's reach and its doctor. Nothing connects until the doctor runs.
+   * login's reach and its doctor. Nothing connects until the doctor runs. `config` is the project
+   * the source is read from, so its doctor checks that question set.
    */
-  readonly tableFacts: (source: SourceConfig) => TableFacts;
+  readonly tableFacts: (source: SourceConfig, config: ProjectConfig) => TableFacts;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
   /** `FACETDB_SECRET`: it signs the reviewers' session cookie. `worker` refuses to start without it. */
@@ -420,6 +422,9 @@ export async function runWorkers(
     }
   }
 
+  /** The project each loop was opened from: the start's config, or a reload's. */
+  const openedFrom = new WeakMap<SourceLoop, ProjectConfig>();
+
   /** What each source answered over the run, by name, across its restarts. */
   const tallies = new Map<string, Tally>();
   const tallyOf = (name: string): Tally => {
@@ -458,18 +463,32 @@ export async function runWorkers(
     }
   };
 
-  /** A table source's facts for the dashboard, made once per source (its doctor's cache with them). */
-  const facts = new Map<string, TableFacts>();
-  const factsOf = (source: SourceConfig): TableFacts => {
-    const known = facts.get(source.name) ?? parts.tableFacts(source);
-    facts.set(source.name, known);
+  /**
+   * A table source's facts for the dashboard, made once per loop (its doctor's cache with them)
+   * from the source and project that loop was opened with: a loop a reload restarts gets its own,
+   * so Home checks the question set in force.
+   */
+  const facts = new WeakMap<SourceLoop, TableFacts>();
+  const factsOf = (loop: SourceLoop): TableFacts => {
+    const known = facts.get(loop) ?? parts.tableFacts(loop.source, openedFrom.get(loop) ?? config);
+    facts.set(loop, known);
     return known;
   };
 
   // The sources as one fleet: every loop under its own stop, so a reload after Apply restarts the
   // changed ones and leaves the others running.
   const fleet = createFleet({
-    open: openLoop,
+    open: async (source, from) => {
+      const loop = await openLoop(source, from);
+      openedFrom.set(loop, from);
+      return loop;
+    },
+    // The engine's doctor for the new source and set, under the worker login over the source's own
+    // connection string, never the page's word; read by `installVerdict`.
+    installed: async (source, from) => {
+      const table = parts.tableFacts(source, from);
+      return installVerdict(table.database, await table.doctor());
+    },
     load: () => {
       if (parts.configFile === undefined) {
         return Promise.reject(new Error("this worker has no config file to reload"));
@@ -609,7 +628,7 @@ export async function runWorkers(
               read: loop.source.read,
               questions: loop.questionSet.questions.length,
               version: loop.version,
-              table: loop.source.api ? undefined : factsOf(loop.source),
+              table: loop.source.api ? undefined : factsOf(loop),
             }));
           },
         },
@@ -1040,7 +1059,8 @@ export async function runWorkerProcess(
         maxConnections: number,
       ) => Promise<OpenConnector>;
       readonly keyText: () => Promise<KeyText | undefined>;
-      readonly facts: TableFacts;
+      /** Its facts and doctor for the source and question set of `from`. */
+      readonly facts: (opened: SourceConfig, from: ProjectConfig) => TableFacts;
     }
   >();
   for (const source of config.sources) {
@@ -1058,13 +1078,18 @@ export async function runWorkerProcess(
     tables.set(source.name, {
       // The type its database records for its keys, read once the table opened.
       keyText: () => tableKeyText(engine, target, url, allowInsecure),
-      facts: tableFacts({
-        engine,
-        target,
-        url,
-        source,
-        deps: { clock: deps.clock, allowInsecure, storeShared },
-      }),
+      facts: (opened, from) =>
+        tableFacts({
+          engine,
+          target: engineTarget(
+            from,
+            { source: opened, ...splitTable(source.table ?? "") },
+            project,
+          ),
+          url,
+          source: opened,
+          deps: { clock: deps.clock, allowInsecure, storeShared },
+        }),
       // The connection is the one checked above: a reload restarts a source only when its
       // table, database and install are unchanged (config-reload.ts), so only the question set moves.
       open: (opened, from, workerId, maxConnections) =>
@@ -1112,12 +1137,12 @@ export async function runWorkerProcess(
           files: deps.configFiles,
         },
         keyTextOf: async (source) => tables.get(source.name)?.keyText(),
-        tableFacts: (source) => {
+        tableFacts: (source, from) => {
           const table = tables.get(source.name);
           if (table === undefined) {
             throw new Error(`the source ${source.name} reads no table`);
           }
-          return table.facts;
+          return table.facts(source, from);
         },
         provider: deps.provider(config),
         sessionSecret,

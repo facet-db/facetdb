@@ -8,18 +8,19 @@ import type {
 } from "@facetdb/core";
 import { CONTRACT_QUESTIONS, FakeClock, runConnectorContract } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createSqliteConnector, type SqliteClient } from "../connector/index.ts";
+import { createSqliteConnector, type SqliteClient, sharedClients } from "../connector/index.ts";
 import { createSqliteEngine } from "../engine/index.ts";
 import { JOURNAL_MODE } from "../install/index.ts";
 import { FakeRepeat, serverUrl, temporaryDatabase } from "../testing/index.ts";
 import { createLibsqlEngine, openLibsql, SERVER_JOURNAL } from "./index.ts";
 
 /**
- * The libSQL engine on a real sqld: the listings installed through @libsql/client with SQLite's SQL
- * (the file's plan less its journal mode), the trigger re-queueing a claimed key after an
- * application write from a second client, the connector contract (one worker, so no peer), and
- * uninstall leaving nothing. The server has one database and no scratch ones: every test drops the
- * fixture's tables and FacetDB's own before it starts, and the suite drops them again at the end.
+ * The libSQL engine on a real sqld: the listings installed through @libsql/client with the SQLite
+ * engine's SQL (the file's plan less its journal mode), the trigger re-queueing a claimed key after
+ * an application write from a second client, the connector contract (one worker, its peer over the
+ * same client), and uninstall leaving nothing. The server has one database and no scratch ones:
+ * every test drops the fixture's tables and FacetDB's own before it starts, and the suite drops
+ * them again at the end.
  */
 
 // The package's one server: unset, the file fails as it loads, never skips.
@@ -433,29 +434,38 @@ describe("the libSQL engine on sqld", () => {
       await wipe();
       await app.exec("create table tickets (id text primary key, subject text, body text)");
       const fixtureClock = new FakeClock(START);
-      const connector = await createSqliteConnector(tickets, url, {
-        clock: fixtureClock,
-        workerId: "w1",
-        open: () => openLibsql({ url }),
-        label: "the libSQL database under test",
-        // Pages of 10, so the 25 seeded records cross page boundaries.
-        scanPageSize: 10,
-        installer: {
-          install: async () => {
-            await install(tickets);
+      // The worker and the peer that starts after it share one client, as the engine's connectors do.
+      const open = sharedClients(
+        () => openLibsql({ url }),
+        () => url,
+      );
+      const make = (workerId: string) =>
+        createSqliteConnector(tickets, url, {
+          clock: fixtureClock,
+          workerId,
+          open,
+          label: "the libSQL database under test",
+          // Pages of 10, so the 25 seeded records cross page boundaries.
+          scanPageSize: 10,
+          installer: {
+            install: async () => {
+              await install(tickets);
+            },
+            uninstall: async () => {
+              if (
+                (await rows("select 1 from sqlite_master where name = 'facetdb_table_owners'"))
+                  .length > 0
+              ) {
+                await uninstall(tickets);
+              }
+            },
           },
-          uninstall: async () => {
-            if (
-              (await rows("select 1 from sqlite_master where name = 'facetdb_table_owners'"))
-                .length > 0
-            ) {
-              await uninstall(tickets);
-            }
-          },
-        },
-      });
+        });
+      const connector = await make("w1");
+      const peer = await make("w2");
       return {
         connector,
+        peer,
         fields: [...FIELDS],
         clock: fixtureClock,
         edit: async (key, state) => {
@@ -490,7 +500,10 @@ describe("the libSQL engine on sqld", () => {
             ...(row["reviewed"] === 1 ? { reviewed: true as const } : {}),
           };
         },
-        close: () => connector.close(),
+        close: async () => {
+          await connector.close();
+          await peer.close();
+        },
       };
     });
   });

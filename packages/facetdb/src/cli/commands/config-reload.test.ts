@@ -315,6 +315,9 @@ function rig(initial: ProjectConfig = PROJECT) {
       };
       return Promise.resolve(loop);
     },
+    // Questions added are checked in reload-install.test.ts: here the check never holds.
+    installed: () =>
+      Promise.resolve({ kind: "missing", missing: "listings lacks the answer column sold_out" }),
     load: () =>
       state.fails === undefined ? Promise.resolve(state.file) : Promise.reject(state.fails),
     beat: (source) => {
@@ -540,6 +543,7 @@ describe("the worker reloads facetdb.config.ts after Apply", () => {
       sources: [
         {
           ...first,
+          read: ["title", "body"],
           questions: [...first.questions, { ...noul("Is it sold out?"), name: "sold_out" }],
         },
         second,
@@ -555,6 +559,27 @@ describe("the worker reloads facetdb.config.ts after Apply", () => {
       version: 1,
       message:
         "the change reaches what facetdb migrate installed (a question added or removed, a type, options or levels, read, where, the table, storage or capture), so it keeps answering with version 1 until you run facetdb migrate and restart facetdb worker.",
+    });
+    // A question added with another change to the install: kept, whatever the database holds.
+    expect(t.lines).not.toContain(expect.stringMatching(/Check again/));
+    // A question added alone waits for the worker's own check of the database.
+    t.state.file = {
+      ...PROJECT,
+      sources: [
+        {
+          ...first,
+          questions: [...first.questions, { ...noul("Is it sold out?"), name: "sold_out" }],
+        },
+        second,
+      ],
+    };
+    const added = await t.fleet.reload();
+    expect(added.loaded && added.sources[0]).toEqual({
+      source: "listings",
+      outcome: "kept",
+      version: 1,
+      message:
+        "the question sold_out is not installed in its database yet (listings lacks the answer column sold_out), so it keeps answering with version 1. Install it from the Questions page, or run facetdb migrate --source listings, then Check again.",
     });
     expect(t.fleet.loop("listings")).toBe(listings);
     expect(t.versions.get("listings")).toHaveLength(1);

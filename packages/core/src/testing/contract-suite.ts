@@ -39,10 +39,12 @@ export type ContractFixture = {
   /** A worker on a fresh database whose state fields are `fields`. The database may be empty. */
   readonly connector: Connector;
   /**
-   * A second worker on the same database. Required when `capabilities.multipleWorkers` is true,
-   * because the claim-exclusivity case needs two workers competing for one queue.
+   * A second worker on the same database: two workers competing for one queue where
+   * `capabilities.multipleWorkers` is true, and everywhere the worker that starts after the one
+   * that queued a key (an enqueue outlives the connector that made it). On an engine whose one
+   * process shares one client per database (SQLite), it opens over the same client.
    */
-  readonly peer?: Connector;
+  readonly peer: Connector;
   /** The application's own write: inserts the row or updates its state fields. */
   readonly edit: (key: RecordKey, state: Readonly<Record<string, StateValue>>) => Promise<void>;
   /** The state fields the connector hashes, in config order. */
@@ -247,6 +249,30 @@ export function runConnectorContract(
       expect(await fx.connector.claim(10)).toEqual([]);
     });
 
+    it("an enqueue outlives the connector that made it: the next worker claims the key", async () => {
+      const fx = await open();
+      await fx.connector.install();
+      await seed(fx, 1);
+      const [key = ""] = seedKeys(1);
+      const hash = (await fx.connector.read([key])).rows[0]?.hash ?? "";
+      // Answered at its state: nothing but the enqueue asks for it again.
+      expect(await fx.connector.write(key, aDecision(), hash)).toEqual({ written: true });
+      await fx.connector.enqueue([key]);
+
+      // The peer does as the worker does: a claim; when that is empty, one watch turn, then a claim.
+      let claimed = await fx.peer.claim(10);
+      if (claimed.length === 0) {
+        const iterator = fx.peer.watch()[Symbol.asyncIterator]();
+        try {
+          await withTimeout(iterator.next(), watchTimeoutMs, "the peer's watch found nothing");
+        } finally {
+          await iterator.return?.();
+        }
+        claimed = await fx.peer.claim(10);
+      }
+      expect(claimed).toContain(key);
+    });
+
     it("scan visits every record exactly once, even when rows arrive between pages", async () => {
       const fx = await open();
       await fx.connector.install();
@@ -290,9 +316,6 @@ export function runConnectorContract(
         ctx.skip();
         return;
       }
-      if (fx.peer === undefined) {
-        throw new Error("the fixture must supply a peer worker for the claim cases");
-      }
       await fx.connector.install();
       await seed(fx, SEED_COUNT);
 
@@ -308,9 +331,6 @@ export function runConnectorContract(
       if (!fx.connector.capabilities.multipleWorkers) {
         ctx.skip();
         return;
-      }
-      if (fx.peer === undefined) {
-        throw new Error("the fixture must supply a peer worker for the claim cases");
       }
       await fx.connector.install();
       await seed(fx, 4);

@@ -596,33 +596,38 @@ describe.skipIf(skipUnless("ORACLE_URL"))("Oracle as a polling dialect", { timeo
           "updated_at" timestamp(6) default systimestamp not null
         )`);
         const clock = new FakeClock(Date.parse("2026-11-04T09:00:00.000Z"));
-        const connector = createPollingConnector(
-          oracleDialect,
-          connect(server),
-          {
-            project: PROJECT,
-            table: "tickets",
-            schema: OWNER,
-            onChange: "keep",
-            questionSet,
-            key: "id",
-          },
-          // Pages of 10, so the suite's 25 records take several and a scan has a cursor to resume.
-          {
-            lastChangedColumn: "updated_at",
-            pageSize: 10,
-            // The body is a CLOB, read whole as the engine's `open` reads it.
-            columns: [
-              { name: "id", type: "VARCHAR2" },
-              { name: "subject", type: "VARCHAR2" },
-              { name: "body", type: "CLOB" },
-            ],
-            clock,
-            warn: () => undefined,
-          },
-        );
+        // The worker, and the peer that starts after it: each on a connection of its own.
+        const make = () =>
+          createPollingConnector(
+            oracleDialect,
+            connect(server),
+            {
+              project: PROJECT,
+              table: "tickets",
+              schema: OWNER,
+              onChange: "keep",
+              questionSet,
+              key: "id",
+            },
+            // Pages of 10, so the suite's 25 records take several and a scan has a cursor to resume.
+            {
+              lastChangedColumn: "updated_at",
+              pageSize: 10,
+              // The body is a CLOB, read whole as the engine's `open` reads it.
+              columns: [
+                { name: "id", type: "VARCHAR2" },
+                { name: "subject", type: "VARCHAR2" },
+                { name: "body", type: "CLOB" },
+              ],
+              clock,
+              warn: () => undefined,
+            },
+          );
+        const connector = make();
+        const peer = make();
         return {
           connector,
+          peer,
           fields: questionSet.read,
           clock,
           edit: async (key, state) => {
@@ -643,7 +648,10 @@ describe.skipIf(skipUnless("ORACLE_URL"))("Oracle as a polling dialect", { timeo
                   ...(found.reviewed ? { reviewed: true } : {}),
                 };
           },
-          close: () => connector.close(),
+          close: async () => {
+            await connector.close();
+            await peer.close();
+          },
         };
       },
       { watchTimeoutMs: 60_000 },
