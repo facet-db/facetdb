@@ -1,4 +1,5 @@
 import {
+  FakeAlertStore,
   FakeClock,
   FakeConnector,
   FakeDatabase,
@@ -8,10 +9,8 @@ import {
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
-  type ActiveAlert,
   type AlertEvent,
   type AlertOutcome,
-  type AlertStore,
   type Alerts,
   type BoundChannel,
   createAlerts,
@@ -211,34 +210,6 @@ class HeldUsageStore extends FlakyUsageStore {
   /** Lets the oldest held write reach the store. */
   letThrough(): void {
     this.#held.shift()?.();
-  }
-}
-
-/** The active alerts the real alerts module keeps, in memory. */
-class MemoryAlertStore implements AlertStore {
-  readonly #active = new Map<string, ActiveAlert>();
-  readonly #beats = new Map<string, number>();
-
-  getActive(key: string): Promise<ActiveAlert | undefined> {
-    return Promise.resolve(this.#active.get(key));
-  }
-  setActive(key: string, alert: ActiveAlert): Promise<void> {
-    this.#active.set(key, alert);
-    return Promise.resolve();
-  }
-  clearActive(key: string): Promise<void> {
-    this.#active.delete(key);
-    return Promise.resolve();
-  }
-  append(): Promise<void> {
-    return Promise.resolve();
-  }
-  lastHeartbeat(project: string): Promise<number | undefined> {
-    return Promise.resolve(this.#beats.get(project));
-  }
-  saveHeartbeat(project: string, at: number): Promise<void> {
-    this.#beats.set(project, at);
-    return Promise.resolve();
   }
 }
 
@@ -748,7 +719,7 @@ describe("spending: the 80% warning and the cap", () => {
         },
       },
     ];
-    const alerts = createAlerts({ store: new MemoryAlertStore(), clock, channels });
+    const alerts = createAlerts({ store: new FakeAlertStore(clock), clock, channels });
     const spending = createSpending({
       usageStore: usage,
       clock,

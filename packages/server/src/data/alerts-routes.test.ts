@@ -289,10 +289,11 @@ describe("GET /v1/alerts", () => {
   });
 
   it("counts an alert raised again every 30 minutes as sent each time, resolved once", async () => {
-    const down = event("worker_not_running", {
+    // A kind the code resolves (worker_not_running is raised once and never resolves).
+    const down = event("model_failing", {
       source: "all sources",
-      what: "The worker has sent no heartbeat for 2 minutes.",
-      did: "Records wait as pending.",
+      what: "6 of 100 model calls failed in the last 5 minutes.",
+      did: "Retrying with backoff.",
     });
     const t = rig({
       history: [

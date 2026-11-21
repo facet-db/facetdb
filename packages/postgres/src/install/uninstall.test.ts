@@ -264,6 +264,40 @@ describe("uninstall", () => {
     expect(await present("facetdb.table_owners")).toBe(false);
   });
 
+  it("deletes the uninstalling project's worker heartbeat rows and nobody else's, whatever else keeps the project", async () => {
+    await freshWorld();
+    await install();
+    // A running worker's row and a dead one's, both of this project; a project that remains has its own.
+    await q(`insert into facetdb.projects (id, name) values ('proj_other', 'Other')`);
+    await q(`insert into facetdb.heartbeats (project, at) values ('${project.id}', 1)`);
+    await q(
+      `insert into facetdb.worker_heartbeats (project, worker, at) values
+         ('${project.id}', 'worker-live', 5), ('${project.id}', 'worker-dead', 1), ('proj_other', 'worker-other', 2)`,
+    );
+
+    const { result } = await runUninstall();
+
+    expect(result).toMatchObject({ ok: true, applied: true });
+    // The project's own heartbeat still keeps it; the workers' rows are not state that keeps one.
+    expect(result.ok && result.plan.projectKeptBy).toEqual(["heartbeats"]);
+    expect(await q(`select project, worker from facetdb.worker_heartbeats`)).toEqual([
+      { project: "proj_other", worker: "worker-other" },
+    ]);
+  });
+
+  it("drops the worker heartbeats table with the other shared tables once no project remains", async () => {
+    await freshWorld();
+    await install();
+    await q(
+      `insert into facetdb.worker_heartbeats (project, worker, at) values ('${project.id}', 'worker-dead', 1)`,
+    );
+
+    const { result } = await runUninstall();
+
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(await present("facetdb.worker_heartbeats")).toBe(false);
+  });
+
   it("in side-table mode drops the side table and the view and leaves the table as it was", async () => {
     await freshWorld();
     await install({ table: "listings", storage: "side-table" });

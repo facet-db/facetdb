@@ -8,6 +8,7 @@ import {
   createPreviewService,
   createQuestionTestService,
   createWorker,
+  createWorkerWatch,
   DEFAULT_WORKER_LIMITS,
   type KeyText,
   type ModelProvider,
@@ -17,6 +18,7 @@ import {
   reviewsOf,
   type SpendingGate,
   type Worker,
+  type WorkerWatchStep,
 } from "@facetdb/core";
 import {
   createBackoff,
@@ -34,11 +36,13 @@ import {
   type DeliveryReport,
   gaveUpAlert,
   gaveUpSubject,
+  hideSecrets,
   OpenSurfaceError,
   onlyRecord,
   openStudioBuild,
   requireAccountToServe,
   type StudioBuild,
+  secretParts,
   type TableFacts,
 } from "@facetdb/server";
 import {
@@ -128,6 +132,19 @@ export const DEFAULT_HOST = "127.0.0.1";
 
 /** How often the outbox looks for webhooks that are due. */
 export const OUTBOX_EVERY_MS = 2_000;
+
+/** What failed, in the words of the line a worker prints when its heartbeat or its look at the others does. */
+const WATCH_FAILURES: Readonly<Record<WorkerWatchStep, string>> = {
+  clean: "the rows of workers that stopped before this one could not be cleared",
+  save: "this worker's row could not be saved",
+  remove: "this worker's row could not be removed",
+  check: "the other workers' rows could not be read",
+  alert: "the alert for a worker that stopped could not be raised",
+};
+
+function errorWords(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * The pool of the worker's store client and of each table source's client: a connection per lane in
@@ -616,6 +633,28 @@ export async function runWorkers(
     onPass: tally,
     failure: (source, error) => installMissing(source, options.config, error),
   });
+  // This worker's own heartbeat row, and a look at the others' every 30 seconds beside the passes;
+  // a failure of either is a line here and nothing more.
+  const watch = createWorkerWatch({
+    store: store.alerts,
+    alerts,
+    clock,
+    project: project.id,
+    worker: workerId,
+    // Read when the alert is raised: Home with a studio, the docs page with none.
+    link: links.worker,
+    report: (error, step) => {
+      // A driver's words often name the connection string (the store's, a source's) that failed;
+      // the sources are the file's in force now, so one a reload added is hidden too.
+      const hidden = [
+        deps.env[STORE_VARIABLE],
+        ...fleet.config().sources.map((source) => source.database),
+      ]
+        .filter((url): url is string => url !== undefined && url !== "")
+        .flatMap((url) => secretParts(url));
+      print(`worker heartbeat: ${WATCH_FAILURES[step]}: ${hideSecrets(errorWords(error), hidden)}`);
+    },
+  });
   // The studio's backfills: jobs inside this worker under the loop in force, asking through the
   // loops' provider and spending gate, over a connector of their own on the source's pool and under
   // a worker id of their own, as facetdb backfill's is: never this worker's, by which a queue in
@@ -655,6 +694,9 @@ export async function runWorkers(
   let listener: HttpListener | undefined;
   /** Under --once, the first source that failed: the command exits with it at the end. */
   let onceFailure: { readonly error: unknown } | undefined;
+  /** Under --once, the heartbeat's timers: they run while it answers and end with the run. */
+  const onceBeats = new AbortController();
+  let onceBeating: Promise<void> | undefined;
   try {
     await fleet.open(config);
     for (const loop of fleet.loops()) {
@@ -932,7 +974,12 @@ export async function runWorkers(
       await parts.listening?.(options.host, listener.port);
     }
 
+    // The first beat, once the sources are open and the surface is up; under --once too, which
+    // beats every 15 seconds for as long as it answers, so a second worker never takes a run that
+    // is still going for a death (its row goes when it has finished, below).
+    await watch.start();
     if (options.once) {
+      onceBeating = watch.run(onceBeats.signal);
       for (const loop of fleet.loops()) {
         const onPass = tally(loop);
         // Pass after pass until the queue is empty, or a pass settles nothing (a record that keeps
@@ -986,6 +1033,9 @@ export async function runWorkers(
           throw error;
         }),
         deliverUntil(signal, () => outbox.deliverDue(clock.now()), clock, print),
+        // This worker's row every 15 seconds, a look at the others' every 30; on the clock, beside
+        // the passes and never inside one, ended by the signal like the loops.
+        watch.run(signal),
         // A backfill job stops after its page in hand when the worker does.
         ...(jobs === undefined ? [] : [jobs.until(signal)]),
       ]);
@@ -995,6 +1045,12 @@ export async function runWorkers(
       }
       print("Stopped: every claim was settled.");
     }
+    // The row goes only here: on a clean stop, and at the end of a --once run that finished (a
+    // source that failed under it is still a finished run). A worker that dies with an error never
+    // gets here and leaves its row, for the others to find and raise.
+    onceBeats.abort();
+    await onceBeating;
+    await watch.stop();
     for (const entry of tallies.values()) {
       print(
         `${entry.source}: answered ${entry.answered}, already answered ${entry.alreadyAnswered}, failed ${entry.failed}`,
@@ -1004,6 +1060,9 @@ export async function runWorkers(
       throw onceFailure.error;
     }
   } finally {
+    // A --once run that threw leaves no timer behind; its row stays (see above).
+    onceBeats.abort();
+    await onceBeating;
     await listener?.close();
     // Before the connectors and the store close: every job's page in hand settled and saved.
     await jobs?.close();
@@ -1413,7 +1472,7 @@ export const CONNECTIONS_OPTION = {
 
 export const workerCommand = defineCommand<WorkerOptions>("worker", {
   description:
-    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API and the studio; run it next to the database, in the same region, because every record costs a few round trips to it",
+    "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API and the studio; run it next to the database, in the same region, because every record costs a few round trips to it. Each worker also watches the others of its project and raises Worker not running once for one that stops beating for 2 minutes, so a lone worker's death shows on Home only: an alert for it needs a second worker (or FacetDB Cloud)",
   options: [...OPTIONS, CONNECTIONS_OPTION, HOST_OPTION, ALLOW_INSECURE_OPTION],
   run: async (context) => {
     const { options, deps, print } = context;

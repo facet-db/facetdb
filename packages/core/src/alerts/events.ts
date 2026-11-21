@@ -22,11 +22,12 @@ export type AlertKind = (typeof ALERT_KINDS)[number];
 export type AlertSeverity = ChannelMessage["severity"];
 
 /**
- * The kinds the code resolves: the heartbeat's next beat resolves `worker_not_running`, a healthy
- * call resolves `model_failing`. Every other kind is raised and never resolved, so a page must not
- * say it is "not resolved". A kind that gains a resolve path is added here.
+ * The kinds the code resolves: a healthy call resolves `model_failing`. Every other kind is raised
+ * and never resolved, so a page must not say it is "not resolved". A kind that gains a resolve path
+ * is added here. `worker_not_running` is not one: it is raised once for a worker that is gone,
+ * whose row is taken as it is raised, and nothing later says it is back.
  */
-export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = ["worker_not_running", "model_failing"];
+export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = ["model_failing"];
 
 /** The Severity column of the system alerts. */
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
@@ -44,9 +45,16 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
 /** No heartbeat for this long and the worker is not running. */
 export const HEARTBEAT_LOSS_MS = 2 * 60_000;
 
+/** How often a running worker saves its own heartbeat row. */
+export const WORKER_BEAT_EVERY_MS = 15_000;
+
+/** How often a running worker takes the rows of the workers that stopped beating. */
+export const WORKER_CHECK_EVERY_MS = 30_000;
+
 /**
- * What the worker-not-running alert says happened: the heartbeat watcher raises it in these words,
- * and the dashboard's health says the same when the heartbeat is that old.
+ * What the dashboard's health says when the project's own heartbeat is older than
+ * `HEARTBEAT_LOSS_MS`. The alert for a worker that died is worded by the worker watch
+ * (`dead-worker.ts`), which names the worker.
  */
 export const WORKER_NOT_RUNNING_WHAT = "The worker has sent no heartbeat for 2 minutes.";
 
@@ -88,13 +96,20 @@ export type AlertEvent = {
   readonly did: string;
   /** The one page where it is fixed. */
   readonly link: string;
+  /**
+   * The worker the event is about, for an event that is one per worker (`worker_not_running`);
+   * absent for every other event. It is part of the event's key, so two dead workers within 30
+   * minutes are two alerts.
+   */
+  readonly worker?: string;
 };
 
 /** What makes two events "the same event": one alert is sent per key per 30 minutes. */
 export function eventKey(
-  event: Pick<AlertEvent, "kind" | "project" | "source" | "question">,
+  event: Pick<AlertEvent, "kind" | "project" | "source" | "question" | "worker">,
 ): string {
-  return [event.kind, event.project, event.source, event.question ?? ""].join("|");
+  const key = [event.kind, event.project, event.source, event.question ?? ""];
+  return (event.worker === undefined ? key : [...key, event.worker]).join("|");
 }
 
 function placeOf(event: AlertEvent): string {

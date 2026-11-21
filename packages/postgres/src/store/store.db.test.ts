@@ -477,3 +477,128 @@ describe("claim on a real Postgres", () => {
     expect([...taken].sort()).toEqual(keys);
   });
 });
+
+describe("the take of dead workers on a real Postgres", () => {
+  const PROJECT = "proj_listings";
+  const LOSS = 120_000;
+
+  /** The server's own clock, in the milliseconds a beat is stamped with. */
+  async function serverNow(): Promise<number> {
+    const rows = await open().query(
+      "select (extract(epoch from clock_timestamp()) * 1000)::bigint::text as now",
+    );
+    return Number(rows[0]?.["now"]);
+  }
+
+  /** A row as a worker `ageMs` ago would have left it, on the server's clock. */
+  async function seed(project: string, worker: string, ageMs: number): Promise<void> {
+    await open().query(
+      `insert into facetdb.worker_heartbeats (project, worker, at)
+       values ($1, $2, (extract(epoch from clock_timestamp()) * 1000)::bigint - $3::bigint)`,
+      [project, worker, ageMs],
+    );
+  }
+
+  it("stamps a beat with the server's clock, not the process's: the store's own clock here is in 2023", async () => {
+    // `newStore` gives the store a fake clock fixed at 1_700_000_000_000. Were a beat or an age
+    // read from the process, the rows below would be centuries apart from the server's now.
+    const { alerts } = await newStore();
+    const before = await serverNow();
+    const first = await alerts.saveWorkerBeat(PROJECT, "worker-a");
+    const again = await alerts.saveWorkerBeat(PROJECT, "worker-a");
+    const after = await serverNow();
+    expect(first).toBeGreaterThanOrEqual(before);
+    expect(again).toBeGreaterThanOrEqual(first);
+    expect(again).toBeLessThanOrEqual(after);
+    expect(
+      await open().query(
+        "select at::text as at from facetdb.worker_heartbeats where worker = 'worker-a'",
+      ),
+    ).toEqual([{ at: String(again) }]);
+  });
+
+  it("ages a row by the server's clock: 2 minutes old is taken, 20 seconds short of it is kept", async () => {
+    const { alerts } = await newStore();
+    await alerts.saveWorkerBeat(PROJECT, "worker-self");
+    await seed(PROJECT, "worker-old", LOSS + 5_000);
+    await seed(PROJECT, "worker-new", LOSS - 20_000);
+    await seed(PROJECT, "worker-oldest", 10 * LOSS);
+    await seed("another", "worker-elsewhere", 10 * LOSS);
+
+    const taken = await alerts.takeDeadWorkers(PROJECT, "worker-self", LOSS);
+
+    expect(taken.taken.map((row) => row.worker)).toEqual(["worker-oldest", "worker-old"]);
+    // Those still beating: the caller's own and the one 100 seconds old.
+    expect(taken.beating).toBe(2);
+    expect(taken.taken[1]?.at).toBeLessThan((await serverNow()) - LOSS);
+    expect(await alerts.takeDeadWorkers(PROJECT, "worker-self", LOSS)).toEqual({
+      taken: [],
+      beating: 0,
+    });
+    await alerts.removeWorkerBeat(PROJECT, "worker-self");
+    expect(
+      await open().query("select project, worker from facetdb.worker_heartbeats order by worker"),
+    ).toEqual([
+      { project: "another", worker: "worker-elsewhere" },
+      { project: PROJECT, worker: "worker-new" },
+    ]);
+  });
+
+  it("never takes the caller's own row, however old", async () => {
+    const { alerts } = await newStore();
+    await seed(PROJECT, "worker-a", 10 * LOSS);
+    expect(await alerts.takeDeadWorkers(PROJECT, "worker-a", LOSS)).toEqual({
+      taken: [],
+      beating: 0,
+    });
+    expect(await open().query("select count(*)::int as n from facetdb.worker_heartbeats")).toEqual([
+      { n: 1 },
+    ]);
+  });
+
+  it("gives a dead worker to one taker when two connections take it at the very same moment", async () => {
+    const [first, second] = await Promise.all([newStore(), newStore()]);
+    await seed(PROJECT, "worker-dead", 10 * LOSS);
+    await first.alerts.saveWorkerBeat(PROJECT, "worker-a");
+    await second.alerts.saveWorkerBeat(PROJECT, "worker-b");
+    // A third connection holds the dead worker's row, so both takes reach it and wait there: they
+    // are in the database at once, neither having deleted anything, which is the race to settle.
+    const lock = holdLock("select 1 from facetdb.worker_heartbeats where worker = $1 for update", [
+      "worker-dead",
+    ]);
+    await lock.holding;
+    const byA = first.alerts.takeDeadWorkers(PROJECT, "worker-a", LOSS);
+    const byB = second.alerts.takeDeadWorkers(PROJECT, "worker-b", LOSS);
+    try {
+      await lockWaiters(open(), 2);
+    } finally {
+      lock.release();
+      await lock.done;
+    }
+    const answers = await Promise.all([byA, byB]);
+
+    expect(answers.flatMap((answer) => answer.taken.map((row) => row.worker))).toEqual([
+      "worker-dead",
+    ]);
+    expect(
+      await open().query("select worker from facetdb.worker_heartbeats order by worker"),
+    ).toEqual([{ worker: "worker-a" }, { worker: "worker-b" }]);
+  });
+
+  it("gives each of many dead workers to exactly one of two connections looking again and again", async () => {
+    const [first, second] = await Promise.all([newStore(), newStore()]);
+    const dead = Array.from({ length: 40 }, (_, i) => `worker-dead-${String(i).padStart(2, "0")}`);
+    for (const worker of dead) {
+      await seed(PROJECT, worker, 10 * LOSS);
+    }
+    const taken: string[] = [];
+    for (let round = 0; round < 8; round++) {
+      const answers = await Promise.all([
+        first.alerts.takeDeadWorkers(PROJECT, "worker-a", LOSS),
+        second.alerts.takeDeadWorkers(PROJECT, "worker-b", LOSS),
+      ]);
+      taken.push(...answers.flatMap((answer) => answer.taken.map((row) => row.worker)));
+    }
+    expect([...taken].sort()).toEqual(dead);
+  });
+});

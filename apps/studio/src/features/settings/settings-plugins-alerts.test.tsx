@@ -126,7 +126,9 @@ describe("the Alerts page", () => {
 
     expect(down?.getByText("Nov 2, 8:15 am")).toBeInTheDocument();
     expect(down?.getByText("all sources")).toBeInTheDocument();
-    expect(down?.getByText("resolved Nov 2, 8:21 am")).toBeInTheDocument();
+    // Worker not running is raised once by another worker and nothing resolves it.
+    expect(down?.getByText("raised")).toBeInTheDocument();
+    expect(down?.queryByText("not resolved")).toBeNull();
 
     // A spending warning has no resolve path in the worker, so it is never "not resolved" for ever;
     // a link to a page of this studio is followed.

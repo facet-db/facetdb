@@ -7,7 +7,7 @@ import type {
   UsageStore,
 } from "@facetdb/core";
 import type { SqlClient } from "../sql/index.ts";
-import { flag, integer, json, textOrNull } from "./rows.ts";
+import { flag, integer, json, text, textOrNull } from "./rows.ts";
 import { RESERVE_USAGE_FUNCTION } from "./schema.ts";
 
 /**
@@ -108,6 +108,9 @@ export function createUsageStore(client: SqlClient): UsageStore {
   };
 }
 
+/** The database's own clock as the milliseconds since the epoch a `bigint` beat column holds. */
+const DATABASE_NOW_MS = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
 /** `facetdb.alerts`, `alert_history` and `heartbeats` as core's `AlertStore`. */
 export function createAlertStore(client: SqlClient): AlertStore {
   return {
@@ -153,6 +156,58 @@ export function createAlertStore(client: SqlClient): AlertStore {
          on conflict (project) do update set at = excluded.at`,
         [project, at],
       );
+    },
+
+    /**
+     * Stamped with the database's clock, not the worker's: the rows are read by workers on other
+     * machines, whose clocks can differ by minutes, and one clock ages them all. One statement; it
+     * answers the time it stamped.
+     */
+    async saveWorkerBeat(project, worker) {
+      const rows = await client.query(
+        `insert into facetdb.worker_heartbeats (project, worker, at) values ($1, $2, ${DATABASE_NOW_MS})
+         on conflict (project, worker) do update set at = excluded.at
+         returning at::text as at`,
+        [project, worker],
+      );
+      return integer(rows[0] ?? {}, "at");
+    },
+
+    async removeWorkerBeat(project, worker) {
+      await client.query(
+        "delete from facetdb.worker_heartbeats where project = $1 and worker = $2",
+        [project, worker],
+      );
+    },
+
+    /**
+     * One statement that deletes and returns the rows: a second statement deleting the same row
+     * waits for the first's commit and then finds it gone, so of two workers that look at once
+     * exactly one gets each. The cutoff is the database's clock, read once for the statement, less
+     * the age asked for: the clock that stamped the rows. The count of rows still beating is read
+     * by the same statement; it names no row the delete took, whose `at` is at or before the
+     * cutoff. Nothing comes back when nothing was taken.
+     */
+    async takeDeadWorkers(project, except, olderThanMs) {
+      const rows = await client.query(
+        `with cut as (
+           select ${DATABASE_NOW_MS} - $3::bigint as at
+         ), taken as (
+           delete from facetdb.worker_heartbeats w using cut
+            where w.project = $1 and w.worker <> $2 and w.at <= cut.at
+           returning w.worker, w.at
+         )
+         select taken.worker as worker, taken.at::text as at,
+                (select count(*) from facetdb.worker_heartbeats b, cut
+                  where b.project = $1 and b.at > cut.at)::text as beating
+           from taken
+          order by taken.at, taken.worker`,
+        [project, except, olderThanMs],
+      );
+      return {
+        taken: rows.map((row) => ({ worker: text(row, "worker"), at: integer(row, "at") })),
+        beating: rows[0] === undefined ? 0 : integer(rows[0], "beating"),
+      };
     },
   };
 }

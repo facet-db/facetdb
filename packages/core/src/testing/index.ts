@@ -4,6 +4,7 @@
  * tests pass these through the same parameters the composition root fills with real adapters.
  */
 export { type ActionCall, FakeAction } from "./action.ts";
+export { FakeAlertStore } from "./alert-store.ts";
 export { type Delivery, FakeChannel } from "./channel.ts";
 export { FakeClock } from "./clock.ts";
 export { FakeConnector, FakeDatabase, type FakeDatabaseOptions } from "./connector.ts";

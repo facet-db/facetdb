@@ -420,6 +420,9 @@ function recordingAlertStore(): AlertStore & { readonly history: AlertRecord[] }
     },
     lastHeartbeat: () => Promise.resolve(undefined),
     saveHeartbeat: () => Promise.resolve(),
+    saveWorkerBeat: () => Promise.resolve(0),
+    removeWorkerBeat: () => Promise.resolve(),
+    takeDeadWorkers: () => Promise.resolve({ taken: [], beating: 0 }),
   };
 }
 

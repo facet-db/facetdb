@@ -3,6 +3,7 @@ import {
   createAlerts,
   createSpending,
   createWorker,
+  createWorkerWatch,
   DEFAULT_WORKER_LIMITS,
   type ModelProvider,
   reviewsOf,
@@ -284,10 +285,10 @@ describe("store statements per answered record", () => {
       }
       sent.length = 0;
     };
-    return { worker, queue, sent };
+    return { worker, queue, sent, store, alerts, clock };
   }
 
-  it("20 answered records cost 4 statements each, plus 8 for the pass: 88 in all", async () => {
+  it("20 answered records cost 4 statements each, plus 7 for the pass: 87 in all", async () => {
     const { worker, queue, sent } = await worldOf();
     await queue(Array.from({ length: 20 }, (_, n) => `r${String(n).padStart(2, "0")}`));
 
@@ -300,12 +301,13 @@ describe("store statements per answered record", () => {
       counts.set(name, (counts.get(name) ?? 0) + 1);
     }
     expect(Object.fromEntries(counts)).toEqual({
-      // The pass: the spending check, the claim, the heartbeat and its alert, the batch's read and
-      // its prior answers, the first healthy model call's alert, and the batch's ack.
+      // The pass: the spending check, the claim, the heartbeat (which resolves no alert now), the
+      // batch's read and its prior answers, the first healthy model call's alert, and the batch's
+      // ack.
       "usage total": 1,
       claim: 1,
       heartbeat: 1,
-      "alert state": 2,
+      "alert state": 1,
       read: 1,
       "latest answers": 1,
       ack: 1,
@@ -315,8 +317,8 @@ describe("store statements per answered record", () => {
       "log answer": 20,
       write: 20,
     });
-    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 8.
-    expect(sent).toHaveLength(88);
+    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 7.
+    expect(sent).toHaveLength(87);
   });
 
   it("one answered record, in the order the store sees them", async () => {
@@ -329,7 +331,6 @@ describe("store statements per answered record", () => {
       "usage total",
       "claim",
       "heartbeat",
-      "alert state",
       "read",
       "latest answers",
       "reserve",
@@ -339,5 +340,50 @@ describe("store statements per answered record", () => {
       "write",
       "ack",
     ]);
+  });
+
+  it("a worker's heartbeat costs one statement each, and its look at the others one, never inside a pass", async () => {
+    const { store, alerts, clock, sent } = await worldOf();
+    const watch = createWorkerWatch({
+      store: store.alerts,
+      alerts,
+      clock,
+      project: "p",
+      worker: "worker-b",
+      link: () => "https://docs.facetdb.dev",
+      report: (error) => {
+        throw error;
+      },
+    });
+    const statements = async (step: () => Promise<void>): Promise<string[]> => {
+      sent.length = 0;
+      await step();
+      return [...sent];
+    };
+    const taking = /^with cut as \([\s\S]*delete from facetdb\.worker_heartbeats/;
+
+    // The start sweeps the old rows and saves the first beat: two statements, one each.
+    const started = await statements(() => watch.start());
+    expect(started).toHaveLength(2);
+    expect(started[0]).toMatch(taking);
+    expect(started[1]).toMatch(/^insert into facetdb\.worker_heartbeats/);
+    expect(await statements(() => watch.beat())).toHaveLength(1);
+    // A look at nobody dead is the one statement, however many workers beat.
+    await store.alerts.saveWorkerBeat("p", "worker-a");
+    const looked = await statements(() => watch.check());
+    expect(looked).toHaveLength(1);
+    expect(looked[0]).toMatch(taking);
+
+    // A pass beats the project's own row and never looks at the workers' rows.
+    const signals = alerts.signals({
+      project: "p",
+      source: "src",
+      link: "https://docs.facetdb.dev",
+    });
+    const passed = await statements(() => signals.beat());
+    expect(passed).toHaveLength(1);
+    expect(passed[0]).toMatch(/^insert into facetdb\.heartbeats/);
+
+    expect(await statements(() => watch.stop())).toHaveLength(1);
   });
 });

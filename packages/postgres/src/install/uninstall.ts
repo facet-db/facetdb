@@ -473,6 +473,12 @@ ${IN_USE_DECLARE}
   declare
     has_state boolean := false;
   begin
+    -- The project's workers' own heartbeat rows: bookkeeping, not state that keeps a
+    -- project, so they are deleted whatever else stays. A worker still running puts its row back
+    -- at its next beat, and a row of a worker that died would only be taken for an alert.
+    if to_regclass('facetdb.worker_heartbeats') is not null then
+      delete from facetdb.worker_heartbeats where project = ${project};
+    end if;
     foreach t in array array[${owned}] loop
       if to_regclass(format('facetdb.%I', split_part(t, ':', 1))) is not null then
         execute format('select exists (select 1 from facetdb.%I where %I = $1)', split_part(t, ':', 1), split_part(t, ':', 2))

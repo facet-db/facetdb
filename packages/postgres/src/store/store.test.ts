@@ -666,6 +666,60 @@ describe("alerts, cursors and question-set versions", () => {
     expect(await store.alerts.lastHeartbeat("p")).toBe(1_700_000_060_000);
   });
 
+  it("keep one heartbeat row per worker, stamped and aged by the database's clock, which the take removes and counts", async () => {
+    // The store's own clock here is a fake one in 2023: only the database's reaches these rows.
+    const { store, db } = await newStore();
+    const databaseNow = async () =>
+      Number(
+        await scalar(db, "select (extract(epoch from clock_timestamp()) * 1000)::bigint::text"),
+      );
+    /** A row as a worker `ageMs` ago would have left it, written on the database's clock. */
+    const seed = (project: string, worker: string, ageMs: number) =>
+      db.exec(
+        `insert into facetdb.worker_heartbeats (project, worker, at)
+         values ('${project}', '${worker}', (extract(epoch from clock_timestamp()) * 1000)::bigint - ${ageMs})`,
+      );
+
+    const before = await databaseNow();
+    const saved = await store.alerts.saveWorkerBeat("p", "worker-a");
+    expect(saved).toBeGreaterThanOrEqual(before);
+    expect(saved).toBeLessThanOrEqual(await databaseNow());
+    expect(await store.alerts.saveWorkerBeat("p", "worker-a")).toBeGreaterThanOrEqual(saved);
+    await seed("p", "worker-b", 100_000);
+    await seed("p", "worker-c", 130_000);
+    await seed("p", "worker-e", 300_000);
+    await seed("q", "worker-z", 500_000);
+    // The project's own heartbeat is a different row and is left as it was.
+    await store.alerts.saveHeartbeat("p", 1_700_000_000_000);
+
+    // Rows 2 minutes old or older go, oldest first, but never the caller's own or another project's;
+    // the count is of the rows still beating, the caller's own among them.
+    const taken = await store.alerts.takeDeadWorkers("p", "worker-b", 120_000);
+    expect(taken.taken.map((row) => row.worker)).toEqual(["worker-e", "worker-c"]);
+    expect(taken.beating).toBe(2);
+    expect(taken.taken[1]?.at).toBeLessThanOrEqual((await databaseNow()) - 130_000);
+    expect(await store.alerts.takeDeadWorkers("p", "worker-b", 120_000)).toEqual({
+      taken: [],
+      beating: 0,
+    });
+    // The caller's own row is never taken, however old.
+    expect(
+      (await store.alerts.takeDeadWorkers("p", "worker-a", 0)).taken.map((row) => row.worker),
+    ).toEqual(["worker-b"]);
+    expect(
+      await scalar(
+        db,
+        "select count(*)::int from facetdb.worker_heartbeats where worker = 'worker-a'",
+      ),
+    ).toBe(1);
+    await store.alerts.removeWorkerBeat("p", "worker-a");
+    await store.alerts.removeWorkerBeat("p", "worker-a");
+    expect(
+      (await store.alerts.takeDeadWorkers("q", "worker-x", 120_000)).taken.map((r) => r.worker),
+    ).toEqual(["worker-z"]);
+    expect(await store.alerts.lastHeartbeat("p")).toBe(1_700_000_000_000);
+  });
+
   it("resume a backfill run from its saved cursor", async () => {
     const { store } = await newStore();
     expect(await store.cursors.load("run")).toBeUndefined();

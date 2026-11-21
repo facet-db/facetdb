@@ -6,9 +6,7 @@ import {
   alertMessage,
   eventKey,
   FAILURE_WINDOW_MS,
-  HEARTBEAT_LOSS_MS,
   resolvedMessage,
-  WORKER_NOT_RUNNING_WHAT,
 } from "./events.ts";
 
 /** An alert that has been raised and not yet resolved. */
@@ -30,9 +28,24 @@ export type AlertRecord = {
   readonly delivered: boolean;
 };
 
+/** One worker of a project and the time of its last beat on the store's clock (ms since the epoch). */
+export type WorkerBeat = { readonly worker: string; readonly at: number };
+
+/** What `takeDeadWorkers` answers: the rows it took, and how many workers of the project still beat. */
+export type DeadWorkers = {
+  /** The workers whose last beat is old enough, each given to exactly one caller. */
+  readonly taken: readonly WorkerBeat[];
+  /**
+   * Workers of the project whose last beat is newer than the window, the caller's own among them.
+   * Read by the statement that took the rows, so 0 when it took none (there is nothing to say yet).
+   */
+  readonly beating: number;
+};
+
 /**
- * Where alert state survives a restart: the alerts awaiting resolution, the history, and the last
- * heartbeat of each project's worker (a watcher in another process reads it).
+ * Where alert state survives a restart: the alerts awaiting resolution, the history, the last
+ * heartbeat of each project (what Home reads) and one heartbeat row per running worker of a project
+ * (what the other workers read).
  */
 export type AlertStore = {
   getActive(key: string): Promise<ActiveAlert | undefined>;
@@ -41,6 +54,20 @@ export type AlertStore = {
   append(record: AlertRecord): Promise<void>;
   lastHeartbeat(project: string): Promise<number | undefined>;
   saveHeartbeat(project: string, at: number): Promise<void>;
+  /**
+   * Saves the worker's own row, replacing its last beat, stamped with the store's clock (the
+   * database's, the one every worker of the project shares: two machines whose own clocks differ
+   * must not make one worker look dead to the other). Answers the time it stamped.
+   */
+  saveWorkerBeat(project: string, worker: string): Promise<number>;
+  /** Removes the worker's own row: a clean stop. */
+  removeWorkerBeat(project: string, worker: string): Promise<void>;
+  /**
+   * Takes, in one statement that deletes and returns them, every row of `project` other than
+   * `except` whose last beat is `olderThanMs` or more behind the store's clock (the same clock
+   * that stamped it): of two workers that look at once, exactly one gets each row.
+   */
+  takeDeadWorkers(project: string, except: string, olderThanMs: number): Promise<DeadWorkers>;
 };
 
 /** A channel with its configuration already bound; the composition root builds these. */
@@ -99,8 +126,6 @@ export type Alerts = {
   raise(event: AlertEvent): Promise<AlertOutcome>;
   /** Sends the resolved message once; later calls find nothing active. */
   resolve(key: string): Promise<AlertOutcome>;
-  /** The heartbeat watcher: raises `worker_not_running` after 2 minutes without a beat, resolves on the next. */
-  checkHeartbeat(scope: AlertScope): Promise<AlertOutcome>;
   signals(scope: AlertScope): AlertSignals;
 };
 
@@ -187,28 +212,6 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     return { status: "resolved", failures };
   }
 
-  function workerKey(scope: AlertScope): string {
-    return eventKey({ kind: "worker_not_running", ...scope, question: null });
-  }
-
-  async function checkHeartbeat(scope: AlertScope): Promise<AlertOutcome> {
-    const last = await store.lastHeartbeat(scope.project);
-    if (last === undefined) {
-      // No worker has ever reported for this project: there is nothing to have lost.
-      return { status: "idle", failures: [] };
-    }
-    if (clock.now() - last >= HEARTBEAT_LOSS_MS) {
-      return raise({
-        kind: "worker_not_running",
-        what: WORKER_NOT_RUNNING_WHAT,
-        ...scope,
-        question: null,
-        did: "Records stay queued and are answered when the worker is back.",
-      });
-    }
-    return resolve(workerKey(scope));
-  }
-
   async function checkModel(scope: AlertScope): Promise<void> {
     const now = clock.now();
     calls = calls.filter((call) => call.at > now - FAILURE_WINDOW_MS);
@@ -259,8 +262,9 @@ export function createAlerts(deps: AlertsDeps): Alerts {
       },
       async beat() {
         knownClear.delete(modelKey(scope));
+        // The project's own row, which Home reads. No alert resolves here: a worker that died is
+        // alerted once by another worker and the alert never resolves.
         await store.saveHeartbeat(scope.project, clock.now());
-        await resolve(workerKey(scope));
       },
       async backfillFinished({ answered, queued, question }) {
         await raise({
@@ -286,5 +290,5 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     };
   }
 
-  return { raise, resolve, checkHeartbeat, signals };
+  return { raise, resolve, signals };
 }

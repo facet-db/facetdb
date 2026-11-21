@@ -1,13 +1,6 @@
-import { FakeChannel, FakeClock, FakeStore } from "@facetdb/core/testing";
+import { FakeAlertStore, FakeChannel, FakeClock } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
-import {
-  type ActiveAlert,
-  type AlertRecord,
-  type AlertScope,
-  type AlertStore,
-  type BoundChannel,
-  createAlerts,
-} from "./alerts.ts";
+import { type AlertScope, type BoundChannel, createAlerts } from "./alerts.ts";
 import {
   ALERT_KINDS,
   ALERT_SEVERITY,
@@ -19,35 +12,6 @@ import {
 } from "./events.ts";
 
 const MINUTE = 60_000;
-
-class MemoryAlertStore implements AlertStore {
-  readonly active = new FakeStore<ActiveAlert>();
-  readonly history: AlertRecord[] = [];
-  readonly #beats = new Map<string, number>();
-
-  getActive(key: string): Promise<ActiveAlert | undefined> {
-    return Promise.resolve(this.active.get(key));
-  }
-  setActive(key: string, alert: ActiveAlert): Promise<void> {
-    this.active.set(key, alert);
-    return Promise.resolve();
-  }
-  clearActive(key: string): Promise<void> {
-    this.active.delete(key);
-    return Promise.resolve();
-  }
-  append(record: AlertRecord): Promise<void> {
-    this.history.push(record);
-    return Promise.resolve();
-  }
-  lastHeartbeat(project: string): Promise<number | undefined> {
-    return Promise.resolve(this.#beats.get(project));
-  }
-  saveHeartbeat(project: string, at: number): Promise<void> {
-    this.#beats.set(project, at);
-    return Promise.resolve();
-  }
-}
 
 const scope: AlertScope = {
   project: "market",
@@ -69,7 +33,7 @@ function eventOf(kind: AlertEvent["kind"], question: string | null = null): Aler
 
 function setup(channelCount = 1) {
   const clock = new FakeClock(1_000_000);
-  const store = new MemoryAlertStore();
+  const store = new FakeAlertStore(clock);
   const fakes = Array.from({ length: channelCount }, () => new FakeChannel<null>());
   const channels: BoundChannel[] = fakes.map((fake, index) => ({
     name: `fake-${index}`,
@@ -182,68 +146,6 @@ describe("resolution", () => {
     const failed = await alerts.resolve(eventKey(event));
     expect(failed.failures).toHaveLength(1);
     expect((await alerts.resolve(eventKey(event))).status).toBe("resolved");
-  });
-});
-
-describe("the heartbeat watcher", () => {
-  it("@timing raises worker_not_running at 2 minutes without a beat, not before", async () => {
-    const { clock, alerts, channel } = setup();
-    const signals = alerts.signals(scope);
-    await signals.beat();
-
-    clock.advance(2 * MINUTE - 1);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("idle");
-    expect(channel.delivered).toEqual([]);
-
-    clock.advance(1);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("sent");
-    expect(channel.delivered[0]?.message).toMatchObject({ severity: "critical" });
-  });
-
-  it("@timing repeats at most every 30 minutes while the worker stays away", async () => {
-    const { clock, alerts, channel } = setup();
-    await alerts.signals(scope).beat();
-    clock.advance(3 * MINUTE);
-    await alerts.checkHeartbeat(scope);
-    clock.advance(10 * MINUTE);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("suppressed");
-    clock.advance(20 * MINUTE);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("sent");
-    expect(channel.delivered).toHaveLength(2);
-  });
-
-  it("resolves when the worker beats again, with the resolved message once", async () => {
-    const { clock, alerts, channel } = setup();
-    const signals = alerts.signals(scope);
-    await signals.beat();
-    clock.advance(5 * MINUTE);
-    await alerts.checkHeartbeat(scope);
-
-    await signals.beat();
-    await signals.beat();
-    expect(
-      channel.delivered.map((delivery) => delivery.message.text.startsWith("Resolved:")),
-    ).toEqual([false, true]);
-  });
-
-  it("says nothing about a project whose worker never reported", async () => {
-    const { clock, alerts, channel } = setup();
-    clock.advance(60 * MINUTE);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("idle");
-    expect(channel.delivered).toEqual([]);
-  });
-
-  it("watches each project by its own beat", async () => {
-    const { clock, alerts, channel } = setup();
-    const other: AlertScope = { ...scope, project: "blog" };
-    await alerts.signals(scope).beat();
-    await alerts.signals(other).beat();
-    clock.advance(90_000);
-    await alerts.signals(other).beat();
-    clock.advance(60_000);
-    expect((await alerts.checkHeartbeat(scope)).status).toBe("sent");
-    expect((await alerts.checkHeartbeat(other)).status).toBe("idle");
-    expect(channel.delivered).toHaveLength(1);
   });
 });
 
@@ -416,13 +318,11 @@ describe("what every alert says", () => {
   it("builds the messages its detectors send from the scope they were given", async () => {
     const { clock, alerts, channel } = setup();
     const signals = alerts.signals(scope);
-    await signals.beat();
     clock.advance(2 * MINUTE);
-    await alerts.checkHeartbeat(scope);
     await signals.modelCall(false);
     await signals.backfillFinished({ answered: 12, queued: 0, question: null });
     await signals.backfillFailed({ failed: 3, question: "scam" });
-    expect(channel.delivered).toHaveLength(4);
+    expect(channel.delivered).toHaveLength(3);
     for (const { message } of channel.delivered) {
       expect(message.text).toContain("market");
       expect(message.text).toContain("listings");
@@ -430,7 +330,6 @@ describe("what every alert says", () => {
       expect(message.link).toBe(scope.link);
     }
     expect(channel.delivered.map((delivery) => delivery.message.severity)).toEqual([
-      "critical",
       "critical",
       "information",
       "warning",
@@ -445,7 +344,7 @@ describe("the kinds the code resolves", () => {
       await alerts.raise(eventOf(kind));
     }
     const signals = alerts.signals(scope);
-    // The two paths that resolve in code: the next beat, and a healthy model call.
+    // The one path that resolves in code: a healthy model call. A beat resolves nothing.
     await signals.beat();
     await signals.modelCall(true);
 
@@ -453,7 +352,7 @@ describe("the kinds the code resolves", () => {
     expect(stillActive).toEqual(
       ALERT_KINDS.filter((kind) => !RESOLVABLE_ALERT_KINDS.includes(kind)),
     );
-    expect([...RESOLVABLE_ALERT_KINDS].sort()).toEqual(["model_failing", "worker_not_running"]);
+    expect([...RESOLVABLE_ALERT_KINDS]).toEqual(["model_failing"]);
   });
 });
 
