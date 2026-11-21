@@ -348,7 +348,13 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     decisions: ActionDecisions,
     decidedAt: Date,
   ): Promise<ReviewActionFailure[]> {
-    const record: ActionRecord = { key: row.key, state: row.state, status, decidedAt };
+    const record: ActionRecord = {
+      key: row.key,
+      state: row.state,
+      status,
+      stateHash: row.hash,
+      decidedAt,
+    };
     const failures: ReviewActionFailure[] = [];
     // One action failing does not keep the others from running.
     for (const step of source.actions) {

@@ -61,6 +61,7 @@ const record: ActionRecord = {
   key: "T-1042",
   state: { subject: "Remboursement", body: "Facturé deux fois ✓" },
   status: "done",
+  stateHash: "h1",
   decidedAt: new Date(START),
 };
 

@@ -5,6 +5,13 @@ export const PLUGIN_KINDS = ["source", "action", "channel", "provider", "pack"] 
 export type PluginKind = (typeof PLUGIN_KINDS)[number];
 
 /**
+ * The name of what a plugin provides (`label`, `add_comment`, `post-message`): lowercase letters
+ * and digits, words joined by an underscore or a dash. `definePlugin` refuses any other name, and
+ * the config file names an action by the same rule, so a name one accepts the other finds.
+ */
+export const PLUGIN_ENTRY_NAME = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
+
+/**
  * A plugin's manifest. `config` is the one schema that validates the config file and draws the
  * dashboard's settings form. `coreVersions` is the semver range of FacetDB core the plugin
  * supports; `facetdb add` refuses a mismatch.

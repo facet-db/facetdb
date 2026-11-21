@@ -8,6 +8,12 @@ export type ActionRecord = {
   readonly state: Readonly<Record<string, StateValue>>;
   readonly status: RecordStatus;
   /**
+   * The hash of the state the decision was made at: with the decisions, it names the decision an
+   * action was queued for, so a later run can tell whether it is still the record's. A hash, never
+   * the state.
+   */
+  readonly stateHash: string;
+  /**
    * When the decision the action reports was made: the time of the decision log entry behind it
    * (the answer, or a person's decision on it), never the time the action runs. An action run late
    * or again carries the same time, so a receiver can order what it gets.

@@ -56,5 +56,5 @@ export {
   INSPECT_SAMPLE_ROWS,
 } from "./engine.ts";
 export type { PluginKind, PluginManifest } from "./plugin.ts";
-export { PLUGIN_KINDS } from "./plugin.ts";
+export { PLUGIN_ENTRY_NAME, PLUGIN_KINDS } from "./plugin.ts";
 export type { ModelProvider, ProviderRequest, ProviderResponse, Usage } from "./provider.ts";

@@ -297,6 +297,8 @@ describe("decide: one door for a person's decision", () => {
       key: "r1",
       state: { body: "Cheap car" },
       status: "done",
+      // The decision's state, so a queued action can tell whether it is still the record's.
+      stateHash: hash,
       decidedAt: new Date(t.clock.now()),
     });
     expect(t.notify.calls[0]?.decisions["team"]).toMatchObject({ value: "billing" });

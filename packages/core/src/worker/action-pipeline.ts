@@ -17,6 +17,20 @@ export type ActionStep = {
   run(record: ActionRecord, decisions: ActionDecisions): Promise<void>;
 };
 
+/**
+ * A step that could not hand its action on for delivery (the store did not take the outbox row), as
+ * opposed to an action that ran and failed. The worker releases the record's job instead of acking
+ * it, so its next pass writes the logged decision again (no model call, the hash still checked) and
+ * runs every step again: "at least once". Any other error a step throws is reported and the job
+ * acked, as before, so a step that always fails cannot hold a record forever.
+ */
+export class ActionNotQueued extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ActionNotQueued";
+  }
+}
+
 const NUMBER_TESTS = [".probability", ".confidence"] as const;
 
 function numberTestQuestion(term: string): string | undefined {

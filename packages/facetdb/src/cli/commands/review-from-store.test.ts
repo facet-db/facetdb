@@ -8,7 +8,7 @@ import {
 } from "@facetdb/core";
 import { FakeClock, FakeConnector, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
+import { actionCall, choice, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess, type Workspace } from "../program.ts";
 import { hashPassword } from "../store-door.ts";
@@ -17,6 +17,7 @@ import {
   createStore,
   type PgliteWorld,
   resetPgliteWorld,
+  type SqlConnect,
   type Store,
   sourceIdOf,
   TEST_SECRET,
@@ -188,6 +189,7 @@ function run(
     interactive?: boolean;
     onDisk?: ProjectConfig;
     osUser?: string;
+    connect?: SqlConnect;
   } = {},
 ) {
   return runInProcess(
@@ -197,7 +199,7 @@ function run(
       env: ENV,
       loadConfig: () => Promise.resolve(look.onDisk ?? config),
       engines: [lazyEngine("mysql", () => Promise.resolve(engine))],
-      connect: world.connect,
+      connect: look.connect ?? world.connect,
       // The command closes the store it is given; the test's own stays open through a wrapper.
       store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
       workspace: workspace(),
@@ -316,6 +318,96 @@ describe("facetdb export, an edited row, facetdb review --from", () => {
     // Still waiting on team, and open to any other reviewer.
     expect(await statusOf("r3")).toBe("needs_review");
     expect((await waitingFor("maya")).sort()).toEqual(["r1", "r3"]);
+  });
+
+  it("queues the source's actions in the store's outbox for the running worker to deliver", async () => {
+    const withActions: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        actions: [
+          actionCall("@facetdb/tracker", "tag", { tag: "scam", when: { scam: true } }),
+          actionCall("@facetdb/tracker", "tag", { tag: "billing", when: { team: "tech" } }),
+        ],
+      })),
+    };
+    files.set(
+      "decisions.jsonl",
+      `${JSON.stringify({ source: "listings", key: "r1", question: "scam", value: "yes" })}\n`,
+    );
+
+    const result = await run(["review", "--from", "decisions.jsonl", "--yes"], {
+      onDisk: withActions,
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    // One row: the second action's condition does not hold, and it has no else.
+    const rows = await world.client.query(
+      `select project_id, source_id, record_key, plugin, action, position, payload::text as payload,
+              delivered_at
+         from facetdb.webhook_outbox`,
+    );
+    expect(rows).toMatchObject([
+      {
+        project_id: "acme-app",
+        source_id: LOG_ID,
+        record_key: "r1",
+        plugin: "@facetdb/tracker",
+        action: "tag",
+        position: 0,
+        delivered_at: null,
+      },
+    ]);
+    const payload = JSON.parse(String(rows[0]?.["payload"])) as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      status: "done",
+      decisions: { scam: { kind: "decided", value: true } },
+      settings: { tag: "scam" },
+    });
+    // The decision and the settings, never the record's state.
+    expect(JSON.stringify(payload)).not.toContain("Cheap car");
+    expect(result.stdout).toContain(
+      "listings: a decision here queues its 2 actions for the running facetdb worker, which delivers them through its plugins and refuses any the config no longer allows.",
+    );
+  });
+
+  it("says a person's decision whose action the store did not take was not queued; the decision stands", async () => {
+    const withActions: ProjectConfig = {
+      ...config,
+      sources: config.sources.map((source) => ({
+        ...source,
+        actions: [actionCall("@facetdb/tracker", "tag", { tag: "scam" })],
+      })),
+    };
+    files.set(
+      "decisions.jsonl",
+      `${JSON.stringify({ source: "listings", key: "r1", question: "scam", value: "yes" })}\n`,
+    );
+    // The store drops the connection on the outbox's insert alone.
+    const refusing: SqlConnect = (url, options) => {
+      const client = world.connect(url, options);
+      return {
+        ...client,
+        query: (text, params) =>
+          text.includes("insert into facetdb.webhook_outbox")
+            ? Promise.reject(new Error("Connection terminated unexpectedly"))
+            : client.query(text, params),
+      };
+    };
+
+    const result = await run(["review", "--from", "decisions.jsonl", "--yes"], {
+      onDisk: withActions,
+      connect: refusing,
+    });
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(await humanEntries("r1")).toMatchObject([{ question: "scam", value: true }]);
+    expect(await statusOf("r1")).toBe("done");
+    expect(result.stdout).toContain(
+      `line 1: The action "tracker.tag" failed: it was not queued, as the store did not take it (Connection terminated unexpectedly); it is queued again when the worker next writes the record's decision, or a person decides it again. The decision stands.`,
+    );
+    const rows = await world.client.query("select id from facetdb.webhook_outbox");
+    expect(rows).toEqual([]);
   });
 
   it("applies nothing from an export nobody edited, and refuses nothing either", async () => {

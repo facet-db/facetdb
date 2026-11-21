@@ -125,6 +125,18 @@ export type ActionDelivery = {
 export type ActionClose = { readonly close: string };
 
 /**
+ * What a runner says when the action cannot be tried yet and the wait is no failure of its own
+ * (140: its source is stopped, so the record cannot be read): the row is put back for
+ * `ACTION_DEFER_MS` with this reason in `last_error`, and the attempt it was claimed for is given
+ * back, so a wait spends no attempt and never gives the row up. Its 24 hours still count from
+ * when it was queued: once its source runs again, a try that fails past them is its last.
+ */
+export type ActionDefer = { readonly defer: string };
+
+/** How long a deferred action row waits before it is claimed again. */
+export const ACTION_DEFER_MS = 60_000;
+
+/**
  * An action's failure in words the runner vouches for: they are kept in the row's `last_error` and
  * repeated in the give-up alert, so they carry no secret and no record state. Any other error a
  * runner throws counts as a failed attempt too, but its text is not kept: a plugin's error may
@@ -164,15 +176,21 @@ export type OutboxDeps = {
   onGiveUp(event: WebhookGaveUp, signal: AbortSignal, lastError: string): Promise<void>;
   /**
    * Runs one attempt of a plugin's action, within the send timeout (`signal` aborts when it runs
-   * out): resolves when it succeeded or with `ActionClose` when the row must be closed untried
-   * again; throws (`ActionFailed` for words worth keeping) when the attempt failed, which is
-   * retried on the webhook's schedule. An outbox without a runner sends webhooks only and leaves
-   * action rows to the loop that has one.
+   * out): resolves when it succeeded, with `ActionClose` when the row must be closed untried
+   * again, or with `ActionDefer` when it cannot be tried yet; throws (`ActionFailed` for words
+   * worth keeping) when the attempt failed, which is retried on the webhook's schedule. An outbox
+   * without a runner sends webhooks only and leaves action rows to the loop that has one.
    */
   readonly runAction?: (
     row: ActionDelivery,
     signal: AbortSignal,
-  ) => Promise<ActionClose | undefined>;
+  ) => Promise<ActionClose | ActionDefer | undefined>;
+  /**
+   * With `runAction`, the one project whose action rows this loop takes: a worker runs the plugins
+   * of its own project's config, and a row of another project sharing the store waits for that
+   * project's worker, never closed or given up on here. Absent, every project's.
+   */
+  readonly actionProject?: string;
 };
 
 export type NewWebhook = {
@@ -205,6 +223,8 @@ export type DeliveryReport = {
   readonly superseded: readonly string[];
   /** Action rows their runner closed with a reason (`ActionClose`). */
   readonly closed: readonly string[];
+  /** Action rows their runner put back to wait (`ActionDefer`), no attempt spent. */
+  readonly deferred: readonly string[];
   /**
    * Sent, but this loop no longer held the claim when it came to record the outcome (its lease ran
    * out and another loop took the row): nothing was written and no alert was raised.
@@ -318,7 +338,8 @@ function claimed(row: SqlRow): Claimed {
 type Attempted =
   | { readonly outcome: "done" }
   | { readonly outcome: "failed"; readonly failure: string }
-  | { readonly outcome: "closed"; readonly reason: string };
+  | { readonly outcome: "closed"; readonly reason: string }
+  | { readonly outcome: "deferred"; readonly reason: string };
 
 /** The same, a close carrying the report's list it lands in. */
 type Tried =
@@ -331,6 +352,36 @@ const CLOSE_UNTRIED = "superseded_at = $4::bigint, gave_up_at = $4::bigint, last
 /** The reason a superseded row keeps: which later row replaced it. */
 function supersededBy(laterId: string): string {
   return `superseded by delivery ${laterId}: a later decision queued the same action for this record`;
+}
+
+/**
+ * Queues a plugin's action for delivery now: no URL, and the row names the record, the action and
+ * its place; returns its delivery id. The outbox's `enqueue` does this, and so does a process that
+ * only queues and delivers nothing (`facetdb review`: the running worker delivers its rows).
+ */
+export async function queueAction(
+  client: OutboxDatabase,
+  clock: Pick<Clock, "now">,
+  entry: NewAction,
+): Promise<string> {
+  const rows = await client.query(
+    `insert into facetdb.webhook_outbox
+       (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position, batch_key)
+     values ($1, $2, $3::bigint, $3::bigint, $4, $5, $6, $7, $8::integer, $9)
+     returning id::text as id`,
+    [
+      entry.projectId,
+      JSON.stringify(entry.payload),
+      clock.now(),
+      entry.sourceId,
+      entry.recordKey,
+      entry.plugin,
+      entry.action,
+      entry.position,
+      entry.batchKey ?? null,
+    ],
+  );
+  return String(rows[0]?.["id"]);
 }
 
 export function createOutbox(deps: OutboxDeps): Outbox {
@@ -350,7 +401,8 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 
   /**
    * Takes the due rows and pushes their `next_attempt_at` past the lease, so no other loop sends
-   * them. A loop without an action runner takes webhooks only.
+   * them. A loop without an action runner takes webhooks only, and one with a runner for a project
+   * takes that project's action rows only.
    */
   async function claim(now: number): Promise<Claimed[]> {
     const rows = await client.query(
@@ -359,13 +411,20 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         where id in (
           select id from facetdb.webhook_outbox
            where delivered_at is null and gave_up_at is null and next_attempt_at <= $1::bigint
-             and ($5::boolean or plugin is null)
+             and (plugin is null or ($5::boolean and ($6::text is null or project_id = $6::text)))
            order by next_attempt_at, id
            limit $3
              for update skip locked)
         returning id::text as id, project_id, endpoint, payload, attempts, created_at::text as created_at,
                   last_error, source_id, record_key, plugin, action, position, batch_key`,
-      [now, CLAIM_LEASE_MS, DELIVERY_BATCH, loopId, deps.runAction !== undefined],
+      [
+        now,
+        CLAIM_LEASE_MS,
+        DELIVERY_BATCH,
+        loopId,
+        deps.runAction !== undefined,
+        deps.actionProject ?? null,
+      ],
     );
     return rows.map(claimed);
   }
@@ -515,9 +574,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           signal,
         ),
       );
-      return outcome === undefined
-        ? { outcome: "done" }
-        : { outcome: "closed", reason: outcome.close };
+      if (outcome === undefined) {
+        return { outcome: "done" };
+      }
+      return "close" in outcome
+        ? { outcome: "closed", reason: outcome.close }
+        : { outcome: "deferred", reason: outcome.defer };
     } catch (error) {
       if (error instanceof TimedOut) {
         return { outcome: "failed", failure: `the action did not finish within ${timeoutMs} ms` };
@@ -608,33 +670,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     (closed ? report.gaveUp : report.lost).push(row.id);
   }
 
-  /** Queues a plugin's action: no URL, and the row names the record, the action and its place. */
-  async function enqueueAction(entry: NewAction): Promise<string> {
-    const now = clock.now();
-    const rows = await client.query(
-      `insert into facetdb.webhook_outbox
-         (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position, batch_key)
-       values ($1, $2, $3::bigint, $3::bigint, $4, $5, $6, $7, $8::integer, $9)
-       returning id::text as id`,
-      [
-        entry.projectId,
-        JSON.stringify(entry.payload),
-        now,
-        entry.sourceId,
-        entry.recordKey,
-        entry.plugin,
-        entry.action,
-        entry.position,
-        entry.batchKey ?? null,
-      ],
-    );
-    return String(rows[0]?.["id"]);
-  }
-
   return {
     async enqueue(webhook) {
       if ("plugin" in webhook) {
-        return enqueueAction(webhook);
+        return queueAction(client, clock, webhook);
       }
       const url = new URL(webhook.endpoint);
       if (url.protocol !== "https:" && url.protocol !== "http:") {
@@ -661,6 +700,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       const gaveUp: string[] = [];
       const superseded: string[] = [];
       const closed: string[] = [];
+      const deferred: string[] = [];
       const lost: string[] = [];
       const alertFailures: AlertFailure[] = [];
 
@@ -703,6 +743,16 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             (held ? delivered : lost).push(row.id);
             return;
           }
+          if (tried.outcome === "deferred") {
+            // A wait, not a failure: the claim's attempt is given back and no give-up is judged.
+            const held = await whileHeld(
+              row,
+              "attempts = attempts - 1, next_attempt_at = $4::bigint, last_error = $5",
+              [now + ACTION_DEFER_MS, tried.reason],
+            );
+            (held ? deferred : lost).push(row.id);
+            return;
+          }
           // The last attempt falls exactly on the deadline; a failure at or after it is the end.
           const deadline = row.createdAt + GIVE_UP_AFTER_MS;
           if (now >= deadline) {
@@ -718,7 +768,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           (rescheduled ? retrying : lost).push(row.id);
         }),
       );
-      return { delivered, retrying, gaveUp, superseded, closed, lost, alertFailures };
+      return { delivered, retrying, gaveUp, superseded, closed, deferred, lost, alertFailures };
     },
   };
 }

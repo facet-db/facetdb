@@ -53,11 +53,23 @@ export function source<Config = unknown>(spec: SourceSpec<Config>): SourceDefini
   return { ...spec, kind: "source" };
 }
 
+/**
+ * What an action receives first: the plugin's context, and the source whose record it runs on: its
+ * name, and its settings when the source comes from this same plugin (a GitHub label action on a
+ * GitHub issues source reads the repository there), null otherwise.
+ */
+export type ActionContext<Config> = PluginContext<Config> & {
+  readonly source: {
+    readonly name: string;
+    readonly settings: Readonly<Record<string, unknown>> | null;
+  };
+};
+
 export type ActionSpec<Config, Settings extends ZodType> = {
   /** The settings of one use of the action in a config file or the dashboard. */
   config: Settings;
   run(
-    ctx: PluginContext<Config>,
+    ctx: ActionContext<Config>,
     record: ActionRecord,
     decisions: ActionDecisions,
     settings: Infer<Settings>,

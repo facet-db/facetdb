@@ -6,7 +6,7 @@ import {
   type QuestionSet,
 } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { type PluginHost, PluginHostError } from "../../plugin/index.ts";
+import { checkActions, type PluginHost, PluginHostError } from "../../plugin/index.ts";
 import { databaseOf, engineFor, schemeOf } from "../engines.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -69,14 +69,24 @@ export async function loadPluginHost(
 /**
  * The config a running worker starts from, and its plugin host: what `facetdb worker`, `facetdb
  * studio` and `facetdb dev` each load first, a dry run included, so the three refuse a bad plugin
- * setting alike before anything starts. Nothing runs a plugin yet.
+ * setting alike before anything starts. Every source's actions are checked against the plugins the
+ * host loaded too: an action its plugin does not provide, or settings its schema refuses.
  */
 export async function loadWorkerConfig(
   deps: CliDeps,
   path: string,
 ): Promise<{ readonly config: ProjectConfig; readonly plugins: PluginHost }> {
   const config = await loadProjectConfig(deps, path);
-  return { config, plugins: await loadPluginHost(deps, config, path) };
+  const plugins = await loadPluginHost(deps, config, path);
+  try {
+    checkActions(config, plugins, deps.env);
+  } catch (error) {
+    if (error instanceof PluginHostError) {
+      throw new CliError(error.code, error.message, error.fix);
+    }
+    throw error;
+  }
+  return { config, plugins };
 }
 
 /** `schema.table` names a schema; a bare name is in `public`. */

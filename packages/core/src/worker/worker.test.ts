@@ -26,7 +26,7 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import { stateHash } from "../records/index.ts";
 import type { SourceReviewEntry, SourceReviews } from "../review/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
-import { conditionHolds, configureAction } from "./action-pipeline.ts";
+import { ActionNotQueued, conditionHolds, configureAction } from "./action-pipeline.ts";
 import {
   createWorker,
   DEFAULT_WORKER_LIMITS,
@@ -588,6 +588,71 @@ describe("the worker loop", () => {
     expect(test.db.decisionOf("a")?.status).toBe("done");
     expect(after.calls).toHaveLength(1);
     expect(test.db.jobs.size).toBe(0);
+  });
+
+  it("releases a record whose action was not handed on, and hands it on from the log next pass with no second model call", async () => {
+    const notQueued = new ActionNotQueued("the store did not take the row");
+    let refusals = 1;
+    const handedOn: string[] = [];
+    const test = await rig();
+    const worker = createWorker({
+      ...test.deps,
+      actions: [
+        {
+          name: "tracker.tag",
+          run: (record) => {
+            if (refusals > 0) {
+              refusals -= 1;
+              return Promise.reject(notQueued);
+            }
+            handedOn.push(`${record.key} ${record.stateHash}`);
+            return Promise.resolve();
+          },
+        },
+      ],
+    });
+    test.db.edit("a", { body: "hello" });
+
+    const first = await worker.runOnce();
+    // Written and logged, the job back in the queue.
+    expect(first.written).toEqual(["a"]);
+    expect(first.failures).toEqual([
+      { key: "a", stage: "action", action: "tracker.tag", error: notQueued },
+    ]);
+    expect(test.db.decisionOf("a")?.status).toBe("done");
+    expect(test.db.jobs.size).toBe(1);
+
+    const second = await worker.runOnce();
+    expect(second.alreadyAnswered).toEqual(["a"]);
+    expect(second.failures).toEqual([]);
+    expect(handedOn).toHaveLength(1);
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.db.jobs.size).toBe(0);
+  });
+
+  it("a record whose action is never handed on is released every pass, settling nothing and asking once", async () => {
+    const test = await rig();
+    const worker = createWorker({
+      ...test.deps,
+      actions: [
+        {
+          name: "tracker.tag",
+          run: () => Promise.reject(new ActionNotQueued("the store is down")),
+        },
+      ],
+    });
+    test.db.edit("a", { body: "hello" });
+
+    await worker.runOnce();
+    for (let pass = 0; pass < 3; pass += 1) {
+      const report = await worker.runOnce();
+      // One failure a pass, nothing settled: `--once` stops on it, `run` waits a poll after it.
+      expect(report.failures).toHaveLength(1);
+      expect(report.alreadyAnswered).toEqual([]);
+      expect(report.written).toEqual([]);
+    }
+    expect(test.provider.requests).toHaveLength(1);
+    expect(test.db.jobs.size).toBe(1);
   });
 
   it("marks a record with blank state as skipped without asking the model", async () => {
@@ -1286,6 +1351,7 @@ describe("action conditions", () => {
     key: "a",
     state: { body: "x" },
     status: "done",
+    stateHash: "h1",
     decidedAt: new Date(0),
   };
   const decisions = {

@@ -1,5 +1,5 @@
 export type { ActionStep } from "./action-pipeline.ts";
-export { conditionHolds, configureAction } from "./action-pipeline.ts";
+export { ActionNotQueued, conditionHolds, configureAction } from "./action-pipeline.ts";
 export type { Run, RunKind, RunLog, RunRecorder } from "./run-log.ts";
 export {
   errorCount,

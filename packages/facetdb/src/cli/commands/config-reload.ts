@@ -374,10 +374,11 @@ export function planReload(
 /**
  * The project's own settings a running worker holds from its start: a change takes a restart. The
  * spending cap and what happens at 100% are not among them: the fleet hands each loaded config to
- * `deps.project`, and the worker's gate reads the cap in force on every check.
+ * `deps.project`, and the worker's gate reads the cap in force on every check. `plugins` is: the
+ * plugin host is loaded once, at the start, so the actions keep the settings it read.
  */
 function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
-  const fields = (["modelUrl", "provider", "studioUrl", "alerts"] as const).filter(
+  const fields = (["modelUrl", "provider", "studioUrl", "alerts", "plugins"] as const).filter(
     (field) => JSON.stringify(started[field]) !== JSON.stringify(next[field]),
   );
   return fields.length === 0
@@ -1097,7 +1098,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           source: source.name,
           outcome: "failed",
           version,
-          message: `could not start with the new question set (${messageOf(error)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
+          message: `could not start with what the file now says (${messageOf(error)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
         });
         return;
       }

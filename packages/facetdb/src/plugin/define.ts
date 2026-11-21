@@ -1,4 +1,5 @@
 import {
+  PLUGIN_ENTRY_NAME,
   PLUGIN_KINDS,
   type PluginKind,
   type PluginManifest,
@@ -66,7 +67,6 @@ export class PluginError extends Error {
 }
 
 const SHORT_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-const ENTRY_NAME = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
 const PACKAGE_PREFIXES = ["@facetdb/", "facetdb-plugin-"] as const;
 
 /** The packages a short name may live in, in the order the loader tries them: `@facetdb/github`, then `facetdb-plugin-github`. */
@@ -285,7 +285,7 @@ const REQUIRED_FUNCTIONS: Readonly<Record<PluginKind, readonly string[]>> = {
 
 function checkEntry(kind: PluginKind, name: string, value: unknown, issues: PluginIssue[]): void {
   const field = `${kind}s.${name}`;
-  if (!ENTRY_NAME.test(name)) {
+  if (!PLUGIN_ENTRY_NAME.test(name)) {
     issues.push({
       field,
       message: "the name must use lowercase letters, digits, dashes and underscores",

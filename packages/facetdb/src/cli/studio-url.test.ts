@@ -9,6 +9,7 @@ import { createFakeProvider } from "@facetdb/model";
 import { GIVE_UP_AFTER_MS, type StudioFiles } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  actionCall,
   configFileSource,
   facetdb,
   fromProjectJson,
@@ -18,13 +19,15 @@ import {
   parseProjectConfig,
   toProjectJson,
 } from "../config/index.ts";
+import { VERSION } from "../index.ts";
+import { action, createPluginHost, definePlugin, z } from "../plugin/index.ts";
 import { projectSpending, wireBackfill } from "./backfill-wiring.ts";
 import { projectRef, questionSetOf } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
 import { alertScope, createLinks, type StudioBase, servedStudioUrl, studioUrl } from "./links.ts";
 import { sharePools } from "./pools.ts";
 import { type HttpHandler, runInProcess, type StudioInstall } from "./program.ts";
-import { hashPassword } from "./store-door.ts";
+import { hashPassword, storeSourceId } from "./store-door.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -513,7 +516,11 @@ const BUILD_DIR = "/install/apps/studio/dist";
 const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
 const START = 1_700_000_000_000;
 
-function listings(studioUrlText?: string, spendingCap?: number): ProjectConfig {
+function listings(
+  studioUrlText?: string,
+  spendingCap?: number,
+  actions: ProjectConfig["sources"][number]["actions"] = [],
+): ProjectConfig {
   return facetdb({
     model: "jev-1.14.0",
     ...(studioUrlText === undefined ? {} : { studioUrl: studioUrlText }),
@@ -525,10 +532,20 @@ function listings(studioUrlText?: string, spendingCap?: number): ProjectConfig {
         table: "listings",
         read: ["id", "title"],
         questions: { is_scam: noul("Is this listing a scam?") },
+        actions,
       },
     ],
   });
 }
+
+/** A plugin whose one action the worker runs from the outbox. */
+const tracker = definePlugin({
+  name: "tracker",
+  version: "1.0.0",
+  facetdb: "*",
+  config: z.object({}),
+  actions: { tag: action({ config: z.object({ tag: z.string() }), run: async () => {} }) },
+});
 
 /** An install whose studio is built, or (`built` false) one with no studio package at all. */
 function install(built: boolean): StudioInstall {
@@ -633,6 +650,22 @@ describe("the worker's alerts", () => {
           return Promise.resolve({ port, close: () => Promise.resolve() });
         },
         studio: options.studio ?? install(true),
+        pluginHost: (loaded) =>
+          createPluginHost({
+            config: loaded,
+            env: {},
+            projectDir: PROJECT_DIR,
+            coreVersion: VERSION,
+            importModule: (specifier) =>
+              specifier === "@facetdb/tracker"
+                ? Promise.resolve({ default: tracker })
+                : Promise.reject(
+                    Object.assign(new Error(`Cannot find package '${specifier}'`), {
+                      code: "ERR_MODULE_NOT_FOUND",
+                    }),
+                  ),
+            builtins: {},
+          }),
         ...(options.stop === undefined ? {} : { stopSignal: () => options.stop as AbortSignal }),
       },
       COMMANDS,
@@ -732,10 +765,44 @@ describe("the worker's alerts", () => {
     expect(await linkOf("spending_80")).toBe(`${DOCS}/spending-cap`);
   });
 
-  // The action kind's link is proven by `links.gaveUp("action")` above and by the outbox's own test:
-  // the worker wires no `runAction` yet ("None are wired yet"), so it never claims an action row and
-  // an action cannot give up in a worker run. A row for a plugin action is left for the loop that
-  // has a runner; when plugin actions are wired, a worker test for the action kind belongs here.
+  /**
+   * An action row of the project's source, queued 24 hours ago and due now, whose payload cannot be
+   * read back: the worker's runner fails its one attempt past the deadline, so the outbox gives it
+   * up and raises "Action gave up".
+   */
+  async function actionGivenUp(argv: readonly string[]): Promise<string> {
+    const project = projectRef(PROJECT_DIR).id;
+    await world.client.query(
+      `insert into facetdb.webhook_outbox
+         (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position)
+       values ($2, '{}', $1::bigint, $1::bigint, $3, 'r1', '@facetdb/tracker', 'tag', 0)`,
+      [START - GIVE_UP_AFTER_MS, project, storeSourceId(project, "listings")],
+    );
+    const config = listings(undefined, undefined, [
+      actionCall("@facetdb/tracker", "tag", { tag: "scam" }),
+    ]);
+
+    const result = await worker(config, ["--once", ...argv]);
+
+    expect(result.code, result.stderr).toBe(0);
+    const [row] = await world.client.query(
+      "select gave_up_at, last_error from facetdb.webhook_outbox where plugin is not null",
+    );
+    expect(row?.["gave_up_at"]).not.toBeNull();
+    expect(row?.["last_error"]).toBe("the queued decision could not be read back from the store");
+    return linkOf("action_gave_up");
+  }
+
+  // The worker runs plugin actions from the outbox: an action row it gives up on is the same alert
+  // as a webhook's, linked by `links.gaveUp("action")`.
+  it("an action that gave up links to the Alerts page of the served studio", async () => {
+    expect(await actionGivenUp(["--port", "4321"])).toBe("http://127.0.0.1:4321/alerts");
+  });
+
+  it("an action that gave up keeps its docs page with no studio", async () => {
+    expect(await actionGivenUp(["--no-http"])).toBe(`${DOCS}/actions`);
+  });
+
   it("a webhook that gave up links to the Alerts page of the served studio", async () => {
     await world.client.query(
       `insert into facetdb.webhook_outbox (project_id, endpoint, payload, created_at, next_attempt_at)

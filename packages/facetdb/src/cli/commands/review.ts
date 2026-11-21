@@ -18,8 +18,9 @@ import {
   type ReviewQueue,
   type ReviewService,
 } from "@facetdb/core";
-import { OS_REVIEWER_PREFIX } from "@facetdb/server";
+import { OS_REVIEWER_PREFIX, queueAction } from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
+import { actionSteps } from "../../plugin/index.ts";
 import { keyWords, openConnector, tableKeyText } from "../engines.ts";
 import {
   CliError,
@@ -468,8 +469,25 @@ export const projectDoor: ReviewDoor = {
         // The version in force, as the store holds it: what the worker runs, and what a human decision carries.
         questionSets.set(view.id, { questionSet: view.questionSet, version: view.version });
         logs.set(view.id, store.log(view.id));
-        // Plugin actions are not resolved yet: the worker runs none (its `actions: []`), so neither does a review.
-        actions.set(view.id, []);
+        // The worker's own steps: a decision made here queues its actions in the store's outbox,
+        // and the running worker delivers them through the plugins it loaded. This command loads no
+        // plugin (a reviewer's shell need not hold every plugin's secret), so it checks nothing of
+        // them, and says so.
+        if (source.actions.length > 0) {
+          context.print(
+            `${source.name}: a decision here queues its ${source.actions.length === 1 ? "action" : `${source.actions.length} actions`} for the running facetdb worker, which delivers ${source.actions.length === 1 ? "it" : "them"} through its plugins and refuses any the config no longer allows.`,
+          );
+        }
+        actions.set(
+          view.id,
+          actionSteps(source, (row) =>
+            queueAction(opened.client, deps.clock, {
+              projectId: opened.project.id,
+              sourceId: view.id,
+              ...row,
+            }),
+          ),
+        );
         const table = opened.tables.get(source.name);
         if (table === undefined) {
           reading.set(
@@ -686,10 +704,30 @@ async function openStore(input: ReviewInput, asksPassword: boolean) {
       tables.set(source.name, await tableRead(deps, config, source, allowInsecure));
     }
   }
-  const store = await deps.store({
-    allowInsecure,
-    warn: (message) => deps.io.stderr(`warning: ${message}\n`),
-  });
+  // One client for the store and for the action rows a decision queues in its outbox, lent to the
+  // store as the worker lends its pool; the store's close leaves it, ours closes both.
+  const client = deps.connect(url);
+  let opened: OpenStore;
+  try {
+    opened = await deps.store({
+      allowInsecure,
+      connect: () => ({ ...client, close: () => Promise.resolve() }),
+      warn: (message) => deps.io.stderr(`warning: ${message}\n`),
+    });
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
+  const store: OpenStore = {
+    ...opened,
+    close: async () => {
+      try {
+        await opened.close();
+      } finally {
+        await client.close();
+      }
+    },
+  };
   try {
     // Before a password is asked, a lock taken or anything written: the rules the cards are judged by.
     const inForce = await versionsInForce(store, input, project.id, context.print);
@@ -708,7 +746,7 @@ async function openStore(input: ReviewInput, asksPassword: boolean) {
             : await tableKeyText(table.engine, table.target, table.url, allowInsecure),
       });
     }
-    return { store, project, reviewer, sources: views, tables };
+    return { store, client, project, reviewer, sources: views, tables };
   } catch (error) {
     await store.close();
     throw error;

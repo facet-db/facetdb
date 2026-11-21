@@ -94,7 +94,11 @@ export type PluginRefusal =
   | "plugin-named-twice"
   | "plugin-secret-literal"
   | "plugin-variable-unset"
-  | "plugin-settings";
+  | "plugin-settings"
+  /** An action the config names that its plugin does not provide (action-host.ts). */
+  | "plugin-no-action"
+  /** An action's settings, or its `else`, that the action's own schema refuses (action-host.ts). */
+  | "action-settings";
 
 /** A plugin the config names cannot run: what is wrong and what to do, never a secret's value. */
 export class PluginHostError extends Error {
@@ -315,8 +319,19 @@ function reach(
   return keys.flatMap((key) => reach(value[key], rest, [...path, key]));
 }
 
+/**
+ * Every place in `settings` one of a schema's secret paths (`secretPaths`) reaches, with what the
+ * file wrote there: a plugin's settings here, an action's in action-host.ts.
+ */
+export function secretPlaces(
+  settings: unknown,
+  patterns: readonly string[],
+): { readonly path: readonly (string | number)[]; readonly value: unknown }[] {
+  return patterns.flatMap((pattern) => reach(settings, stepsOf(pattern), []));
+}
+
 /** The settings with every `env("NAME")` replaced by the variable's value. */
-function resolved(value: JsonValue, env: PluginHostOptions["env"]): unknown {
+export function resolved(value: JsonValue, env: PluginHostOptions["env"]): unknown {
   if (isEnvReference(value)) {
     return env[value.env];
   }
@@ -332,7 +347,7 @@ function resolved(value: JsonValue, env: PluginHostOptions["env"]): unknown {
 }
 
 /** Whether `path` begins with every step of `prefix`. */
-function startsWith(
+export function startsWith(
   path: readonly (string | number)[],
   prefix: readonly (string | number)[],
 ): boolean {
@@ -381,8 +396,8 @@ function settle(found: FoundPlugin, key: string | undefined, options: PluginHost
 
   // A secret the manifest's schema marks (`z.secret()`) is always a variable's name: the schema
   // of the config file judged the keys that look like one; this is every one the plugin declares.
-  const secretPlaces = manifest.secrets.flatMap((pattern) => reach(settings, stepsOf(pattern), []));
-  const literal = secretPlaces.find(
+  const places = secretPlaces(settings, manifest.secrets);
+  const literal = places.find(
     (place) => typeof place.value === "string" || typeof place.value === "number",
   );
   if (literal !== undefined) {
@@ -448,9 +463,9 @@ function settle(found: FoundPlugin, key: string | undefined, options: PluginHost
     );
   }
 
-  const secretPaths = new Set(secretPlaces.map((place) => formatPath(place.path)));
+  const secretPaths = new Set(places.map((place) => formatPath(place.path)));
   const secrets: Record<string, string> = {};
-  for (const place of secretPlaces) {
+  for (const place of places) {
     if (isEnvReference(place.value)) {
       secrets[formatPath(place.path)] = options.env[place.value.env] as string;
     }

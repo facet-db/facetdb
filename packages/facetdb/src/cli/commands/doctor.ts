@@ -8,6 +8,7 @@ import {
 } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
 import {
+  checkActions,
   checkPluginProvider,
   type PluginHost,
   PluginHostError,
@@ -254,6 +255,8 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
     let plugins: PluginHost;
     try {
       plugins = await environment.deps.pluginHost(config, path);
+      // Each source's actions against those plugins, as the worker checks them at its start.
+      checkActions(config, plugins, environment.deps.env);
     } catch (error) {
       if (error instanceof PluginHostError) {
         // A check is one line: the schema's listed reasons follow the heading, joined.

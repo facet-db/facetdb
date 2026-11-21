@@ -1,4 +1,10 @@
-import { type QuestionSet, questionSetSchema } from "@facetdb/core";
+import {
+  PLUGIN_ENTRY_NAME,
+  type Question,
+  type QuestionSet,
+  questionSetSchema,
+  RECORD_STATUSES,
+} from "@facetdb/core";
 import { z } from "zod";
 import { type ActionCall, isEnvReference, type ProjectConfig, type SourceConfig } from "./dsl.ts";
 import { providerIssues } from "./provider.ts";
@@ -360,7 +366,14 @@ const pluginsSchema = z
 
 const actionSchema = strict({
   plugin: pluginName,
-  action: z.string().regex(/^[a-z][A-Za-z0-9]*$/, "an action name is camelCase, such as notify"),
+  // The rule a plugin names its actions by (`definePlugin`), so every name a plugin can have is one
+  // the file can write: lowercase words joined by `_` or `-`.
+  action: z
+    .string()
+    .regex(
+      PLUGIN_ENTRY_NAME,
+      "an action is named as its plugin names it: lowercase letters and digits, words joined by _ or -, such as notify or add_label",
+    ),
   config: z
     .record(z.string(), z.json())
     .superRefine((config, context) => {
@@ -630,18 +643,99 @@ function remapQuestionSetIssues(
   });
 }
 
+/** A JSON value that is an object (not an array, not null). */
+function isPlainObject(value: unknown): value is { readonly [key: string]: unknown } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The values a question equals when decided: yes or no, an option's name, a level's name. */
+function decidedValues(question: Question): readonly (boolean | string)[] {
+  switch (question.type) {
+    case "noul":
+      return [true, false];
+    case "choice":
+      return question.options.map((option) => option.name);
+    case "score":
+      return question.levels.map((level) => level.name);
+  }
+}
+
+/** What a question's term must equal, in words: `true or false`, `"low", "high"`. */
+function valuesWords(question: Question): string {
+  return question.type === "noul"
+    ? "true or false"
+    : decidedValues(question)
+        .map((value) => JSON.stringify(value))
+        .join(", ");
+}
+
+/**
+ * Why one term of a `when` cannot hold as written, or undefined: a question equals one of its
+ * decided values, `status` a record status, and `<question>.probability` or `.confidence` is `{
+ * atLeast: n }` with n from 0 to 1.
+ */
+function termProblem(
+  key: string,
+  value: unknown,
+  questions: readonly Question[],
+): string | undefined {
+  if (key === "status") {
+    return typeof value === "string" && (RECORD_STATUSES as readonly string[]).includes(value)
+      ? undefined
+      : `status is compared with a record status: one of ${RECORD_STATUSES.map((status) => JSON.stringify(status)).join(", ")}`;
+  }
+  const [name, measure] = key.split(".");
+  const question = questions.find((candidate) => candidate.name === name);
+  if (question === undefined) {
+    return undefined;
+  }
+  if (measure !== undefined) {
+    const atLeast = isPlainObject(value) ? value["atLeast"] : undefined;
+    const valid =
+      isPlainObject(value) &&
+      Object.keys(value).length === 1 &&
+      typeof atLeast === "number" &&
+      atLeast >= 0 &&
+      atLeast <= 1;
+    return valid
+      ? undefined
+      : `a ${measure} test is { atLeast: n } with n a number from 0 to 1, such as { atLeast: 0.9 }`;
+  }
+  return decidedValues(question).some((decided) => decided === value)
+    ? undefined
+    : `${name} is a ${question.type} question, so the condition compares it with ${valuesWords(question)}`;
+}
+
 function conditionIssues(
   actions: readonly ActionCall[],
-  questionNames: readonly string[],
+  questions: readonly Question[],
   at: string,
 ): ConfigIssue[] {
+  const questionNames = questions.map((question) => question.name);
   const issues: ConfigIssue[] = [];
   actions.forEach((action, actionIndex) => {
+    const where = `${at}.actions[${actionIndex}]`;
+    const otherwise = action.config["else"];
+    if (otherwise !== undefined && !isPlainObject(otherwise)) {
+      issues.push({
+        path: `${where}.else`,
+        message:
+          'else is an object of the action\'s settings to use when the condition does not hold, such as else: { remove: ["Not Priority"] }',
+      });
+    }
     const when = action.config["when"];
-    if (typeof when !== "object" || when === null || Array.isArray(when)) {
+    if (when === undefined) {
       return;
     }
-    for (const key of Object.keys(when)) {
+    if (!isPlainObject(when)) {
+      issues.push({
+        path: `${where}.when`,
+        message:
+          'when is an object of conditions that must all hold, such as when: { not_priority: true } or when: { status: "needs_review" }',
+      });
+      return;
+    }
+    for (const [key, value] of Object.entries(when)) {
       const [name, measure] = key.split(".");
       const known =
         key === "status" ||
@@ -650,9 +744,14 @@ function conditionIssues(
           (measure === undefined || measure === "probability" || measure === "confidence"));
       if (!known) {
         issues.push({
-          path: `${at}.actions[${actionIndex}].when.${key}`,
+          path: `${where}.when.${key}`,
           message: `"${key}" is not a question of this source; a condition names a question (${questionNames.join(", ")}) or status`,
         });
+        continue;
+      }
+      const problem = termProblem(key, value, questions);
+      if (problem !== undefined) {
+        issues.push({ path: `${where}.when.${key}`, message: problem });
       }
     }
   });
@@ -767,13 +866,7 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
     const parsed = questionSetSchema.safeParse(questionSetInput(source, projectModel));
     if (parsed.success) {
       sets.push(parsed.data);
-      issues.push(
-        ...conditionIssues(
-          source.actions,
-          parsed.data.questions.map((question) => question.name),
-          at,
-        ),
-      );
+      issues.push(...conditionIssues(source.actions, parsed.data.questions, at));
     } else {
       sets.push(undefined);
       const declaredHere = source.model !== undefined;

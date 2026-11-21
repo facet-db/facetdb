@@ -27,6 +27,7 @@ describe("FakeAction and FakeChannel", () => {
       key: "r1",
       state: { title: "x" },
       status: "done" as const,
+      stateHash: "h1",
       decidedAt: new Date(0),
     };
     await action.run(record, {}, { add: ["Not Priority"] });

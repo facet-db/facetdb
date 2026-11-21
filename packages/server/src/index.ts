@@ -152,6 +152,7 @@ export type { GaveUpLink } from "./webhooks/gave-up.ts";
 export { GAVE_UP_DID, gaveUpAlert, gaveUpSubject } from "./webhooks/gave-up.ts";
 export type {
   ActionClose,
+  ActionDefer,
   ActionDelivery,
   ActionGaveUp,
   AlertFailure,
@@ -166,11 +167,13 @@ export type {
   WebhookGaveUp,
 } from "./webhooks/outbox.ts";
 export {
+  ACTION_DEFER_MS,
   ACTION_ERROR_NOT_KEPT,
   ActionFailed,
   createOutbox,
   DEFAULT_FETCH_TIMEOUT_MS,
   GIVE_UP_AFTER_MS,
+  queueAction,
   RETRY_FIRST_MS,
   RETRY_MAX_MS,
   retryDelayMs,

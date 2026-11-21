@@ -5,8 +5,10 @@ import { freshPglite, type PGlite, resetPglite } from "@facetdb/postgres/testing
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { GAVE_UP_DID, gaveUpAlert } from "./gave-up.ts";
 import {
+  ACTION_DEFER_MS,
   ACTION_ERROR_NOT_KEPT,
   type ActionClose,
+  type ActionDefer,
   type ActionDelivery,
   ActionFailed,
   CLAIM_LEASE_MS,
@@ -68,9 +70,12 @@ function fakeTimeouts(clock: FakeClock) {
   };
 }
 
-type Run = (row: ActionDelivery, signal: AbortSignal) => Promise<ActionClose | undefined>;
+type Run = (
+  row: ActionDelivery,
+  signal: AbortSignal,
+) => Promise<ActionClose | ActionDefer | undefined>;
 
-async function rig(options: { readonly runner?: "none" } = {}) {
+async function rig(options: { readonly runner?: "none"; readonly actionProject?: string } = {}) {
   const client = pgliteClient(pglite);
   await migrateStore(client);
   const clock = new FakeClock(START);
@@ -101,6 +106,7 @@ async function rig(options: { readonly runner?: "none" } = {}) {
       ? deps
       : {
           ...deps,
+          ...(options.actionProject === undefined ? {} : { actionProject: options.actionProject }),
           runAction: (row, signal) => {
             runs.push(row);
             return script.run(row, signal);
@@ -436,6 +442,52 @@ describe("an endpoint row beside action rows", () => {
       gave_up_at: null,
       next_attempt_at: String(START),
     });
+  });
+
+  it("is put back by a runner that defers it, spending no attempt and never given up while it waits", async () => {
+    const t = await rig();
+    t.script.run = () => Promise.resolve({ defer: "the source issues is stopped" });
+    const id = await t.action();
+
+    const first = await t.outbox.deliverDue(START);
+    expect(first).toMatchObject({ deferred: [id], retrying: [], gaveUp: [], closed: [] });
+    expect(await t.row(id)).toMatchObject({
+      attempts: 0,
+      next_attempt_at: String(START + ACTION_DEFER_MS),
+      last_error: "the source issues is stopped",
+      gave_up_at: null,
+    });
+
+    // Past its 24 hours, still waiting: a deferral is no failure, so nothing is given up.
+    const late = START + GIVE_UP_AFTER_MS + 60 * 60_000;
+    expect(await t.outbox.deliverDue(late)).toMatchObject({ deferred: [id], gaveUp: [] });
+    expect(t.gaveUp).toEqual([]);
+
+    // Its source back, it runs.
+    t.script.run = () => Promise.resolve(undefined);
+    expect(await t.outbox.deliverDue(late + ACTION_DEFER_MS)).toMatchObject({ delivered: [id] });
+    expect(await t.row(id)).toMatchObject({ attempts: 1, last_error: null });
+  });
+
+  it("is taken only for the runner's own project: another project's row waits for its worker", async () => {
+    const t = await rig({ actionProject: PROJECT });
+    const own = await t.action();
+    const other = await t.action({
+      projectId: "project-2",
+      sourceId: sourceIdOf("project-2", SOURCE),
+    });
+    const hook = await t.outbox.enqueue({
+      projectId: "project-2",
+      endpoint: ENDPOINT,
+      payload: {},
+    });
+
+    const report = await t.outbox.deliverDue(START + GIVE_UP_AFTER_MS);
+
+    // Webhooks of every project are still sent: only a plugin's action belongs to one worker.
+    expect(report.delivered.toSorted()).toEqual([own, hook].toSorted());
+    expect(t.runs.map((row) => row.deliveryId)).toEqual([own]);
+    expect(await t.row(other)).toMatchObject({ attempts: 0, delivered_at: null, gave_up_at: null });
   });
 });
 

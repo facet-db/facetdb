@@ -11,6 +11,7 @@ import {
   env,
   facetdb,
   fromProjectJson,
+  type JsonValue,
   loadConfig,
   noul,
   type ProjectInput,
@@ -751,6 +752,68 @@ describe("what the schema refuses", () => {
     if (!result.ok) {
       expect(result.issues[0]?.path).toBe("sources[0].actions[0].when.urgancy");
     }
+  });
+
+  it("checks each condition's value against its question, status and number tests, and else's shape", () => {
+    const issuesOf = (config: Readonly<Record<string, JsonValue>>) => {
+      const result = parseProjectConfig(
+        facetdb(valid({ actions: [actionCall("@facetdb/slack", "notify", config)] })),
+      );
+      return result.ok ? [] : result.issues;
+    };
+    expect(
+      issuesOf({
+        when: { urgency: "high", status: "needs_review", "urgency.confidence": { atLeast: 0.9 } },
+        else: { channel: "#later" },
+      }),
+    ).toEqual([]);
+    expect(
+      issuesOf({
+        when: {
+          urgency: "urgent",
+          status: "decided",
+          "urgency.confidence": { atLeast: 1.5 },
+          "urgency.probability": 0.9,
+        },
+        else: "#later",
+      }),
+    ).toEqual([
+      {
+        path: "sources[0].actions[0].else",
+        message:
+          'else is an object of the action\'s settings to use when the condition does not hold, such as else: { remove: ["Not Priority"] }',
+      },
+      {
+        path: "sources[0].actions[0].when.urgency",
+        message: 'urgency is a score question, so the condition compares it with "low", "high"',
+      },
+      {
+        path: "sources[0].actions[0].when.status",
+        message:
+          'status is compared with a record status: one of "pending", "done", "needs_review", "error", "unchecked", "skipped"',
+      },
+      {
+        path: "sources[0].actions[0].when.urgency.confidence",
+        message:
+          "a confidence test is { atLeast: n } with n a number from 0 to 1, such as { atLeast: 0.9 }",
+      },
+      {
+        path: "sources[0].actions[0].when.urgency.probability",
+        message:
+          "a probability test is { atLeast: n } with n a number from 0 to 1, such as { atLeast: 0.9 }",
+      },
+    ]);
+    expect(issuesOf({ when: "urgency" })).toMatchObject([{ path: "sources[0].actions[0].when" }]);
+  });
+
+  it("names an action by its plugin's rule: lowercase words joined by _ or -", () => {
+    const named = (action: string) =>
+      parseProjectConfig(facetdb(valid({ actions: [actionCall("@facetdb/github", action, {})] })))
+        .ok;
+    expect(named("add_label")).toBe(true);
+    expect(named("post-message")).toBe(true);
+    expect(named("notify")).toBe(true);
+    expect(named("addLabel")).toBe(false);
   });
 
   it("refuses an API source with a table and a database source without one", () => {

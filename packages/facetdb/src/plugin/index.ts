@@ -9,6 +9,22 @@
  * every entry) and throws a `PluginError` naming each wrong field. To type `ctx.config` inside
  * `source`, `action`, ... annotate the first parameter: `(ctx: PluginContext<Infer<typeof config>>)`.
  */
+export type {
+  ActionPayload,
+  ActionRunnerDeps,
+  ActionSource,
+  QueuedAction,
+} from "./action-host.ts";
+export {
+  actionSteps,
+  checkActions,
+  checkSourceActions,
+  createActionRunner,
+  RECORD_CHANGED,
+  RECORD_GONE,
+  SUPERSEDED,
+  WAITS_FOR_PERSON,
+} from "./action-host.ts";
 export type { Plugin, PluginDefinition, PluginIssue } from "./define.ts";
 export { definePlugin, isPlugin, PluginError, packageNames, shortName } from "./define.ts";
 export type {
@@ -25,6 +41,7 @@ export {
   PluginHostError,
 } from "./host.ts";
 export type {
+  ActionContext,
   ActionDefinition,
   ActionSpec,
   ChannelDefinition,

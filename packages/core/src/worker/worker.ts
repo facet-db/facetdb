@@ -24,7 +24,7 @@ import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
 import { checkStateSize, estimateRequestTokens, estimateTokens } from "../requests/index.ts";
 import { followReview, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
-import type { ActionStep } from "./action-pipeline.ts";
+import { ActionNotQueued, type ActionStep } from "./action-pipeline.ts";
 import {
   RUN_LOG_PRUNE_EVERY_MS,
   RUN_LOG_RETENTION_MS,
@@ -245,7 +245,13 @@ export function createWorker(deps: WorkerDeps): Worker {
     decisions: ActionDecisions,
     decidedAt: Date,
   ): Promise<RecordFailure[]> {
-    const record: ActionRecord = { key: row.key, state: row.state, status, decidedAt };
+    const record: ActionRecord = {
+      key: row.key,
+      state: row.state,
+      status,
+      stateHash: row.hash,
+      decidedAt,
+    };
     const failures: RecordFailure[] = [];
     // Step 7: one action failing does not keep the others from running.
     for (const step of actions) {
@@ -256,6 +262,16 @@ export function createWorker(deps: WorkerDeps): Worker {
       }
     }
     return failures;
+  }
+
+  /**
+   * How a record whose write landed ends its claim once its steps ran: acked, unless a step could
+   * not hand its action on (`ActionNotQueued`). Then the job is released, and the next pass, a poll
+   * interval later (`run` waits after a pass with failures), writes the logged decision again with
+   * no model call and runs every step again.
+   */
+  function afterActions(failures: readonly RecordFailure[]): Settled {
+    return failures.some((failure) => failure.error instanceof ActionNotQueued) ? "release" : "ack";
   }
 
   /**
@@ -489,14 +505,18 @@ export function createWorker(deps: WorkerDeps): Worker {
           return "release";
         }
         await follow(row, decision, answer);
-        report.alreadyAnswered.push(row.key);
         // The actions follow every write that lands. After a lost ack they run again, at least
         // once, as they did when the record was asked again, and report the logged decision's time,
         // not this run's.
-        report.failures.push(
-          ...(await runActions(row, decision.status, decision.decisions, decidedAt)),
-        );
-        return "ack";
+        const failures = await runActions(row, decision.status, decision.decisions, decidedAt);
+        report.failures.push(...failures);
+        const settled = afterActions(failures);
+        // Counted as settled only once its actions are handed on: a pass that only released it
+        // again settles nothing, so `--once` stops instead of spinning while the store refuses.
+        if (settled === "ack") {
+          report.alreadyAnswered.push(row.key);
+        }
+        return settled;
       }
 
       const estimate = estimateTokens(row.state);
@@ -599,9 +619,12 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.toReview.push(row.key);
       }
 
-      // The write above is the default action; the rest follow it.
-      report.failures.push(...(await runActions(row, written.status, written.decisions, entry.at)));
-      return "ack";
+      // The write above is the default action; the rest follow it. The answer is logged and written
+      // either way; a step whose action was not handed on releases the job, and the next pass hands
+      // it on from the log without asking the model.
+      const failures = await runActions(row, written.status, written.decisions, entry.at);
+      report.failures.push(...failures);
+      return afterActions(failures);
     } catch (error) {
       report.failures.push({ key: row.key, stage, error });
       return "release";

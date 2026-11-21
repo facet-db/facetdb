@@ -40,6 +40,7 @@ import {
   OpenSurfaceError,
   onlyRecord,
   openStudioBuild,
+  queueAction,
   requireAccountToServe,
   type StudioBuild,
   secretParts,
@@ -54,7 +55,14 @@ import {
   toProjectJson,
 } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
-import { checkPluginProvider, type PluginHost, PluginProviderError } from "../../plugin/index.ts";
+import {
+  actionSteps,
+  checkPluginProvider,
+  checkSourceActions,
+  createActionRunner,
+  type PluginHost,
+  PluginProviderError,
+} from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import { alertScope, createLinks, hostInUrl, servedStudioUrl } from "../links.ts";
@@ -286,10 +294,11 @@ export type WorkerParts = {
   /** The studio build the surface serves beside the API; absent, the API alone. */
   readonly studio?: StudioBuild;
   /**
-   * The plugins the config names, as the host loaded them when it did: the Plugins page's installed
-   * plugins and packs. Absent, those endpoints answer empty lists.
+   * The plugins the config names, as the host loaded them at the start: the Plugins page's
+   * installed plugins and packs, and every source's actions. A reload does not load them again: a
+   * changed `plugins` key waits for a restart, and the reload says so.
    */
-  readonly plugins?: PluginHost;
+  readonly plugins: PluginHost;
   /**
    * Called once the surface listens, with the host it was told and the port it got: `facetdb studio`
    * opens the browser there.
@@ -432,10 +441,21 @@ export async function runWorkers(
 
   /**
    * The actions a source runs after a decision: the worker's own and a reviewer's decision in the
-   * studio run these same ones. None are wired yet (plugin actions come with plugins).
+   * studio run these same ones. Each queues its row in the store's outbox, and the outbox's loop
+   * below runs the plugin. The row is queued after the decision's write, never in its transaction:
+   * the write is the connector's, on the source's own database, and the outbox is the store's. The
+   * job is acked only once every step queued its row: a crash in between, or a row the store did
+   * not take (core's `ActionNotQueued`), leaves the job queued, and the next pass, a poll later,
+   * writes the logged decision again with no model call and queues the rows again.
    */
-  function actionsOf(_source: SourceConfig): readonly ActionStep[] {
-    return [];
+  function actionsOf(source: SourceConfig): readonly ActionStep[] {
+    return actionSteps(source, (row) =>
+      queueAction(parts.storeClient, clock, {
+        projectId: project.id,
+        sourceId: idOf(source),
+        ...row,
+      }),
+    );
   }
 
   /**
@@ -488,11 +508,6 @@ export async function runWorkers(
   ): Promise<number> {
     await store.ensureSource({ projectId: project.id, name: source.name, kind });
     const recorded = await store.questionSets.record(idOf(source), questionSet);
-    if (source.actions.length > 0) {
-      print(
-        `note: ${source.name} lists ${source.actions.length} action(s); plugin actions run once plugins are resolved (a later version), the answer columns are written meanwhile`,
-      );
-    }
     return recorded.version;
   }
 
@@ -512,6 +527,9 @@ export async function runWorkers(
 
   /** One source's loop: its version recorded, its connector opened, its worker built. */
   async function openLoop(source: SourceConfig, from: ProjectConfig): Promise<SourceLoop> {
+    // Its actions against the plugins this worker loaded, before anything opens: a reload whose
+    // `actions` changed restarts the loop with the new steps, or keeps the old loop and says why.
+    checkSourceActions(from, source, parts.plugins, deps.env);
     const questionSet = questionSetOf(from, source);
     // The loop's own policy, kept on the loop so a restart hands its held records on.
     const outage = createOutagePolicy({ onOutage: source.onOutage, clock });
@@ -724,6 +742,30 @@ export async function runWorkers(
       onGiveUp: async (event, _signal, lastError) => {
         await alerts.raise(gaveUpAlert(event, lastError, links.gaveUp));
       },
+      // A plugin's action row runs here, through the plugins this worker loaded, on the record read
+      // through its source's loop in force; only this project's rows are taken.
+      actionProject: project.id,
+      runAction: createActionRunner({
+        host: parts.plugins,
+        env: deps.env,
+        source: (sourceId) => {
+          const named = fleet.config().sources.find((source) => idOf(source) === sourceId);
+          if (named === undefined) {
+            return { kind: "gone" };
+          }
+          const loop = fleet.loop(named.name);
+          if (loop === undefined) {
+            return { kind: "stopped", name: named.name };
+          }
+          return {
+            kind: "running",
+            name: named.name,
+            connector: fleet.connector(named.name),
+            log: store.log(sourceId),
+            questionSet: loop.questionSet,
+          };
+        },
+      }),
     });
 
     if (options.http) {
@@ -810,20 +852,16 @@ export async function runWorkers(
         ...(parts.studio === undefined ? {} : { studioApp: parts.studio }),
         ...(jobs === undefined ? {} : { backfill: jobs }),
         // The Plugins page: the hosted plugins, the registry's gallery, the packs.
-        ...(parts.plugins === undefined
-          ? {}
-          : {
-              plugins: createPluginsDoor({
-                host: parts.plugins,
-                env: deps.env,
-                coreVersion: VERSION,
-                registry: registryAddress(deps.env),
-                fetch: deps.fetch,
-                abortAfter: deps.abortAfter,
-                workspace: deps.workspace,
-                clock,
-              }),
-            }),
+        plugins: createPluginsDoor({
+          host: parts.plugins,
+          env: deps.env,
+          coreVersion: VERSION,
+          registry: registryAddress(deps.env),
+          fetch: deps.fetch,
+          abortAfter: deps.abortAfter,
+          workspace: deps.workspace,
+          clock,
+        }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
