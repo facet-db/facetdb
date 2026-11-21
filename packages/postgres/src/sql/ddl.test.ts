@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import type { SqlQuery } from "./client.ts";
-import { unlessColumn, unlessRelation } from "./ddl.ts";
+import { unlessColumn, unlessConstraint, unlessRelation } from "./ddl.ts";
 import { jobsTableSql } from "./jobs.ts";
 
 /**
@@ -95,5 +95,32 @@ describe("unlessColumn", () => {
           where table_schema = 'facetdb' and table_name = 'outbox' order by ordinal_position`,
       ),
     ).toEqual([{ column_name: "id" }, { column_name: "claimed_by" }]);
+  });
+});
+
+describe("unlessConstraint", () => {
+  it("rekeys the table when the constraint is missing, and takes no lock on it when it is there", async () => {
+    await world.client.query(`create schema facetdb`);
+    await world.client.query(
+      `create table facetdb.claims (project text not null, kind text not null, cap bigint not null default 0, primary key (project, kind))`,
+    );
+    // Store migration 7's shape: the key dropped and made anew with one more column, in one statement.
+    const statement = unlessConstraint(
+      "facetdb.claims",
+      "claims_by_cap",
+      `alter table facetdb.claims drop constraint claims_pkey, add constraint claims_by_cap primary key (project, kind, cap)`,
+    );
+    await world.client.query(statement);
+    const held = await world.client.transaction(async (query) => {
+      await query(statement);
+      return heldOn(query, "facetdb.claims");
+    });
+    expect(held).toEqual([]);
+    expect(
+      await world.client.query(
+        `select conname, pg_get_constraintdef(oid) as def from pg_constraint
+          where conrelid = 'facetdb.claims'::regclass and contype = 'p'`,
+      ),
+    ).toEqual([{ conname: "claims_by_cap", def: "PRIMARY KEY (project, kind, cap)" }]);
   });
 });

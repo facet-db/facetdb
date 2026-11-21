@@ -155,6 +155,8 @@ describe("plans and runs", () => {
       ["marks", "skip"],
       ["lock", "skip"],
     ]);
+    // No answer at all: a reading of the install behind it tells nothing and may be asked again.
+    expect(checks[0]).toMatchObject({ name: "file", status: "fail", unreachable: true });
     expect(existsSync(missing)).toBe(false);
   });
 

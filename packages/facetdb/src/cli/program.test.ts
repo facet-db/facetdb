@@ -164,6 +164,9 @@ describe("the facetdb program", () => {
           files: () => ({ read: () => Promise.reject(new Error("unused")) }),
         },
         openBrowser: () => Promise.reject(new Error("unused")),
+        setEnv: () => {
+          throw new Error("unused");
+        },
       },
       COMMANDS,
       { code: 0 },

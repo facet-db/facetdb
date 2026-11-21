@@ -1,5 +1,4 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { Clock } from "@facetdb/core";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { POLL_MS } from "@facetdb/sqlite";
 import { type TemporaryDatabase, temporaryDatabase } from "@facetdb/sqlite/testing";
@@ -15,6 +14,7 @@ import {
   createStore,
   type PgliteWorld,
   resetPgliteWorld,
+  SteppedClock,
   type Store,
   TEST_SECRET,
 } from "./testing.ts";
@@ -29,31 +29,6 @@ import {
 
 const PROJECT_DIR = "/work/listings-app";
 const START = 1_700_000_000_000;
-
-/** A clock whose sleeps end only when the test moves time past them: one step, one poll. */
-class SteppedClock implements Clock {
-  #time: number;
-  #sleepers: { readonly due: number; readonly wake: () => void }[] = [];
-  constructor(start: number) {
-    this.#time = start;
-  }
-  now(): number {
-    return this.#time;
-  }
-  sleep(ms: number): Promise<void> {
-    return new Promise((wake) => {
-      this.#sleepers.push({ due: this.#time + ms, wake });
-    });
-  }
-  advance(ms: number): void {
-    this.#time += ms;
-    const due = this.#sleepers.filter((sleeper) => sleeper.due <= this.#time);
-    this.#sleepers = this.#sleepers.filter((sleeper) => sleeper.due > this.#time);
-    for (const sleeper of due) {
-      sleeper.wake();
-    }
-  }
-}
 
 let world: PgliteWorld;
 let store: Store;

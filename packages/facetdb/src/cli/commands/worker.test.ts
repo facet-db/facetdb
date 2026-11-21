@@ -1,4 +1,4 @@
-import { type Clock, DEFAULT_WORKER_LIMITS, monthOf } from "@facetdb/core";
+import { DEFAULT_WORKER_LIMITS, monthOf } from "@facetdb/core";
 import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
@@ -19,6 +19,7 @@ import {
   resetPgliteWorld,
   type SqlClient,
   type SqlConnect,
+  SteppedClock,
   type Store,
   TEST_SECRET,
 } from "../testing.ts";
@@ -52,31 +53,6 @@ const config: ProjectConfig = facetdb({
     },
   ],
 });
-
-/** A clock whose sleeps end only when the test moves time past them: one step, one poll. */
-class SteppedClock implements Clock {
-  #time: number;
-  #sleepers: { readonly due: number; readonly wake: () => void }[] = [];
-  constructor(start: number) {
-    this.#time = start;
-  }
-  now(): number {
-    return this.#time;
-  }
-  sleep(ms: number): Promise<void> {
-    return new Promise((wake) => {
-      this.#sleepers.push({ due: this.#time + ms, wake });
-    });
-  }
-  advance(ms: number): void {
-    this.#time += ms;
-    const due = this.#sleepers.filter((sleeper) => sleeper.due <= this.#time);
-    this.#sleepers = this.#sleepers.filter((sleeper) => sleeper.due > this.#time);
-    for (const sleeper of due) {
-      sleeper.wake();
-    }
-  }
-}
 
 let world: PgliteWorld;
 let store: Store;

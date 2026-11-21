@@ -182,6 +182,8 @@ const homeSchema = z.object({
   spending: z.object({
     status: z.enum(["ok", "warned", "paused", "continuing", "uncapped"]),
     month: z.string(),
+    /** This month's billable input tokens, which an estimate is set against what is left of the cap. */
+    inputTokens: z.number().int().min(0),
     dollars: z.number().min(0),
     // The cap the worker enforces: as it started, and what it does at 100%.
     cap: z
@@ -741,6 +743,12 @@ export type SetupAccess = z.infer<typeof setupAccessSchema>;
 const inspectionSchema = z.object({
   database: z.string(),
   tables: z.array(z.string()),
+  /**
+   * A source the file already reads in this very database, and the variable it reads it through:
+   * the variable to suggest, so one database stays one string (two variables holding one string
+   * leave Apply unable to tell which source reads which).
+   */
+  sharedWith: z.object({ source: z.string(), variable: z.string() }).nullable(),
   table: z
     .object({
       name: z.string(),

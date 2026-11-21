@@ -82,10 +82,24 @@ export type UsageStore = {
     reservation: ReservationId,
     inputTokens: number,
   ): Promise<number>;
-  /** True only for the first claim of this alert in this month; false for every later one. */
-  claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean>;
+  /**
+   * True only for the first claim of this alert in this month under this cap (its input tokens);
+   * false for every later one. A cap changed mid-month is a new claim: a cap raised and reached
+   * again raises the alert again, with the new figures.
+   */
+  claimAlert(
+    projectId: string,
+    month: string,
+    kind: SpendingAlertKind,
+    cap: number,
+  ): Promise<boolean>;
   /** Gives a claim back when the alert reached no channel, so the next check raises it again. */
-  releaseAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<void>;
+  releaseAlert(
+    projectId: string,
+    month: string,
+    kind: SpendingAlertKind,
+    cap: number,
+  ): Promise<void>;
 };
 
 export type SpendingDeps = {
@@ -251,8 +265,14 @@ export function createSpending(deps: SpendingDeps): Spending {
    * only grows, so a smaller one seen later (a read that began before a write) is older and ignored.
    */
   const seen = new Map<string, { readonly month: string; readonly total: number }>();
-  /** The status each project was last reported at with every alert it called for raised cleanly. */
-  const reported = new Map<string, { readonly month: string; readonly status: SpendingStatus }>();
+  /**
+   * The status each project was last reported at, under which cap, with every alert it called for
+   * raised cleanly: a cap changed mid-month is reported afresh.
+   */
+  const reported = new Map<
+    string,
+    { readonly month: string; readonly status: SpendingStatus; readonly cap: number }
+  >();
 
   function see(projectId: string, month: string, total: number): void {
     const known = seen.get(projectId);
@@ -309,9 +329,10 @@ export function createSpending(deps: SpendingDeps): Spending {
     projectId: string,
     month: string,
     kind: SpendingAlertKind,
+    cap: number,
     event: Omit<AlertEvent, "kind" | "project" | "source" | "question" | "link">,
   ): Promise<"held" | "released" | { readonly error: unknown }> {
-    if (!(await usageStore.claimAlert(projectId, month, kind))) {
+    if (!(await usageStore.claimAlert(projectId, month, kind, cap))) {
       return "held";
     }
     // The claim stands only once the alert is out cleanly. A channel that refused it, a raise that
@@ -328,11 +349,11 @@ export function createSpending(deps: SpendingDeps): Spending {
         link: capLink(projectId),
       });
     } catch (error) {
-      await usageStore.releaseAlert(projectId, month, kind);
+      await usageStore.releaseAlert(projectId, month, kind, cap);
       return { error };
     }
     if (outcome.status !== "sent" || outcome.failures.length > 0) {
-      await usageStore.releaseAlert(projectId, month, kind);
+      await usageStore.releaseAlert(projectId, month, kind, cap);
       return "released";
     }
     return "held";
@@ -396,13 +417,18 @@ export function createSpending(deps: SpendingDeps): Spending {
       current = pauses ? "paused" : "continuing";
     }
     const last = reported.get(projectId);
-    if (!always && last?.month === month && last.status === current) {
+    if (
+      !always &&
+      last?.month === month &&
+      last.status === current &&
+      last.cap === cap.inputTokens
+    ) {
       return current;
     }
     reported.delete(projectId);
 
     const warning = warningLevel
-      ? await raiseOnce(projectId, month, "spending_80", {
+      ? await raiseOnce(projectId, month, "spending_80", cap.inputTokens, {
           what: `This month's usage is at 80% of the spending cap: ${usage}.`,
           did: pauses
             ? "Nothing is paused yet; at 100% the project pauses and records stay pending."
@@ -411,7 +437,7 @@ export function createSpending(deps: SpendingDeps): Spending {
       : "held";
     const pause =
       atCap && pauses
-        ? await raiseOnce(projectId, month, "spending_paused", {
+        ? await raiseOnce(projectId, month, "spending_paused", cap.inputTokens, {
             what: `This month's usage reached the spending cap: ${usage}.`,
             did: "Paused: records stay pending and are answered when the month resets or the cap changes.",
           })
@@ -425,7 +451,7 @@ export function createSpending(deps: SpendingDeps): Spending {
     }
     // A claim given back is raised again at the next check, so that status is not reported yet.
     if (warning === "held" && pause === "held") {
-      reported.set(projectId, { month, status: current });
+      reported.set(projectId, { month, status: current, cap: cap.inputTokens });
     }
     return current;
   }

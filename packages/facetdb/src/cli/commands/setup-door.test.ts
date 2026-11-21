@@ -22,7 +22,7 @@ import { runInProcess } from "../program.ts";
 import type { SqlConnect } from "../testing.ts";
 import { fileQueue } from "./config-reload.ts";
 import { COMMANDS } from "./index.ts";
-import { createSetupDoor } from "./setup-door.ts";
+import { createSetupDoor, registeredDatabases } from "./setup-door.ts";
 
 /**
  * The setup flow's door over the fake engine and a config file in memory: the tables and rows an
@@ -223,13 +223,13 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
     ],
     notes: [],
   };
+  const env = { ...ENV, ...extraEnv };
   const door = createSetupDoor({
-    cli: {
+    cli: { env, clock, connect: noConnection },
+    databases: registeredDatabases({
       engines: [lazyEngine("postgres", () => Promise.resolve(engine))],
-      env: { ...ENV, ...extraEnv },
-      clock,
-      connect: noConnection,
-    },
+      env,
+    }),
     project: { id: "listings-app", name: "listings-app" },
     ran: (source, config) => {
       ran.push({
@@ -295,10 +295,27 @@ describe("the setup door's inspection", () => {
       database: "Postgres",
       tables: ["listings", "orders"],
       table: null,
+      // The file's first table source reads this very database: its variable is the one to suggest,
+      // so one database stays one string. The name alone.
+      sharedWith: { source: "orders", variable: "DATABASE_URL" },
     });
     const one = await t.door.inspect(ADMIN, "listings");
     expect(one).toMatchObject({ kind: "inspected", table: { name: "listings", key: "id" } });
     expect(t.engine.inspected).toEqual([null, "listings"]);
+    // Another database on the same server: no source of the file reads it, nothing to suggest.
+    expect(
+      await t.door.inspect(
+        `postgres://${MARK_USER}:${MARK_PASSWORD}@localhost:5432/other`,
+        undefined,
+      ),
+    ).toMatchObject({ kind: "inspected", sharedWith: null });
+    // A file that cannot be read suggests nothing and refuses nothing: the inspection still answers.
+    t.files.read = () => Promise.reject(new Error("the disk went away"));
+    expect(await t.door.inspect(ADMIN, undefined)).toMatchObject({
+      kind: "inspected",
+      tables: ["listings", "orders"],
+      sharedWith: null,
+    });
   });
 
   it("refuses an unknown scheme and a plaintext remote URL before anything connects", async () => {
@@ -414,7 +431,9 @@ describe("the setup door's plan", () => {
     const t = rig();
     const outcome = await t.door.plan(ADMIN, { ...DRAFT, database: { env: "LISTINGS_URL" } });
     expect(outcome).toMatchObject({ kind: "invalid" });
-    expect(JSON.stringify(outcome)).toContain("is not set where the worker runs");
+    expect(JSON.stringify(outcome)).toContain(
+      "is not set where the worker runs; set it to the worker login's connection string (postgres://facetdb_worker:<a long random password>@<host>/<database>: the install creates that login with that password), restart facetdb worker, then show the SQL again",
+    );
   });
 
   it("gives the draft a where filter of the operator's, and still refuses actions", async () => {
@@ -635,7 +654,13 @@ describe("the variable the new source reads", () => {
     const refused = await notUrl.plan(ADMIN, { ...DRAFT, database: { env: "NOT_A_URL" } });
     expect(refused).toMatchObject({
       kind: "invalid",
-      issues: [{ message: expect.stringContaining("does not hold a connection string") }],
+      issues: [
+        {
+          message: expect.stringContaining(
+            "does not hold a connection string of a database FacetDB reads; set it to the worker login's connection string (postgres://facetdb_worker:<a long random password>@<host>/<database>: the install creates that login with that password), restart facetdb worker, then show the SQL again",
+          ),
+        },
+      ],
     });
     expect(JSON.stringify(refused)).not.toContain("hunter2");
   });

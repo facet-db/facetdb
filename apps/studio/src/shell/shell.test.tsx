@@ -148,6 +148,22 @@ describe("the rail", () => {
     ).toBeInTheDocument();
   });
 
+  it("says in a word that the project is paused at the cap, which the rounded figures cannot", async () => {
+    // Seen in a real run: 1,007,553 of 1,000,000 tokens read "$0.04 of $0.04".
+    renderStudio({
+      api: fakeApi({
+        home: () =>
+          Promise.resolve({
+            ...SAMPLE_HOME,
+            spending: { ...SAMPLE_HOME.spending, status: "paused" },
+          }),
+      }),
+    });
+    const foot = await screen.findByRole("region", { name: "Worker and spending" });
+    expect(await within(foot).findByText("Paused at the cap")).toBeVisible();
+    expect(within(foot).getByText("$3.20 of $25")).toBeVisible();
+  });
+
   it("says when the worker could not be read, rather than showing nothing", async () => {
     // A refusal in the surface's words is not retried, so no timer runs.
     const failing = new ApiError(500, "internal_error", "Something went wrong.", "Try again.");

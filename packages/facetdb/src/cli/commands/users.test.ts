@@ -144,6 +144,7 @@ describe("facetdb users add", () => {
       configFiles: { read: unused, replace: unused, gitState: unused },
       studio: { defaultDir: undefined, files: unused },
       openBrowser: unused,
+      setEnv: unused,
     };
     expect(await runProgram(["users", "add", "maya"], deps, COMMANDS)).toBe(0);
     expect(asked).toEqual([

@@ -325,6 +325,15 @@ export type DoctorCheck = {
   readonly detail: string;
   /** What to do, for a failure. */
   readonly fix?: string;
+  /**
+   * A `fail` of a reach check (`database`, `server`, `file`) that got no answer from the database
+   * at all (refused, timed out, no such file, a file this user cannot write): nothing behind it was
+   * read, so a reading of the install tells nothing and may be asked again once the server is up
+   * or the file is there. A reach check that failed on what the database answered (another login
+   * than the worker's, a string the engine refuses) leaves it unset: asking again changes nothing
+   * until the string does, which the worker's environment fixes at its start.
+   */
+  readonly unreachable?: true;
 };
 
 /** What every call that reaches a database is given, besides the target and the URL. */

@@ -31,13 +31,14 @@ import {
   apply,
   ConfigError,
   type ConfigFiles,
+  type ConnectorChoice,
   judgeDraftSource,
   type ProjectConfig,
   planApply,
   type SourceConfig,
   uncommittedWords,
 } from "../../config/index.ts";
-import { databaseOf, engineFor, schemeOf } from "../engines.ts";
+import { databaseOf, engineFor, readsUrl, schemeOf } from "../engines.ts";
 import { type CliDeps, CliError } from "../program.ts";
 import {
   requireStoreUrl,
@@ -100,15 +101,64 @@ export type SetupDoorDeps = InstallDeps & {
 };
 
 /**
- * What one source's install needs besides the admin string: the CLI's engines, environment, clock
- * and store driver, the project, and the worker's `--allow-insecure` for the store it opened. The
- * setup door's and the migrate door's alike.
+ * What one source's install needs besides the admin string: the CLI's environment, clock and store
+ * driver, the databases the doors reach, the project, and the worker's `--allow-insecure` for the
+ * store it opened. The setup door's and the migrate door's alike.
  */
 export type InstallDeps = {
-  readonly cli: Pick<CliDeps, "engines" | "env" | "clock" | "connect">;
+  readonly cli: Pick<CliDeps, "env" | "clock" | "connect">;
+  readonly databases: DoorDatabases;
   readonly project: ProjectRef;
   readonly allowInsecureStore: boolean;
 };
+
+/**
+ * The databases the studio's doors reach, and what the doors know of a connection string to one.
+ * Under `facetdb worker` they are every engine the composition root registered, picked by the
+ * string's scheme (`registeredDatabases`: cli/engines.ts and the store door); under `facetdb dev`
+ * the one embedded database, which dev's address alone names and dev's own engine serves, every
+ * other string refused in words naming that address (dev.ts).
+ */
+export type DoorDatabases = {
+  /** Whether a connection string names a database these doors read; nothing loads or connects. */
+  reads(url: string): boolean;
+  /** The database a connection string names, in words: `Postgres`, `PGlite`; undefined when none. */
+  name(url: string): string | undefined;
+  /** The engine for a connection string, or `connector:`'s; refused in words for a string not read. */
+  engine(url: string, override?: ConnectorChoice): Promise<DatabaseEngine>;
+  /** The engine an install of `source` plans with under the admin string, which must name its kind. */
+  adminEngine(source: SourceConfig, admin: string): Promise<DatabaseEngine>;
+  /** Whether two connection strings reach one database (the store door's `sameDatabase`). */
+  same(a: string, b: string): boolean;
+  /** Whether the store is `source`'s own database, so the install's plan holds the store's part. */
+  storeShared(source: SourceConfig): boolean;
+  /** The worker login's password an install creates the login with, or why there is none. */
+  workerPassword(engine: DatabaseEngine, source: SourceConfig): ReturnType<typeof passwordOf>;
+  /**
+   * What to do when the variable step five names holds no connection string these doors read
+   * (unset, or another kind of string): the words after the finding, in the terms of the worker
+   * that runs (a worker login's string and `facetdb worker`; dev's address and `facetdb dev`).
+   */
+  variableFix(variable: string): string;
+};
+
+/** The doors' databases under `facetdb worker`: the registered engines, judged by the scheme table. */
+export function registeredDatabases(deps: Pick<CliDeps, "engines" | "env">): DoorDatabases {
+  const { engines, env } = deps;
+  return {
+    // The same answer as the static table alone gave before only because main.ts registers an
+    // engine for every key of that table.
+    reads: (url) => readsUrl(engines, url),
+    name: (url) => databaseOf(url)?.name,
+    engine: (url, override) => engineFor(engines, url, override),
+    adminEngine: (source, admin) => adminEngineOf(engines, source, admin),
+    same: (a, b) => sameDatabase(a, b, env),
+    storeShared: (source) => storeSharedFor(env, source),
+    workerPassword: passwordOf,
+    variableFix: () =>
+      "set it to the worker login's connection string (postgres://facetdb_worker:<a long random password>@<host>/<database>: the install creates that login with that password), restart facetdb worker, then show the SQL again",
+  };
+}
 
 /** One source's install as `facetdb migrate` plans and prints it, and what its run needs. */
 export type SourceInstall = {
@@ -162,8 +212,9 @@ export async function sourceInstallOf(
   admin: string,
 ): Promise<SourceInstall> {
   const { env, clock } = deps.cli;
+  const { databases } = deps;
   const source = target.source;
-  const storeShared = storeSharedFor(env, source);
+  const storeShared = databases.storeShared(source);
   const notes: string[] = [];
   if (!storeShared) {
     const store = await showStoreMigration(
@@ -181,12 +232,12 @@ export async function sourceInstallOf(
   }
   const own = engineTarget(config, target, deps.project);
   const engineDeps: EngineDeps = { clock, allowInsecure: false, storeShared };
-  const plan = await planInstall(engine, target, own, admin, engineDeps);
+  const login = databases.workerPassword(engine, source);
+  const plan = await planInstall(engine, target, own, admin, engineDeps, login);
   const label = engine.label(own, admin);
   const sql = installPrintout(source.name, label, engine.render(plan), [
     ...new Set([...notes, ...plan.notes]),
   ]);
-  const login = passwordOf(engine, source);
   return {
     engine,
     own,
@@ -276,7 +327,7 @@ function asRefusal(error: unknown): SetupRefused {
 }
 
 export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
-  const { cli, project, path, files } = deps;
+  const { cli, databases, project, path, files } = deps;
   const { env, clock } = cli;
 
   /** The file as it reads and loads now, or why it cannot be read. */
@@ -338,18 +389,17 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
     label: string,
     admin: string,
   ): string | undefined {
-    const kind = databaseOf(admin)?.key;
     return config.sources.find((other) => {
       if (other.name === source.name || other.table === undefined || other.database === undefined) {
         return false;
       }
       const there = other.database;
+      // `same` is false across kinds of database (the store door reads Postgres addresses alone),
+      // and true for every string under dev, where every table source lives on the one embedded
+      // database whatever its string says.
       const sameDatabaseAs = (url: string | undefined) =>
-        url !== undefined && sameDatabase(there, url, env);
-      if (
-        databaseOf(there)?.key !== kind ||
-        !(sameDatabaseAs(admin) || sameDatabaseAs(source.database))
-      ) {
+        url !== undefined && databases.same(there, url);
+      if (!(sameDatabaseAs(admin) || sameDatabaseAs(source.database))) {
         return false;
       }
       const theirs = engineTarget(config, { source: other, ...splitTable(other.table) }, project);
@@ -366,7 +416,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
     const config = applyPlan.config;
     const target = targetOf(config, name);
     const source = target.source;
-    const engine = await adminEngineOf(cli.engines, source, admin);
+    const engine = await databases.adminEngine(source, admin);
     // Before anything connects: a table the file already reads is not set up again.
     const own: EngineTarget = engineTarget(config, target, project);
     const taken = sourceOfTable(config, source, engine, engine.label(own, admin), admin);
@@ -401,18 +451,18 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         issues: [
           {
             path: "database.env",
-            message: `${variable} is not set where the worker runs; set it to the connection string the worker will use (postgres://facetdb_worker:<a long random password>@<host>/<database>: the install creates that login with that password), restart facetdb worker, then show the SQL again`,
+            message: `${variable} is not set where the worker runs; ${databases.variableFix(variable)}`,
           },
         ],
       };
     }
-    if (databaseOf(value) === undefined) {
+    if (!databases.reads(value)) {
       return {
         kind: "invalid",
         issues: [
           {
             path: "database.env",
-            message: `${variable} is set where the worker runs, and does not hold a connection string of a database FacetDB reads; set it to the worker login's connection string (postgres://facetdb_worker:<a long random password>@<host>/<database>), restart facetdb worker, then show the SQL again`,
+            message: `${variable} is set where the worker runs, and does not hold a connection string of a database FacetDB reads; ${databases.variableFix(variable)}`,
           },
         ],
       };
@@ -491,13 +541,42 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
     }
   }
 
+  /**
+   * The first table source of the file that reads the database `admin` reaches (host, port and
+   * name), whose variable the page suggests: one database, one string, so Apply can tell which
+   * source reads which. Nothing of either string is said, the variable's name alone. A file that
+   * does not load, or cannot be read, suggests nothing and refuses nothing here: the suggestion is
+   * a courtesy, the inspection is the answer.
+   */
+  async function sharedSource(
+    admin: string,
+  ): Promise<(SourceConfig & { readonly databaseEnv: string }) | undefined> {
+    try {
+      const now = await current();
+      return "ok" in now
+        ? now.config.sources.find(
+            (source): source is SourceConfig & { readonly databaseEnv: string } =>
+              source.table !== undefined &&
+              source.database !== undefined &&
+              source.databaseEnv !== undefined &&
+              // A string these doors do not read is never suggested: under dev a source may read a
+              // real server's string, which step five would then refuse.
+              databases.reads(source.database) &&
+              databases.same(source.database, admin),
+          )
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   return {
     available: true,
 
     async inspect(admin, table): Promise<InspectOutcome> {
       try {
-        const engine = await engineFor(cli.engines, admin);
-        const database = databaseOf(admin)?.name ?? engine.name;
+        const engine = await databases.engine(admin);
+        const database = databases.name(admin) ?? engine.name;
         if (engine.inspect === undefined) {
           return {
             kind: "refused",
@@ -513,11 +592,14 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         if (!result.ok) {
           return { kind: "refused", ...result.refusal };
         }
+        const shared = await sharedSource(admin);
         return {
           kind: "inspected",
           database,
           tables: result.inspection.tables,
           table: result.inspection.table ?? null,
+          sharedWith:
+            shared === undefined ? null : { source: shared.name, variable: shared.databaseEnv },
         };
       } catch (error) {
         return asRefusal(error);
@@ -551,7 +633,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
       try {
         const target = targetOf(judged.config, draft.name);
         source = target.source;
-        const engine = await engineFor(cli.engines, admin, source.connector);
+        const engine = await databases.engine(admin, source.connector);
         const read = await rowsOf(
           engine,
           engineTarget(judged.config, target, project),
@@ -737,7 +819,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
 
 type SetupInvalidOut = Extract<SetupPlanOutcome, { kind: "invalid" }>;
 
-/** The door of a worker that does not write facetdb.config.ts: `facetdb dev`, `--once`. */
+/** The door of a worker that does not write facetdb.config.ts: `--once`. */
 export const UNAVAILABLE_SETUP_DOOR: SetupDoor = {
   available: false,
   inspect: () => Promise.reject(new Error("this worker adds no source")),

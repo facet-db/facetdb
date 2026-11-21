@@ -205,7 +205,7 @@ describe("POST /v1/reload", () => {
         error: {
           code: "reload_unavailable",
           message:
-            "This worker does not reload facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+            "This worker does not reload facetdb.config.ts: facetdb worker --once never does.",
           fix: expect.any(String),
         },
       },

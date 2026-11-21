@@ -1,6 +1,5 @@
 import {
   type AlertSignals,
-  type Clock,
   createReviewService,
   createWorker,
   DEFAULT_WORKER_LIMITS,
@@ -34,6 +33,7 @@ import {
   type SourceDraft,
   toProjectJson,
 } from "../../config/index.ts";
+import { SteppedClock } from "../testing.ts";
 import {
   configFileDoor,
   createFleet,
@@ -110,31 +110,6 @@ const UNLIMITED: SpendingGate = {
   record: () => Promise.resolve(),
   finish: () => Promise.resolve(),
 };
-
-/** A clock whose sleeps end only when the test moves time past them. */
-class SteppedClock implements Clock {
-  #time: number;
-  #sleepers: { readonly due: number; readonly wake: () => void }[] = [];
-  constructor(start: number) {
-    this.#time = start;
-  }
-  now(): number {
-    return this.#time;
-  }
-  sleep(ms: number): Promise<void> {
-    return new Promise((wake) => {
-      this.#sleepers.push({ due: this.#time + ms, wake });
-    });
-  }
-  advance(ms: number): void {
-    this.#time += ms;
-    const due = this.#sleepers.filter((sleeper) => sleeper.due <= this.#time);
-    this.#sleepers = this.#sleepers.filter((sleeper) => sleeper.due > this.#time);
-    for (const sleeper of due) {
-      sleeper.wake();
-    }
-  }
-}
 
 /** Says a certain "no" to every question; `hold` keeps each answer until `release`. */
 class HeldProvider implements ModelProvider {

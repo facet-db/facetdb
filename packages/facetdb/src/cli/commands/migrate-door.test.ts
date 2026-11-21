@@ -33,6 +33,7 @@ import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 import { installRuns, installVerdict } from "./install-check.ts";
 import { createMigrateDoor } from "./migrate-door.ts";
+import { registeredDatabases } from "./setup-door.ts";
 
 /**
  * The studio's install of an added question over the fake engine: the plan printed byte for byte as
@@ -192,13 +193,16 @@ function rig(file: ProjectConfig = ADDED) {
   const serial = fileQueue();
   const door = createMigrateDoor({
     cli: {
-      engines: [lazyEngine("postgres", () => Promise.resolve(engine))],
       env: ENV,
       clock: new FakeClock(Date.parse("2026-11-10T12:00:00Z")),
       connect: () => {
         throw new Error("the store shares the source's database here: nothing opens it");
       },
     },
+    databases: registeredDatabases({
+      engines: [lazyEngine("postgres", () => Promise.resolve(engine))],
+      env: ENV,
+    }),
     project: { id: "listings-app", name: "listings-app" },
     allowInsecureStore: false,
     path: PATH,
@@ -510,13 +514,16 @@ describe("the reload after the door's run", () => {
 
     const door = createMigrateDoor({
       cli: {
-        engines: [lazyEngine("postgres", () => Promise.resolve(t.engine))],
         env: ENV,
         clock: new FakeClock(0),
         connect: () => {
           throw new Error("no store here");
         },
       },
+      databases: registeredDatabases({
+        engines: [lazyEngine("postgres", () => Promise.resolve(t.engine))],
+        env: ENV,
+      }),
       project: { id: "listings-app", name: "listings-app" },
       allowInsecureStore: false,
       path: PATH,

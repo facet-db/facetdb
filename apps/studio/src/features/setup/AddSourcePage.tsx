@@ -344,7 +344,10 @@ function SetupFlow({
         read: firstRead(inspected),
         where: "",
         storage: "inline",
-        variable: suggested,
+        // The variable of a source already reading this database, so one database stays one
+        // string; else the file's first, or DATABASE_URL.
+        variable: found.sharedWith?.variable ?? suggested,
+        sharedWith: found.sharedWith,
       });
       setForm((before) => ({ ...before, name }));
     });
@@ -1310,6 +1313,11 @@ function KeepingStep({
           password&gt;@&lt;host&gt;/&lt;database&gt;: the install creates that login with that
           password. The SQL step says whether it is set, and never shows its value.
         </p>
+        {choices.sharedWith === null ? null : (
+          <p className="text-[13px] text-text-2">
+            {`${choices.sharedWith.source} already reads this database through ${choices.sharedWith.variable}, so the same variable is suggested: two variables holding one string would leave Apply unable to tell which source reads which.`}
+          </p>
+        )}
       </div>
       <div className="grid gap-1">
         <p className="text-[13px] text-text-2">After a decision</p>

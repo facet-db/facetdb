@@ -84,18 +84,25 @@ export function atLeast(version: string, minimum: readonly number[]): boolean {
 
 function fileCheck(path: string, subject: string): DoctorCheck {
   if (!existsSync(path) || !statSync(path).isFile()) {
-    return fail(
-      "file",
-      `${path} does not exist, or is not a file`,
-      `check the file's path in ${subject}; FacetDB never creates a SQLite file`,
-    );
+    return {
+      ...fail(
+        "file",
+        `${path} does not exist, or is not a file`,
+        `check the file's path in ${subject}; FacetDB never creates a SQLite file`,
+      ),
+      unreachable: true,
+    };
   }
   if (!writable(path) || !writable(dirname(path))) {
-    return fail(
-      "file",
-      `${path} or its directory is not writable by this user`,
-      "let the worker's user write the file and its directory: WAL keeps a -wal and a -shm file beside it",
-    );
+    // Nothing behind the file was read either, and a chmod mends it with no restart.
+    return {
+      ...fail(
+        "file",
+        `${path} or its directory is not writable by this user`,
+        "let the worker's user write the file and its directory: WAL keeps a -wal and a -shm file beside it",
+      ),
+      unreachable: true,
+    };
   }
   return ok("file", `${path} exists, and it and its directory are writable`);
 }

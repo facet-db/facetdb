@@ -13,7 +13,6 @@ import { CliError } from "../program.ts";
 import { type FileQueue, planReload, type SourceLoop } from "./config-reload.ts";
 import { tableTargets } from "./database.ts";
 import {
-  adminEngineOf,
   type InstallDeps,
   runSourceInstall,
   type SourceInstall,
@@ -176,7 +175,7 @@ export function createMigrateDoor(deps: MigrateDoorDeps): MigrateDoor {
     if (target === undefined) {
       throw new Error(`tableTargets returned nothing for ${name}`);
     }
-    const engine: DatabaseEngine = await adminEngineOf(deps.cli.engines, source, admin);
+    const engine: DatabaseEngine = await deps.databases.adminEngine(source, admin);
     const install = await sourceInstallOf(deps, config, target, engine, admin);
     return { install, source, config, questions };
   }
@@ -266,7 +265,7 @@ export function createMigrateDoor(deps: MigrateDoorDeps): MigrateDoor {
   };
 }
 
-/** The door of a worker that does not reload its config file: `facetdb dev`, `--once`. */
+/** The door of a worker that does not reload its config file: `--once`. */
 export const UNAVAILABLE_MIGRATE_DOOR: MigrateDoor = {
   available: false,
   plan: () => Promise.reject(new Error("this worker installs no question")),

@@ -130,11 +130,14 @@ async function databaseCheck(
     };
   } catch (error) {
     return {
-      check: fail(
-        "database",
-        `"${target.source}" cannot connect to ${databaseLabel(url)}: ${plainMessage(error, [url])}`,
-        `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`,
-      ),
+      check: {
+        ...fail(
+          "database",
+          `"${target.source}" cannot connect to ${databaseLabel(url)}: ${plainMessage(error, [url])}`,
+          `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`,
+        ),
+        unreachable: true,
+      },
     };
   }
 }

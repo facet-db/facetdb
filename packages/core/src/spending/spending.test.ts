@@ -141,9 +141,14 @@ class MemoryUsageStore implements UsageStore {
     );
   }
 
-  claimAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<boolean> {
+  claimAlert(
+    projectId: string,
+    month: string,
+    kind: SpendingAlertKind,
+    cap: number,
+  ): Promise<boolean> {
     this.calls.claimAlert += 1;
-    const key = [projectId, month, kind].join("|");
+    const key = [projectId, month, kind, cap].join("|");
     if (this.#claimed.has(key)) {
       return Promise.resolve(false);
     }
@@ -151,8 +156,13 @@ class MemoryUsageStore implements UsageStore {
     return Promise.resolve(true);
   }
 
-  releaseAlert(projectId: string, month: string, kind: SpendingAlertKind): Promise<void> {
-    this.#claimed.delete([projectId, month, kind].join("|"));
+  releaseAlert(
+    projectId: string,
+    month: string,
+    kind: SpendingAlertKind,
+    cap: number,
+  ): Promise<void> {
+    this.#claimed.delete([projectId, month, kind, cap].join("|"));
     return Promise.resolve();
   }
 }
@@ -497,6 +507,40 @@ class ClaimFailingUsageStore extends MemoryUsageStore {
     return Promise.reject(new Error("usage store down"));
   }
 }
+
+describe("spending: a cap changed mid-month (seen in a real run)", () => {
+  it("raises the pause again under the new cap, with its figures, and once per cap", async () => {
+    const { spending, alerts } = setup();
+    let cap: SpendingCap = { inputTokens: 1_000, onCapReached: "pause" };
+    const gate = spendingGate(spending, PROJECT, () => Promise.resolve(cap));
+    await gate.record(1_000);
+    expect(await gate.allowsWork()).toBe(false);
+    expect(alerts.kinds()).toEqual(["spending_80", "spending_paused"]);
+
+    // The cap raised: under it again, with nothing to raise.
+    cap = { inputTokens: 5_000, onCapReached: "pause" };
+    expect(await gate.allowsWork()).toBe(true);
+    expect(alerts.kinds()).toEqual(["spending_80", "spending_paused"]);
+
+    // Reached again: the alerts of the new cap, with its figures; the old cap's claims hold
+    // nothing back (before, the month's one claim per kind left this pause silent).
+    await gate.record(4_000);
+    expect(await gate.allowsWork()).toBe(false);
+    expect(alerts.kinds()).toEqual([
+      "spending_80",
+      "spending_paused",
+      "spending_80",
+      "spending_paused",
+    ]);
+    expect(alerts.events.at(-1)?.what).toBe(
+      "This month's usage reached the spending cap: 5000 of 5000 input tokens.",
+    );
+
+    // Once per cap: the next check raises nothing more.
+    expect(await gate.allowsWork()).toBe(false);
+    expect(alerts.kinds()).toHaveLength(4);
+  });
+});
 
 describe("spending: store calls per admitted request", () => {
   it("one reserve per admission and no read for the status while it holds; the alerts are claimed when it changes", async () => {

@@ -17,6 +17,8 @@ export type SetupChoices = {
   readonly where: string;
   readonly storage: Storage;
   readonly variable: string;
+  /** A source already reading this database, and its variable, which the page suggested. */
+  readonly sharedWith: { readonly source: string; readonly variable: string } | null;
 };
 
 /** A source's name as the config takes one (packages/server, data/routes.ts). */

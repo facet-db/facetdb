@@ -41,3 +41,17 @@ begin
   end if;
 end $$`;
 }
+
+/**
+ * Runs `statement` (an `alter table … add constraint`, with whatever it drops first) only when the
+ * table `table` (schema-qualified) has no constraint named `constraint`.
+ */
+export function unlessConstraint(table: string, constraint: string, statement: string): string {
+  return `do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = to_regclass(${quoteLiteral(table)}) and conname = ${quoteLiteral(constraint)}) then
+    ${statement};
+  end if;
+end $$`;
+}

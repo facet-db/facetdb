@@ -315,6 +315,25 @@ end $$;
 
 insert into facetdb.store_migrations (version) values (6) on conflict (version) do nothing;
 
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.usage_alerts') and attname = 'cap'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.usage_alerts add column cap bigint not null default 0;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = to_regclass('facetdb.usage_alerts') and conname = 'usage_alerts_by_cap') then
+    alter table facetdb.usage_alerts drop constraint usage_alerts_pkey, add constraint usage_alerts_by_cap primary key (project_id, month, kind, cap);
+  end if;
+end $$;
+
+insert into facetdb.store_migrations (version) values (7) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,

@@ -1,6 +1,5 @@
 import {
   type AlertSignals,
-  type Clock,
   createWorker,
   DEFAULT_WORKER_LIMITS,
   type DoctorCheck,
@@ -29,6 +28,8 @@ import {
   type SourceConfig,
   score,
 } from "../../config/index.ts";
+import { CliError } from "../program.ts";
+import { SteppedClock } from "../testing.ts";
 import {
   createFleet,
   type InstallCheck,
@@ -97,31 +98,6 @@ const UNLIMITED: SpendingGate = {
   record: () => Promise.resolve(),
   finish: () => Promise.resolve(),
 };
-
-/** A clock whose sleeps end only when the test moves time past them. */
-class SteppedClock implements Clock {
-  #time: number;
-  #sleepers: { readonly due: number; readonly wake: () => void }[] = [];
-  constructor(start: number) {
-    this.#time = start;
-  }
-  now(): number {
-    return this.#time;
-  }
-  sleep(ms: number): Promise<void> {
-    return new Promise((wake) => {
-      this.#sleepers.push({ due: this.#time + ms, wake });
-    });
-  }
-  advance(ms: number): void {
-    this.#time += ms;
-    const due = this.#sleepers.filter((sleeper) => sleeper.due <= this.#time);
-    this.#sleepers = this.#sleepers.filter((sleeper) => sleeper.due > this.#time);
-    for (const sleeper of due) {
-      sleeper.wake();
-    }
-  }
-}
 
 /** Says a certain "no" to every noul; `hold` keeps each answer until `release`; `down` fails all. */
 class HeldProvider implements ModelProvider {
@@ -458,6 +434,40 @@ describe("a reload when the only install change is questions added", () => {
       message: words,
     });
     expect(t.fleet.pending()[0]).toMatchObject({ message: words, checkAgain: true });
+    expect(t.versions.get("listings")).toHaveLength(1);
+    await t.fleet.close();
+  });
+
+  it("keeps a source whose string its database refuses, with the fix and the restart, and no Check again", async () => {
+    const t = rig();
+    await t.fleet.open(PROJECT);
+    // Seen in a real run: a string logging in as another user than the worker login, which no
+    // reading asked for again can mend while the worker's environment stands.
+    t.state.check = () =>
+      Promise.reject(
+        new CliError(
+          "doctor-database",
+          '"listings" logs in as postgres on localhost/app, not as the worker login facetdb_worker',
+          "set DATABASE_URL to the worker login's connection string",
+        ),
+      );
+    t.state.file = ADDED;
+
+    const summary = await t.fleet.reload();
+
+    const words =
+      'the question is_vehicle needs its columns, and the worker cannot check them ("listings" logs in as postgres on localhost/app, not as the worker login facetdb_worker; set DATABASE_URL to the worker login\'s connection string), so it keeps answering with version 1 until you restart facetdb worker.';
+    expect(summary.loaded && summary.sources[0]).toEqual({
+      source: "listings",
+      outcome: "kept",
+      version: 1,
+      message: words,
+    });
+    expect(t.fleet.pending()[0]).toMatchObject({
+      message: words,
+      migrate: true,
+      checkAgain: false,
+    });
     expect(t.versions.get("listings")).toHaveLength(1);
     await t.fleet.close();
   });

@@ -289,6 +289,8 @@ describe("doctor", () => {
       status: "fail",
       detail: `"listings" cannot connect to db.example.com/app: a connection was opened`,
       fix: "check the host, port, user and password in the source's connection string, and that the database accepts connections from this machine (a firewall or an allow-list)",
+      // No answer at all: a reading of the install behind it tells nothing and may be asked again.
+      unreachable: true,
     });
     // With the variable the CLI read the URL from, the words name it where they said the phrase.
     const named = await never.doctor({ ...target(), urlVariable: "LISTINGS_URL" }, remote, shared);

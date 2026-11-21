@@ -138,6 +138,7 @@ export const SAMPLE_HOME: Home = {
   spending: {
     status: "ok",
     month: "2026-11",
+    inputTokens: 3_200_000,
     dollars: 3.2,
     cap: { inputTokens: 25_000_000, dollars: 25, onCapReached: "pause" },
     fraction: 0.128,
@@ -681,6 +682,7 @@ export const SAMPLE_TABLES: Inspection = {
   database: "Postgres",
   tables: ["listings", "sellers", "orders"],
   table: null,
+  sharedWith: null,
 };
 
 /** The sellers table as an inspection reads it: its key, its columns and three of its rows. */

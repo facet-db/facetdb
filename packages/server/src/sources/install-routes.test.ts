@@ -157,6 +157,7 @@ function doorOf(engine: FakeEngine, behaviour: Behaviour) {
             database: "Postgres",
             tables: result.inspection.tables,
             table: result.inspection.table ?? null,
+            sharedWith: null,
           }
         : { kind: "refused", ...result.refusal };
     },
@@ -436,7 +437,7 @@ describe("POST /v1/sources/inspect", () => {
     const t = rig();
     expect(await t.call("inspect", { admin: ADMIN })).toEqual({
       status: 200,
-      json: { database: "Postgres", tables: ["listings", "orders"], table: null },
+      json: { database: "Postgres", tables: ["listings", "orders"], table: null, sharedWith: null },
     });
     expect(await t.call("inspect", { admin: ADMIN, table: "listings" })).toMatchObject({
       status: 200,

@@ -351,6 +351,7 @@ describe("doctor", () => {
       detail:
         "\"listings\": 127.0.0.1:1433/listings could not be reached as the worker login: The SELECT permission was denied on the object 'select user_name()'.",
       fix: "check the host, port, database and worker password in LISTINGS_URL, and that the server lets this machine connect",
+      unreachable: true,
     });
     expect(unreachable.checks[0]?.detail).not.toContain("secret");
   });

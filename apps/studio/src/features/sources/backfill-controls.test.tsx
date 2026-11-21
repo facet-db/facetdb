@@ -4,6 +4,7 @@ import {
   type ApiClient,
   ApiError,
   type BackfillStatus,
+  type Home,
   type PendingSource,
   type ProjectConfig,
 } from "../../api/index.ts";
@@ -11,6 +12,7 @@ import {
   fakeApi,
   renderStudio,
   SAMPLE_BACKFILL_IDLE,
+  SAMPLE_HOME,
   SAMPLE_MIGRATED,
   SAMPLE_PROJECT_CONFIG,
   sampleBackfill,
@@ -283,6 +285,96 @@ describe("a source's backfill from the Sources page", () => {
     expect(button(group, "Resume")).toBeEnabled();
     expect(button(group, "Start")).toBeDisabled();
     expect(button(group, "Stop")).toBeDisabled();
+  });
+
+  it("says the worker is paused at the cap beside a whole-set backfill, whose queued records wait", async () => {
+    const finished = sampleBackfill("finished", {
+      counts: COUNTS(1_200),
+      endedAt: "2026-11-06T12:01:00.000Z",
+      words: "Finished: 1,200 records queued for the worker, 0 already answered.",
+    });
+    const paused: Home = {
+      ...SAMPLE_HOME,
+      spending: { ...SAMPLE_HOME.spending, status: "paused" },
+    };
+    const { api } = worker(finished, { home: () => Promise.resolve(paused) });
+    const { group } = await sourcesPage(api);
+    expect(await within(group).findByText("Finished")).toBeVisible();
+    expect(
+      await within(group).findByText(
+        /^The worker is paused at the spending cap, so the records queued for it wait/,
+      ),
+    ).toBeVisible();
+  });
+
+  it("sets the estimate against what is left of the month's cap, so a crossing is said before Start", async () => {
+    const nearTheCap: Home = {
+      ...SAMPLE_HOME,
+      spending: { ...SAMPLE_HOME.spending, inputTokens: 24_950_000 },
+    };
+    const { api, job } = worker(SAMPLE_BACKFILL_IDLE, { home: () => Promise.resolve(nearTheCap) });
+    const { studio, group } = await sourcesPage(api);
+    await studio.user.click(button(group, "Answer existing records"));
+    job.status = WAITING;
+    expect(
+      await refreshed(
+        studio,
+        "Estimated: 1,200 records, about $0.004 (102,000 input tokens), at 50 records a second: about 24 seconds. That is more than what is left under this month's cap (50,000 input tokens), so the answering pauses at the cap, part way.",
+      ),
+    ).toBeVisible();
+    // Start stays the person's call: the worker's state enforces the cap, not the page.
+    expect(button(group, "Start")).toBeEnabled();
+  });
+
+  it("says a cap set to keep answering is crossed, not paused at", async () => {
+    const continuing: Home = {
+      ...SAMPLE_HOME,
+      spending: {
+        ...SAMPLE_HOME.spending,
+        inputTokens: 24_950_000,
+        cap: { inputTokens: 25_000_000, dollars: 25, onCapReached: "continue" },
+      },
+    };
+    const { api, job } = worker(SAMPLE_BACKFILL_IDLE, { home: () => Promise.resolve(continuing) });
+    const { studio, group } = await sourcesPage(api);
+    await studio.user.click(button(group, "Answer existing records"));
+    job.status = WAITING;
+    expect(
+      await refreshed(
+        studio,
+        /That is more than what is left under this month's cap \(50,000 input tokens\), so it goes past the cap, as the config says\.$/,
+      ),
+    ).toBeVisible();
+  });
+
+  it("keeps the note off a job of some questions, which asks the model itself and pauses on its own", async () => {
+    const subset = sampleBackfill("finished", {
+      questions: ["is_vehicle"],
+      counts: COUNTS(1_200),
+      endedAt: "2026-11-06T12:01:00.000Z",
+      words:
+        "Finished for is_vehicle: 1,200 records answered, 0 already had these answers, 0 left for the worker.",
+    });
+    const paused: Home = {
+      ...SAMPLE_HOME,
+      spending: { ...SAMPLE_HOME.spending, status: "paused" },
+    };
+    const { api } = worker(subset, { home: () => Promise.resolve(paused) });
+    const { group } = await sourcesPage(api);
+    expect(await within(group).findByText("Finished")).toBeVisible();
+    expect(within(group).queryByText(/paused at the spending cap/)).toBeNull();
+  });
+
+  it("says nothing of the cap beside a backfill while the project is under it", async () => {
+    const finished = sampleBackfill("finished", {
+      counts: COUNTS(1_200),
+      endedAt: "2026-11-06T12:01:00.000Z",
+      words: "Finished: 1,200 records queued for the worker, 0 already answered.",
+    });
+    const { api } = worker(finished);
+    const { group } = await sourcesPage(api);
+    expect(await within(group).findByText("Finished")).toBeVisible();
+    expect(within(group).queryByText(/paused at the spending cap/)).toBeNull();
   });
 
   it("says why it failed and what to do, with Resume", async () => {

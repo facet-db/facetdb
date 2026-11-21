@@ -11,6 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type Home, homeQuery, projectQuery, reviewCountQuery } from "../api/index.ts";
 import { useApi } from "../deps.tsx";
+import { SPENDING_STATE } from "./spending.ts";
 import { useTheme } from "./theme.tsx";
 
 /**
@@ -182,6 +183,12 @@ function SpendingLine({
     return <span className="text-text-3">Reading</span>;
   }
   const { spending } = home;
+  // Home's own word for the cap reached (one table, shell/spending.ts); the warning line stays
+  // the strip's, which the rail shows.
+  const atCap =
+    spending.status === "paused" || spending.status === "continuing"
+      ? SPENDING_STATE[spending.status]
+      : undefined;
   return (
     <>
       <span className="font-mono text-xs whitespace-nowrap text-text">
@@ -189,6 +196,15 @@ function SpendingLine({
           ? spending.words.figure
           : `${spending.words.figure} of ${money(spending.cap.dollars)}`}
       </span>
+      {/* The figures round a count past the cap to the cap's own: the word says what they cannot. */}
+      {atCap === undefined ? null : (
+        <StatusWord
+          status={atCap.status}
+          size="small"
+          label={atCap.label}
+          title={spending.words.sub}
+        />
+      )}
       {spending.fraction === null ? (
         <span className="text-text-3">No monthly cap</span>
       ) : (

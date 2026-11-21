@@ -69,7 +69,7 @@ export type ProjectConfigDoor = {
   pending(): readonly PendingSource[];
   /**
    * Apply: the diff a draft makes to `facetdb.config.ts`, and the write and the worker's reload.
-   * Absent where nothing may write the file: `facetdb dev` and `facetdb worker --once`.
+   * Absent where nothing may write the file: `facetdb worker --once`.
    */
   readonly file?: ConfigFileDoor;
 };
@@ -112,7 +112,12 @@ export type PendingSource = {
   readonly outcome: "kept" | "not-started";
   /** The reload's own words: why it is not running yet and what to do. */
   readonly message: string;
-  /** False for a source that answers through POST /v1/check, which has no install to migrate. */
+  /**
+   * Whether `facetdb migrate --source X` is a step: false for a source that answers through POST
+   * /v1/check, which has no install to migrate, and for a source new in the file whose problem no
+   * install mends (its variable unset at the worker's start, its string refused by its database,
+   * its database unread, the worker stopping): the reload's words say what does.
+   */
   readonly migrate: boolean;
   /** Questions the file holds that the loop does not run; empty for a source that is not started. */
   readonly added: readonly string[];

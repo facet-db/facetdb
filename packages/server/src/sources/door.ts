@@ -32,6 +32,13 @@ export type InspectOutcome =
       readonly tables: readonly string[];
       /** The table asked about; null when none was. */
       readonly table: TableInspection["table"] | null;
+      /**
+       * A source the file already reads in this very database (host, port and name as the admin
+       * string reaches them) and the variable it reads it through: the one the page suggests, so
+       * one database stays one string (two variables holding one string left Apply unable to tell
+       * which source reads which).
+       */
+      readonly sharedWith: { readonly source: string; readonly variable: string } | null;
     }
   | SetupRefused;
 
@@ -210,8 +217,9 @@ export type MigrateDoor = {
 
 export type SetupDoor = {
   /**
-   * Whether this worker can add a source at all: it writes facetdb.config.ts (not `facetdb dev`,
-   * not `--once`). The routes refuse before any call when it cannot.
+   * Whether this worker can add a source at all: it writes facetdb.config.ts (not under `--once`;
+   * `facetdb dev` does, on its embedded database). The routes refuse before any call when it
+   * cannot.
    */
   readonly available: boolean;
   inspect(admin: string, table: string | undefined): Promise<InspectOutcome>;

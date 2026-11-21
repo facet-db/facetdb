@@ -4,6 +4,7 @@ import {
   type SqlClient,
   type SqlQuery,
   unlessColumn,
+  unlessConstraint,
   unlessRelation,
 } from "../sql/index.ts";
 
@@ -339,6 +340,27 @@ $$`,
       unlessRelation(
         "facetdb.decisions_by_time",
         `create index decisions_by_time on facetdb.decisions (source_id, at desc, id)`,
+      ),
+    ],
+  },
+  {
+    version: 7,
+    statements: [
+      // Seen in a real run: a spending alert claimed once a month stayed claimed when the cap
+      // changed, so a cap raised and reached again the same month raised nothing, and the alert
+      // kept the old cap's figures. The cap (its input tokens) is part of the claim: another cap,
+      // another alert. A claim a version-6 store holds reads as one under cap 0, which no config
+      // sets, so the first reading under the real cap raises afresh. Both statements are looked up
+      // first (sql/ddl.ts): the install runs them again beside a live application.
+      unlessColumn(
+        "facetdb.usage_alerts",
+        "cap",
+        `alter table facetdb.usage_alerts add column cap bigint not null default 0`,
+      ),
+      unlessConstraint(
+        "facetdb.usage_alerts",
+        "usage_alerts_by_cap",
+        `alter table facetdb.usage_alerts drop constraint usage_alerts_pkey, add constraint usage_alerts_by_cap primary key (project_id, month, kind, cap)`,
       ),
     ],
   },

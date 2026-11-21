@@ -5,6 +5,8 @@ import {
   ApiError,
   type BackfillState,
   type BackfillStatus,
+  type Home,
+  homeQuery,
   type SourceRow,
 } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
@@ -67,7 +69,10 @@ function durationWords(records: number, pace: number): string {
 }
 
 /** The estimate in the page's words: how many records, what it costs, at what pace, how long. */
-function estimateWords(status: BackfillStatus): string | null {
+function estimateWords(
+  status: BackfillStatus,
+  spending: Home["spending"] | undefined,
+): string | null {
   const { estimate, pace, questions } = status;
   if (estimate === null) {
     return null;
@@ -80,7 +85,19 @@ function estimateWords(status: BackfillStatus): string | null {
     pace === null
       ? ""
       : `, at ${plural(pace, "record", "records")} a second: ${durationWords(estimate.records, pace)}`;
-  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${countWords(Math.round(estimate.tokens))} input tokens)${time}.`;
+  // Set against what is left of this month's cap (a backfill started under a cap it would cross,
+  // which the loop then met part way).
+  const cap = spending?.cap ?? null;
+  const left =
+    spending === undefined || cap === null
+      ? null
+      : Math.max(0, cap.inputTokens - spending.inputTokens);
+  // What the cap does at 100% is the config's (onCapReached): a pause, or answering on.
+  const beyond =
+    cap !== null && left !== null && estimate.tokens > left
+      ? ` That is more than what is left under this month's cap (${plural(left, "input token", "input tokens")}), so ${cap.onCapReached === "pause" ? "the answering pauses at the cap, part way" : "it goes past the cap, as the config says"}.`
+      : "";
+  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${countWords(Math.round(estimate.tokens))} input tokens)${time}.${beyond}`;
 }
 
 /** How far the job got, for the strip: the pages settled over the records estimated. */
@@ -183,6 +200,10 @@ export function BackfillControls({
   const schedule = useSchedule();
   const queryClient = useQueryClient();
   const status = useQuery(backfillQuery(api, schedule, source));
+  // The project's spending, as the rail reads it: a whole-set backfill asks nothing itself, it
+  // queues records for the worker, which answers them only under the cap ("Finished" beside a
+  // paused project read as a backfill above the cap).
+  const home = useQuery(homeQuery(api));
   /** The last action's refusal, in the worker's words; cleared by the next action. */
   const [problem, setProblem] = useState<Error | null>(null);
 
@@ -259,9 +280,19 @@ export function BackfillControls({
       : job.state === "idle"
         ? (known?.words ?? job.words)
         : job.state === "waiting"
-          ? (estimateWords(job) ?? job.words)
+          ? (estimateWords(job, home.data?.spending) ?? job.words)
           : job.words;
-  const next = job === undefined ? (failed?.fix ?? "") : nextWords(job, now);
+  // A job of some questions asks the model itself and pauses on its own, so the note is the
+  // whole set's alone, on the row and in the job it shows.
+  const pausedNote =
+    questions === undefined &&
+    (job === undefined || job.questions === null) &&
+    home.data?.spending.status === "paused"
+      ? "The worker is paused at the spending cap, so the records queued for it wait: raise spendingCap in facetdb.config.ts, or they are answered when the month resets."
+      : "";
+  const next = [job === undefined ? (failed?.fix ?? "") : nextWords(job, now), pausedNote]
+    .filter((words) => words !== "")
+    .join(" ");
   const lastKnown =
     read !== undefined && status.isError
       ? `Last known ${whenWords(new Date(read.readAt), now, { seconds: true })}. The worker could not be asked again: ${refusalWords(status.error)}`

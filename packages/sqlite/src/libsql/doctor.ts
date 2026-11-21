@@ -115,11 +115,14 @@ export async function libsqlDoctor(
   }
   const { server, token } = connection;
   const unanswered = (error: unknown): readonly DoctorCheck[] => [
-    fail(
-      "server",
-      `the libSQL server at ${server.host} did not answer: ${error instanceof Error ? error.message : String(error)}`,
-      `check that the server is running and that ${subject} names it`,
-    ),
+    {
+      ...fail(
+        "server",
+        `the libSQL server at ${server.host} did not answer: ${error instanceof Error ? error.message : String(error)}`,
+        `check that the server is running and that ${subject} names it`,
+      ),
+      unreachable: true,
+    },
     ...skipped("token", "the server did not answer"),
   ];
   let client: SqliteClient;

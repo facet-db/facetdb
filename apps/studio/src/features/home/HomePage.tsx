@@ -11,7 +11,7 @@ import { Link } from "@tanstack/react-router";
 import { type ReactNode, useId } from "react";
 import { ApiError, type Home, type HomeAlert, homeQuery, projectQuery } from "../../api/index.ts";
 import { useApi, useDeps } from "../../deps.tsx";
-import { PageHead } from "../../shell/index.ts";
+import { PageHead, SPENDING_STATE } from "../../shell/index.ts";
 import { alertTime, followable, ledeOf, splitCheck, unreachableLede } from "./wording.ts";
 
 /**
@@ -180,16 +180,6 @@ function QueueColumn({
 }
 
 /** What spending says besides its sentence when the gate has warned, paused or let it pass. */
-const SPENDING_STATE: Readonly<
-  Partial<
-    Record<Home["spending"]["status"], { readonly status: StatusKind; readonly label: string }>
-  >
-> = {
-  warned: { status: "warning", label: "Past the warning line" },
-  paused: { status: "critical", label: "Paused at the cap" },
-  continuing: { status: "warning", label: "Cap reached, still answering" },
-};
-
 function SpendingColumn({
   spending,
   lastKnown,

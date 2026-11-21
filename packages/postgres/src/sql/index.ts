@@ -8,7 +8,7 @@ export {
   type SqlRow,
 } from "./client.ts";
 export { currentColumns, recordStatus } from "./current.ts";
-export { unlessColumn, unlessRelation } from "./ddl.ts";
+export { unlessColumn, unlessConstraint, unlessRelation } from "./ddl.ts";
 export { quoteIdent, quoteLiteral, quoteTable } from "./identifier.ts";
 export {
   CLAIM_LEASE_MS,

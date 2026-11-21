@@ -446,11 +446,14 @@ export async function doctorChecks(
       const refusal = floor === undefined ? undefined : belowFloor(url, floor);
       return [
         refusal === undefined
-          ? fail(
-              "database",
-              `"${target.source}": ${where}/${database} could not be reached as the worker login: ${plainMessage(error, [url])}`,
-              `check the host, the database and the worker password in ${subject}, and that the server lets this machine connect`,
-            )
+          ? {
+              ...fail(
+                "database",
+                `"${target.source}": ${where}/${database} could not be reached as the worker login: ${plainMessage(error, [url])}`,
+                `check the host, the database and the worker password in ${subject}, and that the server lets this machine connect`,
+              ),
+              unreachable: true as const,
+            }
           : fail("database", `"${target.source}": ${refusal.message}`, refusal.fix),
         ...skipped(1),
       ];

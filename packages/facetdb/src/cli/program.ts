@@ -154,6 +154,14 @@ export type CliDeps = {
   readonly projectDir: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   /**
+   * Sets one variable of the environment this process runs in, which the config file reads when it
+   * is imported (`database: process.env.DATABASE_URL`) and `env` reads back: `facetdb dev` points
+   * DATABASE_URL at its embedded database before the file loads, so the file, the loader and the
+   * studio's setup read one address. The process's own environment in the process; a test's record
+   * in a test. No other command sets anything.
+   */
+  readonly setEnv: (name: string, value: string) => void;
+  /**
    * Loads and validates the config file at a path relative to the project directory; `quiet` keeps
    * its wording warnings unprinted (Apply's diff loads the file on every look).
    */
@@ -513,7 +521,8 @@ type OptionalInTests =
   | "terminal"
   | "configFiles"
   | "studio"
-  | "openBrowser";
+  | "openBrowser"
+  | "setEnv";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -615,6 +624,9 @@ export async function runInProcess(
         }),
       },
       openBrowser: () => Promise.reject(new Error("this test gave the command no browser")),
+      setEnv: () => {
+        throw new Error("this test gave the command no environment to set");
+      },
       ...rest,
       io,
     },

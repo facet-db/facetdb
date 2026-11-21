@@ -135,7 +135,7 @@ export const OPERATOR_ONLY: Words & { readonly code: string } = {
 const UNAVAILABLE: Words & { readonly code: string } = {
   code: "setup_unavailable",
   message:
-    "This worker does not write facetdb.config.ts (facetdb dev and facetdb worker --once never do), so it cannot add a source.",
+    "This worker does not write facetdb.config.ts (facetdb worker --once never does), so it cannot add a source.",
   fix: "Run facetdb worker to add a source from the studio, or add it to facetdb.config.ts and run facetdb migrate.",
 };
 
@@ -153,7 +153,7 @@ export const MIGRATE_OPERATOR_ONLY: Words & { readonly code: string } = {
 const MIGRATE_UNAVAILABLE: Words & { readonly code: string } = {
   code: "setup_unavailable",
   message:
-    "This worker does not install questions from the studio (facetdb dev and facetdb worker --once never do).",
+    "This worker does not install questions from the studio (facetdb worker --once never does).",
   fix: "Run facetdb migrate --source <name> in a terminal, then restart the worker.",
 };
 
@@ -466,7 +466,12 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
         }
         return {
           ok: true,
-          body: { database: outcome.database, tables: outcome.tables, table: outcome.table },
+          body: {
+            database: outcome.database,
+            tables: outcome.tables,
+            table: outcome.table,
+            sharedWith: outcome.sharedWith,
+          },
         };
       }),
 

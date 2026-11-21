@@ -21,6 +21,7 @@ import {
   SAMPLE_SELLERS,
   SAMPLE_SETUP_PLAN,
   SAMPLE_SOURCES,
+  SAMPLE_TABLES,
   SELLERS_PREVIEW,
   STEPS,
   step,
@@ -146,7 +147,8 @@ describe("Add a source", () => {
   // anything".
   it("shuts the table list and says what to do when the connection can read no table", async () => {
     const api = fakeApi({
-      setupInspect: () => Promise.resolve({ database: "Postgres", tables: [], table: null }),
+      setupInspect: () =>
+        Promise.resolve({ database: "Postgres", tables: [], table: null, sharedWith: null }),
     });
     const studio = await opened(api);
     await studio.user.type(screen.getByRole("textbox", { name: "Connection string" }), ADMIN);
@@ -165,7 +167,12 @@ describe("Add a source", () => {
     const api = fakeApi({
       setupInspect: (_admin, table) =>
         table === undefined
-          ? Promise.resolve({ database: "Postgres", tables: ["events", "sellers"], table: null })
+          ? Promise.resolve({
+              database: "Postgres",
+              tables: ["events", "sellers"],
+              table: null,
+              sharedWith: null,
+            })
           : Promise.reject(
               new ApiError(
                 409,
@@ -949,7 +956,19 @@ describe("the Sources page", () => {
           { name: "support_tickets", read: ["body"], questions: {}, thresholds: {} },
           { name: "sellers", read: ["bio"], questions: {}, thresholds: {} },
         ],
-        pending: [],
+        // The worker names every source of the file it does not run, with the reload's own words.
+        pending: [
+          {
+            source: "sellers",
+            outcome: "not-started",
+            message:
+              "new in facetdb.config.ts and not answered yet: its install is not in its database (the columns of is_fake are missing)",
+            migrate: true,
+            added: [],
+            removed: [],
+            checkAgain: true,
+          },
+        ],
         versions: {},
       }),
     });
@@ -963,10 +982,60 @@ describe("the Sources page", () => {
     expect(within(api_).getByText("None: records arrive one by one.")).toBeVisible();
     const sellers = await screen.findByRole("article", { name: "sellers" });
     expect(within(sellers).getByText("not running yet")).toBeVisible();
-    expect(within(sellers).getByText(/stop facetdb worker and start it again/)).toBeVisible();
+    // The reload's own words and steps, the Questions page's block: never a fixed sentence.
+    expect(
+      within(sellers).getByText(/^New in facetdb\.config\.ts and not answered yet: its install/),
+    ).toBeVisible();
+    expect(within(sellers).getByText("facetdb migrate --source sellers")).toBeVisible();
+    expect(within(sellers).getByRole("button", { name: "Check again" })).toBeEnabled();
     expect(screen.getByRole("link", { name: "Add a source" })).toHaveAttribute(
       "href",
       "/sources/new",
     );
+  });
+});
+
+describe("the variable the setup suggests", () => {
+  it("is the one of a source already reading this database, with why, and stays the person's to change", async () => {
+    // Seen in a real run: a second variable holding the first's string left Apply unable to tell
+    // which source reads which. The worker names the source and its variable.
+    const studio = await opened(
+      fakeApi({
+        setupPreview: () => Promise.resolve(SELLERS_PREVIEW),
+        setupInspect: (_admin, table) =>
+          Promise.resolve({
+            ...(table === undefined ? SAMPLE_TABLES : SAMPLE_SELLERS),
+            sharedWith: { source: "listings", variable: "SHOP_URL" },
+          }),
+      }),
+    );
+    await connected(studio);
+    await pick(studio, 1);
+    const where = step("Choose storage, actions and alerts");
+    const variable = within(where).getByRole("textbox", {
+      name: "The variable that holds the worker's connection string",
+    });
+    expect(variable).toHaveValue("SHOP_URL");
+    expect(
+      within(where).getByText(
+        /^listings already reads this database through SHOP_URL, so the same variable is suggested/,
+      ),
+    ).toBeVisible();
+    await studio.user.clear(variable);
+    await studio.user.type(variable, "SELLERS_URL");
+    expect(variable).toHaveValue("SELLERS_URL");
+  });
+
+  it("is the file's first variable where no source reads this database, with nothing said", async () => {
+    const studio = await opened();
+    await connected(studio);
+    await pick(studio, 1);
+    const where = step("Choose storage, actions and alerts");
+    expect(
+      within(where).getByRole("textbox", {
+        name: "The variable that holds the worker's connection string",
+      }),
+    ).toHaveValue("DATABASE_URL");
+    expect(within(where).queryByText(/already reads this database/)).toBeNull();
   });
 });

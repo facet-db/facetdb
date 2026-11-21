@@ -84,9 +84,14 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
-import { installRuns, installVerdict, unreadCheck } from "./install-check.ts";
+import { installRuns, readInstall } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
-import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
+import {
+  createSetupDoor,
+  type DoorDatabases,
+  registeredDatabases,
+  UNAVAILABLE_SETUP_DOOR,
+} from "./setup-door.ts";
 
 /**
  * `facetdb worker`: one process that answers every source of the config. Per table source it runs
@@ -166,8 +171,8 @@ export type WorkerParts = {
     config: ProjectConfig,
   ) => Promise<OpenConnector>;
   /**
-   * The config file the studio's Apply writes and the worker reloads: absent in `dev`, whose config
-   * is not the file's alone (its sources are the installed ones, its model may be `--model-url`'s).
+   * The config file the studio's Apply writes and the worker reloads; `dev` gives it too, reading
+   * every source's string as its embedded database. Dropped under `--once`.
    */
   readonly configFile?: {
     /** As `--config` names it. */
@@ -176,6 +181,11 @@ export type WorkerParts = {
     readonly load: (options?: { readonly quiet?: boolean }) => Promise<ProjectConfig>;
     readonly files: ConfigFiles;
   };
+  /**
+   * The databases the studio's setup and migrate doors reach: the registered engines by scheme
+   * under `worker`, dev's one embedded database under `dev`.
+   */
+  readonly databases: DoorDatabases;
   /**
    * How a table source's keys are written in the log lines: its engine's key text for its table, so
    * MongoDB's `n:1` prints `answered 1`, and a collection whose marker records string `_id`s prints
@@ -194,7 +204,7 @@ export type WorkerParts = {
   /**
    * A source removed from the file, its loop closed: what the start made for its table (its
    * connection, engine and key text) is dropped, so a source added again under the name is made
-   * anew. Absent in `dev`, whose sources never change.
+   * anew. Absent in `dev`, which keeps nothing per source.
    */
   readonly forgetTable?: (source: SourceConfig) => void;
   /** The model, before the backoff and the in-flight limit are put around it. */
@@ -489,14 +499,12 @@ export async function runWorkers(
     // not have, the facts are made here first.
     installed: async (source, from) => {
       const table = await parts.tableFacts(source, from);
-      const checks = await table.doctor();
-      // A database that did not answer tells nothing: the read failed, in the doctor's words, and
-      // the finished install run is kept for the next reading.
-      const unread = unreadCheck(checks);
-      if (unread !== undefined) {
-        throw new Error(unread);
-      }
-      return installVerdict(table.database, checks, studioInstalls.took(source, from));
+      // In `readInstall`'s order: a database that did not answer is a read that failed, one that
+      // refused the string is the CLI's own refusal, and only a reading that looked at the install
+      // takes the finished install run.
+      return readInstall(table.database, await table.doctor(), () =>
+        studioInstalls.took(source, from),
+      );
     },
     removed: (source) => parts.forgetTable?.(source),
     load: () => {
@@ -708,6 +716,7 @@ export async function runWorkers(
             ? UNAVAILABLE_SETUP_DOOR
             : createSetupDoor({
                 cli: deps,
+                databases: parts.databases,
                 project,
                 allowInsecureStore: options.allowInsecure === true,
                 path: configFile.path,
@@ -729,6 +738,7 @@ export async function runWorkers(
             ? UNAVAILABLE_MIGRATE_DOOR
             : createMigrateDoor({
                 cli: deps,
+                databases: parts.databases,
                 project,
                 allowInsecureStore: options.allowInsecure === true,
                 path: configFile.path,
@@ -1184,6 +1194,7 @@ export async function runWorkerProcess(
           load: (load) => deps.loadConfig(options.config, load),
           files: deps.configFiles,
         },
+        databases: registeredDatabases(deps),
         keyTextOf: async (source) => (await tableOf(source)).keyText(),
         tableFacts: async (source, from) => (await tableOf(source)).facts(source, from),
         forgetTable: (source) => {

@@ -133,7 +133,7 @@ describe("Check again on the Questions page", () => {
         new ApiError(
           409,
           "reload_unavailable",
-          "This worker does not reload facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+          "This worker does not reload facetdb.config.ts: facetdb worker --once never does.",
           "Restart the worker to run the file as it is, or run facetdb worker to check again from the studio.",
         ),
       ),
@@ -144,7 +144,7 @@ describe("Check again on the Questions page", () => {
 
     expect(
       await within(block()).findByText(
-        /^This worker does not reload facetdb\.config\.ts: facetdb dev and facetdb worker --once never do\. Restart the worker/,
+        /^This worker does not reload facetdb\.config\.ts: facetdb worker --once never does\. Restart the worker/,
       ),
     ).toBeVisible();
     expect(block()).toBeVisible();

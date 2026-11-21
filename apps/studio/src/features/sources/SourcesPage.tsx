@@ -2,11 +2,11 @@ import { buttonClasses, EmptyState, type StatusKind, StatusWord, Tag } from "@fa
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type ReactNode, useId } from "react";
-import type { SourceRow } from "../../api/index.ts";
+import type { PendingSource, SourceRow } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
 import { PageHead } from "../../shell/index.ts";
 import { Problem, whenWords } from "../decisions/index.ts";
-import { projectConfigQuery } from "../questions/index.ts";
+import { NotRunning, projectConfigQuery } from "../questions/index.ts";
 import { BackfillControls } from "./BackfillControls.tsx";
 import { SOURCES_REFRESH_MS, sourcesQuery } from "./queries.ts";
 
@@ -16,8 +16,9 @@ import { SOURCES_REFRESH_MS, sourcesQuery } from "./queries.ts";
  * and the worker login's reach in words, all as `GET /v1/sources` says them; the page computes
  * nothing. A table source's backfill line is also where one is estimated, started, stopped and
  * resumed (BackfillControls). A source the config names that the worker does not run yet (added to
- * the file and not started) is a row of its own that says so. "Add a source" is the page's one
- * primary action.
+ * the file and not started) is a row of its own that says why in the reload's own words, with the
+ * steps: the Questions page's block, so the two pages never disagree. "Add a source" is the page's
+ * one primary action.
  */
 
 /** The install line under the worker login, as a status word and its square. */
@@ -91,8 +92,20 @@ function Row({ source }: { readonly source: SourceRow }) {
   );
 }
 
-/** A source in facetdb.config.ts that the worker does not run yet: what it is, and what to do. */
-function NotRunning({ name }: { readonly name: string }) {
+/**
+ * A source the file names that the worker does not run: why, in the reload's own words, with the
+ * steps and Check again where a reload can start it (the Questions page's block, so the two pages
+ * never disagree). The worker's config names every such source in `pending`; a name in the file
+ * with no entry there is one the worker runs that this page's list of sources, read on its own
+ * clock, does not show yet, so the row says it is starting and nothing more.
+ */
+function WaitingRow({
+  name,
+  pending,
+}: {
+  readonly name: string;
+  readonly pending: PendingSource | undefined;
+}) {
   const id = useId();
   return (
     <article
@@ -103,11 +116,27 @@ function NotRunning({ name }: { readonly name: string }) {
         <h2 id={id} className="text-lg font-bold tracking-tight">
           {name}
         </h2>
-        <StatusWord status="pending" label="not running yet" size="small" />
+        <StatusWord
+          status="pending"
+          label={pending === undefined ? "starting" : "not running yet"}
+          size="small"
+        />
       </div>
-      <p className="max-w-[64ch] text-text-2">
-        {`${name} is in facetdb.config.ts, and the worker that is running does not answer it: stop facetdb worker and start it again. If its install did not run, facetdb migrate --source ${name} prints the SQL and runs it.`}
-      </p>
+      {pending === undefined ? (
+        <p className="max-w-[64ch] text-text-2">
+          {`${name} is in facetdb.config.ts and the worker runs it: the sources are read again every ${String(SOURCES_REFRESH_MS / 1000)} seconds, and its row appears with the next reading.`}
+        </p>
+      ) : (
+        <NotRunning
+          source={pending.source}
+          outcome={pending.outcome}
+          why={pending.message}
+          migrate={pending.migrate}
+          added={pending.added}
+          removed={pending.removed}
+          checkAgain={pending.checkAgain}
+        />
+      )}
     </article>
   );
 }
@@ -185,7 +214,11 @@ export function SourcesPage() {
           <Row key={source.name} source={source} />
         ))}
         {waiting.map((name) => (
-          <NotRunning key={name} name={name} />
+          <WaitingRow
+            key={name}
+            name={name}
+            pending={config.data?.pending.find((entry) => entry.source === name)}
+          />
         ))}
       </div>
     </>

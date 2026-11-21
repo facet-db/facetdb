@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
@@ -7,6 +11,7 @@ import {
   type ConfigFiles,
   configFileSource,
   facetdb,
+  loadConfig,
   noul,
   type ProjectConfig,
   planApply,
@@ -40,14 +45,23 @@ const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app
 const MARK_USER = "adminMARKuser";
 const MARK_PASSWORD = "pwMARK-31f";
 const ADMIN = `postgres://${MARK_USER}:${MARK_PASSWORD}@localhost:5432/app`;
-const PROJECT_DIR = "/work/listings-app";
+const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const THIS_MACHINE = { remoteAddress: "127.0.0.1" };
+/**
+ * The new source's variable holds the same string as the one the file already names, as a store and
+ * a source in one database do: the loader names a variable by its value and reads the file's
+ * `process.env.SELLERS_URL` back as LISTINGS_URL, which the reload's match of the install run must
+ * see past.
+ */
 const ENV = {
   FACETDB_SECRET: TEST_SECRET,
   DATABASE_URL: "postgres://localhost:5432/facetdb",
   LISTINGS_URL: WORKER_URL,
+  SELLERS_URL: WORKER_URL,
   TYPESAFE_API_KEY: "ts-test-key",
 };
+/** What the config file reads when the real loader imports it: the process's own environment. */
+const FILE_ENV = { LISTINGS_URL: WORKER_URL, SELLERS_URL: WORKER_URL };
 
 const declared = facetdb({
   model: "jev-1.14.0",
@@ -94,7 +108,7 @@ function asWorkerLogin(connect: SqlConnect): SqlConnect {
 const DRAFT = {
   name: "sellers",
   table: "sellers",
-  database: { env: "LISTINGS_URL" },
+  database: { env: "SELLERS_URL" },
   read: ["bio"],
   storage: "inline",
   questions: {
@@ -106,13 +120,40 @@ const DRAFT = {
 let world: PgliteWorld;
 let store: Store;
 let provider: FakeProvider;
+/**
+ * A project directory on disk, so the worker's reload loads the file the setup wrote through the
+ * real loader (the config imports `facetdb`, found through a link beside it), never a config object
+ * the test holds: what the loader makes of the written file is the point.
+ */
+let scratch: string;
+let projectDir: string;
+let configPath: string;
+const previousEnv: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
   world = await createPgliteWorld();
+  scratch = await mkdtemp(join(tmpdir(), "facetdb-worker-setup-"));
+  projectDir = join(scratch, "listings-app");
+  await mkdir(join(projectDir, "node_modules"), { recursive: true });
+  await symlink(PACKAGE_DIR, join(projectDir, "node_modules", "facetdb"));
+  configPath = join(projectDir, "facetdb.config.ts");
+  for (const [name, value] of Object.entries(FILE_ENV)) {
+    previousEnv[name] = process.env[name];
+    process.env[name] = value;
+  }
 });
 
 afterAll(async () => {
   await world.close();
+  await rm(scratch, { recursive: true, force: true });
+  for (const name of Object.keys(FILE_ENV)) {
+    const previous = previousEnv[name];
+    if (previous === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = previous;
+    }
+  }
 });
 
 beforeEach(async () => {
@@ -134,7 +175,7 @@ beforeEach(async () => {
     plan: {
       source: { table: "listings", schema: "public", onChange: "reset", storage: "inline" },
       questionSet: questionSetOf(INITIAL, source),
-      project: projectRef(PROJECT_DIR),
+      project: projectRef(projectDir),
       workerPassword: "worker-password",
     },
   });
@@ -151,30 +192,35 @@ afterEach(async () => {
 describe("adding a source on a running facetdb worker", () => {
   it("inspects, previews, plans and installs through migrate's plan, writes the file, and the reload starts the source", async () => {
     const file = { text: configFileSource(INITIAL), writes: 0 };
+    await writeFile(configPath, file.text);
     const applied = planApply(
       { path: "facetdb.config.ts", text: file.text, config: INITIAL },
       DRAFT,
       ENV,
-      { variable: "LISTINGS_URL" },
+      { variable: "SELLERS_URL" },
     );
     if (!applied.ok) {
       throw new Error(`the draft is valid: ${JSON.stringify(applied.issues)}`);
     }
-    const configs = [INITIAL, applied.plan.config];
+    // The file on disk: the setup door reads and replaces it there, and the reload loads it from
+    // there through the real loader.
     const files: ConfigFiles = {
-      read: () => Promise.resolve({ kind: "file", text: file.text }),
-      replace: (_path, text) => {
+      read: async () => ({ kind: "file", text: await readFile(configPath, "utf8") }),
+      replace: async (_path, text) => {
+        await writeFile(configPath, text);
         file.text = text;
         file.writes += 1;
-        return Promise.resolve();
       },
       gitState: () => Promise.resolve({ kind: "clean" }),
     };
-    const loadConfig = () => {
-      const found = configs.find((config) => configFileSource(config) === file.text);
-      return found === undefined
-        ? Promise.reject(new Error("the test's file holds no known config"))
-        : Promise.resolve(found);
+    const loadFile = async (path: string, options?: { readonly quiet?: boolean }) => {
+      const loaded = await loadConfig(path, {
+        projectDir,
+        env: ENV,
+        stderr: { write: () => undefined },
+        ...(options?.quiet === undefined ? {} : { quiet: options.quiet }),
+      });
+      return loaded.config;
     };
 
     // What `facetdb migrate --dry-run` prints for the same source, the store being another database
@@ -182,7 +228,7 @@ describe("adding a source on a running facetdb worker", () => {
     const dry = await runInProcess(
       ["migrate", "--dry-run", "--source", "sellers", "--admin-url", ADMIN],
       {
-        projectDir: PROJECT_DIR,
+        projectDir: projectDir,
         env: ENV,
         loadConfig: () => Promise.resolve(applied.plan.config),
         engines: postgresEngines(sharePools(world.connect)),
@@ -204,10 +250,10 @@ describe("adding a source on a running facetdb worker", () => {
     const run = runInProcess(
       ["worker"],
       {
-        projectDir: PROJECT_DIR,
+        projectDir: projectDir,
         env: ENV,
         osUser: () => "alex",
-        loadConfig,
+        loadConfig: loadFile,
         configFiles: files,
         engines: postgresEngines(asWorkerLogin(connect)),
         connect,
@@ -355,7 +401,8 @@ describe("adding a source on a running facetdb worker", () => {
     expect(answers["reviewAfter"]).toMatchObject({ status: 200, body: { count: 0, cards: [] } });
     expect(file.writes).toBe(1);
     expect(file.text).toBe(configFileSource(applied.plan.config));
-    expect(file.text).toContain("process.env.LISTINGS_URL");
+    expect(file.text).toContain("process.env.SELLERS_URL");
+    expect(await readFile(configPath, "utf8")).toBe(file.text);
     const columns = await world.client.query(
       "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'sellers' order by ordinal_position",
     );
@@ -375,7 +422,7 @@ describe("adding a source on a running facetdb worker", () => {
         { path: "facetdb.config.ts", text: configFileSource(INITIAL), config: INITIAL },
         DRAFT,
         ENV,
-        { variable: "LISTINGS_URL" },
+        { variable: "SELLERS_URL" },
       );
       if (!applied.ok) {
         throw new Error("the draft is valid");
@@ -388,7 +435,7 @@ describe("adding a source on a running facetdb worker", () => {
       return runInProcess(
         ["worker", "--once", "--no-http"],
         {
-          projectDir: PROJECT_DIR,
+          projectDir: projectDir,
           env: ENV,
           osUser: () => "alex",
           loadConfig: () => Promise.resolve(config),

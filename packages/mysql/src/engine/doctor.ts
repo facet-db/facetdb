@@ -456,11 +456,14 @@ export async function doctorChecks(
     });
   } catch (error) {
     return [
-      fail(
-        "database",
-        `"${target.source}": ${databaseLabel(url)} could not be reached as the worker login: ${plainMessage(error, [url])}`,
-        `check the host, port, database and worker password in ${subject}, and that the server lets this machine connect`,
-      ),
+      {
+        ...fail(
+          "database",
+          `"${target.source}": ${databaseLabel(url)} could not be reached as the worker login: ${plainMessage(error, [url])}`,
+          `check the host, port, database and worker password in ${subject}, and that the server lets this machine connect`,
+        ),
+        unreachable: true,
+      },
       ...skipped(1),
     ];
   }

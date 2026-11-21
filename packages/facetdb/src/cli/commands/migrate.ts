@@ -189,8 +189,9 @@ export async function planInstall(
   own: EngineTarget,
   url: string,
   deps: EngineDeps,
+  /** The login's password or why there is none: the source's string's unless the caller knows better. */
+  login: ReturnType<typeof passwordOf> = passwordOf(engine, target.source),
 ): Promise<EnginePlan> {
-  const login = passwordOf(engine, target.source);
   const planned: PlanResult = await engine.planInstall(own, url, {
     ...deps,
     ...("password" in login ? { workerPassword: login.password } : {}),

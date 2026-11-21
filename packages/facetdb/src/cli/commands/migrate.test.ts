@@ -244,6 +244,9 @@ async function runSeeingPrompts(
         files: () => ({ read: () => Promise.reject(new Error("no studio build")) }),
       },
       openBrowser: () => Promise.reject(new Error("no browser")),
+      setEnv: () => {
+        throw new Error("no environment to set");
+      },
     },
     COMMANDS,
   );

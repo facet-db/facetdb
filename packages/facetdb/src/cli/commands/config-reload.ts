@@ -343,7 +343,13 @@ function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
 /** Why a source with questions added was not switched: the check's finding, or the read that failed. */
 type Unswitched =
   | Exclude<InstallCheck, { readonly kind: "holds" }>
-  | { readonly kind: "unread"; readonly why: string };
+  | { readonly kind: "unread"; readonly why: string }
+  /**
+   * Its database answered and refused the worker's string (another login than the worker's): the
+   * CLI's own refusal with its fix, which no reading asked for again can mend while the worker's
+   * environment stands, so the restart is the step.
+   */
+  | { readonly kind: "refused"; readonly message: string; readonly fix: string };
 
 /**
  * Why a source new in the file was not started: a fact of the file (an API source, a connection
@@ -360,7 +366,9 @@ type NotStarted =
   | { readonly kind: "stopping" }
   /**
    * The start's own checks refused the source before anything connected (its connection string,
-   * its engine, the store's variable): a problem in the file or the environment, with the fix.
+   * its engine, the store's variable), or its database answered and refused the string (another
+   * login than the worker's): a problem in the file or the environment, with the fix, which no
+   * reading asked for again can mend while the worker's environment stands.
    */
   | { readonly kind: "refused"; readonly message: string; readonly fix: string }
   /** The check held, and the source could not be opened. */
@@ -451,6 +459,32 @@ function addedMessage(
       return `its database could not be read to check ${namesOf(questions)} (${check.why}), ${keeps}. Check again once the database answers; facetdb doctor says what is wrong.`;
     case "cannot-tell":
       return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and ${check.why}, ${keeps} until you run facetdb migrate --source ${name} and restart facetdb worker.`;
+    case "refused":
+      return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and the worker cannot check them (${check.message}; ${check.fix}), ${keeps} until you restart facetdb worker.`;
+  }
+}
+
+/**
+ * Whether `facetdb migrate --source X` is a step toward starting a source new in the file: where
+ * the install itself is the question, and where a loop failed to open (the check held, yet an
+ * engine may still refuse a table it was not installed on and say to migrate it first, so the
+ * command stays on the page). A string its database refuses, a variable unset at the start, an
+ * API source or a database that did not answer is not mended by an install: the reason's own
+ * words say what is.
+ */
+function migrateHelps(reason: NotStarted): boolean {
+  switch (reason.kind) {
+    case "missing":
+    case "unchecked":
+    case "cannot-tell":
+    case "failed":
+      return true;
+    case "api":
+    case "no-url":
+    case "stopping":
+    case "refused":
+    case "unread":
+      return false;
   }
 }
 
@@ -744,7 +778,8 @@ export function createFleet(deps: FleetDeps): Fleet {
       try {
         check = await deps.installed(source, next);
       } catch (error) {
-        // The start's own checks refusing (the string, its engine, the store's variable) is a
+        // The start's own checks refusing (the string, its engine, the store's variable), or the
+        // database answering and refusing the string (another login than the worker's), is a
         // problem in the file or the environment, said with its fix; anything else is a read that
         // failed on the database, which a reading asked for again may make.
         check =
@@ -844,7 +879,13 @@ export function createFleet(deps: FleetDeps): Fleet {
           try {
             check = await deps.installed(step.source, next);
           } catch (error) {
-            check = { kind: "unread", why: messageOf(error) };
+            // The database refusing the string (the CLI's own refusal, with its fix) is mended
+            // only by a restart after a change to the environment; anything else is a read that
+            // failed on the database, which a reading asked for again may make.
+            check =
+              error instanceof CliError
+                ? { kind: "refused", message: error.message, fix: error.fix }
+                : { kind: "unread", why: messageOf(error) };
           }
           if (check.kind !== "holds") {
             unswitched.set(step.name, { file: sourceKey(next, step.source), check });
@@ -911,7 +952,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           source: step.name,
           outcome: "not-started",
           message: notStartedMessage(step.name, reason),
-          migrate: !wanted.api,
+          migrate: migrateHelps(reason),
           added: [],
           removed: [],
           checkAgain: checkAgainStarts(reason),
@@ -931,7 +972,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           migrate: true,
           added: [...step.questions],
           removed: [],
-          checkAgain: check.kind !== "cannot-tell",
+          checkAgain: check.kind !== "cannot-tell" && check.kind !== "refused",
         });
       } else if (step.kind === "keep" && wanted !== undefined) {
         const running = slots.get(step.name)?.loop;

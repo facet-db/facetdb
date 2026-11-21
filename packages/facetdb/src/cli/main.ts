@@ -385,6 +385,11 @@ export function processDeps(
     clock,
     projectDir,
     env,
+    // `env` is the process's own, so a variable set here is read back by `env` and by the config
+    // file's `process.env` when the loader imports it (`facetdb dev`).
+    setEnv: (name, value) => {
+      process.env[name] = value;
+    },
     loadConfig: async (path, options) =>
       (
         await loadConfig(path, {

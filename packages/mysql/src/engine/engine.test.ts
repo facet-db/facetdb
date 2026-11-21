@@ -568,6 +568,7 @@ describe("doctor", () => {
       detail:
         '"listings": 127.0.0.1:3306/app could not be reached as the worker login: connect ECONNREFUSED 127.0.0.1:3306 (***)',
       fix: "check the host, port, database and worker password in LISTINGS_URL, and that the server lets this machine connect",
+      unreachable: true,
     });
     expect(
       brief(checks)

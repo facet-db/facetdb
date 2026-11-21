@@ -1195,6 +1195,7 @@ describe("facetdb doctor with the store in its own database", () => {
         {
           projectDir: "/work/dev-app",
           env: { DATABASE_URL: "pglite://.facetdb/dev" },
+          setEnv: () => undefined,
           loadConfig: () => Promise.resolve(configWith()),
           connect: () => {
             throw new Error("dev connected to a database outside the embedded one");

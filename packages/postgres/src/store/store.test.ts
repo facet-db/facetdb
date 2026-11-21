@@ -609,14 +609,18 @@ describe("usage", () => {
     expect(await store.usage.total("p", MONTH)).toBe(await store.usage.total("q", MONTH));
   });
 
-  it("claims each alert once a month and lets a released claim be taken again", async () => {
+  it("claims each alert once a month under a cap and lets a released claim be taken again", async () => {
     const { store } = await newStore();
-    expect(await store.usage.claimAlert("p", MONTH, "spending_80")).toBe(true);
-    expect(await store.usage.claimAlert("p", MONTH, "spending_80")).toBe(false);
-    expect(await store.usage.claimAlert("p", MONTH, "spending_paused")).toBe(true);
-    expect(await store.usage.claimAlert("p", OTHER, "spending_80")).toBe(true);
-    await store.usage.releaseAlert("p", MONTH, "spending_80");
-    expect(await store.usage.claimAlert("p", MONTH, "spending_80")).toBe(true);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 1_000)).toBe(true);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 1_000)).toBe(false);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_paused", 1_000)).toBe(true);
+    expect(await store.usage.claimAlert("p", OTHER, "spending_80", 1_000)).toBe(true);
+    // A cap changed mid-month is a new claim (migration 7; a real run).
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 5_000)).toBe(true);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 5_000)).toBe(false);
+    await store.usage.releaseAlert("p", MONTH, "spending_80", 1_000);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 1_000)).toBe(true);
+    expect(await store.usage.claimAlert("p", MONTH, "spending_80", 5_000)).toBe(false);
   });
 
   it("survives a restart: a second store on the same database sees the counts", async () => {

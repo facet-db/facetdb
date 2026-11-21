@@ -254,7 +254,7 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
         throw new ApiError(
           409,
           "apply_unavailable",
-          "This worker does not write facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+          "This worker does not write facetdb.config.ts: facetdb worker --once never does.",
           "Run facetdb worker to apply from the studio, or edit facetdb.config.ts and restart the worker.",
         );
       case "invalid":
@@ -300,7 +300,7 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
         throw new ApiError(
           409,
           "reload_unavailable",
-          "This worker does not reload facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+          "This worker does not reload facetdb.config.ts: facetdb worker --once never does.",
           "Restart the worker to run the file as it is, or run facetdb worker to check again from the studio.",
         );
     }

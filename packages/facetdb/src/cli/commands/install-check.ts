@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { DoctorCheck } from "@facetdb/core";
 import { type ProjectConfig, type SourceConfig, toProjectJson } from "../../config/index.ts";
+import { CliError } from "../program.ts";
 import type { InstallCheck } from "./config-reload.ts";
 
 /**
@@ -58,20 +60,68 @@ export function installVerdict(
  */
 const REACH_CHECKS: readonly string[] = ["database", "server", "file"];
 
-/**
- * The words of a reading that could not be made because the database did not answer: the install
- * check skipped behind a failed reach check. The caller throws them, so the fleet says the read
- * failed and asks again later, and a finished install run is kept for the next reading rather than
- * used up by one that could not tell. Undefined for every other reading, whose verdict is
- * `installVerdict`'s.
- */
-export function unreadCheck(checks: readonly DoctorCheck[]): string | undefined {
+/** The failed reach check the install check was skipped behind, if that is how the reading went. */
+function failedReach(checks: readonly DoctorCheck[]): DoctorCheck | undefined {
   const install = checks.find((check) => check.name === "install");
   if (install === undefined || install.status !== "skip") {
     return undefined;
   }
-  return checks.find((check) => REACH_CHECKS.includes(check.name) && check.status === "fail")
-    ?.detail;
+  return checks.find((check) => REACH_CHECKS.includes(check.name) && check.status === "fail");
+}
+
+/**
+ * The words of a reading that could not be made because the database did not answer: the install
+ * check skipped behind a reach check the engine marked `unreachable`. The caller throws them, so
+ * the fleet says the read failed and asks again later, and a finished install run is kept for the
+ * next reading rather than used up by one that could not tell. Undefined for every other reading:
+ * one the database answered is `reachRefusal`'s or `installVerdict`'s.
+ */
+export function unreadCheck(checks: readonly DoctorCheck[]): string | undefined {
+  const reach = failedReach(checks);
+  return reach?.unreachable === true ? reach.detail : undefined;
+}
+
+/**
+ * A reading the database answered and refused before the install could be looked at (a string
+ * logging in as another user than the worker login read as "could not be read, Check again", which
+ * no reload can mend): the doctor's finding and its fix, as the CLI's own refusal, so the fleet
+ * says it with the restart and never offers Check again. The worker's environment is fixed at its
+ * start, so the string changes only with one.
+ */
+export function reachRefusal(checks: readonly DoctorCheck[]): CliError | undefined {
+  const reach = failedReach(checks);
+  if (reach === undefined || reach.unreachable === true) {
+    return undefined;
+  }
+  return new CliError(
+    `doctor-${reach.name}`,
+    reach.detail,
+    reach.fix ?? "run facetdb doctor, which says what to do",
+  );
+}
+
+/**
+ * One reading of a source's database for its install, as the worker's `installed` makes it, in this
+ * order: a database that did not answer is thrown as a plain error (the read failed, to be asked
+ * again later); one that answered and refused the string is thrown as the CLI's own refusal (said
+ * with its fix and the restart); only a reading that looked at the install takes `took`, the
+ * finished install run that stands in for a rights check the doctor lacks, so a reading that told
+ * nothing never uses it up.
+ */
+export function readInstall(
+  database: string,
+  checks: readonly DoctorCheck[],
+  took: () => boolean,
+): InstallCheck {
+  const unread = unreadCheck(checks);
+  if (unread !== undefined) {
+    throw new Error(unread);
+  }
+  const refusal = reachRefusal(checks);
+  if (refusal !== undefined) {
+    throw refusal;
+  }
+  return installVerdict(database, checks, took());
 }
 
 /**
@@ -89,9 +139,27 @@ export type InstallRuns = {
 
 export function installRuns(): InstallRuns {
   const runs = new Map<string, string>();
-  /** The source as the file holds it, in the exporter's form: any change since is another source. */
-  const keyOf = (source: SourceConfig, config: ProjectConfig) =>
-    JSON.stringify(toProjectJson({ ...config, sources: [source] }).sources[0]);
+  /**
+   * The source as the file holds it, in the exporter's form, with a digest of its connection string
+   * in place of the variable the string is read from: any other change since is another source, and
+   * so is the same name moved to another database. The loader names the variable by the string's
+   * value, so two variables holding one string (the store's and a new source's, the common case for
+   * one database) both read as DATABASE_URL whichever the file names, and a run recorded under the
+   * file's name never matched the reading's; the string itself is what the install reached, and two
+   * names for it are one database.
+   */
+  const keyOf = (source: SourceConfig, config: ProjectConfig) => {
+    const [json] = toProjectJson({ ...config, sources: [source] }).sources;
+    if (json === undefined) {
+      throw new Error(`the export of the source ${source.name} is empty`);
+    }
+    const { database: _variable, ...rest } = json;
+    const connection =
+      source.database === undefined
+        ? null
+        : createHash("sha256").update(source.database).digest("hex");
+    return JSON.stringify({ ...rest, connection });
+  };
   return {
     ran(source, config) {
       runs.set(source.name, keyOf(source, config));

@@ -120,6 +120,7 @@ function run(
         TYPESAFE_API_KEY: "ts-test-key",
       },
       osUser: () => "alex",
+      setEnv: () => undefined,
       loadConfig: () => Promise.resolve(config),
       connect: world.connect,
       store: () => {

@@ -584,6 +584,8 @@ describe("doctor", () => {
       status: "fail",
       detail: "the libSQL server at listings-acme.turso.io did not answer: fetch failed",
       fix: "check that the server is running and that LISTINGS_URL names it",
+      // No answer at all: a reading of the install behind it tells nothing and may be asked again.
+      unreachable: true,
     });
   });
 

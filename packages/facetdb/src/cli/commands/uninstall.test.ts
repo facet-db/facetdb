@@ -158,6 +158,9 @@ async function runSeeingPrompts(
       configFiles: { read: unused, replace: unused, gitState: unused },
       studio: { defaultDir: undefined, files: () => ({ read: unused }) },
       openBrowser: unused,
+      setEnv: () => {
+        throw new Error("this test gave the command no environment to set");
+      },
     },
     COMMANDS,
   );

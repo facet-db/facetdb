@@ -89,19 +89,20 @@ export function createUsageStore(client: SqlClient): UsageStore {
       return integer(rows[0] ?? {}, "total");
     },
 
-    async claimAlert(projectId, month, kind) {
+    // The cap is part of the claim (migration 7): a cap changed mid-month is a new alert.
+    async claimAlert(projectId, month, kind, cap) {
       const rows = await client.query(
-        `insert into facetdb.usage_alerts (project_id, month, kind) values ($1, $2, $3)
+        `insert into facetdb.usage_alerts (project_id, month, kind, cap) values ($1, $2, $3, $4)
          on conflict do nothing returning kind`,
-        [projectId, month, kind],
+        [projectId, month, kind, cap],
       );
       return rows.length > 0;
     },
 
-    async releaseAlert(projectId, month, kind) {
+    async releaseAlert(projectId, month, kind, cap) {
       await client.query(
-        "delete from facetdb.usage_alerts where project_id = $1 and month = $2 and kind = $3",
-        [projectId, month, kind],
+        "delete from facetdb.usage_alerts where project_id = $1 and month = $2 and kind = $3 and cap = $4",
+        [projectId, month, kind, cap],
       );
     },
   };

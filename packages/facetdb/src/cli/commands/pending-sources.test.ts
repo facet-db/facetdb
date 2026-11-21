@@ -2,6 +2,7 @@ import type { Clock, Worker } from "@facetdb/core";
 import { FakeClock, FakeConnector, FakeDatabase } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { CliError } from "../program.ts";
 import { createFleet, type SourceLoop } from "./config-reload.ts";
 import { questionSetOf } from "./database.ts";
 
@@ -55,7 +56,16 @@ const NOT_RUNNING: Worker = {
   onHumanDecision: () => Promise.reject(new Error("these tests decide nothing")),
 };
 
-function rig() {
+type Installed = Parameters<typeof createFleet>[0]["installed"];
+
+/** The engine's doctor with no rights check and no install run to stand in for one. */
+const CANNOT_TELL: Installed = () =>
+  Promise.resolve({
+    kind: "cannot-tell",
+    why: "the worker's checks of PostgreSQL cannot tell whether the worker login may write them",
+  });
+
+function rig(installed: Installed = CANNOT_TELL) {
   const state: { file: ProjectConfig } = { file: PROJECT };
   const fleet = createFleet({
     open: (source, config) => {
@@ -73,11 +83,7 @@ function rig() {
       return Promise.resolve(loop);
     },
     // PostgreSQL's doctor has no check of the worker login's rights (install-check.ts).
-    installed: () =>
-      Promise.resolve({
-        kind: "cannot-tell",
-        why: "the worker's checks of PostgreSQL cannot tell whether the worker login may write them",
-      }),
+    installed,
     load: () => Promise.resolve(state.file),
     beat: () => Promise.resolve(),
     clock: NEVER_SLEEPS,
@@ -206,6 +212,59 @@ describe("the sources that do not run the file as last loaded", () => {
         checkAgain: false,
       },
     ]);
+  });
+
+  it("offers no migrate for a source whose variable was not set when the worker started", async () => {
+    const t = rig();
+    await t.fleet.open(PROJECT);
+    const { database: _unset, ...refunds } = ORDERS;
+    t.state.file = {
+      ...PROJECT,
+      sources: [
+        LISTINGS,
+        ORDERS,
+        { ...refunds, name: "refunds", table: "refunds", databaseEnv: "REFUNDS_URL" },
+      ],
+    };
+
+    await t.fleet.reload();
+
+    // An install does not set the variable: the reason's own words say what does.
+    expect(t.fleet.pending()[0]).toMatchObject({
+      source: "refunds",
+      outcome: "not-started",
+      message: expect.stringContaining("REFUNDS_URL"),
+      migrate: false,
+      checkAgain: false,
+    });
+  });
+
+  it("offers no migrate for a source whose string its database refuses: the fix and the restart are the steps", async () => {
+    const t = rig(() =>
+      Promise.reject(
+        new CliError(
+          "doctor-database",
+          '"refunds" logs in as postgres on localhost/app, not as the worker login facetdb_worker',
+          "set REFUNDS_URL to the worker login's connection string",
+        ),
+      ),
+    );
+    await t.fleet.open(PROJECT);
+    t.state.file = {
+      ...PROJECT,
+      sources: [LISTINGS, ORDERS, { ...ORDERS, name: "refunds", table: "refunds" }],
+    };
+
+    await t.fleet.reload();
+
+    expect(t.fleet.pending()[0]).toMatchObject({
+      source: "refunds",
+      outcome: "not-started",
+      message:
+        'new in facetdb.config.ts and not answered yet: "refunds" logs in as postgres on localhost/app, not as the worker login facetdb_worker; set REFUNDS_URL to the worker login\'s connection string. Then restart facetdb worker.',
+      migrate: false,
+      checkAgain: false,
+    });
   });
 
   it("is empty once the worker runs the file: a restart opens every loop on it", async () => {

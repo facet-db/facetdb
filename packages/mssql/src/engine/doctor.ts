@@ -594,11 +594,14 @@ export async function doctorChecks(
       ];
     }
     return [
-      fail(
-        "database",
-        `"${target.source}": ${where} could not be reached as the worker login: ${message}`,
-        `check the host, port, database and worker password in ${subject}, and that the server lets this machine connect`,
-      ),
+      {
+        ...fail(
+          "database",
+          `"${target.source}": ${where} could not be reached as the worker login: ${message}`,
+          `check the host, port, database and worker password in ${subject}, and that the server lets this machine connect`,
+        ),
+        unreachable: true,
+      },
       ...skipped(1),
     ];
   } finally {

@@ -994,7 +994,7 @@ describe("the Questions page", () => {
           new ApiError(
             409,
             "apply_unavailable",
-            "This worker does not write facetdb.config.ts: facetdb dev and facetdb worker --once never do.",
+            "This worker does not write facetdb.config.ts: facetdb worker --once never does.",
             "Run facetdb worker to apply from the studio, or edit facetdb.config.ts and restart the worker.",
           ),
         ),
@@ -1002,7 +1002,7 @@ describe("the Questions page", () => {
     const studio = await opened({ api });
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await within(dialog).findByText(/facetdb dev and facetdb worker --once never do/);
+    await within(dialog).findByText(/facetdb worker --once never does/);
     expect(
       within(dialog).getByText(/Run facetdb worker to apply from the studio/),
     ).toBeInTheDocument();

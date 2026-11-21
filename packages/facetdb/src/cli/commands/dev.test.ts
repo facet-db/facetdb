@@ -90,13 +90,23 @@ afterEach(async () => {
   await resetPglite(engine);
 });
 
+/** The run's environment: dev sets DATABASE_URL in it, as it sets the process's. */
+let env: Record<string, string | undefined>;
+
+beforeEach(() => {
+  env = {};
+});
+
 function run(argv: readonly string[], deps: { readonly embedded?: EmbeddedDatabases } = {}) {
   return runInProcess(
     argv,
     {
       projectDir: PROJECT_DIR,
       // No TYPESAFE_API_KEY, no DATABASE_URL, no FACETDB_SECRET: dev needs none of them.
-      env: {},
+      env,
+      setEnv: (name, value) => {
+        env[name] = value;
+      },
       loadConfig: () => Promise.resolve(config),
       connect: () => {
         throw new Error("dev connected to a database outside the embedded one");
@@ -129,6 +139,8 @@ describe("facetdb dev", () => {
     expect(embedded.calls).toEqual([`open ${DEV_DIR}`]);
     expect(first.stdout).toContain("answers come from the scripted fake provider");
     expect(first.stdout).toContain("Installed listings on public.listings in .facetdb/dev");
+    // Dev's address, for the file and the studio's doors to read as the store's variable.
+    expect(env["DATABASE_URL"]).toBe("pglite://facetdb-dev");
 
     // The install outlived the run: a new row is queued by its trigger and answered by the next.
     await embedded.query(DEV_DIR, "insert into public.listings (id, title) values ('r1', 'A car')");
@@ -144,7 +156,9 @@ describe("facetdb dev", () => {
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("skipped listings");
-    expect(result.stdout).toContain("Create public.listings in the dev database");
+    expect(result.stdout).toContain(
+      "Create public.listings in the dev database, or pass --seed <file> with the SQL that creates it, then run facetdb dev again.",
+    );
   });
 
   it("--reset wipes .facetdb/dev/ before opening it", async () => {
@@ -159,12 +173,27 @@ describe("facetdb dev", () => {
     expect(result.stdout).toContain("skipped listings");
   });
 
-  it("--dry-run opens nothing", async () => {
+  it("--dry-run opens nothing, and still says what DATABASE_URL holds for the run", async () => {
     const result = await run(["dev", "--dry-run", "--reset"]);
 
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("Dry run: nothing was started.");
+    expect(result.stdout).toContain(
+      "DATABASE_URL holds pglite://facetdb-dev for this run, so facetdb.config.ts reads the embedded database.",
+    );
     expect(embedded.calls).toEqual([]);
+  });
+
+  it("says when the address replaced a value the shell had, never the value", async () => {
+    env["DATABASE_URL"] = "postgres://shell:secret@db.example.com/app";
+    const result = await run(["dev", "--dry-run"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "DATABASE_URL holds pglite://facetdb-dev for this run, in place of the value the shell had, so facetdb.config.ts reads the embedded database.",
+    );
+    expect(result.stdout + result.stderr).not.toContain("shell:secret");
+    expect(env["DATABASE_URL"]).toBe("pglite://facetdb-dev");
   });
 
   it("creates .facetdb/dev/ on disk and keeps what was written there", async () => {
@@ -184,6 +213,7 @@ describe("facetdb dev", () => {
         {
           projectDir,
           env: {},
+          setEnv: () => undefined,
           loadConfig: () => Promise.resolve(config),
           connect: () => {
             throw new Error("dev connected to a database outside the embedded one");
