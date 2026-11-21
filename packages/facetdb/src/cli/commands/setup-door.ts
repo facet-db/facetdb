@@ -3,6 +3,7 @@ import {
   type DatabaseEngine,
   DEFAULT_BACKFILL_PACE,
   type EngineDeps,
+  type EnginePlan,
   EngineRefusal,
   type EngineTarget,
   ESTIMATE_SAMPLE_SIZE,
@@ -76,12 +77,7 @@ import { installPrintout, passwordOf, planInstall } from "./migrate.ts";
  * to restart the worker.
  */
 
-export type SetupDoorDeps = {
-  /** The CLI's dependencies: the engines, the environment, the clock and the store's driver. */
-  readonly cli: Pick<CliDeps, "engines" | "env" | "clock" | "connect">;
-  readonly project: ProjectRef;
-  /** The worker's `--allow-insecure`, for the store it already opened. */
-  readonly allowInsecureStore: boolean;
+export type SetupDoorDeps = InstallDeps & {
   /** The config file, as `--config` names it, its disk and git door, and its quiet loader. */
   readonly path: string;
   readonly files: ConfigFiles;
@@ -96,6 +92,118 @@ export type SetupDoorDeps = {
   /** The worker's output: the preview's own notes, never a connection string. */
   readonly print: (line: string) => void;
 };
+
+/**
+ * What one source's install needs besides the admin string: the CLI's engines, environment, clock
+ * and store driver, the project, and the worker's `--allow-insecure` for the store it opened. The
+ * setup door's and the migrate door's alike.
+ */
+export type InstallDeps = {
+  readonly cli: Pick<CliDeps, "engines" | "env" | "clock" | "connect">;
+  readonly project: ProjectRef;
+  readonly allowInsecureStore: boolean;
+};
+
+/** One source's install as `facetdb migrate` plans and prints it, and what its run needs. */
+export type SourceInstall = {
+  readonly engine: DatabaseEngine;
+  readonly own: EngineTarget;
+  readonly plan: EnginePlan;
+  /** The table as its engine names it: `public.listings`. */
+  readonly label: string;
+  /** The source's part of `facetdb migrate --source <name> --dry-run` (`installPrintout`). */
+  readonly sql: string;
+  readonly storeShared: boolean;
+  readonly engineDeps: EngineDeps;
+  readonly workerPassword: string | undefined;
+  readonly questionSet: EngineTarget["questionSet"];
+};
+
+/**
+ * The engine an install plans with, as `adminRun` picks it: the source's connection string's, and
+ * the admin string must name the same kind of database (the setup's words).
+ */
+export async function adminEngineOf(
+  engines: CliDeps["engines"],
+  source: SourceConfig,
+  admin: string,
+): Promise<DatabaseEngine> {
+  const engine = await engineFor(engines, source.database ?? admin, source.connector);
+  const theirs = databaseOf(admin);
+  const own = source.database === undefined ? undefined : databaseOf(source.database);
+  if (theirs !== undefined && own !== undefined && theirs.key !== own.key) {
+    throw new CliError(
+      "admin-url-scheme",
+      `the admin connection string is ${theirs.name}'s (${schemeOf(admin)}:), and ${variableOf(source)} holds ${own.name}'s (${schemeOf(source.database ?? "")}:), so the two name different kinds of database; nothing was connected`,
+      `give the admin connection string of the database ${variableOf(source)} names`,
+    );
+  }
+  return engine;
+}
+
+/**
+ * One source's install, planned with the admin string and printed exactly as `facetdb migrate
+ * --source <name> --dry-run` prints the source's part (`installPrintout`). The store's part: when
+ * the store is the source's own database the engine's plan holds it; otherwise a worker running on
+ * the store has it current, so it is only read, for its notes, and a store `facetdb migrate` would
+ * still have to move is refused. A refusal in the CLI's words throws.
+ */
+export async function sourceInstallOf(
+  deps: InstallDeps,
+  config: ProjectConfig,
+  target: TableTarget,
+  engine: DatabaseEngine,
+  admin: string,
+): Promise<SourceInstall> {
+  const { env, clock } = deps.cli;
+  const source = target.source;
+  const storeShared = storeSharedFor(env, source);
+  const notes: string[] = [];
+  if (!storeShared) {
+    const store = await showStoreMigration(
+      deps.cli.connect,
+      requireStoreUrl(env, deps.allowInsecureStore),
+    );
+    if (!store.current) {
+      throw new CliError(
+        "store-not-current",
+        `the FacetDB store on ${store.label} needs facetdb migrate before a source's install runs from the studio`,
+        "run facetdb migrate on this machine, then restart facetdb worker",
+      );
+    }
+    notes.push(...store.notes);
+  }
+  const own = engineTarget(config, target, deps.project);
+  const engineDeps: EngineDeps = { clock, allowInsecure: false, storeShared };
+  const plan = await planInstall(engine, target, own, admin, engineDeps);
+  const label = engine.label(own, admin);
+  const sql = installPrintout(source.name, label, engine.render(plan), [
+    ...new Set([...notes, ...plan.notes]),
+  ]);
+  const login = passwordOf(engine, source);
+  return {
+    engine,
+    own,
+    plan,
+    label,
+    sql,
+    storeShared,
+    engineDeps,
+    workerPassword: "password" in login ? login.password : undefined,
+    questionSet: own.questionSet,
+  };
+}
+
+/** Runs an install as planned, with the worker login's password where the plan creates it. */
+export function runSourceInstall(
+  install: SourceInstall,
+  admin: string,
+): ReturnType<DatabaseEngine["run"]> {
+  return install.engine.run(install.own, install.plan, admin, {
+    ...install.engineDeps,
+    ...(install.workerPassword === undefined ? {} : { workerPassword: install.workerPassword }),
+  });
+}
 
 /** A draft's connection variable, as `database: { env }` names it. */
 function variableIn(draft: SourceDraft): string | undefined {
@@ -211,24 +319,6 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
   }
 
   /**
-   * The engine the install plans with, as `adminRun` picks it: the source's connection string's,
-   * and the admin string must name the same kind of database.
-   */
-  async function engineOfSource(source: SourceConfig, admin: string): Promise<DatabaseEngine> {
-    const engine = await engineFor(cli.engines, source.database ?? admin, source.connector);
-    const theirs = databaseOf(admin);
-    const own = source.database === undefined ? undefined : databaseOf(source.database);
-    if (theirs !== undefined && own !== undefined && theirs.key !== own.key) {
-      throw new CliError(
-        "admin-url-scheme",
-        `the admin connection string is ${theirs.name}'s (${schemeOf(admin)}:), and ${variableOf(source)} holds ${own.name}'s (${schemeOf(source.database ?? "")}:), so the two name different kinds of database; nothing was connected`,
-        `give the admin connection string of the database ${variableOf(source)} names`,
-      );
-    }
-    return engine;
-  }
-
-  /**
    * The source of the file that already reads this table, if one does: the same table as its engine
    * labels it (schema included), on a database of the same kind, reached at the same host, port and
    * database as the admin string or the new source's own connection string. Nothing connects and
@@ -262,12 +352,15 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
   }
 
   /** The install plan, its printout, and what the run needs; a refusal in the CLI's words throws. */
-  async function installOf(applyPlan: ApplyPlan, name: string, admin: string) {
+  async function installOf(
+    applyPlan: ApplyPlan,
+    name: string,
+    admin: string,
+  ): Promise<SourceInstall> {
     const config = applyPlan.config;
     const target = targetOf(config, name);
     const source = target.source;
-    const engine = await engineOfSource(source, admin);
-    const storeShared = storeSharedFor(env, source);
+    const engine = await adminEngineOf(cli.engines, source, admin);
     // Before anything connects: a table the file already reads is not set up again.
     const own: EngineTarget = engineTarget(config, target, project);
     const taken = sourceOfTable(config, source, engine, engine.label(own, admin), admin);
@@ -278,41 +371,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         `that source is ${taken}; finish or check its install with facetdb migrate --source ${taken}, or take it out with facetdb uninstall --source ${taken}`,
       );
     }
-    const notes: string[] = [];
-    if (!storeShared) {
-      // migrate runs the store's part first; a worker running on the store has it current, so the
-      // setup only reads it, for its notes, and refuses a store migrate would still have to move.
-      const store = await showStoreMigration(
-        cli.connect,
-        requireStoreUrl(env, deps.allowInsecureStore),
-      );
-      if (!store.current) {
-        throw new CliError(
-          "store-not-current",
-          `the FacetDB store on ${store.label} needs facetdb migrate before a source can be added`,
-          "run facetdb migrate on this machine, restart facetdb worker, then add the source again",
-        );
-      }
-      notes.push(...store.notes);
-    }
-    const engineDeps: EngineDeps = { clock, allowInsecure: false, storeShared };
-    const plan = await planInstall(engine, target, own, admin, engineDeps);
-    const label = engine.label(own, admin);
-    const sql = installPrintout(name, label, engine.render(plan), [
-      ...new Set([...notes, ...plan.notes]),
-    ]);
-    const login = passwordOf(engine, source);
-    return {
-      engine,
-      own,
-      plan,
-      label,
-      sql,
-      storeShared,
-      engineDeps,
-      workerPassword: "password" in login ? login.password : undefined,
-      questionSet: own.questionSet,
-    };
+    return sourceInstallOf(deps, config, target, engine, admin);
   }
 
   /** Apply's plan of the draft as a new source of the operator's, or why there is none. */
@@ -542,7 +601,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         return applied;
       }
       const applyPlan = applied.plan;
-      let install: Awaited<ReturnType<typeof installOf>>;
+      let install: SourceInstall;
       try {
         install = await installOf(applyPlan, draft.name, admin);
       } catch (error) {
@@ -592,7 +651,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         if (applyPlan.id !== shown.diffPlan) {
           return { kind: "stale" };
         }
-        let install: Awaited<ReturnType<typeof installOf>>;
+        let install: SourceInstall;
         try {
           install = await installOf(applyPlan, draft.name, admin);
         } catch (error) {
@@ -640,12 +699,7 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         });
         let result: Awaited<ReturnType<DatabaseEngine["run"]>>;
         try {
-          result = await install.engine.run(install.own, install.plan, admin, {
-            ...install.engineDeps,
-            ...(install.workerPassword === undefined
-              ? {}
-              : { workerPassword: install.workerPassword }),
-          });
+          result = await runSourceInstall(install, admin);
         } catch (error) {
           // Thrown, the run did not say how it ended: a connection lost during the commit may have
           // committed it. The file keeps the source, so `facetdb migrate --source X --dry-run` shows

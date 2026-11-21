@@ -791,6 +791,31 @@ const setupInstalledSchema = z.object({
 });
 export type SetupInstalled = z.infer<typeof setupInstalledSchema>;
 
+/**
+ * `POST /v1/sources/:name/migrate/plan`: an added question's install as `facetdb migrate
+ * --source <name> --dry-run` prints the source's part, with the token that runs exactly it.
+ */
+const migratePlanSchema = z.object({
+  token: z.string().min(1),
+  expiresInSeconds: z.number().int().positive(),
+  table: z.string(),
+  sql: z.string(),
+  transactional: z.boolean(),
+  /** The questions the file adds to what the source runs. */
+  questions: z.array(z.string()),
+  /** The store is another database: migrate also prints its part above this one. */
+  storeElsewhere: z.boolean(),
+});
+export type MigratePlan = z.infer<typeof migratePlanSchema>;
+
+/** `POST /v1/sources/:name/migrate/run`: the install ran, and the worker reloaded the file. */
+const migratedSchema = z.object({
+  migrated: z.literal(true),
+  table: z.string(),
+  reload: reloadSchema,
+});
+export type Migrated = z.infer<typeof migratedSchema>;
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -872,6 +897,11 @@ export type ApiClient = {
     draft: SetupDraft,
     confirm: { readonly token: string; readonly force: boolean },
   ) => Promise<SetupInstalled>;
+  // An added question's install: the admin string in the body of these two alone.
+  /** The install of the questions the file adds to `source`, shown before anything runs. */
+  readonly migratePlan: (source: string, admin: string) => Promise<MigratePlan>;
+  /** Runs the install the token names, then the worker reloads the file. */
+  readonly migrateRun: (source: string, admin: string, token: string) => Promise<Migrated>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -1040,6 +1070,15 @@ export function createApiClient(fetch: Fetch): ApiClient {
         source: draft,
         token,
         force,
+      }),
+    migratePlan: (source, admin) =>
+      call(migratePlanSchema, "POST", `/sources/${encodeURIComponent(source)}/migrate/plan`, {
+        admin,
+      }),
+    migrateRun: (source, admin, token) =>
+      call(migratedSchema, "POST", `/sources/${encodeURIComponent(source)}/migrate/run`, {
+        admin,
+        token,
       }),
   };
 }

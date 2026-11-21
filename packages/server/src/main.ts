@@ -28,7 +28,7 @@ import {
 import { createRunsService } from "./data/runs.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
 import type { BackfillJobsDoor } from "./sources/backfill-door.ts";
-import type { SetupDoor } from "./sources/door.ts";
+import type { MigrateDoor, SetupDoor } from "./sources/door.ts";
 import { createSetupService } from "./sources/service.ts";
 import type { StudioBuild } from "./studio/build.ts";
 
@@ -103,6 +103,12 @@ export type ServerDeps = {
    */
   readonly setup?: SetupDoor;
   /**
+   * The install of an added question from the studio: `facetdb migrate`'s plan and run for one
+   * source, behind the setup's operator check, token and redaction. Absent, the studio shows the
+   * commands.
+   */
+  readonly migrate?: MigrateDoor;
+  /**
    * The worker's backfill jobs: estimate, start, stop and status per source, run inside the worker
    * as only the CLI can build them. Absent, the studio is told this worker runs none.
    */
@@ -147,7 +153,14 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
     review: createReviewEndpointService({ ...deps.review, projectId: deps.config.projectId }),
     ...(deps.setup === undefined
       ? {}
-      : { setup: createSetupService({ door: deps.setup, clock: deps.clock, log: deps.log }) }),
+      : {
+          setup: createSetupService({
+            door: deps.setup,
+            ...(deps.migrate === undefined ? {} : { migrate: deps.migrate }),
+            clock: deps.clock,
+            log: deps.log,
+          }),
+        }),
     ...(deps.backfill === undefined ? {} : { backfill: deps.backfill }),
     studio: {
       sessions: createSessions({

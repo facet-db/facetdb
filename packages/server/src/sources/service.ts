@@ -2,6 +2,8 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Clock } from "@facetdb/core";
 import type { DraftIssue, SourceDraft, Words } from "../config/service.ts";
 import type {
+  MigrateDoor,
+  MigrateRunOutcome,
   SetupDoor,
   SetupInstallOutcome,
   SetupInvalid,
@@ -22,6 +24,9 @@ import { hideSecrets, secretParts } from "./redact.ts";
  *    diff's plan and the draft), once, within `PLAN_TOKEN_TTL_MS`; the door plans again and runs
  *    only when the script is still the one shown;
  *  - the log gets the step and the kind of each refusal or failure, never a message.
+ * An added question's install is served on the same terms by the migrate door: its own token, which
+ * says the kind of run it was made for (a setup's token runs no migration and the reverse), bound
+ * to the source, the SQL shown and the admin string's HMAC.
  */
 
 /** How long a shown plan may be installed. The setup's own decision. */
@@ -62,10 +67,20 @@ export type SetupService = {
     draft: SourceDraft,
     confirm: { readonly token: string; readonly force: boolean },
   ): Promise<SetupAnswer<unknown>>;
+  /** An added question's install for the source `name`, shown with a token that runs it. */
+  migratePlan(admin: string, name: string): Promise<SetupAnswer<unknown>>;
+  /** Runs the install a `migratePlan` token names, once, then the worker reloads. */
+  migrateRun(
+    admin: string,
+    name: string,
+    confirm: { readonly token: string },
+  ): Promise<SetupAnswer<unknown>>;
 };
 
 export type SetupServiceDeps = {
   readonly door: SetupDoor;
+  /** The install of an added question; absent, this worker offers none. */
+  readonly migrate?: MigrateDoor;
   readonly clock: Clock;
   /** The worker's log: the step and the kind of each refusal and failure, nothing else. */
   readonly log: (line: string) => void;
@@ -89,6 +104,24 @@ const UNAVAILABLE: Words & { readonly code: string } = {
 };
 
 /**
+ * What a request from another machine, or one signed in, is told when it asks to install an added
+ * question: the commands stay the way to do it from there.
+ */
+export const MIGRATE_OPERATOR_ONLY: Words & { readonly code: string } = {
+  code: "operator_only",
+  message:
+    "Installing a question connects to your database with an admin connection string, so it is done only in the studio on the machine that runs facetdb worker, opened there with no sign-in.",
+  fix: "Open the studio on that machine (facetdb studio), or run facetdb migrate --source <name> there, then restart facetdb worker.",
+};
+
+const MIGRATE_UNAVAILABLE: Words & { readonly code: string } = {
+  code: "setup_unavailable",
+  message:
+    "This worker does not install questions from the studio (facetdb dev and facetdb worker --once never do).",
+  fix: "Run facetdb migrate --source <name> in a terminal, then restart the worker.",
+};
+
+/**
  * The setup of a surface that has none to offer (a test's app, a server made without a door): the
  * operator is told it cannot be done here, and nothing is called.
  */
@@ -99,6 +132,17 @@ export const NO_SETUP: SetupService = {
   preview: () => Promise.resolve({ ok: false, failure: { status: 409, ...UNAVAILABLE } }),
   plan: () => Promise.resolve({ ok: false, failure: { status: 409, ...UNAVAILABLE } }),
   install: () => Promise.resolve({ ok: false, failure: { status: 409, ...UNAVAILABLE } }),
+  migratePlan: () =>
+    Promise.resolve({ ok: false, failure: { status: 409, ...MIGRATE_UNAVAILABLE } }),
+  migrateRun: () =>
+    Promise.resolve({ ok: false, failure: { status: 409, ...MIGRATE_UNAVAILABLE } }),
+};
+
+/** A migrate door that offers nothing: the routes answer that this worker installs no question. */
+const NO_MIGRATE: MigrateDoor = {
+  available: false,
+  plan: () => Promise.reject(new Error("this worker installs no question")),
+  run: () => Promise.reject(new Error("this worker installs no question")),
 };
 
 /** A value as one string with every object's keys sorted: the same draft, whatever the order. */
@@ -210,9 +254,15 @@ type Tools = {
   readonly say: (line: string) => void;
 };
 
-/** A shown plan, held by its token: what it showed, and for which draft. */
+/**
+ * A shown plan, held by its token: what it showed, for which kind of run, and for which draft or
+ * source. A setup's token runs no migration and a migration's token installs no new source.
+ */
 type HeldPlan = {
-  readonly draft: string;
+  /** `install`: a new source's setup; `migrate`: an added question's install. */
+  readonly kind: "install" | "migrate";
+  /** The draft's hash for an install; the source's name for a migration. */
+  readonly subject: string;
   /** The admin string as a keyed hash under this process's key: never the string. */
   readonly admin: string;
   readonly engine: string;
@@ -267,6 +317,9 @@ function unknownOutcome(source: string): SetupFailure {
 
 export function createSetupService(deps: SetupServiceDeps): SetupService {
   const { door, clock, log } = deps;
+  const migrate = deps.migrate ?? NO_MIGRATE;
+  // Offered only where the setup is: the same worker, writing the same file, on this machine.
+  const migrating = { available: door.available && migrate.available, words: MIGRATE_UNAVAILABLE };
   const newToken = deps.newToken ?? (() => randomBytes(24).toString("base64url"));
   const plans = new Map<string, HeldPlan>();
   // A key made once for this process: a held plan names its admin string by a keyed hash, so an
@@ -298,14 +351,18 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
     step: string,
     admin: string,
     work: (tools: Tools) => Promise<SetupAnswer<Body>>,
+    offered: { readonly available: boolean; readonly words: Words & { readonly code: string } } = {
+      available: door.available,
+      words: UNAVAILABLE,
+    },
   ): Promise<SetupAnswer<Body>> {
     const parts = secretParts(admin);
     const hide = (text: string) => hideSecrets(text, parts);
     const say = (line: string) => {
       log(hide(line));
     };
-    if (!door.available) {
-      return { ok: false, failure: { status: 409, ...UNAVAILABLE } };
+    if (!offered.available) {
+      return { ok: false, failure: { status: 409, ...offered.words } };
     }
     try {
       return await work({ hide, say });
@@ -430,7 +487,8 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
         prune(now);
         const token = newToken();
         plans.set(token, {
-          draft: hash(canonical(draft)),
+          kind: "install",
+          subject: hash(canonical(draft)),
           admin: bound(admin),
           engine: outcome.engine,
           sql: outcome.sql,
@@ -447,7 +505,12 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
         const held = plans.get(confirm.token);
         // Once: a token is spent by the attempt, whatever the attempt's outcome.
         plans.delete(confirm.token);
-        if (held === undefined || held.expiresAt <= now || held.draft !== hash(canonical(draft))) {
+        if (
+          held === undefined ||
+          held.expiresAt <= now ||
+          held.kind !== "install" ||
+          held.subject !== hash(canonical(draft))
+        ) {
           tools.say("setup: install refused (no plan shown for this draft)");
           return {
             ok: false,
@@ -566,6 +629,180 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
           }
         }
       }),
+
+    migratePlan: (admin, name) =>
+      guarded(
+        "migrate plan",
+        admin,
+        async (tools) => {
+          const outcome = await migrate.plan(name, admin);
+          if (outcome.kind === "refused") {
+            return refused("migrate plan", outcome, tools);
+          }
+          const now = clock.now();
+          prune(now);
+          const token = newToken();
+          plans.set(token, {
+            kind: "migrate",
+            subject: name,
+            admin: bound(admin),
+            engine: outcome.engine,
+            sql: outcome.sql,
+            diffPlan: "",
+            expiresAt: now + PLAN_TOKEN_TTL_MS,
+          });
+          tools.say(`setup: planned the install of ${name}'s added questions on ${outcome.table}`);
+          return {
+            ok: true,
+            body: {
+              token,
+              expiresInSeconds: PLAN_TOKEN_TTL_MS / 1000,
+              table: outcome.table,
+              sql: outcome.sql,
+              transactional: outcome.transactional,
+              questions: outcome.questions,
+              storeElsewhere: outcome.storeElsewhere,
+            },
+          };
+        },
+        migrating,
+      ),
+
+    migrateRun: (admin, name, confirm) =>
+      guarded(
+        "migrate run",
+        admin,
+        async (tools) => {
+          const now = clock.now();
+          const held = plans.get(confirm.token);
+          // Once: a token is spent by the attempt, whatever the attempt's outcome.
+          plans.delete(confirm.token);
+          if (
+            held === undefined ||
+            held.expiresAt <= now ||
+            held.kind !== "migrate" ||
+            held.subject !== name
+          ) {
+            tools.say("setup: migrate run refused (no plan shown for this source)");
+            return {
+              ok: false,
+              failure: {
+                status: 409,
+                code: "plan_not_shown",
+                message: `This run names no install this worker showed for ${name}: it was never shown, was already used, is more than 10 minutes old, or was made for something else. Nothing ran.`,
+                fix: "Show the SQL again, read it, and install the plan it answers with.",
+              },
+            };
+          }
+          if (held.admin !== bound(admin)) {
+            tools.say("setup: migrate run refused (another connection string than the plan's)");
+            return {
+              ok: false,
+              failure: {
+                status: 409,
+                code: "plan_changed",
+                message:
+                  "This run came with another connection string than the one the SQL was shown for, so nothing ran.",
+                fix: "Show the SQL again with the connection string you mean to install with, read it, and install.",
+              },
+            };
+          }
+          let outcome: MigrateRunOutcome;
+          try {
+            outcome = await migrate.run(name, admin, { engine: held.engine, sql: held.sql });
+          } catch (error) {
+            // Thrown once the door had the request: the plan may have run, so nothing here says
+            // it did not.
+            tools.say(
+              `setup: migrate run of ${name} failed, outcome unknown (${codeOf(error) ?? (error instanceof Error ? error.name : "error")})`,
+            );
+            return { ok: false, failure: migrateUnknown(name) };
+          }
+          switch (outcome.kind) {
+            case "migrated":
+              tools.say(`setup: installed ${name}'s added questions on ${outcome.table}`);
+              return {
+                ok: true,
+                body: { migrated: true, table: outcome.table, reload: outcome.reload },
+              };
+            case "plan_changed":
+              tools.say(
+                "setup: migrate run refused (the database or the file changed since the plan)",
+              );
+              return {
+                ok: false,
+                failure: {
+                  status: 409,
+                  code: "database_changed",
+                  message:
+                    "The database or facetdb.config.ts changed since the SQL was shown: planned again, the install is not the script you read, so nothing ran.",
+                  fix: "Show the SQL again, read the new script, and install that.",
+                },
+              };
+            case "refused": {
+              // Refused before any statement ran; one code for every such refusal.
+              const words = refused("migrate run", outcome, tools);
+              return { ok: false, failure: { ...words.failure, code: "install_refused" } };
+            }
+            case "stopped": {
+              tools.say(
+                `setup: migrate run of ${name} stopped (${outcome.why.kind === "refusal" ? outcome.why.refusal.code : outcome.why.kind === "thrown" ? (codeOf(outcome.why.error) ?? "thrown") : "database error"})`,
+              );
+              if (!outcome.known) {
+                return { ok: false, failure: migrateUnknown(name) };
+              }
+              return {
+                ok: false,
+                failure: {
+                  status: 409,
+                  code: INSTALL_STOPPED,
+                  ...migrateStoppedWords(outcome, name, stopWords(outcome.why, tools.hide)),
+                },
+              };
+            }
+          }
+        },
+        migrating,
+      ),
+  };
+}
+
+/**
+ * Plain words on what a stopped install of added questions left: the database as the engine said,
+ * and the source, which keeps answering with the version it ran, since no reload follows a run that
+ * did not finish.
+ */
+function migrateStoppedWords(
+  outcome: Extract<MigrateRunOutcome, { kind: "stopped" }>,
+  source: string,
+  reason: string,
+): Words {
+  const where =
+    outcome.at === null
+      ? "The install failed"
+      : `The install stopped at statement ${outcome.at + 1}${outcome.purpose === null ? "" : ` (${outcome.purpose})`}`;
+  const database =
+    outcome.kept === 0
+      ? outcome.transactional
+        ? "Nothing changed in the database: the install runs as one transaction, and it was rolled back."
+        : "Nothing changed in the database: no statement ran."
+      : `${outcome.kept} statement(s) before it ran and stay in the database on ${outcome.table}.`;
+  return {
+    message: `${where}: ${reason}. ${database} ${source} keeps answering with the version it ran.`,
+    fix:
+      outcome.kept === 0
+        ? "Fix what the database said, then show the SQL again and install."
+        : `Show the SQL again: the install plans afresh from what is in the database and finishes it. Or run facetdb migrate --source ${source} on this machine, then restart facetdb worker.`,
+  };
+}
+
+/** What the worker answers when an added question's install was started and its end is not known. */
+function migrateUnknown(source: string): SetupFailure {
+  return {
+    status: 502,
+    code: INSTALL_OUTCOME_UNKNOWN,
+    message: `The install for ${source} was started, and the worker could not learn how it ended: it may have run, in whole or not at all. ${source} keeps answering with the version it ran.`,
+    fix: `Look before anything else: run facetdb migrate --source ${source} --dry-run on the machine that runs the worker (it prints the SQL still to run). Then show the SQL here again, or run facetdb migrate --source ${source} and restart facetdb worker.`,
   };
 }
 

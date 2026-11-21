@@ -84,7 +84,8 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
-import { installVerdict } from "./install-check.ts";
+import { installRuns, installVerdict } from "./install-check.ts";
+import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
 import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
 
 /**
@@ -475,6 +476,8 @@ export async function runWorkers(
     return known;
   };
 
+  // The installs the studio ran to their end, until the reload after each reads them.
+  const studioInstalls = installRuns();
   // The sources as one fleet: every loop under its own stop, so a reload after Apply restarts the
   // changed ones and leaves the others running.
   const fleet = createFleet({
@@ -484,10 +487,13 @@ export async function runWorkers(
       return loop;
     },
     // The engine's doctor for the new source and set, under the worker login over the source's own
-    // connection string, never the page's word; read by `installVerdict`.
+    // connection string, never the page's word; read by `installVerdict`. An install this worker
+    // just ran to its end for this very source stands in for the rights check an engine's doctor
+    // lacks (PostgreSQL's); the columns are still the doctor's to find.
     installed: async (source, from) => {
       const table = parts.tableFacts(source, from);
-      return installVerdict(table.database, await table.doctor());
+      const checks = await table.doctor();
+      return installVerdict(table.database, checks, studioInstalls.took(source, from));
     },
     load: () => {
       if (parts.configFile === undefined) {
@@ -706,6 +712,24 @@ export async function runWorkers(
                 provider,
                 spending,
                 print,
+              }),
+        // An added question's install from the studio: migrate's plan and run for one running
+        // source, in the writes' queue, then the fleet's reload.
+        migrate:
+          configFile === undefined
+            ? UNAVAILABLE_MIGRATE_DOOR
+            : createMigrateDoor({
+                cli: deps,
+                project,
+                allowInsecureStore: options.allowInsecure === true,
+                path: configFile.path,
+                load: () => configFile.load({ quiet: true }),
+                running: (name) => fleet.loop(name),
+                ran: (source, from) => {
+                  studioInstalls.ran(source, from);
+                },
+                reload: () => fleet.reload(),
+                serial: writes,
               }),
         // A preview reads a running source through the connector its loop holds, asks through the
         // workers' provider (backoff and the in-flight limit) and admits under their spending gate.

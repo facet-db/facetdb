@@ -25,6 +25,8 @@ export type {
   InspectedTable,
   Inspection,
   LoggedAnswer,
+  Migrated,
+  MigratePlan,
   PendingSource,
   PreviewAnswer,
   PreviewRow,

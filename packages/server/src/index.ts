@@ -108,12 +108,17 @@ export type {
 export { NO_BACKFILL_JOBS } from "./sources/backfill-door.ts";
 export type {
   InspectOutcome,
+  MigrateDoor,
+  MigratePlan,
+  MigratePlanOutcome,
+  MigrateRunOutcome,
   SetupDoor,
   SetupInstallOutcome,
   SetupPlan,
   SetupPlanOutcome,
   SetupPreviewOutcome,
   SetupRefused,
+  ShownMigration,
   ShownPlan,
   StopReason,
 } from "./sources/door.ts";

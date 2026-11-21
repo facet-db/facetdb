@@ -1,4 +1,5 @@
 import type { DoctorCheck } from "@facetdb/core";
+import { type ProjectConfig, type SourceConfig, toProjectJson } from "../../config/index.ts";
 import type { InstallCheck } from "./config-reload.ts";
 
 /**
@@ -20,10 +21,21 @@ const RIGHTS_CHECKS: readonly string[] = ["grants", "login", "file"];
 /** A check that found nothing wrong; a warning is worth knowing and never a failure. */
 const passed = (check: DoctorCheck) => check.status === "ok" || check.status === "warn";
 
-export function installVerdict(database: string, checks: readonly DoctorCheck[]): InstallCheck {
+/**
+ * `granted`: this worker has just run the install of this very source to its end from the studio
+ * (the migrate door), and the install grants the worker login its rights on every column it adds.
+ * On an engine with no rights check that run stands in for one; the columns are still read from the
+ * doctor under the worker login, so an install that reached another database than the worker's
+ * switches nothing. A rights check the doctor does have still counts.
+ */
+export function installVerdict(
+  database: string,
+  checks: readonly DoctorCheck[],
+  granted = false,
+): InstallCheck {
   const columns = checks.filter((check) => COLUMN_CHECKS.includes(check.name));
   const rights = checks.filter((check) => RIGHTS_CHECKS.includes(check.name));
-  if (!columns.some((check) => check.name === "install") || rights.length === 0) {
+  if (!columns.some((check) => check.name === "install") || (rights.length === 0 && !granted)) {
     return {
       kind: "cannot-tell",
       why: `the worker's checks of ${database} cannot tell whether the worker login may write them`,
@@ -34,4 +46,34 @@ export function installVerdict(database: string, checks: readonly DoctorCheck[])
     return { kind: "missing", missing: failed.map((check) => check.detail).join("; ") };
   }
   return { kind: "holds" };
+}
+
+/**
+ * The installs this worker ran to their end from the studio, each for its source as the file held
+ * it then, until the reload that follows reads it: `installVerdict`'s `granted`. Spent by the first
+ * reading of its source, so a later Check again on an engine whose doctor cannot tell says so again
+ * rather than leaning on an old run (a prune by hand since, say).
+ */
+export type InstallRuns = {
+  /** This worker's migrate door ran the install of `source`, as `config` holds it, to its end. */
+  ran(source: SourceConfig, config: ProjectConfig): void;
+  /** Whether it did for `source` as `config` holds it now; the answer is given once. */
+  took(source: SourceConfig, config: ProjectConfig): boolean;
+};
+
+export function installRuns(): InstallRuns {
+  const runs = new Map<string, string>();
+  /** The source as the file holds it, in the exporter's form: any change since is another source. */
+  const keyOf = (source: SourceConfig, config: ProjectConfig) =>
+    JSON.stringify(toProjectJson({ ...config, sources: [source] }).sources[0]);
+  return {
+    ran(source, config) {
+      runs.set(source.name, keyOf(source, config));
+    },
+    took(source, config) {
+      const ran = runs.get(source.name);
+      runs.delete(source.name);
+      return ran !== undefined && ran === keyOf(source, config);
+    },
+  };
 }

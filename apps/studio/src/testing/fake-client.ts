@@ -10,6 +10,8 @@ import {
   type DraftValidation,
   type Home,
   type Inspection,
+  type Migrated,
+  type MigratePlan,
   type Project,
   type ProjectConfig,
   type ReviewCard,
@@ -764,6 +766,42 @@ export const SAMPLE_INSTALLED: SetupInstalled = {
     "Then answer the records already in public.sellers: facetdb backfill --source sellers shows its estimate before it asks anything.",
 };
 
+/** An added question's install for listings, as `facetdb migrate --dry-run` prints it. */
+export const SAMPLE_MIGRATE_PLAN: MigratePlan = {
+  token: "migrate-token-1",
+  expiresInSeconds: 600,
+  table: "public.listings",
+  sql: [
+    "-- facetdb migrate: listings (public.listings)",
+    "begin;",
+    'alter table "public"."listings" add column if not exists "is_vehicle" boolean;',
+    'grant update ("is_vehicle") on "public"."listings" to facetdb_worker;',
+    "commit;",
+    "",
+  ].join("\n"),
+  transactional: true,
+  questions: ["is_vehicle"],
+  storeElsewhere: false,
+};
+
+export const SAMPLE_MIGRATED: Migrated = {
+  migrated: true,
+  table: "public.listings",
+  reload: {
+    loaded: true,
+    sources: [
+      {
+        source: "listings",
+        outcome: "restarted",
+        version: 4,
+        message:
+          "the columns of the question is_vehicle are in its database and the worker login may write them: it finishes the batch in hand, then answers with version 4; nothing already answered is asked again.",
+      },
+    ],
+    notes: [],
+  },
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -846,6 +884,9 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     setupPreview: () => Promise.resolve(SAMPLE_PREVIEW),
     setupPlan: () => Promise.resolve(SAMPLE_SETUP_PLAN),
     setupInstall: () => Promise.resolve(SAMPLE_INSTALLED),
+    // An added question's install.
+    migratePlan: () => Promise.resolve(SAMPLE_MIGRATE_PLAN),
+    migrateRun: () => Promise.resolve(SAMPLE_MIGRATED),
     ...answers,
   };
   const admins: string[] = [];
@@ -880,6 +921,16 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
       admins.push(admin);
       calls.push(`setupInstall ${JSON.stringify({ ...confirm, draft })}`);
       return answer.setupInstall(admin, draft, confirm);
+    },
+    migratePlan: (source, admin) => {
+      admins.push(admin);
+      calls.push(`migratePlan ${source}`);
+      return answer.migratePlan(source, admin);
+    },
+    migrateRun: (source, admin, token) => {
+      admins.push(admin);
+      calls.push(`migrateRun ${source} ${token}`);
+      return answer.migrateRun(source, admin, token);
     },
     project: () => {
       calls.push("project");

@@ -149,6 +149,65 @@ export type SetupInstallOutcome =
       readonly file: "restored" | "kept" | "not-restored" | "changed";
     };
 
+/**
+ * An added question's install, shown: the whole idempotent install of the source as the file now
+ * holds it, as `facetdb migrate --source <name> --dry-run` prints the source's part.
+ */
+export type MigratePlan = {
+  readonly kind: "planned";
+  /** The engine that planned it: the run runs only on the same one. */
+  readonly engine: string;
+  /** The table as its engine names it: `public.listings`. */
+  readonly table: string;
+  /** The source's part of `facetdb migrate --source <name> --dry-run`, byte for byte. */
+  readonly sql: string;
+  readonly transactional: boolean;
+  /** The questions the file adds to what the source runs: what the install is for. */
+  readonly questions: readonly string[];
+  /** The store is another database: migrate also prints its part above this one (current here). */
+  readonly storeElsewhere: boolean;
+};
+
+export type MigratePlanOutcome = MigratePlan | SetupRefused;
+
+/** What the plan had shown, as the run is told it. */
+export type ShownMigration = { readonly engine: string; readonly sql: string };
+
+export type MigrateRunOutcome =
+  /** The install ran to its end, and the worker reloaded the file. */
+  | {
+      readonly kind: "migrated";
+      readonly table: string;
+      readonly reload: ReloadSummary;
+    }
+  /** Planned again right before the run, the script is not the one shown: nothing was run. */
+  | { readonly kind: "plan_changed" }
+  | SetupRefused
+  | {
+      readonly kind: "stopped";
+      readonly table: string;
+      readonly at: number | null;
+      readonly purpose: string | null;
+      readonly why: StopReason;
+      /** Whether the engine said how the run ended; false when it threw. */
+      readonly known: boolean;
+      /** Statements that ran and stay in the database: none on a transactional run. */
+      readonly kept: number;
+      readonly transactional: boolean;
+    };
+
+/**
+ * The CLI's door for installing an added question from the studio: `facetdb migrate`'s plan for one
+ * source of the file as it loads now, refused for anything but questions added (the reload's own
+ * rule), and its run, which writes no file and ends by asking the worker to reload. Each call takes
+ * the admin connection string for that call and keeps nothing.
+ */
+export type MigrateDoor = {
+  readonly available: boolean;
+  plan(name: string, admin: string): Promise<MigratePlanOutcome>;
+  run(name: string, admin: string, shown: ShownMigration): Promise<MigrateRunOutcome>;
+};
+
 export type SetupDoor = {
   /**
    * Whether this worker can add a source at all: it writes facetdb.config.ts (not `facetdb dev`,

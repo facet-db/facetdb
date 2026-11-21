@@ -97,6 +97,10 @@ function NotRunningFromReload({
 }) {
   const api = useApi();
   const config = useQuery(projectConfigQuery(api));
+  /** Per source, what the reload said after an install from the block. */
+  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   // The write's own read is under way when this first renders (Apply asks for it before it shows
   // the outcome), so the list held until it settles is from before the write: `waiting`. Then the
   // list was `read` since the write, or it is still `unread` because every read since has failed.
@@ -127,7 +131,11 @@ function NotRunningFromReload({
           why={entry.message}
           migrate={entry.migrate}
           added={entry.added}
+          removed={entry.removed}
           checkAgain={entry.checkAgain}
+          onInstalled={(words) => {
+            setInstalledNotes((before) => new Map(before).set(source.source, words));
+          }}
         />
       );
     }
@@ -141,8 +149,14 @@ function NotRunningFromReload({
         why={source.message ?? "the worker does not run the change yet."}
         migrate
         added={[]}
+        removed={[]}
         checkAgain={false}
       />
+    ) : installedNotes.has(source.source) ? (
+      // An install from the block ran and the block went: what the reload said stays.
+      <p key={source.source} role="status" className="m-0 border-l-2 border-yes pl-3">
+        {installedNotes.get(source.source)}
+      </p>
     ) : null;
   });
 }

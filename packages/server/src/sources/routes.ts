@@ -7,7 +7,7 @@ import type { AppEnv } from "../auth/middleware.ts";
 import { SESSION_COOKIE } from "../auth/sessions.ts";
 import { ApiError } from "../errors.ts";
 import { readJson, requireOwnPage } from "../request.ts";
-import type { SetupAnswer, SetupService } from "./service.ts";
+import { MIGRATE_OPERATOR_ONLY, type SetupAnswer, type SetupService } from "./service.ts";
 
 /**
  * The setup flow's endpoints: `GET /v1/sources/setup` says whether this browser may add a source
@@ -38,7 +38,18 @@ const installBody = z.strictObject({
   force: z.boolean().default(false),
 });
 
+/** A source's name in the path, as the config allows it. */
+const sourceName = z.string().min(1).max(200);
+const migratePlanBody = z.strictObject({ admin });
+const migrateRunBody = z.strictObject({
+  admin,
+  // The token `/migrate/plan` answered with: it names the script that was shown.
+  token: z.string().min(1).max(200),
+});
+
 const SHAPES = {
+  migratePlan: '{"admin": "<the admin connection string>"}',
+  migrateRun: '{"admin": "<the admin connection string>", "token": "<the plan\'s token>"}',
   inspect:
     '{"admin": "<the admin connection string>", "table": "<a table it listed>"} (table optional)',
   draft:
@@ -82,6 +93,13 @@ const SETUP_PAGE = {
   from: "Add the source from the studio this worker serves, on this machine.",
 } as const;
 
+/** `requireOwnPage`'s words for installing an added question. */
+const MIGRATE_PAGE = {
+  what: "Installing a question",
+  does: "installing a question connects to a database with an admin connection string on this machine",
+  from: "Install the question from the studio this worker serves, on this machine.",
+} as const;
+
 /** Whether the request is this machine's operator: loopback, and no session cookie. */
 function isOperator(c: Context<AppEnv>): boolean {
   return fromThisMachine(c.req.raw, c.env) && getCookie(c, SESSION_COOKIE) === undefined;
@@ -90,17 +108,37 @@ function isOperator(c: Context<AppEnv>): boolean {
 /**
  * The setup's writing routes take the operator alone: a request from another machine, through a
  * proxy, under a foreign Host or Origin, or signed in with an account, is refused before its body
- * is read; and only a page of the studio itself can send one (`requireOwnPage`, as Apply).
+ * is read; and only a page of the studio itself can send one (`requireOwnPage`, as Apply). An added
+ * question's install is guarded the same way, in its own words.
  */
-function requireOperator(service: SetupService) {
+function requireOperator(
+  service: SetupService,
+  page: Parameters<typeof requireOwnPage>[1] = SETUP_PAGE,
+  refusal?: { readonly message: string; readonly fix: string },
+) {
   return createMiddleware<AppEnv>(async (c, next) => {
     const access = service.access(isOperator(c));
     if (!access.open && access.code === "operator_only") {
-      throw new ApiError(403, access.code, access.message, access.fix);
+      const words = refusal ?? access;
+      throw new ApiError(403, access.code, words.message, words.fix);
     }
-    requireOwnPage(c.req, SETUP_PAGE);
+    requireOwnPage(c.req, page);
     await next();
   });
+}
+
+/** The source's name from the path, read against its schema; a bad one is named, never quoted. */
+function pathName(raw: string): string {
+  const name = sourceName.safeParse(raw);
+  if (!name.success) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      "The source's name in the path is not valid.",
+      "Send POST /v1/sources/<a source of facetdb.config.ts>/migrate/plan.",
+    );
+  }
+  return name.data;
 }
 
 function answered(answer: SetupAnswer<unknown>) {
@@ -144,6 +182,25 @@ export function setupRoutes(service: SetupService): Hono<AppEnv> {
         await service.install(body.admin, body.source, { token: body.token, force: body.force }),
       ),
     );
+  });
+
+  // An added question's install, shown then run, for a source the file has; the operator's alone,
+  // as the setup's.
+  route.use(
+    "/sources/:name/migrate/*",
+    requireOperator(service, MIGRATE_PAGE, MIGRATE_OPERATOR_ONLY),
+  );
+
+  route.post("/sources/:name/migrate/plan", async (c) => {
+    const name = pathName(c.req.param("name"));
+    const body = await parsed(migratePlanBody, c.req, SHAPES.migratePlan);
+    return c.json(answered(await service.migratePlan(body.admin, name)));
+  });
+
+  route.post("/sources/:name/migrate/run", async (c) => {
+    const name = pathName(c.req.param("name"));
+    const body = await parsed(migrateRunBody, c.req, SHAPES.migrateRun);
+    return c.json(answered(await service.migrateRun(body.admin, name, { token: body.token })));
   });
 
   return route;

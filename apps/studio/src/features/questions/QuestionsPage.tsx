@@ -39,6 +39,10 @@ export function QuestionsPage({
   const [testOpen, setTestOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyOpened, setApplyOpened] = useState(0);
+  /** Per source, what the reload said after an install from the page. */
+  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
 
   const data = config.data;
   useEffect(() => {
@@ -181,7 +185,14 @@ export function QuestionsPage({
             aria-labelledby={tabId(candidate.name)}
             hidden={candidate.name !== chosen}
           >
-            {waiting === undefined ? null : (
+            {waiting === undefined ? (
+              // An install from the block ran and the block went: what the reload said stays.
+              installedNotes.has(candidate.name) ? (
+                <p role="status" className="mb-6 max-w-[64ch] border-l-2 border-yes pl-3">
+                  {installedNotes.get(candidate.name)}
+                </p>
+              ) : null
+            ) : (
               <div className="mb-6">
                 <NotRunning
                   source={waiting.source}
@@ -189,7 +200,11 @@ export function QuestionsPage({
                   why={waiting.message}
                   migrate={waiting.migrate}
                   added={waiting.added}
+                  removed={waiting.removed}
                   checkAgain={waiting.checkAgain}
+                  onInstalled={(words) => {
+                    setInstalledNotes((before) => new Map(before).set(candidate.name, words));
+                  }}
                 />
               </div>
             )}

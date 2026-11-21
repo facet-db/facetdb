@@ -3,9 +3,11 @@
  * nothing but the service and the studio's drift test, so the studio's copy
  * (features/setup/outcome.ts) is held to it.
  *
- * Every code `POST /v1/sources/install` is refused with before facetdb.config.ts was written or
- * any statement ran: the HTTP surface's own refusals, which come before the service, and the
- * service's refusals before the door writes (install-routes.test.ts holds the service to this list).
+ * Every code `POST /v1/sources/install` is refused with before facetdb.config.ts was written or any
+ * statement ran: the HTTP surface's own refusals, which come before the service, and the service's
+ * refusals before the door writes (install-routes.test.ts holds the service to this list). `POST
+ * /v1/sources/:name/migrate/run` answers from the same list, and with the same stopped and unknown
+ * codes, so the page sorts an added question's install as it sorts a setup's.
  */
 export const INSTALL_NOTHING_RAN = [
   // The surface, before the service is called.

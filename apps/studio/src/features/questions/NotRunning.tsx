@@ -1,8 +1,9 @@
 import { Button } from "@facetdb/ui";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { ApiError, type ApplyReload, type PendingSource } from "../../api/index.ts";
 import { useApi, useDeps } from "../../deps.tsx";
+import { InstallQuestion } from "./InstallQuestion.tsx";
 import { CONFIG_KEY } from "./queries.ts";
 
 /**
@@ -14,7 +15,9 @@ import { CONFIG_KEY } from "./queries.ts";
  * a Copy that says it copied. When the worker switches the source once its database holds the
  * change (questions added and nothing else), no restart is needed: Check again asks the worker to
  * reload and read the database itself, says the source's outcome in the reload's words, and the
- * block goes once the list no longer names it.
+ * block goes once the list no longer names it. Where this browser is the worker's operator,
+ * questions added can be installed from the block itself (InstallQuestion): the SQL shown first,
+ * then run, then the reload.
  */
 
 type CopyState = "idle" | "copied" | "select";
@@ -124,16 +127,92 @@ function stepsOf(
   ];
 }
 
+/** The setup's own key: the Add a source page asks the same question of the worker. */
+const SETUP_ACCESS_KEY = ["sources", "setup"] as const;
+
+/**
+ * Whether the page may install the change itself: questions added to a table source the worker
+ * runs, and nothing removed; the worker's door refuses, with the commands, any other change this
+ * list cannot tell apart (a type changed beside a question added).
+ */
+function installable(
+  pending: Pick<PendingSource, "outcome" | "migrate" | "added" | "removed">,
+): boolean {
+  return (
+    pending.outcome === "kept" &&
+    pending.migrate &&
+    pending.added.length > 0 &&
+    pending.removed.length === 0
+  );
+}
+
+/**
+ * The page's own install, where the worker's operator routes are open to this browser (the setup's
+ * `GET /v1/sources/setup`: this machine, no sign-in); elsewhere nothing is offered and the commands
+ * above stay the way. The panel, and the admin string in it, go when it is closed.
+ */
+function InstallHere({
+  source,
+  added,
+  onInstalled,
+}: {
+  readonly source: string;
+  readonly added: readonly string[];
+  readonly onInstalled: (words: string) => void;
+}) {
+  const api = useApi();
+  const access = useQuery({
+    queryKey: SETUP_ACCESS_KEY,
+    queryFn: () => api.setupAccess(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const [open, setOpen] = useState(false);
+  if (access.data?.open !== true) {
+    return null;
+  }
+  if (open) {
+    return (
+      <InstallQuestion
+        source={source}
+        questions={added}
+        onInstalled={onInstalled}
+        onClose={() => {
+          setOpen(false);
+        }}
+      />
+    );
+  }
+  return (
+    <div className="grid justify-items-start gap-1.5">
+      <p className="m-0 max-w-[64ch]">
+        {`Or install ${added.length === 1 ? "it" : "them"} from this page, with the admin connection string of ${source}'s database: the SQL is shown first.`}
+      </p>
+      <Button
+        size="small"
+        onClick={() => {
+          setOpen(true);
+        }}
+      >
+        Install from this page
+      </Button>
+    </div>
+  );
+}
+
 export function NotRunning({
   source,
   outcome,
   why,
   migrate,
   added,
+  removed,
   checkAgain,
-}: Pick<PendingSource, "source" | "outcome" | "migrate" | "added" | "checkAgain"> & {
+  onInstalled,
+}: Pick<PendingSource, "source" | "outcome" | "migrate" | "added" | "removed" | "checkAgain"> & {
   /** The reload's own words for it. */
   readonly why: string;
+  /** An install from the page ran: the reload's words, for after the block goes. */
+  readonly onInstalled?: (words: string) => void;
 }) {
   const id = useId();
   const steps = stepsOf({ source, outcome, migrate, added, checkAgain });
@@ -155,6 +234,15 @@ export function NotRunning({
         ))}
       </ol>
       {checkAgain ? <CheckAgain source={source} /> : null}
+      {installable({ outcome, migrate, added, removed }) ? (
+        <InstallHere
+          source={source}
+          added={added}
+          onInstalled={(words) => {
+            onInstalled?.(words);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

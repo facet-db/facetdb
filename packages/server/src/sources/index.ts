@@ -15,12 +15,17 @@ export { NO_BACKFILL_JOBS } from "./backfill-door.ts";
 export { backfillRoutes } from "./backfill-routes.ts";
 export type {
   InspectOutcome,
+  MigrateDoor,
+  MigratePlan,
+  MigratePlanOutcome,
+  MigrateRunOutcome,
   SetupDoor,
   SetupInstallOutcome,
   SetupPlan,
   SetupPlanOutcome,
   SetupPreviewOutcome,
   SetupRefused,
+  ShownMigration,
   ShownPlan,
   StopReason,
 } from "./door.ts";
