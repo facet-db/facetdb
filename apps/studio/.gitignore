@@ -1,0 +1,4 @@
+# what a Playwright smoke run leaves behind
+test-results/
+playwright-report/
+smoke/screenshots/

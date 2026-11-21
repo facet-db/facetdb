@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "playwright test"
   },
   "dependencies": {
     "@facetdb/ui": "workspace:*",
