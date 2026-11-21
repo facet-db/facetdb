@@ -5,6 +5,7 @@ import {
   type AlertRecord,
   type AlertSeverity,
   RESOLVABLE_ALERT_KINDS,
+  readableTokenCounts,
 } from "@facetdb/core";
 import type { DashboardReads } from "./reads.ts";
 
@@ -154,7 +155,8 @@ export function eventsOf(records: readonly AlertRecord[]): readonly AlertEventVi
         // A resolved line is recorded as information; the event's own severity is the kind's.
         severity: record.phase === "resolved" ? ALERT_SEVERITY[event.kind] : record.severity,
         title: ALERT_TITLES[event.kind],
-        what: event.what,
+        // Rows written before the compact figures carry bare digits: read at a glance, as new rows are.
+        what: readableTokenCounts(event.what),
         project: event.project,
         source: event.source,
         question: event.question,

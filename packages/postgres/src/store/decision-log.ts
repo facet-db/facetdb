@@ -1,7 +1,7 @@
 import {
   type Answer,
   type AnswerEntry,
-  answerDecisions,
+  answerOutcomes,
   chosenWords,
   type DecisionLog,
   type HumanEntry,
@@ -9,8 +9,10 @@ import {
   isHumanDecision,
   type LogEntry,
   type LoggedUsage,
+  namedValue,
   type QuestionSet,
   type RecordKey,
+  type TaggedDecision,
 } from "@facetdb/core";
 import type { SqlClient, SqlQuery, SqlRow } from "../sql/index.ts";
 import { readQuestionSets } from "./question-sets.ts";
@@ -187,16 +189,23 @@ export type DecisionSearch = {
   readonly limit: number;
 };
 
-/** One log entry as the export has it, with the decision each of its answers led to. */
+/**
+ * What one question of a found entry came to: the decision in `facetdb explain`'s words with its
+ * tag (packages/core, log/explain.ts), and the option or level the model named, as the export's
+ * `value` column has it (empty for a noul, and for a score whose version the store no longer keeps).
+ */
+export type FoundAnswer = TaggedDecision & { readonly value: string };
+
+/** One log entry as the export has it, with what each of its answers led to. */
 export type FoundDecision = {
   readonly cursor: SearchCursor;
   readonly entry: LogEntry;
   /**
-   * By question name, in the words `facetdb explain` uses ("yes", "no", an option, "needs review";
-   * "unknown" when the store no longer keeps the version it ran under). A human entry holds its one
-   * question's chosen value.
+   * By question name. A human entry holds its one question's chosen value, decided, as a person's
+   * word always stands; a reviewer's undo reads "withdrawn", as the export prints it, and the entry
+   * itself says it is one (`isHumanDecision`).
    */
-  readonly decisions: Readonly<Record<string, string>>;
+  readonly decisions: Readonly<Record<string, FoundAnswer>>;
 };
 
 export type DecisionSearchPage = {
@@ -264,8 +273,43 @@ export function searchStatement(
   };
 }
 
-function statusOfDecisions(decisions: Readonly<Record<string, string>>): DecisionStatus {
-  return Object.values(decisions).includes("needs review") ? "needs_review" : "decided";
+/**
+ * By the tag, never the words: an option may be named "needs review", and an answer that decided
+ * it is decided.
+ */
+function statusOfDecisions(decisions: Readonly<Record<string, FoundAnswer>>): DecisionStatus {
+  return Object.values(decisions).some((decision) => decision.outcome === "needs_review")
+    ? "needs_review"
+    : "decided";
+}
+
+/** Each answer of a model call, tagged, with the option or level it named under the version's set. */
+function foundAnswers(
+  entry: AnswerEntry,
+  set: QuestionSet | undefined,
+): Readonly<Record<string, FoundAnswer>> {
+  const outcomes = answerOutcomes(entry, set);
+  return Object.fromEntries(
+    Object.entries(entry.answers).map(([name, answer]) => {
+      const question = set?.questions.find((candidate) => candidate.name === name);
+      return [
+        name,
+        {
+          ...(outcomes[name] ?? { words: "unknown", outcome: "unknown" }),
+          value: namedValue(question, answer),
+        },
+      ];
+    }),
+  );
+}
+
+/**
+ * A person's word on one question, as the export prints it. A person never leaves a question to
+ * review, so it files under decided, a withdrawal too; the API row's `withdrawn` tells that apart.
+ */
+function foundHuman(entry: HumanEntry): Readonly<Record<string, FoundAnswer>> {
+  const words = isHumanDecision(entry) ? chosenWords(entry.value) : "withdrawn";
+  return { [entry.question]: { words, outcome: "decided", value: words } };
 }
 
 /**
@@ -310,9 +354,8 @@ export async function searchDecisions(
     for (const [index, { cursor, entry }] of entries.entries()) {
       const decisions =
         entry.kind === "answer"
-          ? answerDecisions(entry, versions.get(entry.version))
-          : // A reviewer's undo reads "withdrawn", as the export prints it.
-            { [entry.question]: isHumanDecision(entry) ? chosenWords(entry.value) : "withdrawn" };
+          ? foundAnswers(entry, versions.get(entry.version))
+          : foundHuman(entry);
       if (status === undefined || statusOfDecisions(decisions) === status) {
         found.push({ cursor, entry, decisions });
       }

@@ -54,6 +54,8 @@ const queueSchema = z.object({
       open: z.array(z.object({ name: z.string(), figure: z.number().min(0).max(1) })),
     }),
   ),
+  // Every source the worker runs, with its questions, whatever the filter: what the filters offer.
+  sources: z.array(z.object({ name: z.string(), questions: z.array(z.string()) })),
 });
 export type ReviewQueue = z.infer<typeof queueSchema>;
 
@@ -82,6 +84,16 @@ const reviewOption = z.object({
   description: z.string().optional(),
   probability: z.number().min(0).max(1),
 });
+// The thresholds a question is decided by, resolved by the worker (its stakes defaults with the
+// config's override): a yes-or-no pair for a noul, one confidence for a choice or a score.
+const reviewThresholds = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("yes-no"),
+    yesAbove: z.number().min(0).max(1),
+    noBelow: z.number().min(0).max(1),
+  }),
+  z.object({ kind: z.literal("confidence"), confidenceAtLeast: z.number().min(0).max(1) }),
+]);
 const reviewOpenQuestion = z.object({
   name: z.string(),
   type: questionType,
@@ -90,6 +102,8 @@ const reviewOpenQuestion = z.object({
   figure: z.number().min(0).max(1),
   top: z.string(),
   options: z.array(reviewOption),
+  stakes: z.enum(["low", "high"]),
+  thresholds: reviewThresholds,
 });
 const reviewDecidedQuestion = z.object({
   name: z.string(),
@@ -222,20 +236,36 @@ const signedOutSchema = z.object({ signedOut: z.literal(true) });
  * the sources' names.
  */
 
+/**
+ * What an answer came to, as the worker tags it beside the words: an option or a level may be named
+ * "needs review" or "unknown", so the page reads the tag and shows the words.
+ */
+const decisionOutcomeSchema = z.enum(["decided", "needs_review", "unknown"]);
+export type DecisionOutcome = z.infer<typeof decisionOutcomeSchema>;
+
 /** One model answer as the log search carries it: the raw figures and what its version's thresholds made of it. */
 const loggedAnswerSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("noul"), probability: z.number(), decision: z.string() }),
+  z.object({
+    type: z.literal("noul"),
+    probability: z.number(),
+    decision: z.string(),
+    outcome: decisionOutcomeSchema,
+  }),
   z.object({
     type: z.literal("choice"),
     top: z.string(),
     probabilities: z.array(z.number()),
     decision: z.string(),
+    outcome: decisionOutcomeSchema,
   }),
   z.object({
     type: z.literal("score"),
     probabilities: z.array(z.number()),
     confidence: z.number(),
+    /** The most likely level's name by the levels of its version; empty when the worker no longer keeps that version. */
+    value: z.string(),
     decision: z.string(),
+    outcome: decisionOutcomeSchema,
   }),
 ]);
 export type LoggedAnswer = z.infer<typeof loggedAnswerSchema>;
@@ -259,6 +289,8 @@ const decisionRowSchema = z.discriminatedUnion("kind", [
     value: z.string(),
     decision: z.string(),
     decided_by: z.string(),
+    /** A reviewer took back their own decision: the row is an undo, whatever its word says. */
+    withdrawn: z.boolean(),
     note: z.string().optional(),
   }),
 ]);
@@ -289,12 +321,15 @@ const explainedEntrySchema = z.discriminatedUnion("kind", [
     at: z.string(),
     model: z.string(),
     version: z.number(),
+    /** The hash of the state the model was shown: another hash on a later answer is a changed record. */
+    stateHash: z.string(),
     answers: z.array(
       z.object({
         question: z.string(),
         wording: z.string(),
         said: z.string(),
         decision: z.string(),
+        outcome: decisionOutcomeSchema,
       }),
     ),
   }),
@@ -302,6 +337,8 @@ const explainedEntrySchema = z.discriminatedUnion("kind", [
     kind: z.literal("human"),
     at: z.string(),
     version: z.number(),
+    /** The state the reviewer saw; the decision stands while the record still has it. */
+    stateHash: z.string(),
     question: z.string(),
     wording: z.string(),
     decided: z.string(),
@@ -312,6 +349,7 @@ const explainedEntrySchema = z.discriminatedUnion("kind", [
     kind: z.literal("withdrawal"),
     at: z.string(),
     version: z.number(),
+    stateHash: z.string(),
     question: z.string(),
     wording: z.string(),
     reviewer: z.string(),
@@ -322,6 +360,12 @@ export type ExplainedEntry = z.infer<typeof explainedEntrySchema>;
 const decisionHistorySchema = z.object({
   source: z.string(),
   key: z.string(),
+  /**
+   * The record's status now, read from the record itself, and whether a person ever decided one
+   * of its questions; both null when the source does not run in the worker or the record is gone.
+   */
+  status: recordStatus.nullable(),
+  reviewed: z.boolean().nullable(),
   entries: z.array(explainedEntrySchema),
 });
 export type DecisionHistory = z.infer<typeof decisionHistorySchema>;
@@ -402,6 +446,8 @@ const studioAccessSchema = z.object({
   host: z.string().min(1),
   loopback: z.boolean(),
   reviewers: z.number().int().min(0),
+  /** Whether the worker's login may make an account; false in the default install (select only). */
+  accountsWritable: z.boolean(),
 });
 export type StudioAccess = z.infer<typeof studioAccessSchema>;
 
@@ -422,6 +468,15 @@ const spendingConfigSchema = z.object({
 /** The month's cap in billable input tokens (null when the config sets none), and what happens at 100%. */
 export type SpendingConfig = {
   readonly tokens: number | null;
+  readonly onCapReached: "pause" | "continue";
+};
+
+/**
+ * Settings' save of the spending cap, as `POST /v1/apply` takes a project draft: the cap in
+ * billable input tokens, null removing it, and what happens at 100%.
+ */
+export type SpendingDraft = {
+  readonly spendingCap: number | null;
   readonly onCapReached: "pause" | "continue";
 };
 
@@ -654,6 +709,15 @@ export type TestQuestionRow = TestResult["questions"][number];
 /** A refusal or a note in plain words, with what to do about it. */
 const wordsSchema = z.object({ message: z.string(), fix: z.string() });
 
+/**
+ * Why the write is refused without `force`: what git says of the file, which the studio words its
+ * own way, and the terminal's words (they name commands and `force`, so the page does not show them).
+ */
+const uncommittedSchema = wordsSchema.extend({
+  state: z.enum(["modified", "untracked", "ignored", "no-repository", "no-git", "unreadable"]),
+});
+export type UncommittedState = z.infer<typeof uncommittedSchema>["state"];
+
 /** `POST /v1/apply` without `confirm`: the file's diff and the plan that names it; nothing written. */
 const applyDiffSchema = z.object({
   written: z.literal(false),
@@ -661,8 +725,9 @@ const applyDiffSchema = z.object({
   diff: z.string(),
   changed: z.boolean(),
   plan: z.string(),
-  /** Why the write is refused without `force`: git keeps no copy of the file as it is. */
-  uncommitted: wordsSchema.nullable(),
+  uncommitted: uncommittedSchema.nullable(),
+  /** The file holds lines of the person's own (comments, code) the whole-file write drops. */
+  dropsOwnText: z.boolean(),
   warnings: z.array(wordingWarningSchema),
 });
 export type ApplyDiff = z.infer<typeof applyDiffSchema>;
@@ -721,6 +786,8 @@ const sourcesSchema = z.object({
       how: sourceLineSchema,
       lastChangeAt: z.string().nullable(),
       answers: z.string(),
+      /** The database's estimate of the table's rows; null when unknown, and for an API source. */
+      rows: z.number().int().nonnegative().nullable(),
       backfill: z.object({
         state: z.enum(["none", "part-way", "finished"]),
         fraction: probability.nullable(),
@@ -755,6 +822,8 @@ const inspectionSchema = z.object({
       key: z.string().nullable(),
       columns: z.array(z.object({ name: z.string(), type: z.string() })),
       rows: z.array(z.record(z.string(), z.string().nullable())),
+      /** The database's estimate of the table's rows from its statistics; null when it has none. */
+      estimatedRows: z.number().int().nonnegative().nullable(),
     })
     .nullable(),
 });
@@ -779,7 +848,7 @@ const setupPlanSchema = z.object({
   transactional: z.boolean(),
   path: z.string(),
   diff: z.string(),
-  uncommitted: wordsSchema.nullable(),
+  uncommitted: uncommittedSchema.nullable(),
   warnings: z.array(wordingWarningSchema),
   backfill: z.object({
     records: z.number().int().min(0),
@@ -963,6 +1032,13 @@ export type ApiClient = {
     draft: SourceDraft,
     confirm: { readonly plan: string; readonly force: boolean },
   ) => Promise<ApplyWritten>;
+  /** Settings: the diff the spending draft makes to facetdb.config.ts and its plan; nothing is written. */
+  readonly applySpendingDiff: (draft: SpendingDraft) => Promise<ApplyDiff>;
+  /** Writes the spending draft the plan names; the worker reloads and enforces the new cap at once. */
+  readonly applySpendingWrite: (
+    draft: SpendingDraft,
+    confirm: { readonly plan: string; readonly force: boolean },
+  ) => Promise<ApplyWritten>;
   /** `POST /v1/reload`, Check again: the worker reads the file and its databases again. */
   readonly reload: () => Promise<ApplyReload>;
   // The Sources page and the setup flow.
@@ -1027,14 +1103,16 @@ export function createApiClient(fetch: Fetch): ApiClient {
     body?: unknown,
     keepalive = false,
   ): Promise<z.output<Schema>> {
+    // Every write carries a JSON body declared as such, `{}` when there is nothing to say: that
+    // header is what the surface asks of a write to tell the studio's own page from another site's.
+    const written = method !== "GET";
     const response = await fetch(`${API}${path}`, {
       method,
       ...(keepalive ? { keepalive: true } : {}),
-      headers:
-        body === undefined
-          ? { accept: "application/json" }
-          : { accept: "application/json", "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      headers: written
+        ? { accept: "application/json", "content-type": "application/json" }
+        : { accept: "application/json" },
+      ...(written ? { body: JSON.stringify(body ?? {}) } : {}),
     });
     let json: unknown;
     try {
@@ -1150,6 +1228,10 @@ export function createApiClient(fetch: Fetch): ApiClient {
     applyDiff: (draft) => call(applyDiffSchema, "POST", "/apply", { source: draft }),
     applyWrite: (draft, { plan, force }) =>
       call(applyWrittenSchema, "POST", "/apply", { source: draft, confirm: plan, force }),
+    // The project's own spending settings ride as `project`, never inside a source.
+    applySpendingDiff: (draft) => call(applyDiffSchema, "POST", "/apply", { project: draft }),
+    applySpendingWrite: (draft, { plan, force }) =>
+      call(applyWrittenSchema, "POST", "/apply", { project: draft, confirm: plan, force }),
     // An empty JSON body: the header is the guard the route takes (Apply's), nothing in it is read.
     reload: () => call(reloadSchema, "POST", "/reload", {}),
     sources: async () => (await call(sourcesSchema, "GET", "/sources")).sources,

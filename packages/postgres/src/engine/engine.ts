@@ -19,7 +19,7 @@ import {
 import { connectPostgres, quoteIdent, type SqlClient, type SqlConnect } from "../sql/index.ts";
 import { STORE_VERSION_TABLE } from "../store/index.ts";
 import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
-import { inspectDatabase, readTableRows } from "./inspect.ts";
+import { estimateTableRows, inspectDatabase, readTableRows } from "./inspect.ts";
 import { installPlan, prunePlan, refusedPlan, uninstallPlan } from "./plans.ts";
 import { runPlan } from "./run.ts";
 import { adminUrlRefusal, subjectOf, workerUrlRefusal } from "./urls.ts";
@@ -348,6 +348,14 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
 
     readRows: (target, url, rowsOptions) =>
       readTableRows(connect, pgHost, target, url, rowsOptions),
+
+    async estimateRows(target, url, deps) {
+      const insecure = workerUrlRefusal(url, deps.allowInsecure, pgHost, subjectOf(target));
+      if (insecure !== undefined) {
+        throw new EngineRefusal(insecure);
+      }
+      return estimateTableRows(connect, target, url);
+    },
   };
 }
 

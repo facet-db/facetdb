@@ -35,6 +35,7 @@ export { createCheckStore } from "./check/store.ts";
 export { onlyRecord } from "./check/target.ts";
 export { PREVIEW_MAX_LIMIT } from "./config/routes.ts";
 export type {
+  ConfigDraft,
   ConfigFileDoor,
   ConfigService,
   DraftCheck,
@@ -45,9 +46,11 @@ export type {
   PendingSource,
   PreviewSource,
   ProjectConfigDoor,
+  ProjectDraft,
   ReloadSummary,
   SourceDraft,
   SourceReload,
+  UncommittedWords,
   Words,
 } from "./config/service.ts";
 export { createConfigService } from "./config/service.ts";

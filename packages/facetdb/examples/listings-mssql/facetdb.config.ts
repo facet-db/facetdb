@@ -5,7 +5,7 @@
 // (mssql://facetdb_worker:<password>@<host>:1433/<database>; on Azure SQL the worker is a contained
 // user of that database); DATABASE_URL is the store's Postgres, which keeps the decision log, usage
 // and alerts. On a host that forbids triggers, add capture: "change-tracking" to the source.
-import { choice, facetdb, noul } from "facetdb";
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
@@ -16,7 +16,7 @@ export default facetdb({
   sources: [
     {
       name: "listings",
-      database: process.env.LISTINGS_URL,
+      database: env("LISTINGS_URL"),
       table: "dbo.listings",
       read: ["title", "description"],
       questions: {

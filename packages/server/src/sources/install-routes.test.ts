@@ -280,6 +280,7 @@ function rig(behaviour: Behaviour = {}) {
                       key: "id",
                       columns: [{ name: "title", type: "text" }],
                       rows: [{ title: "Oak table" }],
+                      estimatedRows: 4_100,
                     },
                   }),
             },
@@ -325,6 +326,7 @@ function rig(behaviour: Behaviour = {}) {
       reviewers: {
         list: () => Promise.reject(new Error("no reviewers")),
         add: () => Promise.reject(new Error("no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
     },
@@ -441,7 +443,14 @@ describe("POST /v1/sources/inspect", () => {
     });
     expect(await t.call("inspect", { admin: ADMIN, table: "listings" })).toMatchObject({
       status: 200,
-      json: { table: { name: "listings", key: "id", rows: [{ title: "Oak table" }] } },
+      json: {
+        table: {
+          name: "listings",
+          key: "id",
+          rows: [{ title: "Oak table" }],
+          estimatedRows: 4_100,
+        },
+      },
     });
     expect(t.admins).toEqual([ADMIN, ADMIN]);
     expectNothingLeaked(t);

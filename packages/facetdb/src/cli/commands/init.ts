@@ -233,14 +233,14 @@ export function configTemplate(
   return [
     "// facetdb.config.ts: one project, one source per table, one question set per source.",
     "// What each setting means: https://docs.facetdb.dev/config",
-    'import { facetdb, noul } from "facetdb";',
+    'import { env, facetdb, noul } from "facetdb";',
     "",
     "export default facetdb({",
     `  model: "${STARTER_MODEL}", // pinned, never an alias such as jev-latest`,
     "  sources: [",
     "    {",
     `      name: "${sourceName(table)}",`,
-    `      database: process.env.${variable}, // read from the environment: this file never holds a password`,
+    `      database: env("${variable}"), // the variable's name, read from the environment: this file never holds a password`,
     // As written, as a string literal: an Oracle name in quotes may hold a space or a backslash.
     extras.collection === true
       ? `      table: ${JSON.stringify(table)}, // the collection whose documents get answers`

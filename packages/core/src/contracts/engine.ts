@@ -430,6 +430,11 @@ export type TableInspection = {
      * worker reads a state field (null for NULL), a value cut at `INSPECT_MAX_VALUE` characters.
      */
     readonly rows: readonly Readonly<Record<string, string | null>>[];
+    /**
+     * The database's own estimate of the table's rows from its statistics (no count is run), as
+     * `ReadRowsResult` carries it; null when it has none (a table never analysed).
+     */
+    readonly estimatedRows: number | null;
   };
 };
 
@@ -598,4 +603,15 @@ export type DatabaseEngine = {
    * the admin role inside those bounds. Absent where `inspect` is.
    */
   readRows?(target: EngineTarget, url: string, options: ReadRowsOptions): Promise<ReadRowsResult>;
+  /**
+   * The database's own estimate of the source table's rows from its statistics, under the worker
+   * login's `url`, for the Sources page; null when it has none (a table never analysed). No count
+   * runs over the table and nothing is changed. A refused URL throws an `EngineRefusal`, as `open`
+   * does. Absent on an engine with no cheap estimate: the page then shows none.
+   */
+  estimateRows?(
+    target: EngineTarget,
+    url: string,
+    deps: Pick<EngineDeps, "allowInsecure">,
+  ): Promise<number | null>;
 };

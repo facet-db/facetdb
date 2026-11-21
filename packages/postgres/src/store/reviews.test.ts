@@ -253,6 +253,37 @@ describe("facetdb.reviews keeps the queue's rules", () => {
     expect(await keysOf(queue, "ana", START, { below: 0.6 })).toEqual(["b", "c"]);
     expect(await keysOf(queue, "ana", START, { question: "category", below: 0.6 })).toEqual([]);
     expect(await keysOf(queue, "ana", START, { limit: 2 })).toEqual(["a", "b"]);
+    // One record's card alone, for the open of a named record.
+    expect(await keysOf(queue, "ana", START, { source: SOURCE, key: "b" })).toEqual(["b"]);
+    expect(await keysOf(queue, "ana", START, { source: SOURCE, key: "c" })).toEqual([]);
+  });
+
+  it("counts under the same clause as the listing, with the oldest card's since, and no card read", async () => {
+    const { queue } = await seeded(
+      card("a", { openQuestions: ["scam"], numbers: { scam: 0.62 } }),
+      card("b", {
+        openQuestions: ["scam", "category"],
+        numbers: { scam: 0.41, category: 0.7 },
+        since: new Date(START + 1_000),
+      }),
+      card("c", { source: "p1:messages", since: new Date(START + 2_000) }),
+    );
+    expect(await queue.count({}, "ana", START)).toEqual({
+      count: 3,
+      oldestSince: new Date(START),
+    });
+    expect(await queue.count({ below: 0.6 }, "ana", START)).toEqual({
+      count: 2,
+      oldestSince: new Date(START + 1_000),
+    });
+    expect(await queue.count({ question: "category", below: 0.6 }, "ana", START)).toEqual({
+      count: 0,
+      oldestSince: undefined,
+    });
+    // A card another reviewer holds is not counted for this viewer, as it is not listed.
+    await queue.lock(SOURCE, "a", "maya", START);
+    expect((await queue.count({ source: SOURCE }, "ana", START)).count).toBe(1);
+    expect((await queue.count({ source: SOURCE }, "maya", START)).count).toBe(2);
   });
 });
 

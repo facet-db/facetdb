@@ -6,7 +6,7 @@ import { fromThisMachine } from "../auth/loopback.ts";
 import type { AppEnv } from "../auth/middleware.ts";
 import { SESSION_COOKIE } from "../auth/sessions.ts";
 import { ApiError } from "../errors.ts";
-import { readJson, requireOwnPage } from "../request.ts";
+import { readJson } from "../request.ts";
 import { MIGRATE_OPERATOR_ONLY, type SetupAnswer, type SetupService } from "./service.ts";
 
 /**
@@ -86,20 +86,6 @@ async function parsed<Schema extends z.ZodType>(
   return body.data;
 }
 
-/** `requireOwnPage`'s words for the setup's routes, which connect to a database and write a file. */
-const SETUP_PAGE = {
-  what: "Adding a source",
-  does: "adding a source connects to a database and writes facetdb.config.ts on this machine",
-  from: "Add the source from the studio this worker serves, on this machine.",
-} as const;
-
-/** `requireOwnPage`'s words for installing an added question. */
-const MIGRATE_PAGE = {
-  what: "Installing a question",
-  does: "installing a question connects to a database with an admin connection string on this machine",
-  from: "Install the question from the studio this worker serves, on this machine.",
-} as const;
-
 /** Whether the request is this machine's operator: loopback, and no session cookie. */
 function isOperator(c: Context<AppEnv>): boolean {
   return fromThisMachine(c.req.raw, c.env) && getCookie(c, SESSION_COOKIE) === undefined;
@@ -108,12 +94,11 @@ function isOperator(c: Context<AppEnv>): boolean {
 /**
  * The setup's writing routes take the operator alone: a request from another machine, through a
  * proxy, under a foreign Host or Origin, or signed in with an account, is refused before its body
- * is read; and only a page of the studio itself can send one (`requireOwnPage`, as Apply). An added
- * question's install is guarded the same way, in its own words.
+ * is read. That only a page of the studio itself can send one is app.ts's `requireOwnPage`, ahead
+ * of this. An added question's install is guarded the same way, in its own words.
  */
 function requireOperator(
   service: SetupService,
-  page: Parameters<typeof requireOwnPage>[1] = SETUP_PAGE,
   refusal?: { readonly message: string; readonly fix: string },
 ) {
   return createMiddleware<AppEnv>(async (c, next) => {
@@ -122,7 +107,6 @@ function requireOperator(
       const words = refusal ?? access;
       throw new ApiError(403, access.code, words.message, words.fix);
     }
-    requireOwnPage(c.req, page);
     await next();
   });
 }
@@ -186,10 +170,7 @@ export function setupRoutes(service: SetupService): Hono<AppEnv> {
 
   // An added question's install, shown then run, for a source the file has; the operator's alone,
   // as the setup's.
-  route.use(
-    "/sources/:name/migrate/*",
-    requireOperator(service, MIGRATE_PAGE, MIGRATE_OPERATOR_ONLY),
-  );
+  route.use("/sources/:name/migrate/*", requireOperator(service, MIGRATE_OPERATOR_ONLY));
 
   route.post("/sources/:name/migrate/plan", async (c) => {
     const name = pathName(c.req.param("name"));

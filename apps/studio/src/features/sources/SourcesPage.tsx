@@ -9,6 +9,7 @@ import { Problem, whenWords } from "../decisions/index.ts";
 import { NotRunning, projectConfigQuery } from "../questions/index.ts";
 import { BackfillControls } from "./BackfillControls.tsx";
 import { SOURCES_REFRESH_MS, sourcesQuery } from "./queries.ts";
+import { aboutRows } from "./rows.ts";
 
 /**
  * The Sources page: a ruled row per source, its connector as the tag, how a change reaches the
@@ -54,7 +55,12 @@ function Row({ source }: { readonly source: SourceRow }) {
       </div>
       <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-2.5">
         <Line label={source.how.label}>{source.how.words}</Line>
-        <Line label="Answers">{source.answers}</Line>
+        <Line label="Answers">
+          {source.answers}
+          {source.rows === null ? null : (
+            <span className="text-text-2">{` · ${aboutRows(source.rows)}`}</span>
+          )}
+        </Line>
         <Line label="Backfill">
           {source.kind === "api" ? (
             // Records arrive one by one through the check API: nothing to go back over.

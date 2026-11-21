@@ -141,6 +141,28 @@ describe("Add a source", () => {
     expect(
       screen.getByRole("textbox", { name: "The source's name in facetdb.config.ts" }),
     ).toHaveValue("sellers");
+    // The database's estimate of 4,137 rows, rounded as an estimate reads.
+    expect(screen.getByText("about 4,100 rows")).toBeVisible();
+  });
+
+  it("names no size for a table the database has no estimate of", async () => {
+    const sellers = SAMPLE_SELLERS.table;
+    if (sellers === null) {
+      throw new Error("the sample inspects the sellers table");
+    }
+    const unanalysed: Inspection = {
+      ...SAMPLE_SELLERS,
+      table: { ...sellers, estimatedRows: null },
+    };
+    const api = fakeApi({
+      setupInspect: (_admin, table) =>
+        Promise.resolve(table === undefined ? SAMPLE_TABLES : unanalysed),
+    });
+    const studio = await opened(api);
+    await connected(studio);
+    await pick(studio, 1);
+    expect(await screen.findByRole("checkbox", { name: /bio/ })).toBeChecked();
+    expect(screen.queryByText(/^about .* rows?$/)).toBeNull();
   });
 
   // Seen in a real run: the list opened on nothing, and "clicking choose table doesn't do
@@ -202,7 +224,7 @@ describe("Add a source", () => {
     const keyless: Inspection = {
       ...SAMPLE_SELLERS,
       table: {
-        ...(SAMPLE_SELLERS.table ?? { name: "", columns: [], rows: [] }),
+        ...(SAMPLE_SELLERS.table ?? { name: "", columns: [], rows: [], estimatedRows: null }),
         name: "sellers",
         key: null,
       },
@@ -326,6 +348,7 @@ describe("Add a source", () => {
         Promise.resolve({
           ...SAMPLE_SETUP_PLAN,
           uncommitted: {
+            state: "modified",
             message:
               "facetdb.config.ts has changes git has not committed, and Apply would replace them",
             fix: 'commit them, or apply again with force ("force": true) to replace them',
@@ -335,11 +358,11 @@ describe("Add a source", () => {
     const studio = await opened(api);
     await written(studio);
     await studio.user.click(screen.getByRole("button", { name: "Show the SQL" }));
-    await screen.findByText(/has changes git has not committed/);
+    // The page's own plain words for the state; the terminal's (force, commit) are not shown.
+    await screen.findByText("This file has changes git has not saved.");
+    expect(screen.queryByText(/"force": true|git commit/)).toBeNull();
     expect(screen.getByRole("button", { name: "Run the install" })).toBeDisabled();
-    await studio.user.click(
-      screen.getByRole("checkbox", { name: "Replace facetdb.config.ts anyway" }),
-    );
+    await studio.user.click(screen.getByRole("checkbox", { name: "Replace it anyway" }));
     await studio.user.click(screen.getByRole("button", { name: "Run the install" }));
     await screen.findByRole("heading", { level: 2, name: "Installed on public.sellers" });
     expect(studio.api.calls.find((call) => call.startsWith("setupInstall "))).toContain(

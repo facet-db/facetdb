@@ -21,7 +21,8 @@ const TIME_INDEX =
 async function version5Store(): Promise<SqlClient> {
   const client = pgliteClient(await newDb());
   await migrateStore(client);
-  // Migration 7's change taken back first (store-migration-7.test.ts proves it on its own).
+  // Migrations 7 and 8 taken back first (each proved on its own in its store-migration-N.test.ts).
+  await client.query(`drop table facetdb.question_sets_in_force`);
   await client.query(`alter table facetdb.usage_alerts drop constraint usage_alerts_by_cap`);
   await client.query(`alter table facetdb.usage_alerts drop column cap`);
   await client.query(
@@ -29,7 +30,7 @@ async function version5Store(): Promise<SqlClient> {
   );
   await client.query(`drop table facetdb.reviews, facetdb.users, facetdb.runs`);
   await client.query(`drop index facetdb.decisions_by_time`);
-  await client.query(`delete from facetdb.store_migrations where version in (6, 7)`);
+  await client.query(`delete from facetdb.store_migrations where version in (6, 7, 8)`);
   return client;
 }
 
@@ -81,9 +82,9 @@ describe("store migration 6", () => {
 
     expect(await migrateStore(client)).toEqual([]);
 
-    // Migration 7 (the cap on a usage alert's claim) runs after it: the version-5 store lands current.
-    expect(SCHEMA_VERSION).toBe(7);
-    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 7, current: true });
+    // Migrations 7 and 8 run after it: the version-5 store lands current.
+    expect(SCHEMA_VERSION).toBe(8);
+    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 8, current: true });
     expect(await tables(client)).toEqual(["reviews", "runs", "users"]);
     expect(await timeIndex(client)).toEqual([TIME_INDEX]);
     expect(await client.query(`select count(*)::int as n from facetdb.decisions`)).toEqual([
@@ -173,7 +174,7 @@ describe("store migration 6", () => {
     await client.query(`delete from facetdb.store_migrations where version = 6`);
     await migrateStore(client);
     expect(await catalog(client)).toEqual(before);
-    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 7, current: true });
+    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 8, current: true });
   });
 
   it("prints migration 6 as three create table statements and one index, under the store's part", () => {

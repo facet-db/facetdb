@@ -17,7 +17,7 @@ import {
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 import { studioUrl } from "./studio.ts";
-import { DEFAULT_HOST, DEFAULT_PORT, parseHost } from "./worker.ts";
+import { DEFAULT_HOST, DEFAULT_PORT, parseHost, WORKER_CONNECTIONS } from "./worker.ts";
 
 /**
  * `facetdb studio` and `facetdb worker --studio-dir` through the in-process runner: the worker's
@@ -79,6 +79,7 @@ let store: Store;
 let served: { readonly handler: HttpHandler; readonly port: number; readonly host: string }[];
 let opened: string[];
 let storeAsked: number;
+let poolsAsked: (number | undefined)[];
 
 beforeAll(async () => {
   world = await createPgliteWorld();
@@ -93,6 +94,7 @@ beforeEach(async () => {
   served = [];
   opened = [];
   storeAsked = 0;
+  poolsAsked = [];
 });
 
 afterEach(async () => {
@@ -122,7 +124,10 @@ function run(
       osUser: () => "alex",
       setEnv: () => undefined,
       loadConfig: () => Promise.resolve(config),
-      connect: world.connect,
+      connect: (url, connectOptions) => {
+        poolsAsked.push(connectOptions?.max);
+        return world.connect(url, connectOptions);
+      },
       store: () => {
         storeAsked += 1;
         return Promise.resolve({ ...store, close: () => Promise.resolve() });
@@ -198,6 +203,15 @@ describe("facetdb studio", () => {
     expect(result.stdout).toContain(
       "The studio is at http://127.0.0.1:4141: open it in your browser.",
     );
+  });
+
+  it("takes --connections as the worker does: the store's pool holds that many", async () => {
+    // A Supabase session pooler: 15 sessions per login, filled by the studio's default of 10 plus
+    // the LISTEN connection beside a process just closed.
+    const result = await run(["studio", "--no-open", "--connections", "6"]);
+    expect(result.code, result.stderr).toBe(0);
+    expect(poolsAsked).toContain(6);
+    expect(poolsAsked).not.toContain(WORKER_CONNECTIONS);
   });
 
   it("keeps running and says to open the address by hand when no browser starts", async () => {

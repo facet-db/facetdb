@@ -133,10 +133,27 @@ export type ConnectorChoice = "polling";
  */
 export type CaptureMode = "trigger" | "change-tracking";
 
+/**
+ * The name of the environment variable a source reads its connection string from: what
+ * `env("DATABASE_URL")` builds. It holds the name only, never the value, so the file, its JSON export
+ * (`database: { env: "DATABASE_URL" }`) and the dashboard all carry the same thing, and the loader
+ * reads the string where the worker runs. Reading `process.env` here would freeze the value in the
+ * module cache and put a secret in a value the rest of FacetDB passes around.
+ */
+export type EnvVariable = { readonly env: string };
+
+export function env(name: string): EnvVariable {
+  return Object.freeze({ env: name });
+}
+
 export type SourceInput = {
   readonly name: string;
-  /** The connection string, read from the environment: `process.env.DATABASE_URL`. */
-  readonly database?: string | undefined;
+  /**
+   * Where the connection string comes from: `env("DATABASE_URL")` names the variable, and the loader
+   * reads it. A string (`process.env.DATABASE_URL`) still loads; the loader then finds the variable by
+   * its value, which is a guess where two variables hold the same string.
+   */
+  readonly database?: string | EnvVariable | undefined;
   /** Overrides the engine the scheme picks: `"polling"` for a host that forbids triggers. */
   readonly connector?: ConnectorChoice;
   /** SQL Server only: `"change-tracking"` watches the table without a trigger; `"trigger"` by default. */
@@ -182,6 +199,12 @@ export type SourceConfig = {
   readonly database?: string;
   /** The environment variable the connection string came from; the JSON export carries this. */
   readonly databaseEnv?: string;
+  /**
+   * The loader's mark that the file named the variable itself (`env("X")`) rather than the loader
+   * guessing it from the string's value: Apply then trusts `databaseEnv` as the file's own. Set by the
+   * loader alone; never in the JSON export, never in the file (the schema refuses the key).
+   */
+  readonly databaseEnvNamed?: true;
   /** The engine chosen over the scheme's: `"polling"`; absent, the scheme picks it. */
   readonly connector?: ConnectorChoice;
   /** How a SQL Server source notices changes, when the config says; absent, the trigger. */
@@ -246,10 +269,14 @@ function nameQuestions(drafts: SourceInput["questions"]): {
 
 function sourceConfig(input: SourceInput): SourceConfig {
   const { questions, thresholds } = nameQuestions(input.questions);
+  // `env("X")` names the variable and the loader reads it; a string is the value already read.
+  const database = input.database;
+  const named = typeof database === "object" ? database : undefined;
   return withDefined<SourceConfig>({
     name: input.name,
     api: input.api === true,
-    database: input.database,
+    database: named === undefined ? database : undefined,
+    databaseEnv: named?.env,
     connector: input.connector,
     capture: input.capture,
     lastChanged: input.lastChanged,

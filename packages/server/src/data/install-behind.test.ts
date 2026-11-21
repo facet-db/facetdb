@@ -60,6 +60,7 @@ function source(name: string, checks: readonly DoctorCheck[]): SourceFacts {
       answersIn: "columns",
       login: { kind: "user", user: "facetdb_worker", reach: "columns" },
       doctor: () => Promise.resolve(checks),
+      estimateRows: () => Promise.resolve(null),
     },
   };
 }

@@ -85,7 +85,7 @@ function offline(engine: DatabaseEngine): DatabaseEngine {
     ...options,
     allowInsecure: true,
   });
-  const { inspect, readRows } = engine;
+  const { inspect, readRows, estimateRows } = engine;
   return {
     ...engine,
     planInstall: (target, url, options) => engine.planInstall(target, url, trusted(options)),
@@ -99,6 +99,9 @@ function offline(engine: DatabaseEngine): DatabaseEngine {
     ...(readRows === undefined
       ? {}
       : { readRows: (target, url, options) => readRows(target, url, trusted(options)) }),
+    ...(estimateRows === undefined
+      ? {}
+      : { estimateRows: (target, url, deps) => estimateRows(target, url, trusted(deps)) }),
   };
 }
 

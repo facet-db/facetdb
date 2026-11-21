@@ -123,7 +123,10 @@ beforeEach(async () => {
   if (listings === undefined) {
     throw new Error("no source");
   }
-  await store.questionSets.record(LOG_ID, questionSetOf(config, listings));
+  // As the worker's loop open does since store migration 8: the version, then the set it runs.
+  const questionSet = questionSetOf(config, listings);
+  const recorded = await store.questionSets.record(LOG_ID, questionSet);
+  await store.questionSets.run(LOG_ID, recorded.version, questionSet);
   // r1 waits for a person on scam; r2 was decided by the thresholds; r3 waits on both questions.
   await answerRecord("r1", "Cheap car, wire only", {
     scam: { type: "noul", probability: 0.58 },
@@ -254,7 +257,14 @@ const statusOf = async (key: string) =>
 /** Every table a review could write, as it stands. */
 async function stored(): Promise<string> {
   const rows = [];
-  for (const table of ["question_set_versions", "reviews", "decisions", "sources", "projects"]) {
+  for (const table of [
+    "question_set_versions",
+    "question_sets_in_force",
+    "reviews",
+    "decisions",
+    "sources",
+    "projects",
+  ]) {
     rows.push(await world.client.query(`select * from facetdb.${table} order by 1, 2`));
   }
   return JSON.stringify(rows);
@@ -533,7 +543,7 @@ describe("facetdb review --from: a config file that is not what the worker runs"
         scam: noul("Does this listing look like a scam?"),
         team: choice("Which team owns this?", { billing: "Money", tech: "Technical" }),
       }),
-      code: "config-differs",
+      fallback: "config-differs",
     },
     "a threshold changed": {
       file: facetdb({
@@ -552,13 +562,24 @@ describe("facetdb review --from: a config file that is not what the worker runs"
           },
         ],
       }),
-      code: "config-may-differ",
+      fallback: "config-may-differ",
     },
   } as const;
 
-  it.each(Object.entries(drafts))(
-    "%s: stops before the password, a lock or a write, as the card does",
-    async (_name, draft) => {
+  // Against the worker's row of what it runs (store migration 8) every change is `config-differs`;
+  // a store whose worker has not started since that migration judges by the version's row, which
+  // cannot see a threshold (`fallback`).
+  const cases = Object.entries(drafts).flatMap(([name, draft]) => [
+    { name, file: draft.file, inForce: true, code: "config-differs" },
+    { name, file: draft.file, inForce: false, code: draft.fallback },
+  ]);
+
+  it.each(cases)(
+    "$name (the worker's row recorded: $inForce): stops before the password, a lock or a write, as the card does",
+    async (draft) => {
+      if (!draft.inForce) {
+        await world.client.query("delete from facetdb.question_sets_in_force");
+      }
       await store.users.add("maya", await hashPassword(PASSWORD));
       files.set(
         "decisions.jsonl",

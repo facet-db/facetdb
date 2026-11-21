@@ -131,7 +131,8 @@ describe("facetdb init", () => {
     );
 
     const file = await configFile();
-    expect(file).toContain("database: process.env.DATABASE_URL");
+    expect(file).toContain('import { env, facetdb, noul } from "facetdb";');
+    expect(file).toContain('database: env("DATABASE_URL")');
     expect(file).not.toContain("s3cret");
     expect(file).not.toContain("db.example.com");
     expect(result.stdout + result.stderr).not.toContain("s3cret");
@@ -372,7 +373,7 @@ describe("facetdb init asks for the store's Postgres only for a source that is n
       "Set ORDERS_URL to the source's connection string, and DATABASE_URL to the store's Postgres",
     );
     const file = await configFile();
-    expect(file).toContain("database: process.env.ORDERS_URL,");
+    expect(file).toContain('database: env("ORDERS_URL"),');
     expect(file + result.stdout + result.stderr).not.toContain("s3cret");
 
     const flagged = await run(
@@ -398,7 +399,7 @@ describe("facetdb init asks for the store's Postgres only for a source that is n
       { engines: [mysql] },
     );
     expect(result.code, result.stderr).toBe(0);
-    expect(await configFile()).toContain("database: process.env.DATABASE_SOURCE_URL,");
+    expect(await configFile()).toContain('database: env("DATABASE_SOURCE_URL"),');
     expect(result.stdout).toContain(
       "Set DATABASE_SOURCE_URL to the source's connection string, and DATABASE_URL to the store's Postgres",
     );
@@ -409,7 +410,7 @@ describe("facetdb init asks for the store's Postgres only for a source that is n
     expect(result.code, result.stderr).toBe(0);
     expect(result.prompts).toEqual([]);
     expect(result.stdout).not.toContain("a Postgres of yours");
-    expect(await configFile()).toContain("database: process.env.DATABASE_URL,");
+    expect(await configFile()).toContain('database: env("DATABASE_URL"),');
   });
 
   it("refuses a store that is not a Postgres, a PGlite one included, without echoing it", async () => {
@@ -622,7 +623,7 @@ describe("facetdb init names the engine and asks what it needs, one question eac
     ]);
     const file = await configFile();
     expect(file).toContain('connector: "polling",');
-    expect(file).toContain("database: process.env.LISTINGS_URL,");
+    expect(file).toContain('database: env("LISTINGS_URL"),');
     expect(result.stdout).toContain('No trigger, then: the config says connector: "polling"');
     expect(result.stdout).toContain(
       "2. Set LISTINGS_URL to the worker login's connection string and DATABASE_URL to the store owner's (the same database is fine)",
@@ -820,7 +821,7 @@ describe("facetdb init names the engine and asks what it needs, one question eac
       );
       expect(result.code, result.stderr).toBe(0);
       const variable = `${name.toUpperCase()}_URL`;
-      expect(await configFile()).toContain(`database: process.env.${variable},`);
+      expect(await configFile()).toContain(`database: env("${variable}"),`);
       const config = await loadWritten({ [variable]: "oracle://example-oracle" });
       expect(config.sources[0]).toMatchObject({ name, table, databaseEnv: variable });
     },
@@ -1023,7 +1024,7 @@ describe("facetdb init --example listings copies the example of every engine", (
     });
     expect(dry.code, dry.stderr).toBe(0);
     expect(dry.stdout).toContain("dry run: nothing is written");
-    expect(dry.stdout).toContain("process.env.LISTINGS_URL");
+    expect(dry.stdout).toContain('env("LISTINGS_URL")');
     await expect(configFile()).rejects.toThrow();
 
     await writeFile(join(dir, "seed.sql"), "-- my own seed\n");

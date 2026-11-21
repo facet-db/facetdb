@@ -45,7 +45,9 @@ there, it does not exist: say so and suggest the nearest one that does.
 
 The model key, the store key and the API key are never in the config file. They come from the
 environment: `TYPESAFE_API_KEY`, `FACETDB_SECRET`, `FACETDB_API_KEY`. A connection string is read
-from the environment too (`process.env.DATABASE_URL`). The worker logs in as `facetdb_worker`; a
+from the environment too: `database: env("DATABASE_URL")` names the variable, and the file never
+holds the string (`process.env.DATABASE_URL` still loads, its variable then found by its value: a
+guess where two variables hold one string). The worker logs in as `facetdb_worker`; a
 connection pooler's suffixed user is fine (the Supabase session pooler wants
 `facetdb_worker.<project ref>`), and `migrate` and `doctor` accept it. A pooler must be in session
 mode (Supabase port 5432), never transaction mode (Supabase port 6543, PgBouncer
@@ -56,7 +58,7 @@ fails its `pooler` check when the connection cannot keep one.
 
 ```ts
 // facetdb.config.ts: one project, any number of sources, one question set per source
-import { facetdb, noul, choice, score } from "facetdb";
+import { env, facetdb, noul, choice, score } from "facetdb";
 import { slack } from "@facetdb/slack";
 
 export default facetdb({
@@ -65,7 +67,7 @@ export default facetdb({
   sources: [
     {
       name: "support_messages",
-      database: process.env.DATABASE_URL,     // any supported database
+      database: env("DATABASE_URL"),          // the variable's name, never its value
       table: "support_messages",
       where: "channel <> 'internal'",         // optional filter on state fields; the rest are skipped
       read: ["subject", "body", "channel"],   // the state: only what the questions need

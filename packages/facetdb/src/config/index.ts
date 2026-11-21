@@ -1,19 +1,29 @@
 export type {
   ApplyPlan,
   ApplyResult,
+  ConfigDraft,
   ConfigFileRead,
   ConfigFiles,
   GitState,
   PlanResult,
+  Uncommitted,
+  UncommittedState,
 } from "./apply.ts";
 export { apply, planApply, uncommittedWords } from "./apply.ts";
-export type { DraftJudgement, NewSourceSetup, SourceDraft } from "./draft.ts";
-export { judgeDraftSource } from "./draft.ts";
+export type {
+  DraftJudgement,
+  NewSourceSetup,
+  ProjectDraft,
+  ProjectDraftJudgement,
+  SourceDraft,
+} from "./draft.ts";
+export { judgeDraftProject, judgeDraftSource } from "./draft.ts";
 export type {
   ActionCall,
   CaptureMode,
   ChoiceOptions,
   ConnectorChoice,
+  EnvVariable,
   JsonValue,
   NoulOptions,
   OnCapReached,
@@ -25,7 +35,7 @@ export type {
   SourceInput,
   StorageMode,
 } from "./dsl.ts";
-export { actionCall, choice, facetdb, noul, score } from "./dsl.ts";
+export { actionCall, choice, env, facetdb, noul, score } from "./dsl.ts";
 export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";
 export type { LoadedConfig, LoadOptions } from "./load.ts";

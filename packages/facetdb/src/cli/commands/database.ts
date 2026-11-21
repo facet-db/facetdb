@@ -81,7 +81,7 @@ export function tableTargets(
       only === undefined
         ? "no source in the config reads a table, so there is nothing to install"
         : `the source "${only}" does not read a table (an API source keeps its answers in the FacetDB store)`,
-      'add a source with table: "<name>" and database: process.env.DATABASE_URL to facetdb.config.ts',
+      'add a source with table: "<name>" and database: env("DATABASE_URL") to facetdb.config.ts',
     );
   }
   const databases = new Set(targets.map((target) => target.source.database ?? ""));

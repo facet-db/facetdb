@@ -1,43 +1,48 @@
-import {
-  Button,
-  Dialog,
-  DialogClose,
-  focusBrackets,
-  ScrollRegion,
-  Tag,
-  type TagTone,
-} from "@facetdb/ui";
+import { Button, Dialog, DialogClose, ScrollRegion, Tag, type TagTone } from "@facetdb/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { ApiError, type ApplyDiff, type ApplyReload, type SourceDraft } from "../../api/index.ts";
 import { useApi } from "../../deps.tsx";
 import { Problem } from "../decisions/index.ts";
+import { Disclosure } from "./Disclosure.tsx";
 import { sameDraft } from "./draft.ts";
 import { type Installed, InstalledNote } from "./InstallQuestion.tsx";
 import { NotRunning } from "./NotRunning.tsx";
 import { CONFIG_KEY, projectConfigQuery } from "./queries.ts";
+import { ReplaceAnyway } from "./ReplaceAnyway.tsx";
 
 /**
  * Apply: the page's one `facet` action. It opens on the file's diff, asked without `confirm`
  * (nothing is written), and the write is a second step that sends the plan that very diff named, so
- * nothing is written that was not shown. One write per plan: a second click sends nothing. `force`
- * is sent only when the person ticked the choice the endpoint's own words explain. A file changed
- * since the diff (409 plan_changed) shows the new diff; every other refusal shows its message and
- * its fix.
+ * nothing is written that was not shown. One write per plan: a second click sends nothing. Where
+ * git keeps no copy of the file, Apply waits for the person's "Replace it anyway", and `force` is
+ * sent only then. A file changed since the diff (409 plan_changed) shows the new diff; every other
+ * refusal shows its message and its fix. The words are plain ones: what a person who is not an
+ * engineer needs, and no more.
  */
 
-/** What a reload did to a source, in words, with the square's role. */
+/**
+ * What a reload did to a source, in the studio's own short words, with the square's role: the
+ * worker's sentence names versions and commands, so it waits behind Details for the engineer who
+ * wants it.
+ */
 const OUTCOMES: Record<
   Extract<ApplyReload, { loaded: true }>["sources"][number]["outcome"],
-  { readonly words: string; readonly tone: TagTone }
+  { readonly words: (source: string) => string; readonly tone: TagTone }
 > = {
-  restarted: { words: "restarted with the new question set", tone: "yes" },
-  started: { words: "started", tone: "yes" },
-  unchanged: { words: "unchanged", tone: "neutral" },
-  kept: { words: "kept running what it ran", tone: "review" },
-  "not-started": { words: "not started", tone: "review" },
-  stopped: { words: "stopped", tone: "no" },
-  failed: { words: "could not start anew", tone: "no" },
+  restarted: { words: (source) => `${source} now answers with the new questions.`, tone: "yes" },
+  started: { words: (source) => `${source} has started.`, tone: "yes" },
+  unchanged: { words: (source) => `${source} is unchanged.`, tone: "neutral" },
+  kept: {
+    words: (source) => `${source} keeps its old questions until the new one is installed.`,
+    tone: "review",
+  },
+  "not-started": { words: (source) => `${source} is not running yet.`, tone: "review" },
+  stopped: { words: (source) => `${source} has stopped.`, tone: "no" },
+  failed: {
+    words: (source) => `${source} could not switch to the new questions.`,
+    tone: "no",
+  },
 };
 
 /** What the config read again after an unanswered write says of it. */
@@ -54,30 +59,39 @@ function foundWords(found: "reading" | "written" | "not-written" | "unreachable"
   }
 }
 
-function DiffText({ diff }: { readonly diff: ApplyDiff }) {
+export function DiffText({ diff }: { readonly diff: ApplyDiff }) {
+  const id = useId();
   const lines = diff.diff.split("\n");
   return (
-    // A wide diff scrolls, and the keyboard reaches its far columns through the region.
-    <ScrollRegion
-      aria-label={`The changes to ${diff.path}`}
-      className="max-h-[50vh] border border-hairline"
-    >
-      <pre className="m-0 px-3.5 py-3 font-mono text-[12.5px] leading-relaxed">
-        {lines.map((line, index) => {
-          const added = line.startsWith("+") && !line.startsWith("+++");
-          const removed = line.startsWith("-") && !line.startsWith("---");
-          return (
-            <span
-              // biome-ignore lint/suspicious/noArrayIndexKey: a diff's line is its place in the text
-              key={index}
-              className={`block ${added ? "bg-surface-2 text-text" : "text-text-2"} ${removed ? "line-through decoration-text-3" : ""}`}
-            >
-              {line === "" ? " " : line}
-            </span>
-          );
-        })}
-      </pre>
-    </ScrollRegion>
+    <div className="grid min-w-0 gap-1.5">
+      <p id={id} className="m-0 text-[13px] text-text-2">
+        {`Changes to ${diff.path}`}
+      </p>
+      {/* A wide diff scrolls, and the keyboard reaches its far columns through the region. */}
+      <ScrollRegion aria-labelledby={id} className="max-h-[50vh] border border-hairline">
+        <DiffLines lines={lines} />
+      </ScrollRegion>
+    </div>
+  );
+}
+
+function DiffLines({ lines }: { readonly lines: readonly string[] }) {
+  return (
+    <pre className="m-0 px-3.5 py-3 font-mono text-[12.5px] leading-relaxed">
+      {lines.map((line, index) => {
+        const added = line.startsWith("+") && !line.startsWith("+++");
+        const removed = line.startsWith("-") && !line.startsWith("---");
+        return (
+          <span
+            // biome-ignore lint/suspicious/noArrayIndexKey: a diff's line is its place in the text
+            key={index}
+            className={`block ${added ? "bg-surface-2 text-text" : "text-text-2"} ${removed ? "line-through decoration-text-3" : ""}`}
+          >
+            {line === "" ? " " : line}
+          </span>
+        );
+      })}
+    </pre>
   );
 }
 
@@ -94,8 +108,11 @@ function DiffText({ diff }: { readonly diff: ApplyDiff }) {
  */
 function NotRunningFromReload({
   sources,
+  onInstalled,
 }: {
   readonly sources: Extract<ApplyReload, { loaded: true }>["sources"];
+  /** An install from a block ran and the worker reloaded once more: what it left. */
+  readonly onInstalled: (note: Installed) => void;
 }) {
   const api = useApi();
   const config = useQuery(projectConfigQuery(api));
@@ -136,8 +153,10 @@ function NotRunningFromReload({
           added={entry.added}
           removed={entry.removed}
           checkAgain={entry.checkAgain}
+          primary
           onInstalled={(note) => {
             setInstalledNotes((before) => new Map(before).set(source.source, note));
+            onInstalled(note);
           }}
         />
       );
@@ -154,6 +173,7 @@ function NotRunningFromReload({
         added={[]}
         removed={[]}
         checkAgain={false}
+        primary
       />
     ) : note === undefined ? null : (
       // An install from the block ran and the block went: what it left stays, with the backfill of
@@ -163,7 +183,7 @@ function NotRunningFromReload({
   });
 }
 
-function Reloaded({ reload }: { readonly reload: ApplyReload }) {
+export function Reloaded({ reload }: { readonly reload: ApplyReload }) {
   if (!reload.loaded) {
     return (
       <p role="alert" className="m-0 grid gap-1 border-l-2 border-no pl-3">
@@ -172,26 +192,42 @@ function Reloaded({ reload }: { readonly reload: ApplyReload }) {
       </p>
     );
   }
+  return <ReloadedSources reload={reload} />;
+}
+
+/**
+ * The sources as the latest reload left them. An install from a block below reloads the worker
+ * once more, and that reload replaces the write's in the list, so the list never still says a
+ * source waits once the install switched it; the blocks stay those of the write's reload.
+ */
+function ReloadedSources({ reload }: { readonly reload: Extract<ApplyReload, { loaded: true }> }) {
+  const [latest, setLatest] = useState(reload);
   return (
     <div className="grid gap-4">
-      <NotRunningFromReload sources={reload.sources} />
-      <ul className="m-0 grid list-none gap-2 p-0">
-        {reload.sources.map((source) => {
+      <NotRunningFromReload
+        sources={reload.sources}
+        onInstalled={(note) => {
+          if (note.reload.loaded) {
+            setLatest(note.reload);
+          }
+        }}
+      />
+      <ul className="m-0 grid list-none gap-3 p-0">
+        {latest.sources.map((source) => {
           const outcome = OUTCOMES[source.outcome];
           return (
-            <li key={source.source} className="grid gap-1">
-              <span className="flex flex-wrap items-center gap-2">
-                <strong>{source.source}</strong>
-                <Tag tone={outcome.tone}>{outcome.words}</Tag>
-              </span>
+            <li key={source.source} className="grid justify-items-start gap-1.5">
+              <Tag tone={outcome.tone}>{outcome.words(source.source)}</Tag>
               {source.message === null ? null : (
-                <span className="text-text-2">{source.message}</span>
+                <Disclosure label="Details" of={source.source}>
+                  <p className="m-0 max-w-[64ch] text-text-2">{source.message}</p>
+                </Disclosure>
               )}
             </li>
           );
         })}
       </ul>
-      {reload.notes.map((note) => (
+      {latest.notes.map((note) => (
         <p key={note} className="m-0 text-text-2">
           {note}
         </p>
@@ -215,7 +251,6 @@ function ApplyBody({
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
-  const id = useId();
   // The draft as it was when the dialog opened: the diff and the write are of the same one.
   const [asked] = useState(draft);
   const [attempt, setAttempt] = useState(0);
@@ -298,68 +333,45 @@ function ApplyBody({
     <div className="grid gap-4.5">
       {diff.isFetching ? (
         <p role="status" className="m-0 text-text-2">
-          Reading facetdb.config.ts and making the diff
+          Preparing the changes
         </p>
       ) : null}
       {diff.isError ? <Problem error={diff.error} /> : null}
       {moved && data !== undefined && !diff.isFetching ? (
         <p role="alert" className="m-0 border-l-2 border-review pl-3">
-          {`${data.path} changed since the diff you read, so nothing was written. This is the diff now: read it before writing.`}
+          The file changed in the meantime, so nothing was applied. These are the changes now.
         </p>
       ) : null}
-      {data === undefined || diff.isFetching ? null : (
+      {data === undefined || diff.isFetching ? null : data.changed ? (
         <>
-          <p className="m-0 text-text-2">
-            {`This writes ${data.path}. The worker reloads it and answers records from now on with the draft of ${source}.`}
-          </p>
-          {data.changed ? (
-            <>
-              <p className="m-0 text-text-2">
-                Apply writes the whole file in FacetDB's own form, as the diff shows: comments and
-                code of your own in it do not stay.
-              </p>
-              <DiffText diff={data} />
+          <p className="m-0">{`The worker starts answering ${source} with this.`}</p>
+          <div className="grid gap-2">
+            <DiffText diff={data} />
+            {data.dropsOwnText ? (
               <p className="m-0 text-[12.5px] text-text-2">
-                {changedQuestions.length === 0
-                  ? "No question's wording changes, so no record is asked again."
-                  : `Records already answered keep their answers. Re-answering them is a separate step, with its estimate shown first: facetdb backfill --source ${source} --question ${changedQuestions.join(",")}.`}
+                The file is rewritten whole; comments and code of your own in it are lost.
               </p>
-            </>
-          ) : (
-            <p className="m-0">{`The draft changes nothing in ${data.path}.`}</p>
-          )}
+            ) : null}
+          </div>
+          <p className="m-0 text-text-2">
+            {changedQuestions.length === 0
+              ? "Nothing is asked again."
+              : "Records already answered keep their answers. You can answer them with the new questions after this."}
+          </p>
         </>
+      ) : (
+        <p className="m-0">This draft is already applied.</p>
       )}
       {offerForce && written === undefined && data?.changed === true && !diff.isFetching ? (
-        <div className="grid gap-2">
-          {refusedUncommitted ? (
-            <Problem error={writeError} />
-          ) : uncommitted === null ? null : (
-            <p className="m-0 grid gap-1 border-l-2 border-review pl-3">
-              <span>{uncommitted.message}</span>
-              <span className="text-text-2">{uncommitted.fix}</span>
-            </p>
-          )}
-          <span
-            className={`${focusBrackets} relative inline-flex w-fit has-[:focus-visible]:after:opacity-100!`}
-          >
-            <input
-              id={`${id}-force`}
-              type="checkbox"
-              className="accent-facet focus-visible:outline-2 focus-visible:outline-transparent"
-              checked={force}
-              onChange={(event) => {
-                setForce(event.target.checked);
-              }}
-            />
-            <label htmlFor={`${id}-force`} className="pl-2">
-              {`Replace ${data.path} anyway: git keeps no copy of it as it is now`}
-            </label>
-          </span>
-        </div>
+        <ReplaceAnyway
+          state={uncommitted?.state ?? null}
+          refused={refusedUncommitted}
+          checked={force}
+          onChange={setForce}
+        />
       ) : null}
       <p role="status" className="m-0 text-text-2">
-        {write.isPending ? "Writing the file and reloading the worker" : ""}
+        {write.isPending ? "Applying" : ""}
       </p>
       {writeError !== null && !refusedUncommitted && !unknownOutcome ? (
         <Problem error={writeError} />
@@ -371,17 +383,16 @@ function ApplyBody({
         </p>
       ) : null}
       {written === undefined ? null : written.written ? (
-        <div className="grid gap-2">
-          <p role="status" className="m-0">
-            {`Written. ${written.path} holds the draft, and the worker reloaded it:`}
+        <div className="grid gap-3">
+          <p role="status" className="m-0 font-semibold">
+            Applied.
           </p>
           <Reloaded reload={written.reload} />
         </div>
       ) : (
-        <p
-          role="status"
-          className="m-0"
-        >{`Nothing was written: ${written.path} already says this.`}</p>
+        <p role="status" className="m-0">
+          Nothing changed: this draft was already applied.
+        </p>
       )}
       <div className="fdb-dialog-actions">
         <DialogClose asChild>
@@ -403,12 +414,16 @@ function ApplyBody({
         {data?.changed === true && written === undefined && !unknownOutcome && !diff.isFetching ? (
           <Button
             variant="primary"
-            disabled={write.isPending || (writeError !== null && !refusedUncommitted)}
+            disabled={
+              write.isPending ||
+              (writeError !== null && !refusedUncommitted) ||
+              (offerForce && !force)
+            }
             onClick={() => {
               confirm(data.plan);
             }}
           >
-            {`Write ${data.path}`}
+            Apply
           </Button>
         ) : null}
       </div>

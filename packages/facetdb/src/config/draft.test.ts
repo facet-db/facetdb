@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { judgeDraftSource } from "./draft.ts";
+import { judgeDraftProject, judgeDraftSource } from "./draft.ts";
 import { facetdb, noul, score } from "./dsl.ts";
 
 /** A draft from the studio judged as the loader judges a file, inside the loaded project. */
@@ -158,5 +158,72 @@ describe("judging a draft source", () => {
       ENV,
     );
     expect(JSON.stringify(CONFIG)).toBe(before);
+  });
+});
+
+describe("judging a project draft (Settings' spending section)", () => {
+  it("places the cap and onCapReached into the project, every source as it was", () => {
+    const judged = judgeDraftProject(
+      CONFIG,
+      { spendingCap: 2_000_000, onCapReached: "continue" },
+      ENV,
+    );
+    expect(judged).toEqual({
+      ok: true,
+      config: { ...CONFIG, spendingCap: 2_000_000, onCapReached: "continue" },
+    });
+  });
+
+  it("removes the cap on null, and keeps what the draft does not name", () => {
+    const capped = { ...CONFIG, spendingCap: 5_000_000, onCapReached: "continue" as const };
+    const removed = judgeDraftProject(capped, { spendingCap: null }, ENV);
+    expect(removed.ok).toBe(true);
+    expect(removed.ok && removed.config.spendingCap).toBeUndefined();
+    expect(removed.ok && removed.config.onCapReached).toBe("continue");
+    expect(judgeDraftProject(capped, { onCapReached: "pause" }, ENV)).toEqual({
+      ok: true,
+      config: { ...capped, onCapReached: "pause" },
+    });
+  });
+
+  it("reads only the connection variables the file names", () => {
+    const judged = judgeDraftProject(
+      CONFIG,
+      { spendingCap: 1000 },
+      { DATABASE_URL: URL, OTHER: "elsewhere" },
+    );
+    expect(judged.ok && judged.config.sources[0]?.database).toBe(URL);
+    expect(JSON.stringify(judged)).not.toContain("elsewhere");
+  });
+
+  it.each([
+    ["model", "jev-1.14.0", "change a source's model on the Questions page"],
+    ["modelUrl", "https://elsewhere.example", "where every record's state is sent"],
+    ["alerts", { channels: ["slack:#ops"] }, "where the worker posts its alerts"],
+    ["sources", [], "change a source with its own draft"],
+    ["retries", 3, "changes only spendingCap and onCapReached"],
+  ])("refuses %s in plain words, nothing judged", (key, value, words) => {
+    const judged = judgeDraftProject(CONFIG, { spendingCap: 1000, [key]: value }, ENV);
+    expect(judged).toEqual({
+      ok: false,
+      issues: [{ path: key, message: expect.stringContaining(words) }],
+    });
+    expect(!judged.ok && judged.issues[0]?.message).toContain("by hand");
+  });
+
+  it("refuses a cap the loader refuses, at the path spendingCap", () => {
+    expect(judgeDraftProject(CONFIG, { spendingCap: 0 }, ENV)).toEqual({
+      ok: false,
+      issues: [{ path: "spendingCap", message: "spendingCap must be more than 0" }],
+    });
+    expect(judgeDraftProject(CONFIG, { spendingCap: 1.5 }, ENV)).toEqual({
+      ok: false,
+      issues: [
+        {
+          path: "spendingCap",
+          message: "spendingCap must be a whole number of billable input tokens",
+        },
+      ],
+    });
   });
 });

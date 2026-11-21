@@ -292,6 +292,7 @@ function rig(
       reviewers: {
         list: () => Promise.reject(new Error("no reviewers")),
         add: () => Promise.reject(new Error("no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
     },

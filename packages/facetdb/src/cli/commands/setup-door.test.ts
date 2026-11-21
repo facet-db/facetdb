@@ -53,10 +53,14 @@ const DECLARED = facetdb({
   ],
 });
 
-/** As the loader reads `database: process.env.DATABASE_URL`. */
+/** As the loader reads the file the exporter writes, `database: env("DATABASE_URL")`. */
 const CONFIG: ProjectConfig = {
   ...DECLARED,
-  sources: DECLARED.sources.map((source) => ({ ...source, databaseEnv: "DATABASE_URL" })),
+  sources: DECLARED.sources.map((source) => ({
+    ...source,
+    databaseEnv: "DATABASE_URL",
+    databaseEnvNamed: true as const,
+  })),
 };
 const TEXT = configFileSource(CONFIG);
 
@@ -162,6 +166,7 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
                   { name: "title", type: "text" },
                 ],
                 rows: [{ id: "3", title: "Kids bike" }],
+                estimatedRows: 4_137,
               },
             }),
       },
@@ -296,11 +301,16 @@ describe("the setup door's inspection", () => {
       tables: ["listings", "orders"],
       table: null,
       // The file's first table source reads this very database: its variable is the one to suggest,
-      // so one database stays one string. The name alone.
+      // so one database stays one string, which a file still read through process.env needs for
+      // Apply to tell its variables apart. The name alone.
       sharedWith: { source: "orders", variable: "DATABASE_URL" },
     });
     const one = await t.door.inspect(ADMIN, "listings");
-    expect(one).toMatchObject({ kind: "inspected", table: { name: "listings", key: "id" } });
+    // The engine's estimate of the table's size goes to the page as it gave it.
+    expect(one).toMatchObject({
+      kind: "inspected",
+      table: { name: "listings", key: "id", estimatedRows: 4_137 },
+    });
     expect(t.engine.inspected).toEqual([null, "listings"]);
     // Another database on the same server: no source of the file reads it, nothing to suggest.
     expect(
@@ -379,7 +389,7 @@ describe("the setup door's plan", () => {
       throw new Error(`not planned: ${JSON.stringify(outcome)}`);
     }
     // The project as Apply would write it, which is what migrate loads from the file then.
-    const written = planApply({ path: PATH, text: TEXT, config: CONFIG }, DRAFT, ENV, {
+    const written = planApply({ path: PATH, text: TEXT, config: CONFIG }, { source: DRAFT }, ENV, {
       variable: "DATABASE_URL",
     });
     if (!written.ok) {
@@ -607,7 +617,7 @@ describe("a table the file already reads", () => {
       fix: "that source is orders; finish or check its install with facetdb migrate --source orders, or take it out with facetdb uninstall --source orders",
     });
     // An install sent for the diff the file would get (no plan answered one): refused as well.
-    const diff = planApply({ path: PATH, text: TEXT, config: CONFIG }, again, ENV, {
+    const diff = planApply({ path: PATH, text: TEXT, config: CONFIG }, { source: again }, ENV, {
       variable: "DATABASE_URL",
     });
     if (!diff.ok) {

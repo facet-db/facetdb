@@ -5,7 +5,7 @@
 // (mariadb://facetdb_worker:<password>@<host>:3306/<database>?ssl={"rejectUnauthorized":true});
 // DATABASE_URL is the store's Postgres, which keeps the decision log, usage and alerts. The admin
 // URL is passed to migrate and uninstall on the command line and never stored.
-import { choice, facetdb, noul } from "facetdb";
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
@@ -16,7 +16,7 @@ export default facetdb({
   sources: [
     {
       name: "listings",
-      database: process.env.LISTINGS_URL,
+      database: env("LISTINGS_URL"),
       table: "listings",
       read: ["title", "description"],
       questions: {

@@ -1,5 +1,6 @@
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
+import { createPostgresEngine } from "@facetdb/postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   type ConfigFiles,
@@ -9,6 +10,7 @@ import {
   noul,
   type ProjectConfig,
 } from "../../config/index.ts";
+import { lazyEngine } from "../engines.ts";
 import { sharePools } from "../pools.ts";
 import { runInProcess } from "../program.ts";
 import { storeSourceId } from "../store-door.ts";
@@ -250,5 +252,244 @@ describe("Apply on a running facetdb worker", () => {
     expect(result.stdout).toContain(
       "listings: the question set changed: it finishes the batch in hand, then answers with version 2; nothing already answered is asked again.",
     );
+  });
+
+  it("writes Settings' spending cap into the file on confirm, and the worker enforces it at once: Home shows the new cap, with no restart note", async () => {
+    const started: ProjectConfig = { ...INITIAL, spendingCap: 1_000_000 };
+    const written: ProjectConfig = { ...started, spendingCap: 3_000_000, onCapReached: "continue" };
+    const file = { text: configFileSource(started), writes: 0 };
+    const configs = [started, written];
+    const files: ConfigFiles = {
+      read: () => Promise.resolve({ kind: "file", text: file.text }),
+      replace: (_path, text) => {
+        file.text = text;
+        file.writes += 1;
+        return Promise.resolve();
+      },
+      gitState: () => Promise.resolve({ kind: "clean" }),
+    };
+    const loadConfig = () => {
+      const found = configs.find((config) => configFileSource(config) === file.text);
+      return found === undefined
+        ? Promise.reject(new Error("the test's file holds no known config"))
+        : Promise.resolve(found);
+    };
+    const project = { spendingCap: 3_000_000, onCapReached: "continue" };
+
+    const stop = new AbortController();
+    const answers: Record<string, unknown> = {};
+    const connect = sharePools(world.connect);
+    const result = await runInProcess(
+      ["worker"],
+      {
+        projectDir: PROJECT_DIR,
+        env: ENV,
+        osUser: () => "alex",
+        loadConfig,
+        configFiles: files,
+        engines: postgresEngines(connect),
+        connect,
+        store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
+        provider: () => provider,
+        clock: new FakeClock(1_700_000_000_000),
+        random: () => 0.5,
+        stopSignal: () => stop.signal,
+        webhookFetch: () => Promise.reject(new Error("no webhook is queued in these tests")),
+        serve: async (handler, port) => {
+          const ask = async (path: string, body?: unknown) => {
+            const response = await handler(
+              new Request(
+                `http://127.0.0.1:4040${path}`,
+                body === undefined
+                  ? {}
+                  : {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify(body),
+                    },
+              ),
+              THIS_MACHINE,
+            );
+            return {
+              status: response.status,
+              body: (await response.json()) as Record<string, unknown>,
+            };
+          };
+          const dry = await ask("/v1/apply", { project });
+          answers["dry"] = dry;
+          answers["writesAfterDry"] = file.writes;
+          answers["confirmed"] = await ask("/v1/apply", { project, confirm: dry.body["plan"] });
+          answers["home"] = (await ask("/v1/home")).body;
+          answers["config"] = (await ask("/v1/config")).body;
+          stop.abort();
+          return { port, close: () => Promise.resolve() };
+        },
+      },
+      COMMANDS,
+    );
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(answers["dry"]).toMatchObject({
+      status: 200,
+      body: {
+        written: false,
+        changed: true,
+        warnings: [],
+        diff: expect.stringContaining(
+          '-  spendingCap: 1000000,\n+  spendingCap: 3000000,\n+  onCapReached: "continue",',
+        ),
+      },
+    });
+    expect(answers["writesAfterDry"]).toBe(0);
+    expect(file.writes).toBe(1);
+    expect(file.text).toBe(configFileSource(written));
+    expect(answers["confirmed"]).toMatchObject({
+      status: 200,
+      body: {
+        written: true,
+        reload: {
+          loaded: true,
+          sources: [{ source: "listings", outcome: "unchanged" }],
+          notes: [],
+        },
+      },
+    });
+    // Home reads the cap in force, which the reload replaced.
+    expect(answers["home"]).toMatchObject({
+      spending: { cap: { inputTokens: 3_000_000, onCapReached: "continue" } },
+    });
+    expect(answers["config"]).toMatchObject({ spendingCap: 3_000_000, onCapReached: "continue" });
+    expect(provider.callCount).toBe(0);
+  });
+
+  it("writes the set in force at its start, again on a threshold-only Apply, and keeps it when the new loop does not open", async () => {
+    // Two threshold changes: neither makes a new version (the content hash does not see them), and
+    // only the set in force (store migration 8) says which one the worker runs.
+    const judge = (yesAbove: number) => {
+      const judged = judgeDraftSource(
+        INITIAL,
+        { name: "listings", thresholds: { is_scam: { yesAbove } } },
+        ENV,
+      );
+      if (!judged.ok) {
+        throw new Error("the draft is valid");
+      }
+      return judged.config;
+    };
+    const stricter = judge(0.9);
+    const strictest = judge(0.95);
+    const file = { text: configFileSource(INITIAL) };
+    const configs = [INITIAL, stricter, strictest];
+    const files: ConfigFiles = {
+      read: () => Promise.resolve({ kind: "file", text: file.text }),
+      replace: (_path, text) => {
+        file.text = text;
+        return Promise.resolve();
+      },
+      gitState: () => Promise.resolve({ kind: "clean" }),
+    };
+    const loadConfig = () => {
+      const found = configs.find((config) => configFileSource(config) === file.text);
+      return found === undefined
+        ? Promise.reject(new Error("the test's file holds no known config"))
+        : Promise.resolve(found);
+    };
+    // The table's key type is the open's last read before the set in force: failing it fails the
+    // open after the version is recorded, where the row was written before.
+    const keyText = { fail: false };
+    const connect = sharePools(world.connect);
+    const engine = createPostgresEngine({ connect, pgHost: undefined });
+    const engines = [
+      lazyEngine("postgres", () =>
+        Promise.resolve({
+          ...engine,
+          keyTextOf: () =>
+            keyText.fail
+              ? Promise.reject(new Error("the key type could not be read"))
+              : Promise.resolve({
+                  toText: (key: string) => key,
+                  fromText: (text: string) => text,
+                  form: "the key as stored",
+                }),
+        }),
+      ),
+    ];
+    const [source] = INITIAL.sources;
+    if (source === undefined) {
+      throw new Error("the test config has a source");
+    }
+    const sourceId = storeSourceId(projectRef(PROJECT_DIR).id, "listings");
+    const stop = new AbortController();
+    const seen: Record<string, unknown> = {};
+    const result = await runInProcess(
+      ["worker"],
+      {
+        projectDir: PROJECT_DIR,
+        env: ENV,
+        osUser: () => "alex",
+        loadConfig,
+        configFiles: files,
+        engines,
+        connect,
+        store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
+        provider: () => provider,
+        clock: new FakeClock(1_700_000_000_000),
+        random: () => 0.5,
+        stopSignal: () => stop.signal,
+        webhookFetch: () => Promise.reject(new Error("no webhook is queued in these tests")),
+        serve: async (handler, port) => {
+          const apply = async (config: ProjectConfig) => {
+            const draft = { name: "listings", thresholds: config.sources[0]?.thresholds };
+            const post = async (body: unknown) => {
+              const response = await handler(
+                new Request("http://127.0.0.1:4040/v1/apply", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify(body),
+                }),
+                THIS_MACHINE,
+              );
+              return (await response.json()) as Record<string, unknown>;
+            };
+            const dry = await post({ source: draft });
+            return post({ source: draft, confirm: dry["plan"] });
+          };
+          seen["started"] = await store.questionSets.inForce(sourceId);
+          seen["stricter"] = await apply(stricter);
+          seen["afterStricter"] = await store.questionSets.inForce(sourceId);
+          keyText.fail = true;
+          seen["strictest"] = await apply(strictest);
+          seen["afterStrictest"] = await store.questionSets.inForce(sourceId);
+          stop.abort();
+          return { port, close: () => Promise.resolve() };
+        },
+      },
+      COMMANDS,
+    );
+
+    expect(result.code, result.stderr).toBe(0);
+    // The start writes the set it runs.
+    expect(seen["started"]).toMatchObject({
+      version: 1,
+      questionSet: questionSetOf(INITIAL, source),
+    });
+    // A threshold-only Apply restarts the loop under the same version, and the row follows it.
+    expect(seen["stricter"]).toMatchObject({
+      written: true,
+      reload: { sources: [{ source: "listings", outcome: "restarted", version: 1 }] },
+    });
+    expect(seen["afterStricter"]).toMatchObject({
+      version: 1,
+      questionSet: { thresholds: { is_scam: { yesAbove: 0.9 } } },
+    });
+    expect(seen["afterStricter"]).toMatchObject({ questionSet: questionSetOf(stricter, source) });
+    // The next Apply's loop fails to open after its version was recorded: the old loop runs on,
+    // and the row still says what it runs, so facetdb review judges by that set and not the file.
+    expect(seen["strictest"]).toMatchObject({
+      written: true,
+      reload: { sources: [{ source: "listings", outcome: "failed", version: 1 }] },
+    });
+    expect(seen["afterStrictest"]).toEqual(seen["afterStricter"]);
+    expect(provider.callCount).toBe(0);
   });
 });

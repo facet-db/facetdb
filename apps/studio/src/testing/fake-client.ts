@@ -53,6 +53,12 @@ export const SAMPLE_QUEUE: ReviewQueue = {
       open: [{ name: "is_scam", figure: 0.58 }],
     },
   ],
+  // The fleet of SAMPLE_HOME with its questions: more than the one card waiting shows.
+  sources: [
+    { name: "listings", questions: ["is_scam", "category"] },
+    { name: "support_messages", questions: ["urgency", "team", "wants_refund"] },
+    { name: "profiles", questions: ["is_bot"] },
+  ],
 };
 
 /** The Review page's sample card (the mockup's): two open questions and one decided. */
@@ -79,6 +85,9 @@ export const SAMPLE_CARD: ReviewCard = {
         { name: "medium", probability: 0.31 },
         { name: "high", probability: 0.62 },
       ],
+      // Low stakes with the config's own line (SAMPLE_PROJECT_CONFIG's override).
+      stakes: "low",
+      thresholds: { kind: "confidence", confidenceAtLeast: 0.6 },
     },
     {
       name: "wants_refund",
@@ -91,6 +100,9 @@ export const SAMPLE_CARD: ReviewCard = {
         { name: "yes", probability: 0.84 },
         { name: "no", probability: 0.16 },
       ],
+      // High stakes on its defaults: the mockup's "decides on its own only at 90% or 10%".
+      stakes: "high",
+      thresholds: { kind: "yes-no", yesAbove: 0.9, noBelow: 0.1 },
     },
   ],
   decided: [
@@ -114,7 +126,7 @@ export const SAMPLE_HOME: Home = {
     checks: [
       { name: "worker", status: "ok", words: "Worker beating, 2 s ago" },
       { name: "model", status: "ok", words: "Model healthy" },
-      { name: "sources", status: "ok", words: "Three sources, logins as installed" },
+      { name: "sources", status: "ok", words: "Three sources, reachable and installed" },
     ],
     sources: [
       { name: "listings", verdict: "healthy", words: "Reachable, login as installed." },
@@ -142,7 +154,10 @@ export const SAMPLE_HOME: Home = {
     dollars: 3.2,
     cap: { inputTokens: 25_000_000, dollars: 25, onCapReached: "pause" },
     fraction: 0.128,
-    words: { figure: "$3.20", sub: "13% of the $25 monthly cap. The project pauses at 100%." },
+    words: {
+      figure: "3.2M of 25M",
+      sub: "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
+    },
   },
   alerts: [
     {
@@ -185,6 +200,7 @@ export const SAMPLE_DECISIONS: DecisionsPage = {
       value: "yes",
       decision: "yes",
       decided_by: "hailey",
+      withdrawn: false,
       note: "gift-card payment, two-day-old seller",
     },
     {
@@ -194,12 +210,18 @@ export const SAMPLE_DECISIONS: DecisionsPage = {
       version: 3,
       model: "jev-1.14.0",
       answers: {
-        is_scam: { type: "noul", probability: 0.58, decision: "needs review" },
+        is_scam: {
+          type: "noul",
+          probability: 0.58,
+          decision: "needs review",
+          outcome: "needs_review",
+        },
         category: {
           type: "choice",
           top: "electronics",
           probabilities: [0.95, 0.03, 0.02],
           decision: "electronics",
+          outcome: "decided",
         },
       },
     },
@@ -209,7 +231,9 @@ export const SAMPLE_DECISIONS: DecisionsPage = {
       record_key: "48190",
       version: 3,
       model: "jev-1.14.0",
-      answers: { is_scam: { type: "noul", probability: 0.02, decision: "no" } },
+      answers: {
+        is_scam: { type: "noul", probability: 0.02, decision: "no", outcome: "decided" },
+      },
     },
   ],
   next: null,
@@ -220,38 +244,47 @@ export function sampleHistory(source: string, key: string): DecisionHistory {
   return {
     source,
     key,
+    // The mockup's "Done, reviewed": hailey's decision settled the one question in review.
+    status: "done",
+    reviewed: true,
     entries: [
       {
         kind: "answer",
         at: "2026-11-03T10:02:00.000Z",
         model: "jev-1.14.0",
         version: 2,
+        stateHash: "hash-at-420",
         answers: [
           {
             question: "is_scam",
             wording: "Is this listing a scam?",
             said: "27% likely yes",
             decision: "no",
+            outcome: "decided",
           },
           {
             question: "category",
             wording: "Which category is this listing?",
             said: "electronics, 93% sure",
             decision: "electronics",
+            outcome: "decided",
           },
         ],
       },
       {
+        // The seller edited the listing: another state, asked again under the version then in force.
         kind: "answer",
         at: "2026-11-06T14:14:00.000Z",
         model: "jev-1.14.0",
         version: 3,
+        stateHash: "hash-at-390",
         answers: [
           {
             question: "is_scam",
             wording: "Is this listing a scam?",
             said: "58% likely yes",
             decision: "needs review",
+            outcome: "needs_review",
           },
         ],
       },
@@ -259,6 +292,7 @@ export function sampleHistory(source: string, key: string): DecisionHistory {
         kind: "human",
         at: "2026-11-06T14:31:00.000Z",
         version: 3,
+        stateHash: "hash-at-390",
         question: "is_scam",
         wording: "Is this listing a scam?",
         decided: "yes",
@@ -384,7 +418,12 @@ export const SAMPLE_ALERTS: Alerts = {
   capped: false,
 };
 
-export const SAMPLE_ACCESS: StudioAccess = { host: "127.0.0.1", loopback: true, reviewers: 2 };
+export const SAMPLE_ACCESS: StudioAccess = {
+  host: "127.0.0.1",
+  loopback: true,
+  reviewers: 2,
+  accountsWritable: true,
+};
 
 export const SAMPLE_REVIEWERS: ReviewerAccounts = [
   { name: "sam", createdAt: local(11, 3, 10, 0) },
@@ -609,6 +648,7 @@ export const SAMPLE_APPLY_DIFF: ApplyDiff = {
   changed: true,
   plan: "plan-1",
   uncommitted: null,
+  dropsOwnText: false,
   warnings: [],
 };
 
@@ -632,6 +672,46 @@ export const SAMPLE_APPLIED: ApplyWritten = {
   },
 };
 
+/** Settings' save of the cap (25,000,000 tokens to 40,000,000, keep answering): the diff it shows. */
+export const SAMPLE_SPENDING_DIFF: ApplyDiff = {
+  written: false,
+  path: "facetdb.config.ts",
+  diff: [
+    "--- a/facetdb.config.ts",
+    "+++ b/facetdb.config.ts",
+    "@@ -1,6 +1,7 @@",
+    ' import { facetdb, noul } from "facetdb";',
+    "",
+    " export default facetdb({",
+    '   model: "jev-1.14.0",',
+    "-  spendingCap: 25000000,",
+    "+  spendingCap: 40000000,",
+    '+  onCapReached: "continue",',
+    "   sources: [",
+    "",
+  ].join("\n"),
+  changed: true,
+  plan: "plan-spending",
+  uncommitted: null,
+  dropsOwnText: false,
+  warnings: [],
+};
+
+/** The cap written: every source runs on, and the worker took the cap up in the reload (no note). */
+export const SAMPLE_SPENDING_APPLIED: ApplyWritten = {
+  written: true,
+  path: "facetdb.config.ts",
+  diff: SAMPLE_SPENDING_DIFF.diff,
+  reload: {
+    loaded: true,
+    sources: [
+      { source: "listings", outcome: "unchanged", version: 3, message: null },
+      { source: "support_messages", outcome: "unchanged", version: 1, message: null },
+    ],
+    notes: [],
+  },
+};
+
 /*
  * The Sources page and the setup flow: the mockups' sources, an inspection of the marketplace
  * database, a plan and an install, shaped as the worker answers.
@@ -649,6 +729,7 @@ export const SAMPLE_SOURCES: readonly SourceRow[] = [
     },
     lastChangeAt: "2026-11-06T11:59:48.000Z",
     answers: "Inline columns on public.listings. 2 questions, version 3.",
+    rows: 41_237,
     backfill: {
       state: "finished",
       fraction: 1,
@@ -671,6 +752,7 @@ export const SAMPLE_SOURCES: readonly SourceRow[] = [
     },
     lastChangeAt: "2026-11-06T11:59:20.000Z",
     answers: "Kept in the FacetDB store. 1 question, version 2. Unsure records land in Review.",
+    rows: null,
     backfill: { state: "none", fraction: null, words: "None: records arrive one by one." },
     login: null,
   },
@@ -702,6 +784,7 @@ export const SAMPLE_SELLERS: Inspection = {
       { id: "202", bio: "Selling my old bikes", country: "NL", joined: "2024-03-01 10:00:00+00" },
       { id: "201", bio: "Vintage furniture since 2011", country: "BE", joined: null },
     ],
+    estimatedRows: 4_137,
   },
 };
 
@@ -728,7 +811,7 @@ export const SAMPLE_SETUP_PLAN: SetupPlan = {
     "@@ -20,0 +21,4 @@",
     "+    {",
     '+      name: "sellers",',
-    "+      database: process.env.DATABASE_URL,",
+    '+      database: env("DATABASE_URL"),',
     "+    },",
     "",
   ].join("\n"),
@@ -956,6 +1039,8 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     testDraft: () => Promise.resolve(SAMPLE_TEST_RESULT),
     applyDiff: () => Promise.resolve(SAMPLE_APPLY_DIFF),
     applyWrite: () => Promise.resolve(SAMPLE_APPLIED),
+    applySpendingDiff: () => Promise.resolve(SAMPLE_SPENDING_DIFF),
+    applySpendingWrite: () => Promise.resolve(SAMPLE_SPENDING_APPLIED),
     reload: () => Promise.resolve({ loaded: true, sources: [], notes: [] }),
     // The Sources page and the setup flow.
     sources: () => Promise.resolve(SAMPLE_SOURCES),
@@ -1160,6 +1245,14 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     applyWrite: (draft, confirm) => {
       calls.push(`applyWrite ${JSON.stringify({ ...confirm, draft })}`);
       return answer.applyWrite(draft, confirm);
+    },
+    applySpendingDiff: (draft) => {
+      calls.push(`applySpendingDiff ${JSON.stringify(draft)}`);
+      return answer.applySpendingDiff(draft);
+    },
+    applySpendingWrite: (draft, confirm) => {
+      calls.push(`applySpendingWrite ${JSON.stringify({ ...confirm, draft })}`);
+      return answer.applySpendingWrite(draft, confirm);
     },
     reload: () => {
       calls.push("reload");

@@ -137,7 +137,7 @@ async function databaseCheck(
       ),
       ...(milliseconds > FAR_MS
         ? {
-            warning: `the database is ${milliseconds} ms away; run the worker next to it, the 1 second target assumes a same-region link`,
+            warning: `the database answers in ${milliseconds} ms; run the worker in the same region for fast answers`,
           }
         : {}),
     };

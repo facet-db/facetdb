@@ -11,6 +11,7 @@ import {
   STORE_TABLES,
   STORE_VERSION_TABLE,
   STORE_WORKER_READ_ONLY_TABLES,
+  STORE_WORKER_UPSERT_TABLES,
   StoreNotInstalledError,
   sourceIdOf,
 } from "../store/index.ts";
@@ -158,9 +159,14 @@ describe("the install script and the store", () => {
           ? ["SELECT"]
           : STORE_APPEND_ONLY_TABLES.includes(table)
             ? ["INSERT", "SELECT"]
-            : ["DELETE", "INSERT", "SELECT", "UPDATE"],
+            : STORE_WORKER_UPSERT_TABLES.includes(table)
+              ? ["INSERT", "SELECT", "UPDATE"]
+              : ["DELETE", "INSERT", "SELECT", "UPDATE"],
       );
     }
+    // The set each worker runs, by name: upserted, never deleted from by the worker (store
+    // migration 8; uninstall and the store's purge delete as the admin).
+    expect(byTable.get("question_sets_in_force")).toEqual(["INSERT", "SELECT", "UPDATE"]);
     // The append-only logs, by name: the decision log and the question-set versions.
     expect(byTable.get("decisions")).toEqual(["INSERT", "SELECT"]);
     expect(byTable.get("question_set_versions")).toEqual(["INSERT", "SELECT"]);
@@ -202,6 +208,24 @@ describe("the install script and the store", () => {
       { table_name: "decisions", privileges: ["INSERT", "SELECT"] },
       { table_name: "question_set_versions", privileges: ["INSERT", "SELECT"] },
     ]);
+  });
+
+  it("an install made with delete on the set in force converges on select, insert and update", async () => {
+    // The first install of store migration 8 granted delete on the set in force too.
+    const world = await installed();
+    await world.client.query(`grant delete on facetdb.question_sets_in_force to facetdb_worker`);
+    await install(world);
+    const rights = () =>
+      world.client.query(
+        `select array_agg(privilege_type order by privilege_type) as privileges
+           from information_schema.table_privileges
+          where table_schema = 'facetdb' and grantee = 'facetdb_worker'
+            and table_name = 'question_sets_in_force'`,
+      );
+    expect(await rights()).toEqual([{ privileges: ["INSERT", "SELECT", "UPDATE"] }]);
+    // Run again, it changes nothing.
+    await install(world);
+    expect(await rights()).toEqual([{ privileges: ["INSERT", "SELECT", "UPDATE"] }]);
   });
 
   it("refuses, changing nothing, when the revoke on the logs took nothing back, and says who must run it", async () => {

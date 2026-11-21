@@ -10,6 +10,7 @@ import {
   type SourceRow,
 } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
+import { compactTokens } from "../../shell/index.ts";
 import { Problem, whenWords } from "../decisions/index.ts";
 import { countWords, dollarWords, plural } from "../questions/index.ts";
 import { BACKFILL_REFRESH_MS, type BackfillRead, backfillKey, backfillQuery } from "./queries.ts";
@@ -92,12 +93,13 @@ function estimateWords(
     spending === undefined || cap === null
       ? null
       : Math.max(0, cap.inputTokens - spending.inputTokens);
-  // What the cap does at 100% is the config's (onCapReached): a pause, or answering on.
+  // The cap and what it does at 100% are the worker's (GET /v1/home): the ones it enforces now,
+  // which each Apply from Settings replaces.
   const beyond =
     cap !== null && left !== null && estimate.tokens > left
-      ? ` That is more than what is left under this month's cap (${plural(left, "input token", "input tokens")}), so ${cap.onCapReached === "pause" ? "the answering pauses at the cap, part way" : "it goes past the cap, as the config says"}.`
+      ? ` That is more than what is left this month under the cap the worker runs with (${compactTokens(left)} input tokens), so ${cap.onCapReached === "pause" ? "the answering pauses at the cap, part way" : "it goes past the cap, as the worker was started to do"}.`
       : "";
-  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${countWords(Math.round(estimate.tokens))} input tokens)${time}.${beyond}`;
+  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${compactTokens(estimate.tokens)} input tokens)${time}.${beyond}`;
 }
 
 /** How far the job got, for the strip: the pages settled over the records estimated. */
@@ -288,7 +290,7 @@ export function BackfillControls({
     questions === undefined &&
     (job === undefined || job.questions === null) &&
     home.data?.spending.status === "paused"
-      ? "The worker is paused at the spending cap, so the records queued for it wait: raise spendingCap in facetdb.config.ts, or they are answered when the month resets."
+      ? "The worker is paused at the spending cap, so the records queued for it wait: raise the cap in Settings, which applies at once, or they are answered when the month resets."
       : "";
   const next = [job === undefined ? (failed?.fix ?? "") : nextWords(job, now), pausedNote]
     .filter((words) => words !== "")

@@ -8,16 +8,14 @@ export const TYPE_WORDS: Record<QuestionType, string> = {
   score: "Rate on a scale",
 };
 
-/** "What happens when the answer is wrong?": each stakes in words, with the cut it sets. */
-export function stakesWords(type: QuestionType, stakes: Stakes): string {
-  if (type === "noul") {
-    return stakes === "high"
-      ? "Something is hidden, rejected or charged, or a person is accused: high stakes, decide only when 90% sure"
-      : "Someone has to look twice: low stakes, decide at 70%";
-  }
+/**
+ * "What happens when this answer is wrong?": each stakes in words, with no figure: the cut in
+ * force, which a hand-set threshold can change, is said once, under the slider.
+ */
+export function stakesWords(stakes: Stakes): string {
   return stakes === "high"
-    ? "Something is hidden, rejected or charged: high stakes, decide only at 75% confidence"
-    : "Someone has to look twice: low stakes, decide at 50% confidence";
+    ? "High stakes: a wrong answer hides, rejects or charges something, or accuses someone"
+    : "Low stakes: a wrong answer gets a second look";
 }
 
 /** Dollars as a person reads a price this small: "$0.0002", "$0.04", "$1.20". */

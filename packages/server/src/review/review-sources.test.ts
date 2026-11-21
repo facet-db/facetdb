@@ -194,6 +194,27 @@ describe("the sources the review endpoints know", () => {
     });
   });
 
+  it("list the fleet on the queue, with each source's questions, whatever the filter and whether a card waits", async () => {
+    const t = rig();
+    const listings = { name: "listings", questions: ["scam"] };
+    const sellers = { name: "sellers", questions: ["scam"] };
+    const fleet = async (filter: { source?: string; question?: string }) => {
+      const queue = await t.service.queue(VIEWER, filter, 10);
+      return queue.kind === "queue" ? queue.sources : queue;
+    };
+
+    // No card waits yet: the filters still have the fleet to offer.
+    expect(await fleet({})).toEqual([listings]);
+    t.starts("sellers");
+    expect(await fleet({})).toEqual([listings, sellers]);
+    // Narrowing the cards never narrows the fleet.
+    await t.seed("sellers", "s1", "New here, cash only");
+    expect(await fleet({ source: "sellers", question: "scam" })).toEqual([listings, sellers]);
+    // A stopped source leaves the fleet from the next call on.
+    t.stops("listings");
+    expect(await fleet({})).toEqual([sellers]);
+  });
+
   it("forget a source a reload stopped, while the cards it left still say which source they are", async () => {
     const t = rig();
     t.starts("sellers");

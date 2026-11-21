@@ -30,12 +30,17 @@ export type AddOutcome =
 
 export type Reviewers = {
   list(): Promise<readonly ReviewerAccount[]>;
+  /**
+   * Whether `add` can succeed at all: false under the worker login, which may read the accounts
+   * and not write them, so the Settings page shows the terminal command instead of the form.
+   */
+  canAdd(): Promise<boolean>;
   /** Makes the account unless the name or password is not allowed or the name is taken. */
   add(name: string, password: string, addedBy: string): Promise<AddOutcome>;
 };
 
 export type ReviewersDeps = {
-  readonly users: Pick<UsersStore, "list" | "add">;
+  readonly users: Pick<UsersStore, "list" | "add" | "writable">;
   /** One line per account made: its name and who made it, never a password or a hash. */
   readonly log: (line: string) => void;
 };
@@ -43,6 +48,7 @@ export type ReviewersDeps = {
 export function createReviewers({ users, log }: ReviewersDeps): Reviewers {
   return {
     list: () => users.list(),
+    canAdd: () => users.writable(),
 
     async add(name, password, addedBy) {
       if (!isUserName(name)) {

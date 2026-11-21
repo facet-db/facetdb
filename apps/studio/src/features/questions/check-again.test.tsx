@@ -32,7 +32,7 @@ const LISTINGS_ADDED: PendingSource = {
   removed: [],
 };
 
-const NOT_RUNNING_HEADING = /is written to facetdb\.config\.ts and is not running yet$/;
+const NOT_RUNNING_HEADING = /is not running yet\.$/;
 
 function configWith(pending: readonly PendingSource[]): ProjectConfig {
   return { ...SAMPLE_PROJECT_CONFIG, pending: [...pending] };
@@ -60,8 +60,11 @@ function block() {
 
 describe("Check again on the Questions page", () => {
   it("offers Check again in place of the restart for a source the worker switches on its own reading of the database", async () => {
-    await questionsPage(worker(() => Promise.reject(new Error("not asked"))).api);
+    const studio = await questionsPage(worker(() => Promise.reject(new Error("not asked"))).api);
 
+    await studio.user.click(
+      await within(block()).findByRole("button", { name: "Show terminal steps" }),
+    );
     const steps = within(block()).getAllByRole("listitem");
     expect(steps).toHaveLength(3);
     expect(steps[0]).toHaveTextContent("facetdb migrate --source listings");
@@ -74,8 +77,11 @@ describe("Check again on the Questions page", () => {
   it("shows no Check again for a change that only a restart takes up", async () => {
     const { api, state } = worker(() => Promise.reject(new Error("not asked")));
     state.pending = [{ ...LISTINGS_ADDED, checkAgain: false }];
-    await questionsPage(api);
+    const studio = await questionsPage(api);
 
+    await studio.user.click(
+      await within(block()).findByRole("button", { name: "Show terminal steps" }),
+    );
     expect(within(block()).queryByRole("button", { name: "Check again" })).toBeNull();
     expect(within(block()).getByText(/^Restart the worker/)).toBeVisible();
   });

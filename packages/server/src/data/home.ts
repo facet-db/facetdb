@@ -3,8 +3,10 @@ import {
   type AlertRecord,
   type AlertSeverity,
   type Clock,
+  compactTokens,
   HEARTBEAT_LOSS_MS,
   monthOf,
+  readableTokenCounts,
   type SpendingCap,
   WORKER_NOT_RUNNING_WHAT,
 } from "@facetdb/core";
@@ -79,8 +81,8 @@ export type Spending = {
   readonly inputTokens: number;
   readonly dollars: number;
   /**
-   * The cap the worker enforces: the one it started with (a reload of the file changes the cap only
-   * at the next restart), and what it does at 100%. The Settings page compares it with the file.
+   * The cap the worker enforces now (each reload of the file replaces it), and what it does at
+   * 100%. The Settings page compares it with the file, which differs only when edited by hand.
    */
   readonly cap: {
     readonly inputTokens: number;
@@ -236,8 +238,8 @@ function sourcesCheck(sources: readonly SourceState[]): HealthCheck {
   }
   const all =
     sources.length === 1
-      ? "One source, its login as installed"
-      : `${counted(sources.length, "source", "sources")}, logins as installed`;
+      ? "One source, reachable and installed"
+      : `${counted(sources.length, "source", "sources")}, reachable and installed`;
   const warned = sources.filter((source) => source.verdict === "warning");
   return warned.length === 0
     ? { name: "sources", status: "ok", words: all }
@@ -300,9 +302,19 @@ function queueOf(
   };
 }
 
+/** "about $3.20"; "$0" and "less than $0.01" as they are, since neither is an approximation. */
+function aboutMoney(dollars: number): string {
+  const words = money(dollars);
+  return words.startsWith("$") && words !== "$0" ? `about ${words}` : words;
+}
+
+/**
+ * The month's input tokens as the figure, at a glance ("3.2M of 25M"; a real run: the cap is set in
+ * tokens, so the figure is in tokens, and the dollars follow in the sentence), and the sentence
+ * under it: the share of the cap, the price, and what happens at 100%.
+ */
 function spendingOf(inputTokens: number, cap: SpendingCap | undefined, month: string): Spending {
   const dollars = dollarsOf(inputTokens);
-  const figure = money(dollars);
   if (cap === undefined) {
     return {
       status: "uncapped",
@@ -312,9 +324,13 @@ function spendingOf(inputTokens: number, cap: SpendingCap | undefined, month: st
       cap: null,
       warningAt: SPENDING_WARNING_PERCENT / 100,
       fraction: null,
-      words: { figure, sub: "No monthly cap is set, so the project never pauses." },
+      words: {
+        figure: compactTokens(inputTokens),
+        sub: `Input tokens this month, ${aboutMoney(dollars)}. No monthly cap is set, so the project never pauses.`,
+      },
     };
   }
+  const figure = `${compactTokens(inputTokens)} of ${compactTokens(cap.inputTokens)}`;
   const capMoney = money(dollarsOf(cap.inputTokens));
   const pauses = cap.onCapReached === "pause";
   const atHundred = pauses
@@ -328,20 +344,23 @@ function spendingOf(inputTokens: number, cap: SpendingCap | undefined, month: st
     percent(inputTokens, cap.inputTokens),
     warned ? 99 : SPENDING_WARNING_PERCENT - 1,
   );
-  const share = `${shown}% of the ${capMoney} monthly cap`;
+  const price = `${aboutMoney(dollars)} of ${capMoney}`;
   const [status, sub]: [Spending["status"], string] = atCap
     ? pauses
       ? [
           "paused",
-          `The ${capMoney} monthly cap is reached: the project is paused until the month resets or the cap changes.`,
+          `Input tokens this month: the monthly cap is reached (${aboutMoney(dollars)}), so the project is paused until the month resets or the cap changes.`,
         ]
       : [
           "continuing",
-          `The ${capMoney} monthly cap is reached; the project keeps answering, as the config says.`,
+          `Input tokens this month: the monthly cap is reached (${aboutMoney(dollars)}); the project keeps answering, as the config says.`,
         ]
     : warned
-      ? ["warned", `${share}, past the 80% warning. ${atHundred}`]
-      : ["ok", `${share}. ${atHundred}`];
+      ? [
+          "warned",
+          `Input tokens this month: ${shown}% of the monthly cap, past the 80% warning, ${price}. ${atHundred}`,
+        ]
+      : ["ok", `Input tokens this month: ${shown}% of the monthly cap, ${price}. ${atHundred}`];
   return {
     status,
     month,
@@ -360,14 +379,16 @@ function spendingOf(inputTokens: number, cap: SpendingCap | undefined, month: st
 
 function alertOf(record: AlertRecord): HomeAlert {
   const { event } = record;
+  // Rows written before the compact figures carry bare digits: read at a glance, as new rows are.
+  const what = readableTokenCounts(event.what);
   return {
     at: new Date(record.at).toISOString(),
     phase: record.phase,
     severity: record.severity,
     badge: record.phase === "resolved" ? "Resolved" : SEVERITY_WORDS[record.severity],
     title: ALERT_TITLES[event.kind],
-    words: `${event.source}: ${event.what} ${event.did}`,
-    what: event.what,
+    words: `${event.source}: ${what} ${event.did}`,
+    what,
     project: event.project,
     source: event.source,
     question: event.question,

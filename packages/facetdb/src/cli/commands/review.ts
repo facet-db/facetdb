@@ -526,9 +526,13 @@ function stored(questionSet: QuestionSet): QuestionSet {
  * In what ways two question sets differ, in the words of the config. `covered` are the differences
  * the version's content hash sees (the model, the fields read, a question's type, name, wording,
  * criteria, options or levels): a worker restarted with the file records a new version, so the
- * store shows the change. `uncovered` are the rest (thresholds, the where filter, stakes, the
- * probability columns, the order of the questions): the store writes a version's set only once,
- * so it keeps these as they were when the version was made, and a restarted worker leaves no trace.
+ * version's row shows the change. `uncovered` are the rest (thresholds, the where filter, stakes,
+ * the probability columns, the order of the questions): the store writes a version's set only once,
+ * so the version's row keeps these as they were when the version was made. Compared with the set
+ * in force (`store.questionSets.inForce`, what the worker's last loop open recorded whole), every
+ * difference is one the worker really runs or not, covered or uncovered alike; the split matters
+ * only against a version's row, the fallback for a store whose worker has not started since store
+ * migration 8.
  */
 function differences(
   inStore: QuestionSet,
@@ -567,12 +571,16 @@ type InForce = {
 };
 
 /**
- * The question set and version the store holds for each source: what the worker last recorded, and
- * what the cards in the queue were judged by. The review writes nothing before a decision and
- * judges with these, never with the file. A source with no version has never run a worker, so it is
- * said so and left out; one whose file differs from its version in anything that changes how a
- * card reads (the questions, the fields read, the model, the thresholds, the where filter) stops
- * the review before any lock, because the worker is not running what the file says.
+ * The question set and version the store holds for each source: what the worker runs, and what the
+ * cards in the queue were judged by. The review writes nothing before a decision and judges with
+ * these, never with the file. The set in force (`inForce`, written whole at every loop open since
+ * store migration 8) is the first word: every difference between it and the file, thresholds, the
+ * where filter, stakes and order included, means the worker is not running what the file says, and
+ * stops the review before any lock. A store whose worker has not started since that migration has
+ * no such row, and the newest version's row stands in: it keeps only what its content hash sees,
+ * so a difference in the rest cannot be told from a worker already running the file, and the
+ * review refuses without judging either way (`config-may-differ`) until a worker starts and
+ * records what it runs. A source with neither has never run a worker, so it is said so and left out.
  */
 async function versionsInForce(
   store: Pick<OpenStore, "questionSets">,
@@ -582,10 +590,27 @@ async function versionsInForce(
 ): Promise<readonly InForce[]> {
   const kept: InForce[] = [];
   const drifted: string[] = [];
-  // Whether any difference is one the version's content hash sees (a restart then clears it).
-  let hashedChange = false;
+  // Whether any difference is one the store shows for certain: the set in force differs from the
+  // file, or a version's content hash sees the change (a restart then records the file).
+  let certain = false;
   for (const source of input.sources) {
     const id = storeSourceId(projectId, source.name);
+    const inFile = stored(questionSetOf(input.config, source));
+    const inForce = await store.questionSets.inForce(id);
+    if (inForce !== null) {
+      const apart = differences(inForce.questionSet, inFile);
+      const all = [...apart.covered, ...apart.uncovered];
+      if (all.length > 0) {
+        certain = true;
+        drifted.push(
+          `${source.name} runs version ${inForce.version}, and the file differs in ${all.join(" and ")}`,
+        );
+        continue;
+      }
+      kept.push({ source, questionSet: inForce.questionSet, version: inForce.version });
+      continue;
+    }
+    // The fallback: no worker has started on this store since migration 8 recorded what it runs.
     const latest = await store.questionSets.latest(id);
     if (latest === undefined) {
       print(
@@ -597,10 +622,10 @@ async function versionsInForce(
     if (inStore === undefined) {
       throw new Error(`the store lists version ${latest.version} of "${id}" but does not keep it`);
     }
-    const apart = differences(inStore, stored(questionSetOf(input.config, source)));
+    const apart = differences(inStore, inFile);
     const all = [...apart.covered, ...apart.uncovered];
     if (all.length > 0) {
-      hashedChange ||= apart.covered.length > 0;
+      certain ||= apart.covered.length > 0;
       drifted.push(
         `${source.name} runs version ${latest.version}, and the file differs in ${all.join(" and ")}`,
       );
@@ -608,14 +633,15 @@ async function versionsInForce(
     }
     kept.push({ source, questionSet: inStore, version: latest.version });
   }
-  if (drifted.length > 0 && !hashedChange) {
-    // Only values the store keeps as they were when the version was made: it cannot tell whether
-    // the worker already runs the file, so nothing here may tell the user to restart or to put the
-    // file back (either could leave the check passing while the worker runs something else).
+  if (drifted.length > 0 && !certain) {
+    // Only values a version's row keeps as they were when the version was made, and no row of what
+    // the worker runs: the store cannot tell whether the worker already runs the file. A restarted
+    // worker records what it runs, and this check then tells for sure; putting the file back
+    // proves nothing and is not suggested.
     throw new CliError(
       "config-may-differ",
-      `this check cannot tell whether the worker already runs ${input.context.options.config} (${drifted.join("; ")}), because the store keeps those values as they were when that version was made; nothing was locked or written`,
-      "review in the studio, which judges cards by what the worker runs",
+      `this check cannot tell whether the worker already runs ${input.context.options.config} (${drifted.join("; ")}), because the store keeps those values as they were when that version was made, and no worker has recorded what it runs since the store last migrated; nothing was locked or written`,
+      "restart facetdb worker with this file (it records what it runs, and this check can then tell), or review in the studio, which judges cards by what the worker runs",
     );
   }
   if (drifted.length > 0) {

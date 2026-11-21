@@ -5,10 +5,13 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import type { Answer } from "../thresholds/index.ts";
 import {
   type AnswerEntry,
+  answerOutcomes,
   answersCurrentFor,
   applyHumanDecision,
+  explainHistory,
   type HumanEntry,
   humanDecisionStands,
+  namedValue,
   type ReviewedRecord,
   reapplyThresholds,
   recordAnswer,
@@ -314,6 +317,40 @@ describe("a human decision stands until the record's state changes", () => {
       status: "done",
       reviewed: true,
     });
+  });
+
+  it("takes the history the caller just read for its first write, and still carries a decision logged meanwhile", async () => {
+    const journal: string[] = [];
+    const log = new FakeDecisionLog(journal);
+    const { write, writes } = fakeWriter(journal, { r1: "h1" });
+    const record: ReviewedRecord = {
+      ...reviewed("h1"),
+      questions: [scam, team],
+      decisions: { scam: { kind: "needs_review" }, team: { kind: "needs_review" } },
+      answers: {
+        scam: { type: "noul", probability: 0.55 },
+        team: { type: "choice", top: "billing", probabilities: [0.6, 0.4] },
+      },
+    };
+    // The card's history as the review screen loaded it; then another reviewer decides team.
+    const before = await log.history("r1");
+    await log.appendHuman(humanEntry("r1", "team", "billing", "h1"));
+
+    const result = await applyHumanDecision(
+      humanEntry("r1", "scam", true, "h1"),
+      record,
+      log,
+      write,
+      before,
+    );
+
+    // The first write carried the loaded history plus this entry; the re-read after it found the
+    // other reviewer's decision and wrote again, so the row holds both and the record is done.
+    expect(result).toEqual({ written: true, status: "done" });
+    expect(journal).toEqual(["append human r1", "append human r1", "write r1", "write r1"]);
+    expect(writes[0]?.decision.decisions["team"]).toEqual({ kind: "needs_review" });
+    expect(writes[1]?.decision.decisions["team"]).toMatchObject({ value: "billing" });
+    expect(writes[1]?.decision.decisions["scam"]).toMatchObject({ value: true });
   });
 
   it("leaves the record in review while another question is still undecided", async () => {
@@ -664,5 +701,84 @@ describe("a logged answer is current for a row (the worker's and the backfill's 
     await log.appendHuman(humanEntry("r1", "scam", true, "h1"));
     expect(answersCurrentFor(await log.latestAnswer("r1"), target)).toBe(false);
     expect(answersCurrentFor(undefined, target)).toBe(false);
+  });
+});
+
+describe("explain tags what each answer came to and keeps the state it saw (the why page)", () => {
+  // Options named like the other outcomes: the words cannot tell them apart, the tag can.
+  const queue: Question = {
+    type: "choice",
+    name: "queue",
+    instructions: "Which queue should take it?",
+    options: [
+      { name: "needs review", description: "A person looks first" },
+      { name: "unknown", description: "Nobody owns it yet" },
+    ],
+    stakes: "low",
+    storeProbabilities: false,
+  };
+  const urgency: Question = {
+    type: "score",
+    name: "urgency",
+    instructions: "How urgent is it?",
+    levels: [{ name: "calm" }, { name: "urgent" }],
+    stakes: "low",
+  };
+  const set = questionSet([scam, queue, urgency]);
+  const urgent: Answer = {
+    type: "score",
+    probabilities: [0.2, 0.8],
+    confidence: 0.6,
+    expected: 0.8,
+  };
+  const call = answerEntry("r1", "h1", {
+    scam: { type: "noul", probability: 0.5 },
+    queue: { type: "choice", top: "needs review", probabilities: [0.9, 0.1] },
+    urgency: urgent,
+  });
+
+  it("tags a decided option named 'needs review' as decided, and an undecided noul as needs review", () => {
+    expect(answerOutcomes(call, set)).toEqual({
+      scam: { words: "needs review", outcome: "needs_review" },
+      queue: { words: "needs review", outcome: "decided" },
+      urgency: { words: "urgent", outcome: "decided" },
+    });
+  });
+
+  it("tags every answer unknown when the store no longer keeps its version", () => {
+    expect(answerOutcomes(call, undefined)).toEqual({
+      scam: { words: "unknown", outcome: "unknown" },
+      queue: { words: "unknown", outcome: "unknown" },
+      urgency: { words: "unknown", outcome: "unknown" },
+    });
+  });
+
+  it("names a choice's top option and a score's most likely level, as the export's value", () => {
+    expect(namedValue(queue, { type: "choice", top: "unknown", probabilities: [0.1, 0.9] })).toBe(
+      "unknown",
+    );
+    expect(namedValue(urgency, urgent)).toBe("urgent");
+    // No levels to read it by: the version is gone.
+    expect(namedValue(undefined, urgent)).toBe("");
+    expect(namedValue(scam, { type: "noul", probability: 0.9 })).toBe("");
+  });
+
+  it("keeps the state hash on every entry, so a reader sees when the record changed", () => {
+    const withdrawn: HumanEntry = { ...humanEntry("r1", "scam", true, "h2"), value: WITHDRAWN };
+    const explained = explainHistory(
+      [call, humanEntry("r1", "scam", true, "h2"), withdrawn],
+      new Map([[1, set]]),
+    );
+    expect(explained.map((entry) => [entry.kind, entry.stateHash])).toEqual([
+      ["answer", "h1"],
+      ["human", "h2"],
+      ["withdrawal", "h2"],
+    ]);
+    const [answered] = explained;
+    expect(answered?.kind === "answer" ? answered.answers.map((a) => a.outcome) : []).toEqual([
+      "needs_review",
+      "decided",
+      "decided",
+    ]);
   });
 });

@@ -5,6 +5,7 @@ import {
   type Clock,
   type Connector,
   type CursorStore,
+  compactTokens,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
   type DecisionLog,
@@ -86,6 +87,8 @@ export type BackfillJobsDeps = {
   readonly provider: ModelProvider;
   /** The project's spending gate, the loops' own: every admission is counted together. */
   readonly spending: SpendingGate;
+  /** The lanes a job keeps in flight: the worker's own limit under `--connections`; the engine's default when absent. */
+  readonly maxInFlight?: number;
   readonly clock: Clock;
   readonly cursors: CursorStore;
   /** The source's decision log, by the source's name. */
@@ -290,7 +293,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       case "waiting":
         return estimate === null
           ? "Waiting to be started."
-          : `Estimated${asked(job)}: ${grouped.format(estimate.records)} records, about ${grouped.format(Math.round(estimate.tokens))} input tokens, ${money(estimate.dollars)}. Nothing is asked until it is started; an estimate not started within ${ESTIMATE_KEPT_MS / 60_000} minutes is dropped.`;
+          : `Estimated${asked(job)}: ${grouped.format(estimate.records)} records, about ${compactTokens(estimate.tokens)} input tokens, ${money(estimate.dollars)}. Nothing is asked until it is started; an estimate not started within ${ESTIMATE_KEPT_MS / 60_000} minutes is dropped.`;
       case "running":
         return `Running${asked(job)} under version ${job.loop.version}, newest first, at most ${DEFAULT_BACKFILL_PACE} records a second: ${grouped.format(counts.records)}${estimate === null ? "" : ` of ${grouped.format(estimate.records)}`} records done.`;
       case "stopping":
@@ -405,7 +408,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       case "paused":
         job.state = "paused";
         job.why =
-          "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts or wait for next month, then estimate again: it resumes after the last finished page.";
+          "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts (Settings can change it) and restart facetdb worker, or wait for next month, then estimate again: it resumes after the last finished page.";
         break;
     }
     job.token = null;
@@ -461,6 +464,9 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       });
       const report = await backfill.run({
         pace: DEFAULT_BACKFILL_PACE,
+        // Inside the worker's connection budget (without it the job took the engine's default of 8
+        // lanes on a pool of 6, and the review endpoints queued behind them).
+        ...(deps.maxInFlight === undefined ? {} : { maxInFlight: deps.maxInFlight }),
         ...(job.questions === null ? {} : { onlyQuestions: job.questions }),
         signal: job.halt.signal,
         onEstimate: (estimate) => waitForStart(job, estimate),

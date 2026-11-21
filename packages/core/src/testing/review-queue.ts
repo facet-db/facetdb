@@ -1,6 +1,7 @@
 import type { RecordKey } from "../contracts/index.ts";
 import {
   type LockResult,
+  type QueueCount,
   REVIEW_LOCK_MS,
   type ReviewCard,
   type ReviewEntry,
@@ -67,6 +68,19 @@ export class FakeReviewQueue implements ReviewQueue {
     return Promise.resolve(filter.limit === undefined ? cards : cards.slice(0, filter.limit));
   }
 
+  async count(
+    filter: Omit<ReviewFilter, "limit">,
+    viewer: string,
+    nowMs: number,
+  ): Promise<QueueCount> {
+    const cards = await this.list(filter, viewer, nowMs);
+    const oldest = cards.reduce<Date | undefined>(
+      (found, card) => (found === undefined || card.since < found ? card.since : found),
+      undefined,
+    );
+    return { count: cards.length, oldestSince: oldest };
+  }
+
   lock(source: string, key: RecordKey, viewer: string, nowMs: number): Promise<LockResult> {
     const row = this.#rows.get(idOf(source, key));
     if (row === undefined) {
@@ -131,6 +145,9 @@ function cardMatches(
     return false;
   }
   if (filter.source !== undefined && card.source !== filter.source) {
+    return false;
+  }
+  if (filter.key !== undefined && card.key !== filter.key) {
     return false;
   }
   const { question, below } = filter;

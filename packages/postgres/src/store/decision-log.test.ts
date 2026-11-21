@@ -190,14 +190,16 @@ describe("searching the log", () => {
     expect(keysOf(page)).toEqual(["d", "c", "b", "a", "b", "a"]);
     expect(page.next).toBeUndefined();
     const byKey = page.found.map(({ entry, decisions }) => [entry.kind, entry.key, decisions]);
+    // A noul names no option or level: its value is empty, its answer is the probability.
+    const decided = (words: string) => ({ words, outcome: "decided", value: "" });
     expect(byKey).toEqual([
       // "tone" is not a question of version 1, so there are no thresholds to read it by.
-      ["answer", "d", { tone: "unknown" }],
-      ["human", "c", { scam: "no" }],
-      ["human", "b", { scam: "yes" }],
-      ["answer", "a", { scam: "no" }],
-      ["answer", "b", { scam: "needs review" }],
-      ["answer", "a", { scam: "yes" }],
+      ["answer", "d", { tone: { words: "unknown", outcome: "unknown", value: "" } }],
+      ["human", "c", { scam: { words: "no", outcome: "decided", value: "no" } }],
+      ["human", "b", { scam: { words: "yes", outcome: "decided", value: "yes" } }],
+      ["answer", "a", { scam: decided("no") }],
+      ["answer", "b", { scam: { words: "needs review", outcome: "needs_review", value: "" } }],
+      ["answer", "a", { scam: decided("yes") }],
     ]);
     // The rows are the export's: the same entries `page` reads, with the cursor besides.
     const { entries } = await store.log("src").page(undefined, 10);
@@ -220,6 +222,54 @@ describe("searching the log", () => {
     expect(keysOf(await search({ status: "decided" }))).toEqual(["d", "c", "b", "a", "a"]);
     expect(keysOf(await store.searchDecisions({ source: "other", limit: 10 }))).toEqual(["z"]);
     expect(keysOf(await store.searchDecisions({ source: "nobody", limit: 10 }))).toEqual([]);
+  });
+
+  it("files by the tag, never the words, and names a score's level by its version's levels", async () => {
+    const store = await newStore();
+    // Option and level names are any one-line text, the other outcomes' words included.
+    await store.questionSets.record("triage", {
+      questions: [
+        {
+          type: "choice",
+          name: "queue",
+          instructions: "Which queue should take it?",
+          options: [
+            { name: "needs review", description: "A person looks first" },
+            { name: "withdrawn", description: "The seller took it down" },
+          ],
+          stakes: "low",
+          storeProbabilities: false,
+        },
+        {
+          type: "score",
+          name: "urgency",
+          instructions: "How urgent is it?",
+          levels: [{ name: "calm" }, { name: "urgent" }, { name: "unknown" }],
+          stakes: "low",
+        },
+      ],
+      read: ["body"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    });
+    await store.log("triage").appendAnswer({
+      ...answer("t", 0),
+      version: 1,
+      answers: {
+        queue: { type: "choice", top: "needs review", probabilities: [0.95, 0.05] },
+        urgency: { type: "score", probabilities: [0.1, 0.8, 0.1], confidence: 0.7, expected: 1 },
+      },
+    });
+    const search = (filters: object) =>
+      store.searchDecisions({ source: "triage", limit: 10, ...filters });
+
+    // The model decided the option "needs review": that is a decision, not a wait for a person.
+    expect(keysOf(await search({ status: "needs_review" }))).toEqual([]);
+    const [found] = (await search({ status: "decided" })).found;
+    expect(found?.decisions).toEqual({
+      queue: { words: "needs review", outcome: "decided", value: "needs review" },
+      urgency: { words: "urgent", outcome: "decided", value: "urgent" },
+    });
   });
 
   it("takes a time range, from inclusive and to exclusive", async () => {

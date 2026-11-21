@@ -1,13 +1,23 @@
 import {
   type AnswerEntry,
-  answerDecisions,
+  answerOutcomes,
+  type CurrentDecision,
+  chosenWords,
   explainHistory,
   type HumanEntry,
+  isHumanDecision,
   type KeyText,
   type LogEntry,
+  namedValue,
   type QuestionSet,
+  WITHDRAWN,
 } from "@facetdb/core";
-import type { DecisionSearch, DecisionSearchPage, FoundDecision } from "@facetdb/postgres";
+import type {
+  DecisionSearch,
+  DecisionSearchPage,
+  FoundAnswer,
+  FoundDecision,
+} from "@facetdb/postgres";
 import { sourceIdOf } from "@facetdb/postgres";
 import { describe, expect, it } from "vitest";
 import { createApp, type StudioAccess } from "../app.ts";
@@ -61,6 +71,7 @@ function localStudio(projectId: string): StudioAccess {
     reviewers: {
       list: () => Promise.reject(new Error("these tests list no reviewers")),
       add: () => Promise.reject(new Error("these tests add no reviewer")),
+      canAdd: () => Promise.resolve(false),
     },
     projectId,
   };
@@ -141,6 +152,31 @@ const decidedBy = (
   at: at(minute),
 });
 
+/** What the store makes of an entry (decision-log.ts), from the same core functions. */
+function foundOf(
+  entry: LogEntry,
+  set: QuestionSet | undefined,
+): Readonly<Record<string, FoundAnswer>> {
+  if (entry.kind === "human") {
+    const words = isHumanDecision(entry) ? chosenWords(entry.value) : "withdrawn";
+    return { [entry.question]: { words, outcome: "decided", value: words } };
+  }
+  const outcomes = answerOutcomes(entry, set);
+  return Object.fromEntries(
+    Object.entries(entry.answers).map(([name, answer]) => [
+      name,
+      {
+        words: outcomes[name]?.words ?? "unknown",
+        outcome: outcomes[name]?.outcome ?? "unknown",
+        value: namedValue(
+          set?.questions.find((question) => question.name === name),
+          answer,
+        ),
+      },
+    ]),
+  );
+}
+
 /**
  * An in-memory log in the order the real one searches: newest first, rows of one instant in the
  * order they were appended, the cursor the pair (time, position). The record every call made.
@@ -180,11 +216,10 @@ function fakeStore(rows: readonly LogEntry[], versions: Readonly<Record<number, 
         if (after !== undefined && !(time < after.atMs || (time === after.atMs && id > after.id))) {
           continue;
         }
-        const decisions =
-          entry.kind === "answer"
-            ? answerDecisions(entry, versions[entry.version])
-            : { [entry.question]: entry.value === true ? "yes" : "no" };
-        const status = Object.values(decisions).includes("needs review")
+        const decisions = foundOf(entry, versions[entry.version]);
+        const status = Object.values(decisions).some(
+          (decision) => decision.outcome === "needs_review",
+        )
           ? "needs_review"
           : "decided";
         if (search.status !== undefined && status !== search.status) {
@@ -227,9 +262,12 @@ function rig(
   options: {
     readonly keyText?: KeyText;
     readonly versions?: Readonly<Record<number, QuestionSet>>;
+    /** The records as their source holds them now, by source and key; absent is not running or gone. */
+    readonly current?: Readonly<Record<string, CurrentDecision>>;
   } = {},
 ) {
   const log = fakeStore(rows, options.versions ?? { 1: V1, 2: V2 });
+  const currentAsked: string[] = [];
   const appFor = (studioProject: string) =>
     createApp({
       keys,
@@ -242,6 +280,10 @@ function rig(
           projectId: PROJECT,
           sources: ["listings", "support_messages"],
           keyText: (source) => (source === "listings" ? options.keyText : undefined),
+          current: (source, key) => {
+            currentAsked.push(`${source}/${key}`);
+            return Promise.resolve(options.current?.[`${source}/${key}`]);
+          },
         }),
         home: { home: () => Promise.reject(new Error("these tests read no home")) },
         sources: { sources: () => Promise.reject(new Error("these tests read no sources")) },
@@ -267,7 +309,7 @@ function rig(
     return { status: response.status, body: (await response.json()) as Reply };
   }
 
-  return { get, searches: log.searches };
+  return { get, searches: log.searches, currentAsked };
 }
 
 /** A log of eight rows: six model calls and two people, over ten minutes, under two versions. */
@@ -302,7 +344,14 @@ describe("GET /v1/decisions", () => {
         version: 1,
         state_hash: "hash-e",
         model: "jev-1.14.0",
-        answers: { is_scam: { type: "noul", probability: 0.5, decision: "needs review" } },
+        answers: {
+          is_scam: {
+            type: "noul",
+            probability: 0.5,
+            decision: "needs review",
+            outcome: "needs_review",
+          },
+        },
       },
       {
         time: "2026-11-05T12:06:00.000Z",
@@ -314,6 +363,7 @@ describe("GET /v1/decisions", () => {
         value: "no",
         decision: "no",
         decided_by: "sam",
+        withdrawn: false,
         note: "checked the seller",
       },
       {
@@ -324,10 +374,86 @@ describe("GET /v1/decisions", () => {
         state_hash: "hash-d",
         model: "jev-1.14.0",
         // Version 2 asks for 90% before it says yes and 10% before it says no: 50% is review.
-        answers: { is_scam: { type: "noul", probability: 0.5, decision: "needs review" } },
+        answers: {
+          is_scam: {
+            type: "noul",
+            probability: 0.5,
+            decision: "needs review",
+            outcome: "needs_review",
+          },
+        },
       },
     ]);
     expect(body["next"]).toBeTypeOf("string");
+  });
+
+  it("tags each answer's outcome beside its words, names the option or level, and marks an undo", async () => {
+    // Options named like the other outcomes: only the tag tells a decided one from the rest.
+    const triage: QuestionSet = {
+      questions: [
+        {
+          type: "choice",
+          name: "queue",
+          instructions: "Which queue should take it?",
+          stakes: "low",
+          storeProbabilities: false,
+          options: [
+            { name: "needs review", description: "A person looks first." },
+            { name: "withdrawn", description: "The seller took it down." },
+          ],
+        },
+        {
+          type: "score",
+          name: "urgency",
+          instructions: "How urgent is it?",
+          stakes: "low",
+          levels: [
+            { name: "calm", description: "It can wait." },
+            { name: "urgent", description: "Today." },
+          ],
+        },
+      ],
+      read: ["title"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    const call: AnswerEntry = {
+      kind: "answer",
+      key: "t",
+      version: 1,
+      model: "jev-1.14.0",
+      stateHash: "hash-t",
+      answers: {
+        queue: { type: "choice", top: "needs review", probabilities: [0.95, 0.05] },
+        urgency: { type: "score", probabilities: [0.1, 0.9], confidence: 0.8, expected: 0.9 },
+      },
+      usage: { inputTokens: 100, outputTokens: 2 },
+      at: at(1),
+    };
+    const undo: HumanEntry = { ...decidedBy("t", 2, "amara", true), value: WITHDRAWN };
+    const { get } = rig([call, undo], { versions: { 1: triage } });
+    const { body } = await get("/v1/decisions?source=listings");
+    const [withdrawal, answer] = body["decisions"] as Record<string, unknown>[];
+    expect(withdrawal).toMatchObject({ kind: "human", decision: "withdrawn", withdrawn: true });
+    expect(answer?.["answers"]).toEqual({
+      queue: {
+        type: "choice",
+        top: "needs review",
+        probabilities: [0.95, 0.05],
+        value: "needs review",
+        decision: "needs review",
+        outcome: "decided",
+      },
+      urgency: {
+        type: "score",
+        probabilities: [0.1, 0.9],
+        confidence: 0.8,
+        expected: 0.9,
+        value: "urgent",
+        decision: "urgent",
+        outcome: "decided",
+      },
+    });
   });
 
   it("passes each filter to the log as the caller named it, under the project's source id", async () => {
@@ -445,6 +571,9 @@ describe("GET /v1/decisions/:source/:key", () => {
     expect(body).toEqual({
       source: "listings",
       key: "a",
+      // The source holds no record "a" in this rig: the log alone speaks.
+      status: null,
+      reviewed: null,
       entries: JSON.parse(
         JSON.stringify(
           explainHistory(
@@ -468,12 +597,14 @@ describe("GET /v1/decisions/:source/:key", () => {
         at: "2026-11-05T12:00:00.000Z",
         model: "jev-1.14.0",
         version: 1,
+        stateHash: "hash-a",
         answers: [
           {
             question: "is_scam",
             wording: "Is it a scam?",
             said: "90% likely yes",
             decision: "yes",
+            outcome: "decided",
           },
         ],
       },
@@ -482,12 +613,14 @@ describe("GET /v1/decisions/:source/:key", () => {
         at: "2026-11-05T12:04:00.000Z",
         model: "jev-1.14.0",
         version: 2,
+        stateHash: "hash-a",
         answers: [
           {
             question: "is_scam",
             wording: "Does the listing look like a scam?",
             said: "95% likely yes",
             decision: "yes",
+            outcome: "decided",
           },
         ],
       },
@@ -497,6 +630,7 @@ describe("GET /v1/decisions/:source/:key", () => {
       kind: "human",
       at: "2026-11-05T12:06:00.000Z",
       version: 2,
+      stateHash: "hash-d",
       question: "is_scam",
       wording: "Does the listing look like a scam?",
       decided: "no",
@@ -513,7 +647,24 @@ describe("GET /v1/decisions/:source/:key", () => {
       wording: "is_scam",
       said: "50% likely yes",
       decision: "unknown",
+      outcome: "unknown",
     });
+  });
+
+  it("carries the record's status now, read through the source, by the key the source holds", async () => {
+    const now: CurrentDecision = {
+      decisions: { is_scam: { kind: "decided", value: false, probabilityOrConfidence: 0.5 } },
+      status: "done",
+      reviewed: true,
+      updatedAt: at(6),
+    };
+    const { get, currentAsked } = rig([answered("oid:65f1", 0, 0.5)], {
+      keyText: tagged,
+      current: { "listings/oid:65f1": now },
+    });
+    const { body } = await get("/v1/decisions/listings/65f1");
+    expect(currentAsked).toEqual(["listings/oid:65f1"]);
+    expect(body).toMatchObject({ key: "65f1", status: "done", reviewed: true });
   });
 
   it("answers 404 with the fix for a record with no history, and for a source it does not have", async () => {

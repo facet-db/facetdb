@@ -1,5 +1,6 @@
 export type {
   LockResult,
+  QueueCount,
   ReviewCard,
   ReviewEntry,
   ReviewFilter,

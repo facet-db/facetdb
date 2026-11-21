@@ -11,7 +11,7 @@ import {
 } from "@facetdb/core";
 import type { SqlClient, SqlQuery, SqlRow } from "../sql/index.ts";
 import { createDecisionLog } from "./decision-log.ts";
-import { flag, fromMs, json, jsonObject, text, textOrNull, toMs } from "./rows.ts";
+import { flag, fromMs, integer, json, jsonObject, text, textOrNull, toMs } from "./rows.ts";
 
 /**
  * `facetdb.reviews` (store migration 6) as core's `ReviewQueue`: one statement per operation, each
@@ -44,20 +44,29 @@ const REMOVE = "delete from facetdb.reviews where source_id = $1 and record_key 
 const WITHDRAW = `delete from facetdb.reviews
  where source_id = $1 and record_key = $2 and state_hash = $3`;
 
-// `$1` source, `$2` question, `$3` below, `$4` viewer, `$5` now (ms), `$6` limit; null filters
-// match everything. The viewer's skipped cards sort after the rest, each part oldest first.
-const LIST = `select ${CARD_COLUMNS}, skipped_by @> jsonb_build_array($4::text) as skipped
-  from facetdb.reviews
- where ($1::text is null or source_id = $1::text)
+// `$1` source, `$2` question, `$3` below, `$4` viewer, `$5` now (ms), `$6` key; null filters
+// match everything. The cards the viewer may open: one clause for the listing and the count.
+const OPENABLE = `where ($1::text is null or source_id = $1::text)
+   and ($6::text is null or record_key = $6::text)
    and ($2::text is null or open_questions @> jsonb_build_array($2::text))
    and ($3::double precision is null or exists (
          select 1 from jsonb_each_text(numbers) as n(name, figure)
           where n.figure::double precision < $3::double precision
             and ($2::text is null or n.name = $2::text)))
-   and (locked_by is null or locked_by = $4::text or not ${leaseLive("$5")})
+   and (locked_by is null or locked_by = $4::text or not ${leaseLive("$5")})`;
+
+// `$7` limit. The viewer's skipped cards sort after the rest, each part oldest first.
+const LIST = `select ${CARD_COLUMNS}, skipped_by @> jsonb_build_array($4::text) as skipped
+  from facetdb.reviews
+ ${OPENABLE}
  order by skipped_by @> jsonb_build_array($4::text), since,
           source_id collate "C", record_key collate "C"
- limit $6::integer`;
+ limit $7::integer`;
+
+// The count and the oldest card's `since` under the same clause, carrying no card.
+const COUNT = `select count(*)::text as count, ${toMs("min(since)", "oldest_ms")}
+  from facetdb.reviews
+ ${OPENABLE}`;
 
 /**
  * A lease statement: `taken` sets the viewer's lease when `may` holds of the row, and `standing`
@@ -130,9 +139,29 @@ export function createReviewQueue(client: SqlClient): ReviewQueue {
         filter.below ?? null,
         viewer,
         nowMs,
+        filter.key ?? null,
         filter.limit ?? null,
       ]);
       return rows.map(toCard);
+    },
+
+    async count(filter, viewer, nowMs) {
+      const [row] = await query(COUNT, [
+        filter.source ?? null,
+        filter.question ?? null,
+        filter.below ?? null,
+        viewer,
+        nowMs,
+        filter.key ?? null,
+      ]);
+      if (row === undefined) {
+        throw new Error("the count of the review queue returned no row");
+      }
+      const oldest = textOrNull(row, "oldest_ms");
+      return {
+        count: integer(row, "count"),
+        oldestSince: oldest === null ? undefined : new Date(Number(oldest)),
+      };
     },
 
     lock: (source, key, viewer, nowMs) => lease(query, LOCK, [source, key, viewer, nowMs]),

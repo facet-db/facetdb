@@ -68,9 +68,9 @@ export function QuestionsPage({
 
   const head =
     chosen === undefined || draft === undefined ? (
-      <PageHead title="Questions" lede={LEDE} />
+      <PageHead title="Questions" lede={LEDE} sticky />
     ) : sendable === undefined ? (
-      <PageHead title="Questions" lede={LEDE}>
+      <PageHead title="Questions" lede={LEDE} sticky>
         <Button disabled aria-describedby={blockedId}>
           Test
         </Button>
@@ -79,7 +79,7 @@ export function QuestionsPage({
         </Button>
       </PageHead>
     ) : (
-      <PageHead title="Questions" lede={LEDE}>
+      <PageHead title="Questions" lede={LEDE} sticky>
         <TestDialog
           source={chosen}
           draft={sendable}

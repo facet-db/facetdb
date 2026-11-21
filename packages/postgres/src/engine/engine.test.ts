@@ -49,6 +49,7 @@ const STORE_ONLY = [
   "install",
   "sources",
   "question_set_versions",
+  "question_sets_in_force",
   "decisions",
   "records",
   "credentials",

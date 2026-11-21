@@ -1,13 +1,19 @@
 export { recordAnswer } from "./answer.ts";
 export type { CurrentTarget } from "./current.ts";
 export { answersCurrentFor } from "./current.ts";
-export type { ExplainedAnswer, ExplainedEntry } from "./explain.ts";
+export type {
+  DecisionOutcome,
+  ExplainedAnswer,
+  ExplainedEntry,
+  TaggedDecision,
+} from "./explain.ts";
 export {
-  answerDecisions,
+  answerOutcomes,
   chosenWords,
   decisionWords,
   explainHistory,
   likelyYes,
+  namedValue,
   percent,
   saidWords,
 } from "./explain.ts";

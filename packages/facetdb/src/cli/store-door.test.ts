@@ -119,7 +119,7 @@ describe("the store is always a Postgres", () => {
       `the source "orders" reads DATABASE_URL, the store's variable, and its database is not a Postgres (mysql); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
     );
     expect(refused.fix).toBe(
-      "write database: process.env.ORDERS_URL for the source in facetdb.config.ts, set ORDERS_URL to its connection string, and point DATABASE_URL at the store's Postgres",
+      'write database: env("ORDERS_URL") for the source in facetdb.config.ts, set ORDERS_URL to its connection string, and point DATABASE_URL at the store\'s Postgres',
     );
   });
 

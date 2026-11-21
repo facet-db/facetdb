@@ -3,8 +3,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
-import { bodyProblems, readJson, requireOwnPage } from "../request.ts";
-import type { ConfigService, DraftIssue } from "./service.ts";
+import { bodyProblems, readJson } from "../request.ts";
+import type { ConfigDraft, ConfigService, DraftIssue } from "./service.ts";
 
 /** The most rows one preview answers, as `facetdb preview --limit` allows. */
 export const PREVIEW_MAX_LIMIT = 100;
@@ -29,17 +29,53 @@ const testBody = z.strictObject({
   estimate: z.boolean().default(false),
 });
 
-const applyBody = z.strictObject({
-  source: draftSource,
-  // Absent: the dry run, which answers with the diff and its plan. Present: the plan that diff
-  // named, so what is written is what was shown.
-  confirm: z.string().min(1).optional(),
-  // Replace a file git keeps no copy of (uncommitted changes, untracked, no repository).
-  force: z.boolean().default(false),
+/**
+ * The project's own settings a draft may change (Settings' spending section): the monthly cap in
+ * billable input tokens, `null` removing it, and what happens at 100%. Nothing else of the project
+ * is a draft's: `modelUrl` decides where every record's state is sent and `alerts` where alerts
+ * post, so they stay the operator's, edited by hand. The cap's own rules are the loader's.
+ */
+const draftProject = z.strictObject({
+  spendingCap: z.number().int().positive().nullable().exactOptional(),
+  onCapReached: z.enum(["pause", "continue"]).exactOptional(),
 });
+
+const applyBody = z
+  .strictObject({
+    source: draftSource.exactOptional(),
+    project: draftProject.exactOptional(),
+    // Absent: the dry run, which answers with the diff and its plan. Present: the plan that diff
+    // named, so what is written is what was shown.
+    confirm: z.string().min(1).optional(),
+    // Replace a file git keeps no copy of (uncommitted changes, untracked, no repository).
+    force: z.boolean().default(false),
+  })
+  .transform(({ source, project, confirm, force }, context) => {
+    // One draft per Apply: a source, or the project's spending settings, so one diff shows one change.
+    const draft: ConfigDraft | undefined =
+      source !== undefined && project === undefined
+        ? { source }
+        : project !== undefined && source === undefined
+          ? { project }
+          : undefined;
+    if (draft === undefined) {
+      context.addIssue({
+        code: "custom",
+        message:
+          source === undefined
+            ? 'the body carries no draft: send "source" or "project"'
+            : 'the body carries both "source" and "project": send one draft per apply',
+      });
+      return z.NEVER;
+    }
+    return { draft, confirm, force };
+  });
 
 const DRAFT_SHAPE =
   '{"source": {"name": "<source name>", "questions": {…}, "thresholds": {…}}} in the project JSON\'s shape (GET /v1/config)';
+
+const PROJECT_DRAFT_SHAPE =
+  '{"project": {"spendingCap": <billable input tokens a month, or null for no cap>, "onCapReached": "pause" | "continue"}}';
 
 async function parsed<Schema extends z.ZodType>(
   schema: Schema,
@@ -60,20 +96,6 @@ const unknownProject = () =>
     "This request belongs to a project this worker does not serve.",
     "Open the studio of the worker that serves this project.",
   );
-
-/** Apply writes a file on the operator's machine: `requireOwnPage`'s words for it. */
-const APPLY_PAGE = {
-  what: "Apply",
-  does: "Apply writes facetdb.config.ts on this machine",
-  from: "Apply from the studio this worker serves, or from a program on a machine you trust.",
-} as const;
-
-/** Check again makes the worker reload on the operator's machine: Apply's guard, in its words. */
-const RELOAD_PAGE = {
-  what: "Check again",
-  does: "Check again makes this worker reload facetdb.config.ts on this machine",
-  from: "Check again from the studio this worker serves, or from a program on a machine you trust.",
-} as const;
 
 function issuesInWords(issues: readonly DraftIssue[]): string {
   return issues
@@ -224,19 +246,20 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
 
   // Apply: without `confirm`, the diff the draft makes to facetdb.config.ts and the plan that names
   // it; with the plan as `confirm`, the write, and the worker's reload. Show before doing: nothing
-  // is written that was not shown.
+  // is written that was not shown. The draft is one source (the Questions page) or the project's
+  // spending settings (Settings); any reviewer who may Apply may send either, and the reload puts a
+  // written cap in force at once.
   route.post("/apply", async (c) => {
-    requireOwnPage(c.req, APPLY_PAGE);
     const body = await parsed(
       applyBody,
       c.req,
-      `Send ${DRAFT_SHAPE} for the diff; to write it, send the same draft with "confirm": "<the plan the diff answered with>", and "force": true to replace a file git keeps no copy of.`,
+      `Send ${DRAFT_SHAPE}, or ${PROJECT_DRAFT_SHAPE} for the spending cap, for the diff; to write it, send the same draft with "confirm": "<the plan the diff answered with>", and "force": true to replace a file git keeps no copy of.`,
     );
     const projectId = c.get("projectId");
     const outcome =
       body.confirm === undefined
-        ? await service.diff(projectId, body.source)
-        : await service.apply(projectId, body.source, { plan: body.confirm, force: body.force });
+        ? await service.diff(projectId, body.draft)
+        : await service.apply(projectId, body.draft, { plan: body.confirm, force: body.force });
     switch (outcome.kind) {
       case "planned": {
         const { kind: _kind, ...result } = outcome;
@@ -286,10 +309,9 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
   });
 
   // Check again: the worker reads facetdb.config.ts and its databases again, as after Apply, and
-  // answers the reload. Guarded as Apply is: whoever may Apply may ask, from the studio's own page
-  // or a program; no body is read (the JSON header is the guard).
+  // answers the reload. Whoever may Apply may ask; no body is read (the studio sends `{}` as JSON,
+  // which is what app.ts's `requireOwnPage` asks of a write).
   route.post("/reload", async (c) => {
-    requireOwnPage(c.req, RELOAD_PAGE);
     const outcome = await service.reload(c.get("projectId"));
     switch (outcome.kind) {
       case "reloaded":

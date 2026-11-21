@@ -44,6 +44,7 @@ function localStudio(projectId: string): StudioAccess {
     reviewers: {
       list: () => Promise.reject(new Error("these tests list no reviewers")),
       add: () => Promise.reject(new Error("these tests add no reviewer")),
+      canAdd: () => Promise.resolve(false),
     },
     projectId,
   };

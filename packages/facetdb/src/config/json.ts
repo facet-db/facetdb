@@ -204,7 +204,7 @@ function sourceSource(source: SourceConfig): string {
   if (source.api) {
     fields.push("api: true");
   } else {
-    fields.push(`database: process.env.${source.databaseEnv ?? "DATABASE_URL"}`);
+    fields.push(`database: env(${text(source.databaseEnv ?? "DATABASE_URL")})`);
     if (source.connector !== undefined) fields.push(`connector: ${text(source.connector)}`);
     if (source.capture !== undefined) fields.push(`capture: ${text(source.capture)}`);
     fields.push(`table: ${text(source.table)}`);
@@ -242,6 +242,8 @@ function sourceSource(source: SourceConfig): string {
 export function configFileSource(config: ProjectConfig): string {
   const used = new Set<string>(["facetdb"]);
   for (const source of config.sources) {
+    // A table source names its variable with `env(...)`; the name, never the string, is in the file.
+    if (!source.api) used.add("env");
     if (source.actions.length > 0) used.add("actionCall");
     for (const question of source.questions) used.add(question.type);
   }

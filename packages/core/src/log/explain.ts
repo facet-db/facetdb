@@ -38,6 +38,51 @@ export function decisionWords(decision: Decision): string {
   return decision.kind === "needs_review" ? "needs review" : chosenWords(decision.value);
 }
 
+/**
+ * What an answer came to, as a tag beside the words. An option or a level may be named any one-line
+ * text, "needs review" and "unknown" included, so no reader tells a decided value from the other
+ * two by the words: it reads this. `unknown` is a version the store no longer keeps, or a question
+ * that version does not name, so there are no thresholds to read the answer by.
+ */
+export type DecisionOutcome = "decided" | "needs_review" | "unknown";
+
+export type TaggedDecision = {
+  /** "yes", "no", an option or level name, "needs review" or "unknown": what a person reads. */
+  readonly words: string;
+  readonly outcome: DecisionOutcome;
+};
+
+const UNKNOWN_DECISION: TaggedDecision = { words: "unknown", outcome: "unknown" };
+
+/** A decision with its tag. */
+function tagDecision(decision: Decision): TaggedDecision {
+  return { words: decisionWords(decision), outcome: decision.kind };
+}
+
+/** The most likely level of a score answer, by the question's levels; undefined without a score question. */
+function topLevelName(question: Question | undefined, answer: Answer): string | undefined {
+  if (question?.type !== "score" || answer.type !== "score") {
+    return undefined;
+  }
+  return question.levels[answer.probabilities.indexOf(Math.max(...answer.probabilities))]?.name;
+}
+
+/**
+ * The option or level the model named, as `facetdb export` prints it in `value`: a choice's top
+ * option, a score's most likely level by the levels of the question set in force (empty when the
+ * store no longer keeps that version), and nothing for a noul, whose answer is its probability.
+ */
+export function namedValue(question: Question | undefined, answer: Answer): string {
+  switch (answer.type) {
+    case "noul":
+      return "";
+    case "choice":
+      return answer.top;
+    case "score":
+      return topLevelName(question, answer) ?? "";
+  }
+}
+
 /** What the model said, in words: "58% likely yes", "billing, 82% sure". */
 export function saidWords(question: Question | undefined, answer: Answer): string {
   switch (answer.type) {
@@ -45,34 +90,28 @@ export function saidWords(question: Question | undefined, answer: Answer): strin
       return likelyYes(answer.probability);
     case "choice":
       return `${answer.top}, ${percent(choiceConfidence(answer.probabilities))} sure`;
-    case "score": {
-      const level =
-        question?.type === "score"
-          ? question.levels[answer.probabilities.indexOf(Math.max(...answer.probabilities))]
-          : undefined;
-      return `${level?.name ?? "unknown"}, ${percent(answer.confidence)} sure`;
-    }
+    case "score":
+      return `${topLevelName(question, answer) ?? "unknown"}, ${percent(answer.confidence)} sure`;
   }
 }
 
 /**
- * What each question of a logged answer led to, in words, by question name, under the thresholds
- * of the question-set version the call ran under. `set` is undefined when the store no longer
- * keeps that version, and a question the set does not name has no thresholds to read: both are
- * "unknown".
+ * What each question of a logged answer led to, tagged, by question name, under the thresholds of
+ * the question-set version the call ran under. `set` is undefined when the store no longer keeps
+ * that version, and a question the set does not name has no thresholds to read: both are unknown.
  */
-export function answerDecisions(
+export function answerOutcomes(
   entry: AnswerEntry,
   set: QuestionSet | undefined,
-): Readonly<Record<string, string>> {
+): Readonly<Record<string, TaggedDecision>> {
   return Object.fromEntries(
     Object.entries(entry.answers).map(([name, answer]) => {
       const question = set?.questions.find((candidate) => candidate.name === name);
       return [
         name,
         question === undefined || set === undefined
-          ? "unknown"
-          : decisionWords(
+          ? UNKNOWN_DECISION
+          : tagDecision(
               decide(question, resolveThresholds(question, set.thresholds[name]), answer),
             ),
       ];
@@ -89,6 +128,8 @@ export type ExplainedAnswer = {
   readonly said: string;
   /** What that version's thresholds made of it: "yes", "no", a name, or "needs review". */
   readonly decision: string;
+  /** The tag the words cannot carry: whether `decision` is a value, needs review or unknown. */
+  readonly outcome: DecisionOutcome;
 };
 
 export type ExplainedEntry =
@@ -98,12 +139,16 @@ export type ExplainedEntry =
       readonly at: string;
       readonly model: string;
       readonly version: number;
+      /** The hash of the state the model was shown: two answers at different hashes saw a changed record. */
+      readonly stateHash: string;
       readonly answers: readonly ExplainedAnswer[];
     }
   | {
       readonly kind: "human";
       readonly at: string;
       readonly version: number;
+      /** The state the reviewer saw; the decision stands while the record still has it. */
+      readonly stateHash: string;
       readonly question: string;
       /** The wording of that version, or the question's name when the version is not kept. */
       readonly wording: string;
@@ -116,20 +161,23 @@ export type ExplainedEntry =
       readonly kind: "withdrawal";
       readonly at: string;
       readonly version: number;
+      readonly stateHash: string;
       readonly question: string;
       readonly wording: string;
       readonly reviewer: string;
     };
 
 function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): ExplainedEntry {
-  const decisions = answerDecisions(entry, set);
+  const outcomes = answerOutcomes(entry, set);
   const answers = Object.entries(entry.answers).map(([name, answer]): ExplainedAnswer => {
     const question = set?.questions.find((candidate) => candidate.name === name);
+    const { words, outcome } = outcomes[name] ?? UNKNOWN_DECISION;
     return {
       question: name,
       wording: question?.instructions ?? name,
       said: saidWords(question, answer),
-      decision: decisions[name] ?? "unknown",
+      decision: words,
+      outcome,
     };
   });
   return {
@@ -137,6 +185,7 @@ function explainAnswer(entry: AnswerEntry, set: QuestionSet | undefined): Explai
     at: entry.at.toISOString(),
     model: entry.model,
     version: entry.version,
+    stateHash: entry.stateHash,
     answers,
   };
 }
@@ -146,6 +195,7 @@ function explainHuman(entry: HumanEntry, set: QuestionSet | undefined): Explaine
   const common = {
     at: entry.at.toISOString(),
     version: entry.version,
+    stateHash: entry.stateHash,
     question: entry.question,
     wording: question?.instructions ?? entry.question,
     reviewer: entry.reviewer,

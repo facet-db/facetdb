@@ -98,6 +98,7 @@ const studio: StudioAccess = {
   reviewers: {
     list: () => Promise.resolve([]),
     add: () => Promise.reject(new Error("these tests add no reviewer")),
+    canAdd: () => Promise.resolve(false),
   },
   projectId: PROJECT,
 };

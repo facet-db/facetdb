@@ -5,6 +5,7 @@ export type {
   DecisionSearch,
   DecisionSearchPage,
   DecisionStatus,
+  FoundAnswer,
   FoundDecision,
   SearchCursor,
 } from "./decision-log.ts";
@@ -16,7 +17,7 @@ export {
   storePurgeRefusal,
   storePurgeStatements,
 } from "./purge.ts";
-export type { StoredQuestionSetVersion } from "./question-sets.ts";
+export type { QuestionSetInForce, StoredQuestionSetVersion } from "./question-sets.ts";
 export {
   deleteCursorsSql,
   NOT_A_RESUME_ROW,
@@ -44,6 +45,7 @@ export {
   STORE_TABLES,
   STORE_VERSION_TABLE,
   STORE_WORKER_READ_ONLY_TABLES,
+  STORE_WORKER_UPSERT_TABLES,
   StoreNotInstalledError,
   storeInstallStatements,
   storeVersion,

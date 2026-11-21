@@ -810,7 +810,7 @@ describe("facetdb doctor, how far the database is", () => {
     const printed = lines(result.stdout);
     const warn = printed.findIndex((text) => text.startsWith("warn"));
     expect(printed[warn]).toBe(
-      "warn  distance: the database is 190 ms away; run the worker next to it, the 1 second target assumes a same-region link",
+      "warn  distance: the database answers in 190 ms; run the worker in the same region for fast answers",
     );
     expect(printed[warn - 1]).toMatch(/^ok\s+database:/);
     expect(printed.at(-1)).toBe("All 8 checks passed.");
@@ -858,7 +858,7 @@ describe("facetdb doctor, how far the database is", () => {
         label: "distance",
         status: "warn",
         detail:
-          "the database is 190 ms away; run the worker next to it, the 1 second target assumes a same-region link",
+          "the database answers in 190 ms; run the worker in the same region for fast answers",
       },
     ]);
   });

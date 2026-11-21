@@ -334,6 +334,15 @@ end $$;
 
 insert into facetdb.store_migrations (version) values (7) on conflict (version) do nothing;
 
+create table if not exists facetdb.question_sets_in_force (
+  source_id text primary key,
+  version integer not null,
+  question_set jsonb not null,
+  recorded_at timestamptz not null
+);
+
+insert into facetdb.store_migrations (version) values (8) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -598,6 +607,8 @@ grant select, insert, update, delete on "facetdb"."projects" to "facetdb_worker"
 
 grant select, insert on "facetdb"."question_set_versions" to "facetdb_worker";
 
+grant select, insert, update on "facetdb"."question_sets_in_force" to "facetdb_worker";
+
 grant select, insert on "facetdb"."decisions" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."jobs" to "facetdb_worker";
@@ -631,6 +642,8 @@ grant select, insert, update, delete on "facetdb"."runs" to "facetdb_worker";
 revoke update, delete on "facetdb"."question_set_versions" from "facetdb_worker";
 
 revoke update, delete on "facetdb"."decisions" from "facetdb_worker";
+
+revoke delete on "facetdb"."question_sets_in_force" from "facetdb_worker";
 
 do $$
 declare

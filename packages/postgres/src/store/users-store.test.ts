@@ -179,6 +179,8 @@ describe("the users store", () => {
     `);
     try {
       const asReader = createUsersStore(pgliteClient(await newDb()));
+      // Known before any write is tried, so a page can show the terminal command instead of a form.
+      expect(await asReader.writable()).toBe(false);
       expect((await asReader.list()).map((account) => account.name)).toEqual(["maya"]);
       expect(await asReader.verify("maya", PASSWORD)).toBe(true);
       await expect(asReader.add("omar", "scrypt$1$1$1$c2FsdA$a2V5")).rejects.toBeInstanceOf(
@@ -190,5 +192,6 @@ describe("the users store", () => {
       await db.exec("reset role");
     }
     expect((await store.users.list()).map((account) => account.name)).toEqual(["maya"]);
+    expect(await store.users.writable()).toBe(true);
   });
 });

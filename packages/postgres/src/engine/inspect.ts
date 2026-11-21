@@ -135,6 +135,7 @@ async function tableOf(
         }),
       ),
     ),
+    estimatedRows: await estimateOf(query, relation),
   };
 }
 
@@ -226,6 +227,37 @@ const ESTIMATE_QUERY = `select c.reltuples::float8 as rows,
   left join pg_catalog.pg_stat_all_tables s on s.relid = c.oid
  where c.oid = to_regclass($1)`;
 
+/** The planner's estimate of `relation`'s rows (a quoted name), or null when it has none. */
+async function estimateOf(query: SqlQuery, relation: string): Promise<number | null> {
+  const [statistics] = await query(ESTIMATE_QUERY, [relation]);
+  const estimate = Number(statistics?.["rows"] ?? -1);
+  const usable =
+    Number.isFinite(estimate) &&
+    estimate >= 0 &&
+    !(estimate === 0 && statistics?.["never"] !== false);
+  return usable ? Math.round(estimate) : null;
+}
+
+/**
+ * `DatabaseEngine.estimateRows` on Postgres: the planner's estimate of the source table's rows,
+ * under the worker login. `pg_class` and `pg_stat_all_tables` are readable by every role, so the
+ * worker login needs no grant for it; the connection is asked for without a size, so a worker that
+ * holds a pool open on this database lends it (cli/pools.ts) and nothing new connects.
+ */
+export async function estimateTableRows(
+  connect: SqlConnect,
+  target: EngineTarget,
+  url: string,
+): Promise<number | null> {
+  const relation = quoteTable({ schema: target.schema ?? "public", name: target.table });
+  const client = connect(url);
+  try {
+    return await estimateOf(client.query, relation);
+  } finally {
+    await client.close();
+  }
+}
+
 /**
  * `DatabaseEngine.readRows` on Postgres: the newest rows of a table no worker runs yet, read by
  * `scan`'s own query (its states, its where filter, its order) inside `inReadOnly`, and the
@@ -265,16 +297,10 @@ export async function readTableRows(
         questionSet: target.questionSet,
         pageSize: Math.max(1, options.limit),
       })(null);
-      const [statistics] = await query(ESTIMATE_QUERY, [relation]);
-      const estimate = Number(statistics?.["rows"] ?? -1);
-      const usable =
-        Number.isFinite(estimate) &&
-        estimate >= 0 &&
-        !(estimate === 0 && statistics?.["never"] !== false);
       return {
         ok: true,
         rows: page.rows,
-        estimatedRows: usable ? Math.round(estimate) : null,
+        estimatedRows: await estimateOf(query, relation),
       };
     });
   } finally {

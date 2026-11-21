@@ -113,6 +113,7 @@ function rig(file: ConfigFileDoor | undefined, projectId = PROJECT) {
       reviewers: {
         list: () => Promise.reject(new Error("these tests list no reviewers")),
         add: () => Promise.reject(new Error("these tests add no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
     },
@@ -184,7 +185,7 @@ describe("POST /v1/reload", () => {
           error: {
             code: "cross_origin",
             message:
-              "This request came from a page on another site, and Check again makes this worker reload facetdb.config.ts on this machine.",
+              "This request came from a page on another site, and the studio takes a write only from its own pages or a program.",
           },
         },
       });

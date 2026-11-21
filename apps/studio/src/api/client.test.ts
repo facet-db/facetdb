@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SAMPLE_BACKFILL_IDLE,
+  SAMPLE_CARD,
   SAMPLE_HOME,
   SAMPLE_PROJECT,
   SAMPLE_QUEUE,
@@ -64,6 +65,14 @@ describe("the API client", () => {
     expect(out.sent.map((one) => [one.init?.method, one.path])).toEqual([
       ["DELETE", "/v1/session"],
     ]);
+    // A write with nothing to say still sends `{}` declared as JSON, which the surface asks of
+    // every write; a read sends neither.
+    expect(out.sent[0]?.init?.body).toBe("{}");
+    expect(new Headers(out.sent[0]?.init?.headers).get("content-type")).toBe("application/json");
+    const read = recording(() => json(SAMPLE_PROJECT));
+    await createApiClient(read.fetch).project();
+    expect(read.sent[0]?.init?.body).toBeUndefined();
+    expect(new Headers(read.sent[0]?.init?.headers).get("content-type")).toBeNull();
   });
 
   it("turns the surface's refusal into an ApiError with its code, words and fix", async () => {
@@ -169,6 +178,29 @@ describe("the review calls", () => {
     ]);
     const wrong = recording(() => json({ card: { source: "x" } }));
     await expect(createApiClient(wrong.fetch).reviewOpen()).rejects.toMatchObject({
+      code: "unexpected-answer",
+    });
+  });
+
+  it("reads the fleet's sources off the queue, and each question's stakes and thresholds off the card", async () => {
+    const t = recording((path) =>
+      path.startsWith("/v1/review/queue") ? json(SAMPLE_QUEUE) : json({ card: SAMPLE_CARD }),
+    );
+    const api = createApiClient(t.fetch);
+    expect((await api.reviewQueue()).sources).toEqual(SAMPLE_QUEUE.sources);
+    expect(await api.reviewOpen()).toEqual({ card: SAMPLE_CARD });
+
+    // Thresholds of a kind the studio cannot word are refused, never shown as something else.
+    const [first] = SAMPLE_CARD.open;
+    const unknown = { ...SAMPLE_CARD, open: [{ ...first, thresholds: { kind: "always" } }] };
+    const wrong = recording(() => json({ card: unknown }));
+    await expect(createApiClient(wrong.fetch).reviewOpen()).rejects.toMatchObject({
+      code: "unexpected-answer",
+    });
+    // A queue from a worker that lists no fleet is refused too: the filters are built from it.
+    const { sources: _sources, ...bare } = SAMPLE_QUEUE;
+    const old = recording(() => json(bare));
+    await expect(createApiClient(old.fetch).reviewQueue()).rejects.toMatchObject({
       code: "unexpected-answer",
     });
   });

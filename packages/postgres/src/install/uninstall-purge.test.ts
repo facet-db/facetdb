@@ -293,6 +293,12 @@ describe("uninstall --purge finds the log by the source's id", () => {
       `insert into facetdb.question_set_versions (source_id, version, content_hash, question_set) values ($1, 1, 'h', '{}')`,
       [sourceId],
     );
+    // Store migration 8: the set the source's worker runs, which a purge deletes with its versions.
+    await q(
+      `insert into facetdb.question_sets_in_force (source_id, version, question_set, recorded_at)
+       values ($1, 1, '{}', now())`,
+      [sourceId],
+    );
   }
 
   it.each(["t_listings", "listings_renamed"])(
@@ -340,6 +346,19 @@ describe("uninstall --purge finds the log by the source's id", () => {
       expect(await q(`select source_id from facetdb.question_set_versions`)).toEqual([
         { source_id: "src_other" },
       ]);
+      // The purged source's row goes in the purge block; the table itself is bookkeeping, dropped
+      // with the store's version table when nothing of the store is left to use it (the renamed
+      // source's old registration still uses it).
+      const inForce = (await q(`select to_regclass('facetdb.question_sets_in_force') as t`))[0];
+      expect(inForce?.["t"] !== null).toBe(renamed);
+      if (renamed) {
+        expect(await q(`select source_id from facetdb.question_sets_in_force`)).toEqual([
+          { source_id: "src_other" },
+        ]);
+      }
+      expect(printed[0]).toContain(
+        `delete from facetdb.question_sets_in_force where source_id = current_setting(`,
+      );
       expect(printed).toEqual([renderSql(executed)]);
       expect(printed[0]).not.toContain("source_id = ''");
       if (renamed) {

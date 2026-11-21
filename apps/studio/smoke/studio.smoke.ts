@@ -162,7 +162,7 @@ test("the studio on facetdb dev: Home, Add a source, Questions, Review with the 
   await expect(turnOn.getByText(/alter table "public"\."sellers"/)).toBeVisible();
   // The copy lives under packages/facetdb/build/, which git ignores, so the page says git keeps no
   // copy of facetdb.config.ts to bring back and asks before replacing it: the tick a person gives.
-  await turnOn.getByRole("checkbox", { name: "Replace facetdb.config.ts anyway" }).check();
+  await turnOn.getByRole("checkbox", { name: "Replace it anyway" }).check();
   await button(turnOn, "Run the install").click();
   await expect(
     page.getByRole("heading", { level: 2, name: "Installed on public.sellers" }),

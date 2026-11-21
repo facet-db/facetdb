@@ -11,7 +11,7 @@ import { Link } from "@tanstack/react-router";
 import { type ReactNode, useId } from "react";
 import { ApiError, type Home, type HomeAlert, homeQuery, projectQuery } from "../../api/index.ts";
 import { useApi, useDeps } from "../../deps.tsx";
-import { PageHead, SPENDING_STATE } from "../../shell/index.ts";
+import { fileCapAheadWords, PageHead, SPENDING_STATE, useFileCapAhead } from "../../shell/index.ts";
 import { alertTime, followable, ledeOf, splitCheck, unreachableLede } from "./wording.ts";
 
 /**
@@ -188,6 +188,9 @@ function SpendingColumn({
   readonly lastKnown: string | null;
 }) {
   const state = SPENDING_STATE[spending.status];
+  // The figures are the cap the worker enforces now; a cap the file sets that the worker has not
+  // taken up (edited by hand since the last reload) is said under them, never shown as in force.
+  const fileSets = useFileCapAhead(spending.cap);
   return (
     <Column title="Spending">
       <Figure>{spending.words.figure}</Figure>
@@ -205,6 +208,11 @@ function SpendingColumn({
         <div>
           <StatusWord status={state.status} size="small" label={state.label} wrap />
         </div>
+      )}
+      {fileSets === null ? null : (
+        <p className="m-0 border-l-2 border-facet pl-3 text-[13px]">
+          {fileCapAheadWords(fileSets)}
+        </p>
       )}
     </Column>
   );

@@ -41,7 +41,7 @@ describe("the Home page", () => {
     expect(health.getByText("Running")).toBeInTheDocument();
     expect(health.getByText("Worker beating, 2 s ago")).toBeInTheDocument();
     expect(health.getByText("Model healthy")).toBeInTheDocument();
-    expect(health.getByText("Three sources, logins as installed")).toBeInTheDocument();
+    expect(health.getByText("Three sources, reachable and installed")).toBeInTheDocument();
 
     const answered = await column("Answered today");
     expect(answered.getByText("12,480")).toBeInTheDocument();
@@ -54,9 +54,11 @@ describe("the Home page", () => {
     ).toBeInTheDocument();
 
     const spending = await column("Spending");
-    expect(spending.getByText("$3.20")).toBeInTheDocument();
+    expect(spending.getByText("3.2M of 25M")).toBeInTheDocument();
     expect(
-      spending.getByText("13% of the $25 monthly cap. The project pauses at 100%."),
+      spending.getByText(
+        "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -65,7 +67,9 @@ describe("the Home page", () => {
     const answered = await column("Answered today");
     expect(answered.getByRole("img", { name: "62% of yesterday's 20,100." })).toBeInTheDocument();
     const spending = await column("Spending");
-    expect(spending.getByRole("img", { name: /13% of the \$25 monthly cap/ })).toBeInTheDocument();
+    expect(
+      spending.getByRole("img", { name: /Input tokens this month: 13% of the monthly cap/ }),
+    ).toBeInTheDocument();
   });
 
   it("shows no percentage without its words and its strip in the same column", async () => {
@@ -98,8 +102,8 @@ describe("the Home page", () => {
           cap: null,
           fraction: null,
           words: {
-            figure: "$3.20",
-            sub: "No monthly cap is set, so the project never pauses.",
+            figure: "3.2M",
+            sub: "Input tokens this month, about $3.20. No monthly cap is set, so the project never pauses.",
           },
         },
       })),
@@ -112,7 +116,7 @@ describe("the Home page", () => {
       answered.getByRole("img", { name: "None were answered yesterday." }),
     ).toBeInTheDocument();
     const spending = await column("Spending");
-    expect(spending.getByText("No monthly cap is set, so the project never pauses.")).toBeVisible();
+    expect(spending.getByText(/No monthly cap is set, so the project never pauses/)).toBeVisible();
     expect(spending.queryByRole("img")).toBeNull();
     // The queue's strip is the share of today's review work still waiting, in the column's words.
     expect(
@@ -201,15 +205,47 @@ describe("the Home page", () => {
           status: "paused",
           fraction: 1,
           words: {
-            figure: "$25",
-            sub: "The $25 monthly cap is reached: the project is paused until the month resets or the cap changes.",
+            figure: "25M of 25M",
+            sub: "Input tokens this month: the monthly cap is reached (about $25), so the project is paused until the month resets or the cap changes.",
           },
         },
       })),
     });
     const spending = await column("Spending");
     expect(spending.getByText("Paused at the cap")).toBeInTheDocument();
-    expect(spending.getByRole("img", { name: /The \$25 monthly cap is reached/ })).toBeVisible();
+    expect(
+      spending.getByRole("img", { name: /the monthly cap is reached \(about \$25\)/ }),
+    ).toBeVisible();
+  });
+
+  it("keeps the worker's cap in the figures, and says when the file sets another it has not taken up", async () => {
+    // The file was edited by hand to 40,000,000 tokens since the last reload; the worker still
+    // enforces the 25,000,000 it took up last.
+    renderStudio({
+      api: fakeApi({
+        spendingConfig: () => Promise.resolve({ tokens: 40_000_000, onCapReached: "continue" }),
+      }),
+    });
+    const spending = await column("Spending");
+    expect(
+      await spending.findByText(
+        "facetdb.config.ts sets a monthly cap of 40M billable input tokens (40,000,000), and the project keeps answering past 100%, which the worker has not taken up: apply it from Settings.",
+      ),
+    ).toBeVisible();
+    expect(
+      spending.getByText(
+        "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing of the file when it sets the cap the worker enforces", async () => {
+    renderStudio();
+    const spending = await column("Spending");
+    await spending.findByText("3.2M of 25M");
+    await waitFor(() => {
+      expect(spending.queryByText(/facetdb\.config\.ts sets/)).toBeNull();
+    });
   });
 
   it("lists the recent alerts as rows: severity word, title, what FacetDB did, time and one link", async () => {
@@ -363,13 +399,16 @@ describe("the Home page", () => {
           status: "uncapped",
           cap: null,
           fraction: null,
-          words: { figure: "$3.20", sub: "No monthly cap is set, so the project never pauses." },
+          words: {
+            figure: "3.2M",
+            sub: "Input tokens this month, about $3.20. No monthly cap is set, so the project never pauses.",
+          },
         },
       })),
     });
     const spending = await column("Spending");
     expect(
-      spending.getByText("No monthly cap is set, so the project never pauses."),
+      spending.getByText(/No monthly cap is set, so the project never pauses/),
     ).not.toHaveAttribute("aria-hidden");
   });
 
@@ -425,9 +464,13 @@ describe("the Home page's wording", () => {
       line: "Worker not running",
       rest: "It has not beaten. None yet.",
     });
-    expect(splitCheck("Three sources, logins as installed; listings: reason")).toEqual({
-      line: "Three sources, logins as installed",
-      rest: "listings: reason",
+    expect(
+      splitCheck(
+        "Three sources, reachable and installed; listings: the database answers in 149 ms; run the worker in the same region for fast answers",
+      ),
+    ).toEqual({
+      line: "Three sources, reachable and installed",
+      rest: "listings: the database answers in 149 ms; run the worker in the same region for fast answers",
     });
   });
 

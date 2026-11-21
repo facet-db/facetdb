@@ -11,7 +11,13 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type Home, homeQuery, projectQuery, reviewCountQuery } from "../api/index.ts";
 import { useApi } from "../deps.tsx";
-import { SPENDING_STATE } from "./spending.ts";
+import {
+  FILE_CAP_AHEAD_SHORT,
+  fileCapAheadWords,
+  SPENDING_STATE,
+  spentMoneyWords,
+  useFileCapAhead,
+} from "./spending.ts";
 import { useTheme } from "./theme.tsx";
 
 /**
@@ -130,11 +136,6 @@ const CHECK_STATUS: Readonly<Record<Home["health"]["checks"][number]["status"], 
   fail: "error",
 };
 
-/** Dollars as the rail shows a cap: whole when whole, cents otherwise. */
-function money(dollars: number): string {
-  return Number.isInteger(dollars) ? `$${String(dollars)}` : `$${dollars.toFixed(2)}`;
-}
-
 const WORKER_UNREACHABLE = "Not known: the worker cannot be reached";
 
 function WorkerLine({
@@ -182,7 +183,13 @@ function SpendingLine({
   if (home === undefined) {
     return <span className="text-text-3">Reading</span>;
   }
-  const { spending } = home;
+  return <Spent spending={home.spending} />;
+}
+
+function Spent({ spending }: { readonly spending: Home["spending"] }) {
+  // The cap shown is the worker's, the one it started with; a cap saved to the file since waits
+  // for a restart, and the rail says so in a line short enough for its column.
+  const fileSets = useFileCapAhead(spending.cap);
   // Home's own word for the cap reached (one table, shell/spending.ts); the warning line stays
   // the strip's, which the rail shows.
   const atCap =
@@ -191,10 +198,12 @@ function SpendingLine({
       : undefined;
   return (
     <>
-      <span className="font-mono text-xs whitespace-nowrap text-text">
-        {spending.cap === null
-          ? spending.words.figure
-          : `${spending.words.figure} of ${money(spending.cap.dollars)}`}
+      {/* The worker's own figure, in tokens at a glance ("3.2M of 25M tokens"), and what that costs under it: its sentence is the title. */}
+      <span className="font-mono text-xs whitespace-nowrap text-text" title={spending.words.sub}>
+        {`${spending.words.figure} tokens`}
+      </span>
+      <span className="font-mono text-xs whitespace-nowrap text-text-2" title={spending.words.sub}>
+        {spentMoneyWords(spending)}
       </span>
       {/* The figures round a count past the cap to the cap's own: the word says what they cannot. */}
       {atCap === undefined ? null : (
@@ -209,6 +218,11 @@ function SpendingLine({
         <span className="text-text-3">No monthly cap</span>
       ) : (
         <DitherStrip value={spending.fraction} width={160} rows={4} label={spending.words.sub} />
+      )}
+      {fileSets === null ? null : (
+        <span className="text-text" title={fileCapAheadWords(fileSets)}>
+          {FILE_CAP_AHEAD_SHORT}
+        </span>
       )}
     </>
   );

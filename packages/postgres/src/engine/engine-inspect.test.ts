@@ -100,6 +100,12 @@ describe("the Postgres engine's inspect", () => {
     expect(table.rows.map((row) => row["id"])).toEqual(["7", "6", "5", "4", "3"]);
     expect(table.rows[1]).toEqual({ id: "6", title: "item 6", price: "60", seen: null });
     expect(table.rows[0]?.["title"]).toHaveLength(INSPECT_MAX_VALUE);
+    // Never analysed: no estimate of the table's size, and none made up.
+    expect(table.estimatedRows).toBeNull();
+
+    await q("analyze public.listings");
+    const analysed = await inspect("listings");
+    expect(analysed.ok && analysed.inspection.table?.estimatedRows).toBe(7);
   });
 
   it("says a table has no single-column key, and still shows its rows", async () => {
@@ -215,6 +221,47 @@ describe("the Postgres engine's inspect", () => {
     });
 
     expect(result.ok).toBe(false);
+    expect(opened).toEqual([]);
+  });
+});
+
+describe("the Postgres engine's estimateRows", () => {
+  const WORKER = "postgres://facetdb_worker:pw@localhost/app";
+  const target = {
+    project: { id: "p", name: "p" },
+    source: "listings",
+    table: "listings",
+    storage: "inline" as const,
+    onChange: "reset" as const,
+    questionSet: { questions: [], read: ["title"], model: "jev-1.14.0", thresholds: {} },
+  };
+
+  it("reads the planner's estimate of the source table under the worker login, null before an analyse", async () => {
+    const q = world.client.query;
+    await q("create table public.listings (id serial primary key, title text)");
+    for (let n = 1; n <= 12; n += 1) {
+      await q("insert into public.listings (title) values ($1)", [`item ${n}`]);
+    }
+    if (engine.estimateRows === undefined) {
+      throw new Error("the Postgres engine has no estimateRows");
+    }
+    expect(await engine.estimateRows(target, WORKER, { allowInsecure: false })).toBeNull();
+
+    await q("analyze public.listings");
+    expect(await engine.estimateRows(target, WORKER, { allowInsecure: false })).toBe(12);
+    // Asked for without a size, so a worker's open pool on this database is lent, not added to.
+    expect(opened).toEqual([undefined, undefined]);
+  });
+
+  it("refuses a plaintext worker URL to another machine before it connects", async () => {
+    if (engine.estimateRows === undefined) {
+      throw new Error("the Postgres engine has no estimateRows");
+    }
+    await expect(
+      engine.estimateRows(target, "postgres://facetdb_worker:pw@db.example.com/app", {
+        allowInsecure: false,
+      }),
+    ).rejects.toThrow(/no connection was made/);
     expect(opened).toEqual([]);
   });
 });

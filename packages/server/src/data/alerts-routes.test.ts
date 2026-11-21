@@ -59,6 +59,7 @@ function localStudio(projectId: string): StudioAccess {
     reviewers: {
       list: () => Promise.reject(new Error("these tests list no reviewers")),
       add: () => Promise.reject(new Error("these tests add no reviewer")),
+      canAdd: () => Promise.resolve(false),
     },
     projectId,
   };
@@ -107,6 +108,8 @@ function rig(
     readonly fileChannels?: readonly string[];
     readonly history?: readonly AlertRecord[];
     readonly host?: string;
+    /** Whether the login may make an account; the default install's worker login may not. */
+    readonly accountsWritable?: boolean;
     readonly alertsProject?: string;
   } = {},
 ) {
@@ -137,7 +140,10 @@ function rig(
       }),
       access: createAccessService({
         host: options.host ?? "127.0.0.1",
-        reviewers: { list: () => Promise.resolve(ACCOUNTS) },
+        reviewers: {
+          list: () => Promise.resolve(ACCOUNTS),
+          canAdd: () => Promise.resolve(options.accountsWritable ?? false),
+        },
       }),
     },
     studio: localStudio(PROJECT),
@@ -327,14 +333,23 @@ describe("GET /v1/alerts", () => {
   });
 
   it("claims nothing about being over for a kind that nothing ever resolves", async () => {
-    const spending = event("spending_80", { what: "80% of the cap.", did: "Kept running." });
+    // A row written by an earlier version, with bare digits: read at a glance, the exact pair
+    // after.
+    const spending = event("spending_80", {
+      what: "80% of the cap: 2400097 of 3000000 input tokens.",
+      did: "Kept running.",
+    });
     const t = rig({ history: [record("raised", NOW, spending, { severity: "warning" })] });
 
     const events = (await t.get("/v1/alerts")).json["events"] as readonly {
       readonly standing: unknown;
+      readonly what: string;
     }[];
 
     expect(events.map((one) => one.standing)).toEqual([{ phase: "raised" }]);
+    expect(events[0]?.what).toBe(
+      "80% of the cap: 2.4M of 3M input tokens (2,400,097 of 3,000,000).",
+    );
   });
 
   it("keeps a resolved message whose alert is older than the lines read, marked as raised earlier", async () => {
@@ -398,20 +413,26 @@ describe("GET /v1/alerts", () => {
 });
 
 describe("GET /v1/studio", () => {
-  it("answers the host, that it is this machine alone, and how many accounts exist", async () => {
+  it("answers the host, that it is this machine alone, how many accounts exist, and that this login cannot make one", async () => {
     const t = rig({ host: "127.0.0.1" });
     const { json, text } = await t.get("/v1/studio");
-    expect(json).toEqual({ host: "127.0.0.1", loopback: true, reviewers: 2 });
+    expect(json).toEqual({
+      host: "127.0.0.1",
+      loopback: true,
+      reviewers: 2,
+      accountsWritable: false,
+    });
     expect(text).not.toContain("sam");
     expect(text).not.toContain("maya");
   });
 
-  it("says a studio bound to every interface is not this machine alone", async () => {
-    const t = rig({ host: "0.0.0.0" });
+  it("says a studio bound to every interface is not this machine alone, and when accounts can be made here", async () => {
+    const t = rig({ host: "0.0.0.0", accountsWritable: true });
     expect((await t.get("/v1/studio")).json).toEqual({
       host: "0.0.0.0",
       loopback: false,
       reviewers: 2,
+      accountsWritable: true,
     });
   });
 });

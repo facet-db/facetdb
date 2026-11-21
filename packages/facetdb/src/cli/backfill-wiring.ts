@@ -6,6 +6,7 @@ import {
   createAlerts,
   createSpending,
   type ModelProvider,
+  type SpendingCap,
   type SpendingGate,
   spendingGate,
 } from "@facetdb/core";
@@ -121,12 +122,24 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
   };
 }
 
+/** The project's spending settings, as the config carries them. */
+export type ProjectSpendingSettings = Pick<ProjectConfig, "spendingCap" | "onCapReached">;
+
+/** The cap the gate enforces for these settings: the config's, or none (the count is still kept). */
+export function capOf(settings: ProjectSpendingSettings): SpendingCap {
+  return settings.spendingCap === undefined
+    ? NO_CAP
+    : { inputTokens: settings.spendingCap, onCapReached: settings.onCapReached };
+}
+
 /**
- * The project's spending gate: the config's cap, or none (the count is still kept). Every worker
- * and backfill of the project shares one, so admissions are counted together.
+ * The project's spending gate under the cap `readCap` answers, read on every check: the worker
+ * hands it the settings in force, which each reload of facetdb.config.ts replaces, so a cap saved
+ * from Settings is enforced at once. Every worker and backfill of the project shares one, so
+ * admissions are counted together.
  */
-export function projectSpending(
-  config: ProjectConfig,
+export function spendingUnder(
+  readCap: () => SpendingCap,
   store: Pick<Store, "usage">,
   alerts: Alerts,
   clock: Clock,
@@ -138,9 +151,17 @@ export function projectSpending(
     alerts,
     capLink: () => "https://docs.facetdb.dev/fix/spending-cap",
   });
-  const cap =
-    config.spendingCap === undefined
-      ? NO_CAP
-      : { inputTokens: config.spendingCap, onCapReached: config.onCapReached };
-  return spendingGate(spending, projectId, () => Promise.resolve(cap));
+  return spendingGate(spending, projectId, () => Promise.resolve(readCap()));
+}
+
+/** The gate under the config's own cap, for a command that runs the file as loaded (backfill, preview). */
+export function projectSpending(
+  config: ProjectConfig,
+  store: Pick<Store, "usage">,
+  alerts: Alerts,
+  clock: Clock,
+  projectId: string,
+): SpendingGate {
+  const cap = capOf(config);
+  return spendingUnder(() => cap, store, alerts, clock, projectId);
 }

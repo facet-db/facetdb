@@ -4,6 +4,7 @@ import {
   ApiError,
   createApiClient,
   type DecisionFilters,
+  type DecisionHistory,
   type DecisionRow,
   type DecisionsPage,
   type ExplainedEntry,
@@ -68,7 +69,7 @@ function modelRow(key: string, at: string, probability: number): DecisionRow {
     record_key: key,
     version: 3,
     model: "jev-1.14.0",
-    answers: { is_scam: { type: "noul", probability, decision: "no" } },
+    answers: { is_scam: { type: "noul", probability, decision: "no", outcome: "decided" } },
   };
 }
 
@@ -125,6 +126,80 @@ describe("the Decisions page", () => {
     // The strip has a text equivalent: its label names the figure in words.
     expect(screen.getByRole("img", { name: "58% likely yes" })).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "electronics, 93% sure" })).toBeInTheDocument();
+  });
+
+  it("reads what a line came to by the tag, so an option named like a status is a decided value", async () => {
+    const page: DecisionsPage = {
+      decisions: [
+        {
+          kind: "human",
+          time: "2026-11-06T14:40:00.000Z",
+          record_key: "U-1",
+          version: 3,
+          question: "is_scam",
+          value: "withdrawn",
+          decision: "withdrawn",
+          decided_by: "hailey",
+          withdrawn: true,
+        },
+        {
+          kind: "answer",
+          time: "2026-11-06T14:30:00.000Z",
+          record_key: "O-1",
+          version: 3,
+          model: "jev-1.14.0",
+          answers: {
+            listing_state: {
+              type: "choice",
+              top: "withdrawn",
+              probabilities: [0.9, 0.1],
+              decision: "withdrawn",
+              outcome: "decided",
+            },
+            queue: {
+              type: "choice",
+              top: "needs review",
+              probabilities: [0.9, 0.1],
+              decision: "needs review",
+              outcome: "decided",
+            },
+            seller: {
+              type: "choice",
+              top: "unknown",
+              probabilities: [0.9, 0.1],
+              decision: "unknown",
+              outcome: "decided",
+            },
+            // The lines below are the levels' names, by the version the worker keeps.
+            urgency: {
+              type: "score",
+              probabilities: [0.1, 0.2, 0.7],
+              confidence: 0.6,
+              value: "high",
+              decision: "high",
+              outcome: "decided",
+            },
+          },
+        },
+      ],
+      next: null,
+    };
+    await openedLog("/decisions?time=all", fakeApi({ decisions: () => Promise.resolve(page) }));
+    const table = screen.getByRole("table", { name: "Decisions of listings" });
+    const decided = within(table)
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => within(row).getAllByRole("cell")[5]?.querySelector("[data-status]"));
+    expect(decided.map((cell) => [cell?.textContent, cell?.getAttribute("data-status")])).toEqual([
+      // The person's undo, told by the row's flag.
+      ["withdrawn", "skipped"],
+      // Options named "withdrawn", "needs review" and "unknown", each decided by the model.
+      ["withdrawn", "done"],
+      ["needs review", "done"],
+      ["unknown", "done"],
+      ["high", "done"],
+    ]);
+    expect(screen.getByRole("img", { name: "high, 60% sure" })).toBeInTheDocument();
   });
 
   it("asks for the first source's log from today's midnight, and for nothing else", async () => {
@@ -519,15 +594,16 @@ describe("the Runs tab", () => {
 
 describe("the why page", () => {
   it("words every kind of entry, newest first, as facetdb explain does", async () => {
+    const sample = sampleHistory("listings", "48213");
     const history = {
-      source: "listings",
-      key: "48213",
+      ...sample,
       entries: [
-        ...sampleHistory("listings", "48213").entries,
+        ...sample.entries,
         {
           kind: "withdrawal" as const,
           at: "2026-11-06T14:40:00.000Z",
           version: 3,
+          stateHash: "hash-at-390",
           question: "is_scam",
           wording: "Is this listing a scam?",
           reviewer: "hailey",
@@ -552,10 +628,15 @@ describe("the why page", () => {
     expect(entries[1]).toHaveTextContent('"Is this listing a scam?" decided yes');
     expect(entries[1]).toHaveTextContent("Note: gift-card payment, two-day-old seller");
     expect(entries[1]).toHaveTextContent("hailey, question set v3");
-    expect(entries[2]).toHaveTextContent("Asked again");
+    // Another state and another version than the answer before: both reasons are said.
+    expect(entries[2]).toHaveTextContent("Asked again: the record changed, under question set v3");
     expect(entries[2]).toHaveTextContent("jev-1.14.0, question set v3");
     expect(sighted(entries[2])).toContain(
       '"Is this listing a scam?" 58% likely yes → needs review',
+    );
+    expect(within(entries[2] as HTMLElement).getByText("needs review")).toHaveAttribute(
+      "data-status",
+      "needs_review",
     );
     expect(entries[3]).toHaveTextContent("First answer");
     expect(entries[3]).toHaveTextContent("jev-1.14.0, question set v2");
@@ -586,12 +667,16 @@ describe("the why page", () => {
     );
   });
 
-  it("opens with the latest of each question under Now, and the title line", async () => {
+  it("opens with the record's status and the latest of each question under Now, and the title line", async () => {
     renderStudio({ path: "/decisions/listings/48213" });
-    const now = (
-      await screen.findByRole("heading", { level: 2, name: "What the log says last" })
-    ).closest("article");
+    const now = (await screen.findByRole("heading", { level: 2, name: "Now" })).closest("article");
     expect(now).not.toBeNull();
+    // Read from the record by the worker, as facetdb explain reads it: the mockup's "Done, reviewed".
+    expect(within(now as HTMLElement).getByText("done, reviewed")).toHaveAttribute(
+      "data-status",
+      "done",
+    );
+    expect(now).not.toHaveTextContent("It is not the record's status");
     const lines = within(now as HTMLElement).getAllByRole("listitem");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toHaveTextContent("is_scam: yes, by hailey");
@@ -627,7 +712,7 @@ describe("the why page", () => {
 
   it("copies the link inside the click", async () => {
     const { user, copied } = renderStudio({ path: "/decisions/listings/a%2Fb" });
-    await screen.findByRole("heading", { level: 2, name: "What the log says last" });
+    await screen.findByRole("heading", { level: 2, name: "Now" });
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     expect(await screen.findByText(/Link copied/)).toBeVisible();
     expect(copied).toEqual(["http://127.0.0.1:4040/decisions/listings/a%2Fb"]);
@@ -638,7 +723,7 @@ describe("the why page", () => {
       path: "/decisions/listings/48213",
       clipboard: () => Promise.reject(new Error("denied")),
     });
-    await screen.findByRole("heading", { level: 2, name: "What the log says last" });
+    await screen.findByRole("heading", { level: 2, name: "Now" });
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     const field = await screen.findByRole("textbox");
     expect(field).toHaveValue("http://127.0.0.1:4040/decisions/listings/48213");
@@ -653,7 +738,7 @@ describe("the why page", () => {
         throw new TypeError("clipboard is undefined");
       },
     });
-    await screen.findByRole("heading", { level: 2, name: "What the log says last" });
+    await screen.findByRole("heading", { level: 2, name: "Now" });
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     expect(await screen.findByRole("textbox")).toHaveValue(
       "http://127.0.0.1:4040/decisions/listings/48213",
@@ -666,11 +751,14 @@ describe("the why page", () => {
         Promise.resolve({
           source: "listings",
           key: "<b>1</b>",
+          status: null,
+          reviewed: null,
           entries: [
             {
               kind: "human",
               at: "2026-11-06T14:31:00.000Z",
               version: 1,
+              stateHash: "h1",
               question: "q",
               wording: "<i>Q?</i>",
               decided: "yes",
@@ -688,21 +776,41 @@ describe("the why page", () => {
 
 const SCAM = "Is this listing a scam?";
 
-function answered(at: string, said: string, decision: string, version = 1): ExplainedEntry {
+/**
+ * A model answer to is_scam at a state (the hash the model was shown). The tag is the worker's;
+ * these fixtures decide nothing but a noul's yes or no, so "needs review" here is only ever that.
+ */
+function answered(
+  at: string,
+  said: string,
+  decision: string,
+  version = 1,
+  stateHash = "h1",
+): ExplainedEntry {
   return {
     kind: "answer",
     at,
     model: "jev-1.14.0",
     version,
-    answers: [{ question: "is_scam", wording: SCAM, said, decision }],
+    stateHash,
+    answers: [
+      {
+        question: "is_scam",
+        wording: SCAM,
+        said,
+        decision,
+        outcome: decision === "needs review" ? "needs_review" : "decided",
+      },
+    ],
   };
 }
 
-function decided(at: string, value: string, reviewer: string): ExplainedEntry {
+function decided(at: string, value: string, reviewer: string, stateHash = "h1"): ExplainedEntry {
   return {
     kind: "human",
     at,
     version: 1,
+    stateHash,
     question: "is_scam",
     wording: SCAM,
     decided: value,
@@ -710,22 +818,39 @@ function decided(at: string, value: string, reviewer: string): ExplainedEntry {
   };
 }
 
-function withdrawn(at: string, reviewer: string): ExplainedEntry {
-  return { kind: "withdrawal", at, version: 1, question: "is_scam", wording: SCAM, reviewer };
+function withdrawn(at: string, reviewer: string, stateHash = "h1"): ExplainedEntry {
+  return {
+    kind: "withdrawal",
+    at,
+    version: 1,
+    stateHash,
+    question: "is_scam",
+    wording: SCAM,
+    reviewer,
+  };
 }
 
-/** The lines under "What the log says last" for a history, as a sighted reader reads them. */
-async function standing(entries: readonly ExplainedEntry[], key = "48213") {
+/**
+ * The lines of the block above the history for a history, as a sighted reader reads them. The
+ * record's status is not readable here (a source the worker does not run), unless one is given.
+ */
+async function standing(
+  entries: readonly ExplainedEntry[],
+  key = "48213",
+  now: Pick<DecisionHistory, "status" | "reviewed"> = { status: null, reviewed: null },
+) {
   const api = fakeApi({
     decisionHistory: (source, asked) =>
-      Promise.resolve({ source, key: asked, entries: [...entries] }),
+      Promise.resolve({ source, key: asked, ...now, entries: [...entries] }),
   });
   renderStudio({ path: `/decisions/listings/${encodeURIComponent(key)}`, api });
-  const block = (
-    await screen.findByRole("heading", { level: 2, name: "What the log says last" })
-  ).closest("article");
+  const heading = now.status === null ? "What the log says last" : "Now";
+  const block = (await screen.findByRole("heading", { level: 2, name: heading })).closest(
+    "article",
+  );
   const item = within(block as HTMLElement).getByRole("listitem");
   return {
+    block: block as HTMLElement,
     item,
     text: sighted(item),
     lines: [...item.querySelectorAll("p")].map((line) => sighted(line)),
@@ -733,7 +858,7 @@ async function standing(entries: readonly ExplainedEntry[], key = "48213") {
 }
 
 describe("what the log says last", () => {
-  it("shows a person's decision first when the model answered again after it", async () => {
+  it("shows a person's decision first when the model answered again on the same state", async () => {
     const { text, lines } = await standing([
       answered("2026-11-03T10:00:00.000Z", "58% likely yes", "needs review"),
       decided("2026-11-03T11:00:00.000Z", "yes", "hailey"),
@@ -744,24 +869,60 @@ describe("what the log says last", () => {
     expect(lines[1]).toMatch(
       /^The model answered again .*: it said 58% likely yes, which the thresholds made needs review\.$/,
     );
+    // The state hashes match: the decision stands over the answer, as core keeps it.
     expect(lines[2]).toBe(
-      "hailey's decision still holds unless the record changed in between. facetdb explain listings 48213 reads the record itself.",
+      "The record had not changed since hailey decided, so the decision stands.",
     );
     // The answer is never drawn above the decision as if it had replaced it.
     expect(text).not.toContain("is_scam: needs review");
     expect(text).not.toContain("by the model");
   });
 
-  it("quotes a key for the shell in the explain command", async () => {
-    const { lines } = await standing(
-      [
-        answered("2026-11-03T10:00:00.000Z", "58% likely yes", "needs review"),
-        decided("2026-11-03T11:00:00.000Z", "yes", "hailey"),
-        answered("2026-11-05T09:00:00.000Z", "40% likely yes", "needs review", 2),
-      ],
+  it("puts the model's answer first when the record changed after the decision", async () => {
+    const { lines } = await standing([
+      answered("2026-11-03T10:00:00.000Z", "58% likely yes", "needs review"),
+      decided("2026-11-03T11:00:00.000Z", "yes", "hailey"),
+      answered("2026-11-05T09:00:00.000Z", "12% likely yes", "no", 1, "h2"),
+    ]);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^is_scam: no, by the model\. It said 12% likely yes, /);
+    expect(lines[1]).toMatch(
+      /^hailey decided yes .*; the record changed after that, so the decision no longer stands\.$/,
+    );
+  });
+
+  it("does not bring back a decision when the record changes back (A, B, A), as core does not", async () => {
+    const { lines } = await standing([
+      answered("2026-11-03T10:00:00.000Z", "58% likely yes", "needs review"),
+      decided("2026-11-03T11:00:00.000Z", "yes", "hailey"),
+      answered("2026-11-04T09:00:00.000Z", "58% likely yes", "needs review", 1, "h2"),
+      answered("2026-11-05T09:00:00.000Z", "58% likely yes", "needs review", 1, "h1"),
+    ]);
+    expect(lines[0]).toMatch(/^is_scam: needs review, by the model\./);
+    expect(lines[1]).toMatch(/^hailey decided yes .*no longer stands\.$/);
+  });
+
+  it("says the record's status when the worker reads it, and that a person decided", async () => {
+    const { block } = await standing(
+      [answered("2026-11-03T10:00:00.000Z", "58% likely yes", "needs review")],
+      "48213",
+      { status: "needs_review", reviewed: false },
+    );
+    // The record's badge, beside the small one the model's answer carries in its line.
+    const status = within(block).getByText("needs review", { selector: "[data-size='default']" });
+    expect(status).toHaveAttribute("data-status", "needs_review");
+    expect(block).not.toHaveTextContent("reviewed");
+    expect(block).toHaveTextContent("read from the record itself as facetdb explain reads it");
+  });
+
+  it("says when it speaks from the log alone, with the explain command quoted for the shell", async () => {
+    const { block } = await standing(
+      [answered("2026-11-03T10:00:00.000Z", "27% likely yes", "no")],
       "it's a key",
     );
-    expect(lines[2]).toContain(
+    expect(screen.queryByRole("heading", { level: 2, name: "Now" })).not.toBeInTheDocument();
+    expect(block).toHaveTextContent("The record's status cannot be read here");
+    expect(block).toHaveTextContent(
       "facetdb explain listings 'it'\\''s a key' reads the record itself.",
     );
   });
@@ -827,10 +988,57 @@ describe("what the log says last", () => {
     expect(lines[0]).toMatch(/^is_scam: needs review, by the model\. It said 58% likely yes, /);
   });
 
-  it("does not call the block the record's status", async () => {
-    await standing([answered("2026-11-03T10:00:00.000Z", "27% likely yes", "no")]);
-    expect(screen.queryByRole("heading", { level: 2, name: "Now" })).not.toBeInTheDocument();
-    expect(screen.getByText(/It is not the record's status/)).toBeVisible();
+  it("reads an option named 'needs review' that the model decided as a value, not a status", async () => {
+    const queue: ExplainedEntry = {
+      kind: "answer",
+      at: "2026-11-03T10:00:00.000Z",
+      model: "jev-1.14.0",
+      version: 1,
+      stateHash: "h1",
+      answers: [
+        {
+          question: "queue",
+          wording: "Which queue should take it?",
+          said: "needs review, 80% sure",
+          decision: "needs review",
+          outcome: "decided",
+        },
+      ],
+    };
+    const { item } = await standing([queue]);
+    expect(sighted(item)).toMatch(/^queue: needs review, by the model\./);
+    expect(item.querySelector("[data-status]")).toBeNull();
+    const timeline = screen.getByRole("list", { name: "Decisions for record 48213" });
+    expect(timeline.querySelector("[data-status]")).toBeNull();
+  });
+});
+
+describe("why a record was asked again", () => {
+  /** The headline of each model answer in the timeline, oldest first. */
+  async function headlines(entries: readonly ExplainedEntry[]) {
+    await standing(entries);
+    const timeline = screen.getByRole("list", { name: "Decisions for record 48213" });
+    return [...timeline.querySelectorAll<HTMLElement>(":scope > li[data-kind='answer']")]
+      .reverse()
+      .map((entry) => entry.textContent);
+  }
+
+  it("says the record changed, the version changed, both, or neither, from the answer before", async () => {
+    const said = await headlines([
+      answered("2026-11-01T10:00:00.000Z", "27% likely yes", "no", 1, "h1"),
+      answered("2026-11-02T10:00:00.000Z", "28% likely yes", "no", 1, "h2"),
+      answered("2026-11-03T10:00:00.000Z", "29% likely yes", "no", 2, "h2"),
+      // A person's decision between two answers is not the answer before.
+      decided("2026-11-03T11:00:00.000Z", "yes", "hailey", "h2"),
+      answered("2026-11-04T10:00:00.000Z", "30% likely yes", "no", 3, "h3"),
+      answered("2026-11-05T10:00:00.000Z", "31% likely yes", "no", 3, "h3"),
+    ]);
+    expect(said[0]).toContain("First answer");
+    expect(said[1]).toContain("Asked again: the record changed");
+    expect(said[1]).not.toContain("under question set");
+    expect(said[2]).toContain("Asked again under question set v2");
+    expect(said[3]).toContain("Asked again: the record changed, under question set v3");
+    expect(said[4]).toMatch(/Asked again(?!:| under)/);
   });
 });
 
@@ -941,7 +1149,7 @@ describe("a read that fails after a good one", () => {
       },
     });
     const { user } = renderStudio({ path: "/decisions/listings/48213", api });
-    await screen.findByRole("heading", { level: 2, name: "What the log says last" });
+    await screen.findByRole("heading", { level: 2, name: "Now" });
     await user.click(
       within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", {
         name: "Decisions",
@@ -952,7 +1160,7 @@ describe("a read that fails after a good one", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("The worker could not read the log.");
-    expect(screen.getByRole("heading", { level: 2, name: "What the log says last" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "Now" })).toBeVisible();
     expect(screen.getByRole("list", { name: "Decisions for record 48213" })).toBeVisible();
     expect(
       screen.getByText(/This history was last read .* and may be out of date\./),
@@ -1283,7 +1491,14 @@ describe("the words of the table", () => {
   });
 
   it("says what the model said as explain does", () => {
-    expect(saidOf({ type: "noul", probability: 0.58, decision: "needs review" })).toEqual({
+    expect(
+      saidOf({
+        type: "noul",
+        probability: 0.58,
+        decision: "needs review",
+        outcome: "needs_review",
+      }),
+    ).toEqual({
       figure: 0.58,
       words: "likely yes",
       label: "58% likely yes",
@@ -1295,19 +1510,39 @@ describe("the words of the table", () => {
         top: "electronics",
         probabilities: [0.95, 0.03, 0.02],
         decision: "electronics",
+        outcome: "decided",
       }).label,
     ).toBe("electronics, 93% sure");
-    expect(
-      saidOf({ type: "score", probabilities: [0.1, 0.2, 0.7], confidence: 0.48, decision: "high" })
-        .label,
-    ).toBe("high, 48% sure");
-    // The row does not name a level the thresholds left undecided: only its place.
     expect(
       saidOf({
         type: "score",
         probabilities: [0.1, 0.2, 0.7],
         confidence: 0.48,
+        value: "high",
+        decision: "high",
+        outcome: "decided",
+      }).label,
+    ).toBe("high, 48% sure");
+    // The row names the most likely level even when the thresholds left it to a person.
+    expect(
+      saidOf({
+        type: "score",
+        probabilities: [0.1, 0.2, 0.7],
+        confidence: 0.48,
+        value: "high",
         decision: "needs review",
+        outcome: "needs_review",
+      }).words,
+    ).toBe("high");
+    // A version the worker no longer keeps has no levels to name it by: only its place.
+    expect(
+      saidOf({
+        type: "score",
+        probabilities: [0.1, 0.2, 0.7],
+        confidence: 0.48,
+        value: "",
+        decision: "unknown",
+        outcome: "unknown",
       }).words,
     ).toBe("leans to level 3 of 3");
   });
@@ -1323,6 +1558,12 @@ describe("the words of the table", () => {
     expect(lines.at(0)?.by).toEqual({ kind: "person", reviewer: "hailey" });
     expect(logLines(SAMPLE_DECISIONS.decisions, "category").map((line) => line.id)).toEqual([
       "1:category",
+    ]);
+    expect(lines.map((line) => line.outcome)).toEqual([
+      "decided",
+      "needs_review",
+      "decided",
+      "decided",
     ]);
   });
 

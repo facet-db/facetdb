@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { judgeDraftSource, type NewSourceSetup, type SourceDraft } from "./draft.ts";
+import {
+  judgeDraftProject,
+  judgeDraftSource,
+  type NewSourceSetup,
+  type ProjectDraft,
+  type SourceDraft,
+} from "./draft.ts";
 import type { ProjectConfig } from "./dsl.ts";
 import { configFileSource } from "./json.ts";
 import type { ConfigIssue } from "./schema.ts";
@@ -11,7 +17,7 @@ import type { ConfigWarning } from "./warnings.ts";
  * file loads now, the whole project is rendered by the JSON-to-config exporter from that validated
  * JSON alone, and the file's diff is shown before anything is written. Nothing a draft carries
  * reaches the file as code: every value goes through `JSON.stringify`, a connection string is never
- * in it (only `process.env.<variable>` of a variable the file already names), and an action is
+ * in it (only `env("<variable>")` of a variable the file already names), and an action is
  * `actionCall("<plugin>", "<action>", {...})`. The write goes beside the file and is renamed into
  * place, so a reader sees the old file or the new one.
  */
@@ -25,6 +31,16 @@ export type GitState =
   | { readonly kind: "no-repository" }
   | { readonly kind: "no-git" }
   | { readonly kind: "unreadable"; readonly reason: string };
+
+/** Each state in which Apply replaces the file only with `force`; the studio words each its own way. */
+export type UncommittedState = Exclude<GitState["kind"], "clean">;
+
+/** Why the file is not replaced without `force`: the state, and the terminal's words with the fix. */
+export type Uncommitted = {
+  readonly state: UncommittedState;
+  readonly message: string;
+  readonly fix: string;
+};
 
 /** What is at the config file's path, never read through a symbolic link. */
 export type ConfigFileRead =
@@ -61,9 +77,20 @@ export type ApplyPlan = {
   readonly id: string;
   /** The project as the written file loads. */
   readonly config: ProjectConfig;
-  /** The wording warnings of the draft source; never a refusal. */
+  /** The wording warnings of the draft source; never a refusal; none for a project draft. */
   readonly warnings: readonly ConfigWarning[];
+  /**
+   * The file holds lines the exporter would not write for the project as it loads now (comments,
+   * code or a layout of the person's own): the whole-file write drops them.
+   */
+  readonly dropsOwnText: boolean;
 };
+
+/**
+ * What Apply places into the file: one source (the Questions page, the setup flow), or the
+ * project's own spending settings (Settings), never both in one draft.
+ */
+export type ConfigDraft = { readonly source: SourceDraft } | { readonly project: ProjectDraft };
 
 export type PlanResult =
   | { readonly ok: true; readonly plan: ApplyPlan }
@@ -116,11 +143,15 @@ function namesVariable(text: string, name: string): boolean {
 }
 
 /**
- * The variable each source reads its connection from, as the file names it. The loader records the
+ * The variable each source reads its connection from, as the file names it. A source written as
+ * `env("X")` named it, and the loader marked the name as the file's own (`databaseEnvNamed`): it is
+ * kept as it is. One written as `process.env.X` arrived as a string, and the loader recorded the
  * variable by the value it found (DATABASE_URL first), so where two variables hold the same string
  * on this machine it may name another one than the file does, and Apply would write that one: a
  * different database wherever they differ. The file's own name wins; where the file names more than
- * one of them, or none, Apply cannot tell and refuses.
+ * one of them, or none, Apply cannot tell and refuses. The mark decides, never the text: a file
+ * holding `env("X")` for one source and `process.env.X` for another would otherwise confirm the
+ * guess for the second by the first's name.
  */
 function pinVariables(
   config: ProjectConfig,
@@ -132,7 +163,7 @@ function pinVariables(
   const issues: ConfigIssue[] = [];
   const sources = config.sources.map((source, index) => {
     const value = source.database;
-    if (source.databaseEnv === undefined || value === undefined) {
+    if (source.databaseEnv === undefined || value === undefined || source.databaseEnvNamed) {
       return source;
     }
     const holding = Object.keys(env)
@@ -158,16 +189,36 @@ function pinVariables(
   return issues.length > 0 ? { ok: false, issues } : { ok: true, config: { ...config, sources } };
 }
 
+/** The project with the draft in place, and the draft source's wording warnings (a project draft has none). */
+function judgeDraft(
+  file: ProjectConfig,
+  draft: ConfigDraft,
+  env: Readonly<Record<string, string | undefined>>,
+  setup: NewSourceSetup | undefined,
+):
+  | {
+      readonly ok: true;
+      readonly config: ProjectConfig;
+      readonly warnings: readonly ConfigWarning[];
+    }
+  | { readonly ok: false; readonly issues: readonly ConfigIssue[] } {
+  if ("source" in draft) {
+    return judgeDraftSource(file, draft.source, env, setup);
+  }
+  const judged = judgeDraftProject(file, draft.project, env);
+  return judged.ok ? { ok: true, config: judged.config, warnings: [] } : judged;
+}
+
 /**
  * Judges `draft` within the project as the file loads now (`current.config`), renders the whole
  * project through the exporter and diffs it against the file's text. `env` is the worker's: a draft
  * may name only the connection variables the file already names (`judgeDraftSource`). `setup` is
  * the studio's setup flow's alone: the operator on this machine adding a new source, which may name
- * its own variable and carry a where filter.
+ * its own variable and carry a where filter; a project draft never takes one.
  */
 export function planApply(
   current: { readonly path: string; readonly text: string; readonly config: ProjectConfig },
-  draft: SourceDraft,
+  draft: ConfigDraft,
   env: Readonly<Record<string, string | undefined>>,
   setup?: NewSourceSetup,
 ): PlanResult {
@@ -176,13 +227,16 @@ export function planApply(
     return pinned;
   }
   const file = pinned.config;
-  const judged = judgeDraftSource(file, draft, env, setup);
+  // A project draft (Settings' spending cap) changes no source, so it has no where filter or
+  // actions to guard and no wording to warn about; the whole file is still rendered again, so the
+  // variables stay pinned above and the unset-variable check below holds for it too.
+  const judged = judgeDraft(file, draft, env, setup);
   if (!judged.ok) {
     return judged;
   }
-  // The exporter writes `process.env.<variable>` for each table source, the variable a name the
-  // schema has judged (`databaseEnv`). One the loader could not record (its value unset where the
-  // worker runs) would be written as DATABASE_URL: another connection than the one in force.
+  // The exporter writes `env("<variable>")` for each table source, the variable a name the schema
+  // has judged (`databaseEnv`). One the loader could not record (its value unset where the worker
+  // runs) would be written as DATABASE_URL: another connection than the one in force.
   const issues = judged.config.sources.flatMap((source, index): ConfigIssue[] =>
     source.api || source.databaseEnv !== undefined
       ? []
@@ -193,7 +247,9 @@ export function planApply(
           },
         ],
   );
-  issues.push(...operatorOnly(file, judged.config, draft.name, setup));
+  if ("source" in draft) {
+    issues.push(...operatorOnly(file, judged.config, draft.source.name, setup));
+  }
   if (issues.length > 0) {
     return { ok: false, issues };
   }
@@ -201,6 +257,9 @@ export function planApply(
   const id = createHash("sha256")
     .update(`${current.path}\u0000${current.text}\u0000${after}`)
     .digest("hex");
+  // FacetDB's own lines are the ones the exporter writes for the project as it loads now: any other
+  // line in the file (a comment, a helper, a layout of the person's own) is gone once it is rewritten.
+  const own = new Set(configFileSource(file).split("\n"));
   return {
     ok: true,
     plan: {
@@ -212,20 +271,27 @@ export function planApply(
       id,
       config: judged.config,
       warnings: judged.warnings,
+      dropsOwnText: current.text.split("\n").some((line) => !own.has(line)),
     },
   };
 }
 
 /** Why the file is not replaced without `force`, in words with the fix; undefined when git keeps it. */
-export function uncommittedWords(
-  state: GitState,
+export function uncommittedWords(state: GitState, path: string): Uncommitted | undefined {
+  if (state.kind === "clean") {
+    return undefined;
+  }
+  return { state: state.kind, ...terminalWords(state, path) };
+}
+
+/** The terminal's words for a file git keeps no copy of, with the fix (`force` or a commit). */
+function terminalWords(
+  state: Exclude<GitState, { readonly kind: "clean" }>,
   path: string,
-): { readonly message: string; readonly fix: string } | undefined {
+): { readonly message: string; readonly fix: string } {
   const commit = `git add ${path} && git commit`;
   const force = 'apply again with force ("force": true)';
   switch (state.kind) {
-    case "clean":
-      return undefined;
     case "modified":
       return {
         message: `${path} has changes git has not committed, and Apply would replace them`,
@@ -266,7 +332,7 @@ export type ApplyResult =
   /** The file is no longer the one the plan was made from: nothing was written. */
   | { readonly kind: "moved" }
   | { readonly kind: "not-a-file" }
-  | { readonly kind: "uncommitted"; readonly message: string; readonly fix: string };
+  | ({ readonly kind: "uncommitted" } & Uncommitted);
 
 /**
  * Writes the plan's file, aside and renamed into place, unless git shows the file holds changes it

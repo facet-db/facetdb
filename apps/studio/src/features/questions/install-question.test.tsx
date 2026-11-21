@@ -44,7 +44,7 @@ const LISTINGS_ADDED: PendingSource = {
   removed: [],
 };
 
-const NOT_RUNNING_HEADING = /is written to facetdb\.config\.ts and is not running yet$/;
+const NOT_RUNNING_HEADING = /is not running yet\.$/;
 
 function configWith(pending: readonly PendingSource[]): ProjectConfig {
   return { ...SAMPLE_PROJECT_CONFIG, pending: [...pending] };
@@ -136,9 +136,15 @@ describe("installing an added question from the Questions page", () => {
     await studio.user.click(install);
 
     expect(
-      await screen.findByText(
-        /^Installed on public\.listings\. listings answers with version 4 now: the columns of the question is_vehicle are in its database/,
-      ),
+      await screen.findByText("Installed. listings now answers with is_vehicle."),
+    ).toBeVisible();
+    // No version, no worker's sentence: it waits behind Details.
+    const said = /columns of the question is_vehicle are in its database/;
+    expect(screen.getByText(said)).not.toBeVisible();
+    await studio.user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByText(said)).toBeVisible();
+    expect(
+      screen.getByText("Records from before have no answer for is_vehicle yet."),
     ).toBeVisible();
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: NOT_RUNNING_HEADING })).toBeNull();
@@ -186,7 +192,8 @@ describe("installing an added question from the Questions page", () => {
     await waitFor(() => {
       expect(api.calls).toContain("setupAccess");
     });
-    expect(within(block()).getByText("facetdb migrate --source listings")).toBeVisible();
+    // The terminal steps are the way here: open from the start.
+    expect(await within(block()).findByText("facetdb migrate --source listings")).toBeVisible();
     expect(within(block()).queryByRole("button", { name: "Install from this page" })).toBeNull();
   });
 
@@ -304,10 +311,13 @@ describe("installing an added question from the Questions page", () => {
     );
 
     expect(
-      await within(panel).findByText(
-        /^Installed on public\.listings\. The question is_vehicle is not installed in its database yet/,
-      ),
+      await within(panel).findByText("Installed. listings does not answer with is_vehicle yet."),
     ).toBeVisible();
+    await studio.user.click(within(panel).getByRole("button", { name: "Details" }));
+    expect(
+      within(panel).getByText(/^The question is_vehicle is not installed in its database yet/),
+    ).toBeVisible();
+    expect(within(panel).queryByText(/Records from before/)).toBeNull();
     expect(block()).toBeVisible();
   });
 });
@@ -349,17 +359,17 @@ describe("installing an added question from the Apply dialog", () => {
     const studio = await questionsPage(api);
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await studio.user.click(
-      await within(dialog).findByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/Written\. facetdb\.config\.ts holds the draft/);
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText("Applied.");
     return { studio, dialog };
   }
 
-  it("installs from the block in the dialog and says the source runs version 4 once the block goes", async () => {
+  it("installs from the block in the dialog, says the source answers with the question once the block goes, and the list follows the install's reload", async () => {
     const { api } = applying();
     const { studio, dialog } = await applyDialog(api);
     const inDialog = await within(dialog).findByRole("region", { name: NOT_RUNNING_HEADING });
+    const kept = "listings keeps its old questions until the new one is installed.";
+    expect(within(dialog).getByText(kept)).toBeVisible();
 
     await studio.user.click(
       within(inDialog).getByRole("button", { name: "Install from this page" }),
@@ -372,13 +382,15 @@ describe("installing an added question from the Apply dialog", () => {
     );
 
     expect(
-      await within(dialog).findByText(
-        /^Installed on public\.listings\. listings answers with version 4 now/,
-      ),
+      await within(dialog).findByText("Installed. listings now answers with is_vehicle."),
     ).toBeVisible();
     await waitFor(() => {
       expect(within(dialog).queryByRole("region", { name: NOT_RUNNING_HEADING })).toBeNull();
     });
+    // The write's reload said "kept"; the install's own reload switched it: the list says so, and
+    // no longer contradicts the note above it.
+    expect(within(dialog).queryByText(kept)).toBeNull();
+    expect(within(dialog).getByText("listings now answers with the new questions.")).toBeVisible();
   });
 
   it("drops the string when the dialog closes", async () => {

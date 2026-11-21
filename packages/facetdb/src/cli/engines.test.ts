@@ -202,7 +202,7 @@ describe("the scheme table", () => {
     const json = JSON.stringify(toProjectJson(parsed.config));
     expect(json).toContain('"database":{"env":"LISTINGS_URL"}');
     const file = configFileSource(parsed.config);
-    expect(file).toContain("database: process.env.LISTINGS_URL");
+    expect(file).toContain('database: env("LISTINGS_URL")');
     for (const text of [json, file]) {
       expect(text).not.toContain("turso.io");
       expect(text).not.toContain("AUTH_TOKEN");

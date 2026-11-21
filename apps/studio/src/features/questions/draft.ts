@@ -141,7 +141,7 @@ export function cutProblem(question: QuestionForm): string | undefined {
   if (thresholds.kind !== "cuts" || !crossed(thresholds)) {
     return undefined;
   }
-  return `The cut lines cross: no at or below ${percent(thresholds.noBelow)} is not lower than yes at or above ${percent(thresholds.yesAbove)}. A cut set by hand stays when the stakes change: use the stakes' default, or choose the stakes again.`;
+  return `The cut lines cross: yes at ${percent(thresholds.yesAbove)} sits below no at ${percent(thresholds.noBelow)}. Move one, or use the default.`;
 }
 
 /**

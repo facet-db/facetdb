@@ -471,9 +471,14 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
     if (!("ok" in now)) {
       return now;
     }
-    const planned = planApply({ path, text: now.text, config: now.config }, draft, env, {
-      variable,
-    });
+    const planned = planApply(
+      { path, text: now.text, config: now.config },
+      { source: draft },
+      env,
+      {
+        variable,
+      },
+    );
     if (!planned.ok) {
       const hide = hidingValue(draft);
       return {

@@ -11,10 +11,12 @@ import {
 import {
   fakeApi,
   renderStudio,
+  SAMPLE_ACCESS,
   SAMPLE_ALERTS,
   SAMPLE_HOME,
   SAMPLE_PROJECT,
   SAMPLE_REVIEWERS,
+  SAMPLE_SPENDING_APPLIED,
 } from "../../testing/index.ts";
 import { Unreachable } from "./index.ts";
 
@@ -574,6 +576,54 @@ describe("the Settings page", () => {
         "addReviewer lee",
       ]);
     });
+
+    it("shows the terminal command with the name filled in, and no form, when this login cannot make accounts", async () => {
+      // The default install: the worker's login may read facetdb.users and not write it, which GET
+      // /v1/studio says before anything is typed.
+      const api = fakeApi({
+        studioAccess: () => Promise.resolve({ ...SAMPLE_ACCESS, accountsWritable: false }),
+      });
+      const { user, copied } = renderStudio({ path: "/settings", api, now: NOW });
+
+      const section = within(await screen.findByRole("region", { name: "Reviewers" }));
+      expect(
+        await section.findByText(/Reviewer accounts are made from a terminal\./),
+      ).toBeInTheDocument();
+      expect(section.getByText("Local accounts, made with facetdb users add.")).toBeInTheDocument();
+      // No password boxes and no Add: nothing that can only refuse.
+      expect(section.queryByLabelText("Password")).toBeNull();
+      expect(section.queryByRole("button", { name: "Add a reviewer" })).toBeNull();
+      // The command follows the name as it is typed, and copies.
+      expect(section.getByText("DATABASE_URL=<owner-url> facetdb users add <name>")).toBeVisible();
+      await user.type(section.getByLabelText("Name"), "maya");
+      const command = "DATABASE_URL=<owner-url> facetdb users add maya";
+      expect(section.getByText(command)).toBeVisible();
+      await user.click(section.getByRole("button", { name: `Copy ${command}` }));
+      expect(copied).toEqual([command]);
+      expect(await section.findByText("Copied. Paste it into the terminal.")).toBeVisible();
+      expect(api.calls.some((call) => call.startsWith("addReviewer"))).toBe(false);
+      // A name the CLI would refuse is refused at the box, and never spliced into the command.
+      await user.type(section.getByLabelText("Name"), " smith");
+      expect(section.getByText("DATABASE_URL=<owner-url> facetdb users add <name>")).toBeVisible();
+      expect(section.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true");
+      expect(section.getByText('"maya smith" is not a name an account can have.')).toBeVisible();
+    });
+
+    it("shows the terminal route, never the form, when how accounts are made could not be read", async () => {
+      // A refusal in the worker's words is not retried, so the read settles as failed at once.
+      const api = fakeApi({
+        studioAccess: () =>
+          Promise.reject(
+            new ApiError(500, "internal_error", "Something went wrong.", "Try again."),
+          ),
+      });
+      renderStudio({ path: "/settings", api, now: NOW });
+      const section = within(await screen.findByRole("region", { name: "Reviewers" }));
+      expect(
+        await section.findByText(/Reviewer accounts are made from a terminal\./),
+      ).toBeInTheDocument();
+      expect(section.queryByLabelText("Password")).toBeNull();
+    });
   });
 
   it("says the list was last known when a refresh after an account was made fails", async () => {
@@ -621,27 +671,166 @@ describe("the Settings page", () => {
   });
 
   describe("the spending cap", () => {
-    it("shows the cap, what happens at 100% and the month's spending, with no control that writes", async () => {
+    /** The figures the worker enforces, apart from the form that offers the same choices. */
+    const inForce = async () =>
+      within(
+        await screen.findByRole("region", {
+          name: "The cap the worker enforces",
+        }),
+      );
+
+    it("shows the cap, what happens at 100% and the month's spending as the worker enforces them", async () => {
       const api = fakeApi();
       renderStudio({ path: "/settings", api, now: NOW });
 
-      const cap = within(await screen.findByRole("region", { name: "Spending cap" }));
-      expect(await cap.findByText("$25")).toBeInTheDocument();
-      expect(cap.getByText(/25,000,000 billable input tokens/)).toBeInTheDocument();
-      expect(cap.getByText("Pause the project; records wait as pending")).toBeInTheDocument();
-      expect(cap.getByText("$3.20")).toBeInTheDocument();
+      const cap = await inForce();
+      expect(await cap.findByText("25M")).toBeInTheDocument();
       expect(
-        cap.getByRole("img", { name: "13% of the $25 monthly cap. The project pauses at 100%." }),
+        cap.getByText(/billable input tokens \(25,000,000\), \$25 at the model.s price/),
       ).toBeInTheDocument();
-      // Not a form: nothing to save, and no Apply is ever called by this page.
-      expect(cap.queryByRole("textbox")).toBeNull();
-      expect(cap.queryByRole("combobox")).toBeNull();
-      expect(cap.queryByRole("button")).toBeNull();
-      expect(api.calls.some((call) => call.startsWith("apply"))).toBe(false);
-      // It says where the cap is set, and why it is not set here.
-      expect(cap.getByText(/edit/, { exact: false })).toHaveTextContent("facetdb.config.ts");
-      expect(cap.getByText(/restart the worker/)).toBeInTheDocument();
-      expect(cap.getByText(/Apply writes one source at a time/)).toBeInTheDocument();
+      expect(cap.getByText("Pause the project; records wait as pending")).toBeInTheDocument();
+      expect(cap.getByText("3.2M of 25M")).toBeInTheDocument();
+      expect(
+        cap.getByRole("img", {
+          name: "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
+        }),
+      ).toBeInTheDocument();
+      // The form starts from the file, which sets the same cap.
+      const section = within(screen.getByRole("region", { name: "Spending cap" }));
+      expect(
+        await section.findByRole("textbox", { name: "Monthly cap, in billable input tokens" }),
+      ).toHaveValue("25M");
+      expect(
+        section.getByRole("radio", { name: "Pause the project; records wait as pending" }),
+      ).toBeChecked();
+      expect(section.getByRole("checkbox", { name: "No monthly cap" })).not.toBeChecked();
+      expect(section.getByText(/the worker enforces the new cap at once/)).toHaveTextContent(
+        "facetdb.config.ts",
+      );
+    });
+
+    it("Save opens the diff and nothing is written before confirm; the write puts the cap in force, and the figures show it", async () => {
+      // The file as the worker reads it: the sample until the write, then what was written; the
+      // worker takes the written cap up in the write's reload, so Home's cap follows the file.
+      let file: SpendingConfig = { tokens: 25_000_000, onCapReached: "pause" };
+      const api = fakeApi({
+        spendingConfig: () => Promise.resolve(file),
+        home: () =>
+          Promise.resolve({
+            ...SAMPLE_HOME,
+            spending: {
+              ...SAMPLE_HOME.spending,
+              cap:
+                file.tokens === null
+                  ? null
+                  : {
+                      inputTokens: file.tokens,
+                      dollars: (file.tokens * 0.042) / 1_000_000,
+                      onCapReached: file.onCapReached,
+                    },
+            },
+          }),
+        applySpendingWrite: () => {
+          file = { tokens: 40_000_000, onCapReached: "continue" };
+          return Promise.resolve(SAMPLE_SPENDING_APPLIED);
+        },
+      });
+      const { user } = renderStudio({ path: "/settings", api, now: NOW });
+      const section = within(await screen.findByRole("region", { name: "Spending cap" }));
+      const box = await section.findByRole("textbox", {
+        name: "Monthly cap, in billable input tokens",
+      });
+
+      await user.clear(box);
+      await user.type(box, "40,000,000");
+      await user.click(
+        section.getByRole("radio", {
+          name: "Keep answering past the cap; the warning at 80% still goes out",
+        }),
+      );
+      await user.click(section.getByRole("button", { name: "Save" }));
+
+      const dialog = within(await screen.findByRole("dialog", { name: "Save the spending cap" }));
+      expect(
+        await dialog.findByRole("region", { name: "Changes to facetdb.config.ts" }),
+      ).toHaveTextContent('+ spendingCap: 40000000,+ onCapReached: "continue",');
+      expect(
+        dialog.getByText("The worker uses this cap as soon as it is applied."),
+      ).toBeInTheDocument();
+      expect(api.calls).toContain(
+        'applySpendingDiff {"spendingCap":40000000,"onCapReached":"continue"}',
+      );
+      // Shown, not written.
+      expect(api.calls.some((call) => call.startsWith("applySpendingWrite"))).toBe(false);
+      expect(api.calls.some((call) => call.startsWith("applyDiff"))).toBe(false);
+
+      await user.click(dialog.getByRole("button", { name: "Apply" }));
+
+      expect(
+        await dialog.findByText("Applied. The worker uses the new cap now."),
+      ).toBeInTheDocument();
+      expect(api.calls).toContain(
+        'applySpendingWrite {"plan":"plan-spending","force":false,"draft":{"spendingCap":40000000,"onCapReached":"continue"}}',
+      );
+      // No restart note: the reload took the cap up.
+      expect(dialog.queryByText(/restart/)).toBeNull();
+      // One write per plan: the button is gone once written.
+      expect(dialog.queryByRole("button", { name: "Apply" })).toBeNull();
+
+      // The file and the cap in force are read again, and agree: the figures show the new cap,
+      // and nothing says the file sets another.
+      await user.click(dialog.getByRole("button", { name: "Close" }));
+      expect(await (await inForce()).findByText("40M")).toBeInTheDocument();
+      expect(
+        (await inForce()).getByText(
+          "Keep answering past the cap; the warning at 80% still goes out",
+        ),
+      ).toBeInTheDocument();
+      expect(section.queryByText(/facetdb\.config\.ts sets a monthly cap/)).toBeNull();
+      expect(api.calls.filter((call) => call.startsWith("applySpendingWrite"))).toHaveLength(1);
+    });
+
+    it("says before the write when this month's usage is already past the cap saved", async () => {
+      // 3,200,000 spent this month (the sample); a cap of 3,000,000 pauses the project on landing.
+      const { user } = renderStudio({ path: "/settings", api: fakeApi(), now: NOW });
+      const section = within(await screen.findByRole("region", { name: "Spending cap" }));
+      const box = await section.findByRole("textbox", {
+        name: "Monthly cap, in billable input tokens",
+      });
+      await user.clear(box);
+      await user.type(box, "3M");
+      await user.click(section.getByRole("button", { name: "Save" }));
+      const dialog = within(await screen.findByRole("dialog", { name: "Save the spending cap" }));
+      expect(
+        await dialog.findByText(
+          "The worker uses this cap as soon as it is applied. This month's usage is already past this cap, so the project pauses as soon as it is applied, until the month resets or the cap is raised.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("saves no cap as null, and refuses a cap that is not a whole number before asking the worker", async () => {
+      const api = fakeApi();
+      const { user } = renderStudio({ path: "/settings", api, now: NOW });
+      const section = within(await screen.findByRole("region", { name: "Spending cap" }));
+      const box = await section.findByRole("textbox", {
+        name: "Monthly cap, in billable input tokens",
+      });
+
+      await user.clear(box);
+      await user.type(box, "lots");
+      await user.click(section.getByRole("button", { name: "Save" }));
+      expect(await section.findByRole("alert")).toHaveTextContent(
+        "The cap is a whole number of billable input tokens.",
+      );
+      expect(box).toHaveAttribute("aria-invalid", "true");
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      await user.click(section.getByRole("checkbox", { name: "No monthly cap" }));
+      expect(box).toBeDisabled();
+      await user.click(section.getByRole("button", { name: "Save" }));
+      await screen.findByRole("dialog", { name: "Save the spending cap" });
+      expect(api.calls).toContain('applySpendingDiff {"spendingCap":null,"onCapReached":"pause"}');
+      expect(api.calls.some((call) => call.startsWith("applySpendingWrite"))).toBe(false);
     });
 
     /**
@@ -685,44 +874,61 @@ describe("the Settings page", () => {
         now: NOW,
       });
       expect(
-        await screen.findByText("Keep answering past the cap; the warning at 80% still goes out"),
+        (await inForce()).getByText(
+          "Keep answering past the cap; the warning at 80% still goes out",
+        ),
       ).toBeInTheDocument();
       unmount();
 
       renderStudio({ path: "/settings", api: homeWithCap(null), now: NOW });
-      expect(await screen.findByText("None set, so the project never pauses.")).toBeInTheDocument();
-      expect(screen.queryByText("At 100%")).toBeNull();
+      const none = await inForce();
+      expect(await none.findByText("None set, so the project never pauses.")).toBeInTheDocument();
+      expect(none.queryByText("At 100%")).toBeNull();
+      // The form says the file has no cap either.
+      expect(await screen.findByRole("checkbox", { name: "No monthly cap" })).toBeChecked();
     });
 
     it("says nothing of the file when it sets the cap the worker enforces", async () => {
       renderStudio({ path: "/settings", now: NOW });
       const cap = within(await screen.findByRole("region", { name: "Spending cap" }));
-      await cap.findByText("$25");
-      expect(cap.queryByText(/restart the worker to apply it/)).toBeNull();
+      await cap.findByText("25M");
+      expect(cap.queryByText(/the worker still enforces the cap above/)).toBeNull();
       expect(cap.queryByRole("status")).toBeNull();
     });
 
-    it("shows the cap the worker enforces, and says the file sets another that a restart applies", async () => {
-      // The operator lowered spendingCap in the file and applied a question change: the file reads
-      // 1,000,000 now, the worker still spends up to 5,000,000 until it is restarted.
+    it("shows the cap the worker enforces, says when the file sets another it has not taken up, and applies it on a click", async () => {
+      // The operator lowered spendingCap in the file by hand since the last reload: the file reads
+      // 1,000,000 now, the worker still spends up to the 5,000,000 it took up last.
       const api = homeWithCap(
         { inputTokens: 5_000_000, dollars: 5, onCapReached: "pause" },
         { tokens: 1_000_000, onCapReached: "continue" },
       );
-      renderStudio({ path: "/settings", api, now: NOW });
+      const { user } = renderStudio({ path: "/settings", api, now: NOW });
 
       const cap = within(await screen.findByRole("region", { name: "Spending cap" }));
-      expect(await cap.findByText("$5")).toBeInTheDocument();
+      const enforced = await inForce();
+      expect(await enforced.findByText("5M")).toBeInTheDocument();
       // The cap and the choice in force, not the file's.
-      expect(cap.getByText(/, 5,000,000 billable input tokens/)).toBeInTheDocument();
-      expect(cap.getByText("Pause the project; records wait as pending")).toBeInTheDocument();
       expect(
-        cap.queryByText("Keep answering past the cap; the warning at 80% still goes out"),
+        enforced.getByText(/billable input tokens \(5,000,000\), \$5 at the model.s price/),
+      ).toBeInTheDocument();
+      expect(enforced.getByText("Pause the project; records wait as pending")).toBeInTheDocument();
+      expect(
+        enforced.queryByText("Keep answering past the cap; the warning at 80% still goes out"),
       ).toBeNull();
-      // The file's, in words, with what to do.
+      // The form edits the file, so it starts from the file's.
+      expect(
+        await cap.findByRole("textbox", { name: "Monthly cap, in billable input tokens" }),
+      ).toHaveValue("1M");
+      // The file's, in words, with the reload that applies it.
       expect(cap.getByRole("status")).toHaveTextContent(
-        "facetdb.config.ts sets a monthly cap of 1,000,000 billable input tokens, and the project keeps answering past 100%; restart the worker to apply it.",
+        "facetdb.config.ts sets a monthly cap of 1M billable input tokens (1,000,000), and the project keeps answering past 100%; the worker still enforces the cap above.",
       );
+      await user.click(cap.getByRole("button", { name: "Apply the file's cap" }));
+      expect(
+        await cap.findByText("Applied: the worker enforces the file's cap now."),
+      ).toBeInTheDocument();
+      expect(api.calls).toContain("reload");
     });
 
     it("says the file sets no cap, or sets one where the worker has none", async () => {
@@ -733,7 +939,7 @@ describe("the Settings page", () => {
       const { unmount } = renderStudio({ path: "/settings", api: none, now: NOW });
       expect(
         await screen.findByText(
-          /^facetdb\.config\.ts sets no monthly cap; restart the worker to apply it\./,
+          /^facetdb\.config\.ts sets no monthly cap; the worker still enforces the cap above\./,
         ),
       ).toBeInTheDocument();
       unmount();
@@ -742,7 +948,7 @@ describe("the Settings page", () => {
       renderStudio({ path: "/settings", api: added, now: NOW });
       expect(
         await screen.findByText(
-          /^facetdb\.config\.ts sets a monthly cap of 2,000,000 billable input tokens, and the project pauses at 100%; restart the worker to apply it\./,
+          /^facetdb\.config\.ts sets a monthly cap of 2M billable input tokens \(2,000,000\), and the project pauses at 100%; the worker still enforces the cap above\./,
         ),
       ).toBeInTheDocument();
     });
@@ -773,7 +979,7 @@ describe("the Settings page", () => {
       expect(await cap.findByRole("alert")).toHaveTextContent(
         "The cap in facetdb.config.ts could not be read.",
       );
-      expect(cap.getByText("$25")).toBeInTheDocument();
+      expect(cap.getByText("25M")).toBeInTheDocument();
     });
   });
 
@@ -798,7 +1004,13 @@ describe("the Settings page", () => {
 
     it("says a studio open to the network asks other computers to sign in", async () => {
       const api = fakeApi({
-        studioAccess: () => Promise.resolve({ host: "0.0.0.0", loopback: false, reviewers: 1 }),
+        studioAccess: () =>
+          Promise.resolve({
+            host: "0.0.0.0",
+            loopback: false,
+            reviewers: 1,
+            accountsWritable: true,
+          }),
       });
       renderStudio({ path: "/settings", api, now: NOW });
 

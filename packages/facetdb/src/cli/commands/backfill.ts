@@ -1,6 +1,7 @@
 import {
   type BackfillEstimate,
   type BackfillReport,
+  compactTokens,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
@@ -71,7 +72,7 @@ function money(dollars: number): string {
 
 /** The estimate in words: records, tokens, dollars. */
 function describeEstimate(estimate: BackfillEstimate): string {
-  return `${whole.format(estimate.records)} records to answer, about ${whole.format(Math.round(estimate.tokens))} input tokens, ${money(estimate.dollars)}.`;
+  return `${whole.format(estimate.records)} records to answer, about ${compactTokens(estimate.tokens)} input tokens, ${money(estimate.dollars)}.`;
 }
 
 function summary(report: BackfillReport) {

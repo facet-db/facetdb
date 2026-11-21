@@ -58,7 +58,18 @@ async function questionsPage(api: FakeApi, options: { path?: string; shows?: str
   return studio;
 }
 
-const NOT_RUNNING_HEADING = /is written to facetdb\.config\.ts and is not running yet$/;
+const NOT_RUNNING_HEADING = /is not running yet\.$/;
+
+/**
+ * Opens the block's terminal steps: behind "Show terminal steps" where the page offers the install
+ * itself, open from the start where it does not.
+ */
+async function showSteps(studio: ReturnType<typeof renderStudio>, block: HTMLElement) {
+  const button = await within(block).findByRole("button", { name: "Show terminal steps" });
+  if (button.getAttribute("aria-expanded") === "false") {
+    await studio.user.click(button);
+  }
+}
 
 const applied = (reload: ApplyReload): ApplyWritten => ({
   written: true,
@@ -68,13 +79,23 @@ const applied = (reload: ApplyReload): ApplyWritten => ({
 });
 
 describe("the Questions page when a source does not run the file", () => {
-  it("leads the source's panel with the state in words and the commands, in the order they are run", async () => {
-    await questionsPage(listed([LISTINGS_BEHIND]).api);
+  it("leads the source's panel with the state in words and the install, the commands behind Show terminal steps, in the order they are run", async () => {
+    const studio = await questionsPage(listed([LISTINGS_BEHIND]).api);
 
     const panel = screen.getByRole("tabpanel");
     const block = within(panel).getByRole("region", {
-      name: "listings is written to facetdb.config.ts and is not running yet",
+      name: "listings is not running yet.",
     });
+    // The page's own way first; the terminal's, and the worker's why, wait behind the disclosure.
+    const install = await within(block).findByRole("button", { name: "Install from this page" });
+    const toggle = within(block).getByRole("button", { name: "Show terminal steps" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(install.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(block).getByText(/it keeps answering with version 3/)).not.toBeVisible();
+    expect(within(block).getByText("facetdb migrate --source listings")).not.toBeVisible();
+
+    await studio.user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(
       within(block).getByText(/^The change reaches what facetdb migrate installed/),
     ).toBeVisible();
@@ -97,7 +118,10 @@ describe("the Questions page when a source does not run the file", () => {
   });
 
   it("names every added question in the backfill command, separated by commas", async () => {
-    await questionsPage(listed([{ ...LISTINGS_BEHIND, added: ["is_vehicle", "is_new"] }]).api);
+    const studio = await questionsPage(
+      listed([{ ...LISTINGS_BEHIND, added: ["is_vehicle", "is_new"] }]).api,
+    );
+    await showSteps(studio, screen.getByRole("region", { name: NOT_RUNNING_HEADING }));
 
     expect(
       screen.getByText("facetdb backfill --source listings --question is_vehicle,is_new"),
@@ -123,8 +147,14 @@ describe("the Questions page when a source does not run the file", () => {
     });
 
     const block = screen.getByRole("region", {
-      name: "support_messages is written to facetdb.config.ts and is not running yet",
+      name: "support_messages is not running yet.",
     });
+    // The page cannot install a new source's whole change: the terminal steps are the way, open.
+    expect(within(block).queryByRole("button", { name: "Install from this page" })).toBeNull();
+    expect(within(block).getByRole("button", { name: "Show terminal steps" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(
       within(block).getByText(
         /^New in facetdb\.config\.ts and not answered yet: run facetdb migrate to install it/,
@@ -191,6 +221,7 @@ describe("the Questions page when a source does not run the file", () => {
 describe("Copy in the block", () => {
   it("puts the command on the clipboard and says that it copied, on that line only", async () => {
     const studio = await questionsPage(listed([LISTINGS_BEHIND]).api);
+    await showSteps(studio, screen.getByRole("region", { name: NOT_RUNNING_HEADING }));
 
     await studio.user.click(
       screen.getByRole("button", { name: "Copy facetdb migrate --source listings" }),
@@ -212,6 +243,7 @@ describe("Copy in the block", () => {
 
   it("copies the backfill line as printed, with the questions' names", async () => {
     const studio = await questionsPage(listed([LISTINGS_BEHIND]).api);
+    await showSteps(studio, screen.getByRole("region", { name: NOT_RUNNING_HEADING }));
 
     await studio.user.click(
       screen.getByRole("button", {
@@ -230,6 +262,7 @@ describe("Copy in the block", () => {
       clipboard: () => Promise.reject(new Error("denied")),
     });
     await screen.findByRole("article", { name: "is_scam" });
+    await showSteps(studio, screen.getByRole("region", { name: NOT_RUNNING_HEADING }));
 
     await studio.user.click(
       screen.getByRole("button", { name: "Copy facetdb migrate --source listings" }),
@@ -250,10 +283,8 @@ describe("the Apply dialog when the file is written and the worker does not run 
     const studio = await questionsPage(api);
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await studio.user.click(
-      await within(dialog).findByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/Written\. facetdb\.config\.ts holds the draft/);
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText("Applied.");
     return { studio, dialog };
   }
 
@@ -280,7 +311,7 @@ describe("the Apply dialog when the file is written and the worker does not run 
       ),
     );
 
-  it("leads with the block above the list of sources, and keeps the list's words", async () => {
+  it("leads with the block above the list of sources, the install its primary action, and says each source's state in short words", async () => {
     // The file is written and the worker's list names the source once the dialog reads it again.
     const state = { pending: [] as readonly PendingSource[] };
     const api = fakeApi({
@@ -290,19 +321,30 @@ describe("the Apply dialog when the file is written and the worker does not run 
         return Promise.resolve(applied(KEPT_RELOAD));
       },
     });
-    const { dialog } = await applyDialog(api);
+    const { studio, dialog } = await applyDialog(api);
 
     const block = await within(dialog).findByRole("region", {
-      name: "listings is written to facetdb.config.ts and is not running yet",
+      name: "listings is not running yet.",
     });
+    const install = await within(block).findByRole("button", { name: "Install from this page" });
+    expect(install).toHaveAttribute("data-variant", "primary");
+    await showSteps(studio, block);
     expect(within(block).getByText("facetdb migrate --source listings")).toBeVisible();
     expect(
       within(block).getByText("facetdb backfill --source listings --question is_vehicle"),
     ).toBeVisible();
-    const tag = within(dialog).getByText("kept running what it ran");
+    const tag = within(dialog).getByText(
+      "listings keeps its old questions until the new one is installed.",
+    );
     expect(block.compareDocumentPosition(tag) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(dialog).getByText("support_messages is unchanged.")).toBeVisible();
+    // The worker's sentence for the row is behind its Details.
+    expect(within(dialog).getByRole("button", { name: "Details of listings" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
     // The block fits the dialog: its commands wrap, they are not scrolled sideways.
-    expect(within(dialog).queryAllByRole("region", { name: /^The changes to/ })).toHaveLength(1);
+    expect(within(dialog).queryAllByRole("region", { name: /^Changes to/ })).toHaveLength(1);
   });
 
   it("copies a command from the dialog", async () => {
@@ -315,6 +357,10 @@ describe("the Apply dialog when the file is written and the worker does not run 
       },
     });
     const { studio, dialog } = await applyDialog(api);
+    await showSteps(
+      studio,
+      await within(dialog).findByRole("region", { name: NOT_RUNNING_HEADING }),
+    );
 
     await studio.user.click(
       await within(dialog).findByRole("button", { name: "Copy facetdb migrate --source listings" }),
@@ -328,7 +374,7 @@ describe("the Apply dialog when the file is written and the worker does not run 
     const api = fakeApi({ applyWrite: () => Promise.resolve(SAMPLE_APPLIED) });
     const { dialog } = await applyDialog(api);
 
-    expect(within(dialog).getByText("restarted with the new question set")).toBeVisible();
+    expect(within(dialog).getByText("listings now answers with the new questions.")).toBeVisible();
     expect(within(dialog).queryByRole("region", { name: NOT_RUNNING_HEADING })).toBeNull();
     expect(within(dialog).queryByText(/facetdb migrate --source/)).toBeNull();
   });
@@ -337,7 +383,9 @@ describe("the Apply dialog when the file is written and the worker does not run 
     const api = fakeApi({ applyWrite: () => Promise.resolve(applied(KEPT_RELOAD)) });
     const { dialog } = await applyDialog(api);
 
-    expect(within(dialog).getByText("kept running what it ran")).toBeVisible();
+    expect(
+      within(dialog).getByText("listings keeps its old questions until the new one is installed."),
+    ).toBeVisible();
     expect(within(dialog).queryByRole("region", { name: NOT_RUNNING_HEADING })).toBeNull();
   });
 
@@ -423,6 +471,10 @@ describe("the Apply dialog when the file is written and the worker does not run 
       },
     });
     const { studio, dialog } = await applyDialog(api);
+    await showSteps(
+      studio,
+      await within(dialog).findByRole("region", { name: NOT_RUNNING_HEADING }),
+    );
     const copy = await within(dialog).findByRole("button", {
       name: "Copy facetdb migrate --source listings",
     });
@@ -497,9 +549,11 @@ describe("the Apply dialog when the file is written and the worker does not run 
     const { dialog } = await applyDialog(api);
 
     const block = await within(dialog).findByRole("region", {
-      name: "support_messages is written to facetdb.config.ts and is not running yet",
+      name: "support_messages is not running yet.",
     });
     expect(within(block).getByText("facetdb migrate --source support_messages")).toBeVisible();
-    expect(within(dialog).getByText("not started")).toBeVisible();
+    // The block's heading, and the source's row in the list, say it in the same words.
+    expect(within(dialog).getAllByText("support_messages is not running yet.")).toHaveLength(2);
+    expect(within(dialog).getByText("listings is unchanged.")).toBeVisible();
   });
 });

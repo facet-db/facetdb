@@ -473,7 +473,7 @@ describe("the studio's doors under facetdb dev", () => {
     expect(file.writes).toBe(1);
     const written = await readFile(configPath, "utf8");
     expect(written).toContain('name: "sellers"');
-    expect(written.split("process.env.DATABASE_URL")).toHaveLength(3);
+    expect(written.split('env("DATABASE_URL")')).toHaveLength(3);
     for (const text of [...texts, result.stdout, result.stderr, written]) {
       expect(text).not.toContain("MARK");
     }

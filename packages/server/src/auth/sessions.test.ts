@@ -60,6 +60,7 @@ function fakeUsers(clock: FakeClock) {
         ),
       ),
     remove: (name) => Promise.resolve(accounts.delete(name)),
+    writable: () => Promise.resolve(true),
   };
   return {
     store,
@@ -136,6 +137,8 @@ function rig(options: { readonly secret?: string; readonly users?: Partial<Users
       {
         method,
         headers: {
+          // Every write is declared JSON, as the studio's client sends it; a case's headers win.
+          ...(method === "GET" ? {} : { "content-type": "application/json" }),
           ...(options.cookie === undefined
             ? {}
             : { cookie: `${SESSION_COOKIE}=${options.cookie}` }),
@@ -407,6 +410,32 @@ describe("POST /v1/session and DELETE /v1/session", () => {
     expect(wrong.json).toMatchObject({ error: { code: "invalid-credentials" } });
   });
 
+  it("signs nobody in from a page of another site, which would choose the account (login CSRF)", async () => {
+    const t = rig();
+    const forged = [
+      { headers: { "sec-fetch-site": "cross-site" }, status: 403, code: "cross_origin" },
+      { headers: { "sec-fetch-site": "same-site" }, status: 403, code: "cross_origin" },
+      { headers: { "content-type": "text/plain" }, status: 415, code: "json_only" },
+    ];
+    for (const attempt of forged) {
+      const response = await t.send("POST", `${REMOTE_URL}/v1/session`, {
+        peer: ELSEWHERE,
+        headers: attempt.headers,
+        body: { name: MAYA.name, password: MAYA.password },
+      });
+      expect(response.status, JSON.stringify(attempt.headers)).toBe(attempt.status);
+      expect(response.json).toMatchObject({ error: { code: attempt.code } });
+      expect(response.headers.get("set-cookie")).toBeNull();
+    }
+    // The sign-in page itself signs in.
+    const own = await t.send("POST", `${REMOTE_URL}/v1/session`, {
+      peer: ELSEWHERE,
+      headers: { origin: REMOTE_URL, "sec-fetch-site": "same-origin" },
+      body: { name: MAYA.name, password: MAYA.password },
+    });
+    expect(own.status).toBe(200);
+  });
+
   it("refuses a body that is not a name and a password, in the stable shape", async () => {
     const t = rig();
     const response = await t.send("POST", `${REMOTE_URL}/v1/session`, {
@@ -529,6 +558,36 @@ describe("GET and POST /v1/reviewers", () => {
         fix: expect.stringContaining("facetdb users remove maya"),
       },
     });
+  });
+
+  it("make no account for a page of another site, a sibling subdomain included, with the reviewer's cookie", async () => {
+    const t = rig();
+    const { value } = await t.signIn();
+    // A sibling subdomain is same-site: SameSite=Lax sends the cookie, and text/plain needs no preflight.
+    const forged = [
+      { headers: { "sec-fetch-site": "same-site" }, status: 403, code: "cross_origin" },
+      { headers: { "sec-fetch-site": "cross-site" }, status: 403, code: "cross_origin" },
+      { headers: { origin: "https://evil.studio.example.com" }, status: 403, code: "cross_origin" },
+      { headers: { "content-type": "text/plain" }, status: 415, code: "json_only" },
+    ];
+    for (const attempt of forged) {
+      const response = await t.send("POST", `${REMOTE_URL}/v1/reviewers`, {
+        peer: ELSEWHERE,
+        cookie: value,
+        headers: attempt.headers,
+        body: { name: "mallory", password: "a password the attacker chose" },
+      });
+      expect(response.status, JSON.stringify(attempt.headers)).toBe(attempt.status);
+      expect(response.json).toMatchObject({ error: { code: attempt.code } });
+    }
+    expect(t.fake.hashes.has("mallory")).toBe(false);
+    // A stranger is told to sign in before anything is said about the body.
+    const stranger = await t.send("POST", `${REMOTE_URL}/v1/reviewers`, {
+      peer: ELSEWHERE,
+      headers: { "content-type": "text/plain" },
+      body: { name: "mallory", password: "a password the attacker chose" },
+    });
+    expect(stranger.status).toBe(401);
   });
 
   it("say what to do when the login may read the accounts but not change them", async () => {

@@ -75,9 +75,17 @@ const declared = facetdb({
     },
   ],
 });
+/**
+ * As the loader reads the file the exporter writes, `database: env("LISTINGS_URL")`: the name is the
+ * file's own (`databaseEnvNamed`), so Apply keeps it though SELLERS_URL holds the same string.
+ */
 const INITIAL: ProjectConfig = {
   ...declared,
-  sources: declared.sources.map((source) => ({ ...source, databaseEnv: "LISTINGS_URL" })),
+  sources: declared.sources.map((source) => ({
+    ...source,
+    databaseEnv: "LISTINGS_URL",
+    databaseEnvNamed: true as const,
+  })),
 };
 
 /**
@@ -195,7 +203,7 @@ describe("adding a source on a running facetdb worker", () => {
     await writeFile(configPath, file.text);
     const applied = planApply(
       { path: "facetdb.config.ts", text: file.text, config: INITIAL },
-      DRAFT,
+      { source: DRAFT },
       ENV,
       { variable: "SELLERS_URL" },
     );
@@ -401,7 +409,7 @@ describe("adding a source on a running facetdb worker", () => {
     expect(answers["reviewAfter"]).toMatchObject({ status: 200, body: { count: 0, cards: [] } });
     expect(file.writes).toBe(1);
     expect(file.text).toBe(configFileSource(applied.plan.config));
-    expect(file.text).toContain("process.env.SELLERS_URL");
+    expect(file.text).toContain('database: env("SELLERS_URL")');
     expect(await readFile(configPath, "utf8")).toBe(file.text);
     const columns = await world.client.query(
       "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'sellers' order by ordinal_position",
@@ -420,7 +428,7 @@ describe("adding a source on a running facetdb worker", () => {
     function configWithSellers(): ProjectConfig {
       const applied = planApply(
         { path: "facetdb.config.ts", text: configFileSource(INITIAL), config: INITIAL },
-        DRAFT,
+        { source: DRAFT },
         ENV,
         { variable: "SELLERS_URL" },
       );

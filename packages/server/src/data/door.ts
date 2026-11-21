@@ -40,6 +40,12 @@ export type TableFacts = {
   readonly login: WorkerLogin;
   /** The engine's doctor under the worker login: never throws, a failure is a failed check. */
   doctor(): Promise<readonly DoctorCheck[]>;
+  /**
+   * The database's own estimate of the table's rows, under the worker login; null when it has none
+   * (an engine without one, a table never analysed). Never throws: a failed read is no estimate,
+   * and the doctor beside it says why the database could not be read.
+   */
+  estimateRows(): Promise<number | null>;
 };
 
 export type SourceFacts = {

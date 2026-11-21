@@ -1,3 +1,4 @@
+export { compactTokens, groupedTokens, readableTokenCounts, tokensOfCap } from "./figures.ts";
 export type {
   ReservationId,
   Reserved,

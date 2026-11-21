@@ -48,6 +48,27 @@ export function typeWords(type: ReviewOpenQuestion["type"]): string {
   }
 }
 
+/**
+ * The card's tag for a question, as the terminal review words it (review-card.ts, `kindWords`):
+ * its kind, and "high stakes" on a yes-or-no question whose wrong automatic answer costs. The
+ * stakes are said, not colored: the brief's Tag has no role for them.
+ */
+export function kindWords(question: Pick<ReviewOpenQuestion, "type" | "stakes">): string {
+  const kind = typeWords(question.type);
+  return question.type === "noul" && question.stakes === "high" ? `${kind}, high stakes` : kind;
+}
+
+/**
+ * At what figure the worker decides without a person, as the terminal review says it: the lines
+ * this answer missed, so the reviewer knows why the card is in front of them.
+ */
+export function decidesWords(question: Pick<ReviewOpenQuestion, "thresholds">): string {
+  const { thresholds } = question;
+  return thresholds.kind === "yes-no"
+    ? `It decides on its own at ${percent(thresholds.yesAbove)} or more, or ${percent(thresholds.noBelow)} or less.`
+    : `It decides on its own at ${percent(thresholds.confidenceAtLeast)} confidence or more.`;
+}
+
 /** The legend a screen reader hears on a group of answers. */
 export function pickWords(type: ReviewOpenQuestion["type"]): string {
   switch (type) {

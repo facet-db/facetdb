@@ -8,7 +8,7 @@ import { engineFor, lazyEngine, openConnector } from "../engines.ts";
 import { runEnding } from "../pipe.ts";
 import { sharePools } from "../pools.ts";
 import type { EngineEntry, HttpHandler } from "../program.ts";
-import { runInProcess } from "../program.ts";
+import { EXIT_USAGE, runInProcess } from "../program.ts";
 import { hashPassword, storeSourceId } from "../store-door.ts";
 import {
   createPgliteWorld,
@@ -25,7 +25,14 @@ import {
 } from "../testing.ts";
 import { engineTarget, projectRef, questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
-import { DEFAULT_HOST, DEFAULT_PORT, deliverUntil, WORKER_CONNECTIONS } from "./worker.ts";
+import {
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  deliverUntil,
+  installMissing,
+  limitsFor,
+  WORKER_CONNECTIONS,
+} from "./worker.ts";
 
 /**
  * `facetdb worker` through the in-process runner on PGlite: the table is installed as `facetdb
@@ -280,6 +287,59 @@ describe("facetdb worker", () => {
       // The store, the outbox, the primary-key probe and the source's connector all borrow it.
       expect(poolsAsked.clients).toEqual([{ url: WORKER_URL, max: WORKER_CONNECTIONS }]);
       expect(poolsAsked.store).toEqual([true]);
+    });
+
+    it("--connections and FACETDB_CONNECTIONS size every pool, and a count under three is refused", async () => {
+      // Seen in a real run: a Supabase session pooler's 15 sessions per login, filled by one studio
+      // with its backfill beside a process just closed.
+      const flagged = await run(["worker", "--once", "--no-http", "--connections", "6"], {
+        env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(flagged.code, flagged.stderr).toBe(0);
+      expect(poolsAsked.clients).toEqual([{ url: WORKER_URL, max: 6 }]);
+
+      poolsAsked = { store: [], clients: [] };
+      const fromEnv = await run(["worker", "--once", "--no-http"], {
+        env: {
+          DATABASE_URL: WORKER_URL,
+          TYPESAFE_API_KEY: "ts-test-key",
+          FACETDB_CONNECTIONS: "7",
+        },
+      });
+      expect(fromEnv.code, fromEnv.stderr).toBe(0);
+      expect(poolsAsked.clients).toEqual([{ url: WORKER_URL, max: 7 }]);
+
+      const refused = await run(["worker", "--once", "--no-http", "--connections", "2"], {
+        env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "ts-test-key" },
+      });
+      expect(refused.code).toBe(EXIT_USAGE);
+      expect(refused.stderr).toContain(
+        '--connections is a whole number of connections from 3 to 1000, not "2"',
+      );
+      expect(limitsFor(6)).toMatchObject({ maxInFlight: 4 });
+      expect(limitsFor(100)).toMatchObject({ maxInFlight: DEFAULT_WORKER_LIMITS.maxInFlight });
+    });
+
+    it("says a database with no connection left in its own words, with the budget as the fix", () => {
+      const refusal = installMissing(
+        "listings",
+        "facetdb.config.ts",
+        Object.assign(new Error("max clients reached in session mode"), {
+          code: "EMAXCONNSESSION",
+        }),
+      );
+      expect(refusal).toMatchObject({
+        code: "too-many-connections",
+        message:
+          'the source "listings" stopped: its database allows no more connections for the worker login (max clients reached in session mode)',
+      });
+      expect(
+        installMissing(
+          "listings",
+          "facetdb.config.ts",
+          Object.assign(new Error("x"), { code: "53300" }),
+        ),
+      ).toMatchObject({ code: "too-many-connections" });
     });
 
     it("a table source on another database gets a pool of its own, and the probe the default", async () => {
@@ -685,6 +745,7 @@ describe("facetdb worker", () => {
         const response = await handler(
           new Request("http://127.0.0.1/v1/session", {
             method: "POST",
+            headers: { "content-type": "application/json" },
             body: JSON.stringify({ name: "maya", password: "a long enough password" }),
           }),
           THIS_MACHINE,

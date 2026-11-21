@@ -544,7 +544,8 @@ end $$`,
 
 /**
  * The decision log: the resolved source's rows, its question-set versions (they only explain the
- * log's version numbers), its review cards (made from that log: a reinstalled source's record
+ * log's version numbers) and the set its worker last ran (store migration 8; a reinstalled source's
+ * review must not judge by it), its review cards (made from that log: a reinstalled source's record
  * written done at its old hash must find no card left), and its registration in `sources` (the
  * worker's, under the project, as a plugin-kind source; with its log gone it holds nothing). An
  * unresolved source gets no `delete` at all. Then each table, once no row of anyone's is left and
@@ -567,6 +568,9 @@ begin
   end if;
   if to_regclass('facetdb.question_set_versions') is not null then
     delete from facetdb.question_set_versions where source_id = ${source};
+  end if;
+  if to_regclass('facetdb.question_sets_in_force') is not null then
+    delete from facetdb.question_sets_in_force where source_id = ${source};
   end if;
   if to_regclass('facetdb.reviews') is not null then
     delete from facetdb.reviews where source_id = ${source};

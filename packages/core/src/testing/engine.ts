@@ -70,6 +70,11 @@ export type FakeEngineOptions = {
    * engine the studio cannot set up a source on yet. An insecure URL is refused before it.
    */
   readonly inspect?: (options: InspectOptions) => InspectResult;
+  /**
+   * The database's estimate of a source table's rows (`DatabaseEngine.estimateRows`); absent, the
+   * engine has none. An insecure URL is refused before it, as `open` refuses one.
+   */
+  readonly estimateRows?: (target: EngineTarget) => number | null;
 };
 
 /** One `run` as the fake saw it. */
@@ -172,6 +177,7 @@ export class FakeEngine implements DatabaseEngine {
   readonly inspect?: NonNullable<DatabaseEngine["inspect"]>;
   /** With `inspect` and a database: the database's newest rows. */
   readonly readRows?: NonNullable<DatabaseEngine["readRows"]>;
+  readonly estimateRows?: NonNullable<DatabaseEngine["estimateRows"]>;
   /** The table each `inspect` asked about, `null` for none; the URL is never kept. */
   readonly inspected: (string | null)[] = [];
   readonly runs: FakeRun[] = [];
@@ -213,6 +219,15 @@ export class FakeEngine implements DatabaseEngine {
     }
     if (options.login !== undefined) {
       this.login = options.login;
+    }
+    const estimateRows = options.estimateRows;
+    if (estimateRows !== undefined) {
+      this.estimateRows = (target, url, deps) => {
+        const refused = this.checkUrl(target, url, deps);
+        return refused === undefined
+          ? Promise.resolve(estimateRows(target))
+          : Promise.reject(new EngineRefusal(refused));
+      };
     }
     const inspect = options.inspect;
     const database = options.database;

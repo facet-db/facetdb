@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { ApiError, type ApplyReload, type PendingSource } from "../../api/index.ts";
 import { useApi, useDeps } from "../../deps.tsx";
+import { Disclosure } from "./Disclosure.tsx";
 import { type Installed, InstallQuestion } from "./InstallQuestion.tsx";
 import { CONFIG_KEY } from "./queries.ts";
 
@@ -18,6 +19,10 @@ import { CONFIG_KEY } from "./queries.ts";
  * block goes once the list no longer names it. Where this browser is the worker's operator,
  * questions added can be installed from the block itself (InstallQuestion): the SQL shown first,
  * then run, then the reload.
+ *
+ * The block says the source is not running yet, and its way on this page (Install from this page,
+ * Check again) comes first; the worker's own why and the terminal steps are behind "Show terminal
+ * steps", open from the start only where the page offers no way of its own.
  */
 
 type CopyState = "idle" | "copied" | "select";
@@ -50,8 +55,11 @@ function useCopy(command: string) {
   return { field, state, copy };
 }
 
-/** A command on a line of its own: it wraps inside the dialog instead of running past it. */
-function CommandLine({ command }: { readonly command: string }) {
+/**
+ * A command on a line of its own, with a Copy that says it copied: it wraps inside the dialog
+ * instead of running past it. Settings' reviewers section shows `facetdb users add` with it.
+ */
+export function CommandLine({ command }: { readonly command: string }) {
   const { field, state, copy } = useCopy(command);
   return (
     <div className="grid gap-1.5">
@@ -108,7 +116,7 @@ function stepsOf(
     checkAgain
       ? {
           words:
-            "Press Check again, below: the worker reads its database and switches the source once the change is there, with no restart.",
+            "Press Check again on this page: the worker reads its database and switches the source once the change is there, with no restart.",
         }
       : {
           words:
@@ -151,25 +159,33 @@ function installable(
  * `GET /v1/sources/setup`: this machine, no sign-in); elsewhere nothing is offered and the commands
  * above stay the way. The panel, and the admin string in it, go when it is closed.
  */
-function InstallHere({
-  source,
-  added,
-  onInstalled,
-}: {
-  readonly source: string;
-  readonly added: readonly string[];
-  readonly onInstalled: (note: Installed) => void;
-}) {
+function useInstallHere(offered: boolean): "asking" | "open" | "closed" {
   const api = useApi();
   const access = useQuery({
     queryKey: SETUP_ACCESS_KEY,
     queryFn: () => api.setupAccess(),
     staleTime: Number.POSITIVE_INFINITY,
+    enabled: offered,
   });
-  const [open, setOpen] = useState(false);
-  if (access.data?.open !== true) {
-    return null;
+  if (!offered) {
+    return "closed";
   }
+  return access.isPending ? "asking" : access.data?.open === true ? "open" : "closed";
+}
+
+/** The install from the page: its button, then its panel (the SQL first, then the run). */
+function InstallHere({
+  source,
+  added,
+  primary,
+  onInstalled,
+}: {
+  readonly source: string;
+  readonly added: readonly string[];
+  readonly primary: boolean;
+  readonly onInstalled: (note: Installed) => void;
+}) {
+  const [open, setOpen] = useState(false);
   if (open) {
     return (
       <InstallQuestion
@@ -183,12 +199,9 @@ function InstallHere({
     );
   }
   return (
-    <div className="grid justify-items-start gap-1.5">
-      <p className="m-0 max-w-[64ch]">
-        {`Or install ${added.length === 1 ? "it" : "them"} from this page, with the admin connection string of ${source}'s database: the SQL is shown first.`}
-      </p>
+    <div className="flex">
       <Button
-        size="small"
+        variant={primary ? "primary" : "secondary"}
         onClick={() => {
           setOpen(true);
         }}
@@ -207,42 +220,60 @@ export function NotRunning({
   added,
   removed,
   checkAgain,
+  primary = false,
   onInstalled,
 }: Pick<PendingSource, "source" | "outcome" | "migrate" | "added" | "removed" | "checkAgain"> & {
   /** The reload's own words for it. */
   readonly why: string;
+  /**
+   * The install is the view's one primary action (the Apply dialog after its write); on a page
+   * whose own primary action is another, it is a secondary button.
+   */
+  readonly primary?: boolean;
   /** An install from the page ran: what it left, for after the block goes. */
   readonly onInstalled?: (note: Installed) => void;
 }) {
   const id = useId();
   const steps = stepsOf({ source, outcome, migrate, added, checkAgain });
+  const install = useInstallHere(installable({ outcome, migrate, added, removed }));
   return (
     <section aria-labelledby={id} className="grid gap-3 border-l-2 border-review pl-3.5">
       <h3 id={id} className="m-0 text-base font-bold">
-        {`${source} is written to facetdb.config.ts and is not running yet`}
+        {`${source} is not running yet.`}
       </h3>
-      <p className="m-0 max-w-[64ch] text-text-2">{capitalized(why)}</p>
-      <p className="m-0">
-        In a terminal, in the folder that holds facetdb.config.ts, one after the other:
-      </p>
-      <ol className="m-0 grid list-decimal gap-3 pl-5">
-        {steps.map((step) => (
-          <li key={step.words} className="grid gap-2 pl-1">
-            <span>{step.words}</span>
-            {step.command === undefined ? null : <CommandLine command={step.command} />}
-          </li>
-        ))}
-      </ol>
-      {checkAgain ? <CheckAgain source={source} /> : null}
-      {installable({ outcome, migrate, added, removed }) ? (
+      {install === "open" ? (
         <InstallHere
           source={source}
           added={added}
+          primary={primary}
           onInstalled={(note) => {
             onInstalled?.(note);
           }}
         />
       ) : null}
+      {checkAgain ? <CheckAgain source={source} /> : null}
+      {install === "asking" ? null : (
+        // The terminal's way, and the worker's own why, for the engineer; open from the start where
+        // the page offers no way of its own (an install to run, or a restart), since then they are
+        // the way. Check again alone needs no terminal.
+        <Disclosure
+          label="Show terminal steps"
+          open={install === "closed" && (migrate || !checkAgain)}
+        >
+          <p className="m-0 max-w-[64ch] text-text-2">{capitalized(why)}</p>
+          <p className="m-0">
+            In a terminal, in the folder that holds facetdb.config.ts, one after the other:
+          </p>
+          <ol className="m-0 grid list-decimal gap-3 pl-5">
+            {steps.map((step) => (
+              <li key={step.words} className="grid gap-2 pl-1">
+                <span>{step.words}</span>
+                {step.command === undefined ? null : <CommandLine command={step.command} />}
+              </li>
+            ))}
+          </ol>
+        </Disclosure>
+      )}
     </section>
   );
 }

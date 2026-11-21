@@ -5,7 +5,7 @@
 // token (turso db tokens create <database>), read from the environment only, never from the URL;
 // DATABASE_URL is the store's Postgres, which keeps the decision log, usage and alerts. One worker
 // runs per database.
-import { choice, facetdb, noul } from "facetdb";
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
@@ -16,7 +16,7 @@ export default facetdb({
   sources: [
     {
       name: "listings",
-      database: process.env.LISTINGS_URL,
+      database: env("LISTINGS_URL"),
       table: "listings",
       read: ["title", "description"],
       questions: {

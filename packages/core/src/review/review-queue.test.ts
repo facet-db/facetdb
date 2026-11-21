@@ -207,6 +207,27 @@ describe("the review queue's rules (the fake)", () => {
     expect(await keysOf(queue, "ana", START, { below: 0.6 })).toEqual(["b", "c"]);
     expect(await keysOf(queue, "ana", START, { question: "category", below: 0.6 })).toEqual([]);
     expect(await keysOf(queue, "ana", START, { limit: 2 })).toEqual(["a", "b"]);
+    expect(await keysOf(queue, "ana", START, { source: SOURCE, key: "b" })).toEqual(["b"]);
+    expect(await keysOf(queue, "ana", START, { source: SOURCE, key: "c" })).toEqual([]);
+  });
+
+  it("counts what it would list, with the oldest card's since", async () => {
+    const queue = await seeded(
+      card("a", { numbers: { scam: 0.62 } }),
+      card("b", { numbers: { scam: 0.41 }, since: new Date(START + 1_000) }),
+      card("c", { source: "p1:messages", since: new Date(START + 2_000) }),
+    );
+    expect(await queue.count({}, "ana", START)).toEqual({ count: 3, oldestSince: new Date(START) });
+    expect(await queue.count({ below: 0.6 }, "ana", START)).toEqual({
+      count: 2,
+      oldestSince: new Date(START + 1_000),
+    });
+    await queue.lock(SOURCE, "a", "maya", START);
+    expect((await queue.count({ source: SOURCE }, "ana", START)).count).toBe(1);
+    expect(await queue.count({ question: "none" }, "ana", START)).toEqual({
+      count: 0,
+      oldestSince: undefined,
+    });
   });
 });
 

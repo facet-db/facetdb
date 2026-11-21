@@ -16,12 +16,14 @@ useStoreWorld();
 async function version6Store(): Promise<SqlClient> {
   const client = pgliteClient(await newDb());
   await migrateStore(client);
+  // Migration 8's table taken back first (store-migration-8.test.ts proves it on its own).
+  await client.query(`drop table facetdb.question_sets_in_force`);
   await client.query(`alter table facetdb.usage_alerts drop constraint usage_alerts_by_cap`);
   await client.query(`alter table facetdb.usage_alerts drop column cap`);
   await client.query(
     `alter table facetdb.usage_alerts add constraint usage_alerts_pkey primary key (project_id, month, kind)`,
   );
-  await client.query(`delete from facetdb.store_migrations where version = 7`);
+  await client.query(`delete from facetdb.store_migrations where version in (7, 8)`);
   return client;
 }
 
@@ -50,8 +52,9 @@ describe("store migration 7", () => {
 
     expect(await migrateStore(client)).toEqual([]);
 
-    expect(SCHEMA_VERSION).toBe(7);
-    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 7, current: true });
+    // Migration 8 (the set in force) runs after it: the version-6 store lands current.
+    expect(SCHEMA_VERSION).toBe(8);
+    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 8, current: true });
     const fresh = pgliteClient(await newDb());
     await migrateStore(fresh);
     const shape = await alertsShape(client);

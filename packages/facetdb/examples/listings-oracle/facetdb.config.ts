@@ -6,7 +6,7 @@
 // quotes, and polls the table every 10 seconds by UPDATED_AT. LISTINGS_URL is the worker login's
 // connection string (oracle://facetdb_worker:<password>@<host>:2484/<service>?protocol=tcps);
 // DATABASE_URL is the store's Postgres, which keeps the decision log, usage and alerts.
-import { choice, facetdb, noul } from "facetdb";
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
@@ -17,7 +17,7 @@ export default facetdb({
   sources: [
     {
       name: "listings",
-      database: process.env.LISTINGS_URL,
+      database: env("LISTINGS_URL"),
       table: "APP.LISTINGS", // the worker owns no schema, so the source names the table's owner
       read: ["TITLE", "DESCRIPTION"],
       questions: {

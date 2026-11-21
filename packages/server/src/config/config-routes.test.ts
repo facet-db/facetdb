@@ -16,7 +16,7 @@ import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetd
 import { describe, expect, it } from "vitest";
 import { createApp } from "../app.ts";
 import type { ApiKeys } from "../auth/api-keys.ts";
-import type { Sessions } from "../auth/sessions.ts";
+import { SESSION_COOKIE, type Sessions } from "../auth/sessions.ts";
 import type { CheckService } from "../check/service.ts";
 import type { DataServices } from "../data/routes.ts";
 import { NO_REVIEW } from "../review/no-review.ts";
@@ -360,6 +360,7 @@ async function rig(
       reviewers: {
         list: () => Promise.reject(new Error("these tests list no reviewers")),
         add: () => Promise.reject(new Error("these tests add no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: options.studioProject ?? PROJECT,
     },
@@ -712,7 +713,10 @@ describe("the config routes", () => {
         code: "spending_cap_reached",
         message:
           "This month's usage reached the project's spending cap, so the preview asked the model nothing.",
-        fix: expect.stringContaining("spendingCap"),
+        // The worker reads the cap at its start: raising it in the file takes a restart too.
+        fix: expect.stringContaining(
+          "Raise spendingCap in facetdb.config.ts (Settings can change it) and restart facetdb worker",
+        ),
       },
     });
     expect(t.provider.requests).toHaveLength(0);
@@ -841,5 +845,60 @@ describe("POST /v1/test", () => {
       },
     });
     expect(JSON.stringify(failed.json)).not.toContain("oid:");
+  });
+});
+
+describe("validate, preview and test from a page of another site", () => {
+  // A signed-in reviewer's browser carries the cookie to any page's request; preview and test
+  // spend model budget (a test up to 1,000 requests), so the site decides before the body is read.
+  const SIGNED_IN = { cookie: `${SESSION_COOKIE}=${MAYA}.valid` };
+  const ROUTES = [
+    ["/v1/config/validate", { source: { name: "listings" } }],
+    ["/v1/preview", { source: { name: "listings" } }],
+    ["/v1/test", { source: { name: "listings" }, estimate: true }],
+  ] as const;
+
+  it("answers none of them, and never calls the model", async () => {
+    const t = await rig();
+    const forged = [
+      { headers: { ...SIGNED_IN, "content-type": "text/plain" }, status: 415, code: "json_only" },
+      {
+        headers: { ...SIGNED_IN, origin: "https://evil.example" },
+        status: 403,
+        code: "cross_origin",
+      },
+      {
+        headers: { ...SIGNED_IN, "sec-fetch-site": "same-site" },
+        status: 403,
+        code: "cross_origin",
+      },
+      {
+        headers: { ...SIGNED_IN, "sec-fetch-site": "cross-site" },
+        status: 403,
+        code: "cross_origin",
+      },
+    ];
+    for (const [path, body] of ROUTES) {
+      for (const attempt of forged) {
+        const response = await t.call("POST", path, body, {
+          peer: ELSEWHERE,
+          headers: attempt.headers,
+        });
+        expect(response.status, `${path} ${JSON.stringify(attempt.headers)}`).toBe(attempt.status);
+        expect(response.json).toMatchObject({ error: { code: attempt.code } });
+      }
+    }
+    expect(t.provider.requests).toHaveLength(0);
+  });
+
+  it("answers the studio's own page", async () => {
+    const t = await rig();
+    for (const [path, body] of ROUTES) {
+      const response = await t.call("POST", path, body, {
+        peer: ELSEWHERE,
+        headers: { ...SIGNED_IN, origin: "http://localhost", "sec-fetch-site": "same-origin" },
+      });
+      expect(response.status, path).toBe(200);
+    }
   });
 });

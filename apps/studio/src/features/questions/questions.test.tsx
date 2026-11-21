@@ -111,7 +111,7 @@ async function previewed(studio: Awaited<ReturnType<typeof opened>>) {
 
 describe("the Questions page", () => {
   it("shows a tab per source and the form per question: kind and stakes in words, the question, its criteria or options, the versions", async () => {
-    await opened();
+    const studio = await opened();
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "listings",
       "support_messages",
@@ -130,12 +130,24 @@ describe("the Questions page", () => {
       "A plausible price, a seller with history, ordinary payment.",
     );
     expect(
-      within(scam).getByRole("combobox", { name: "What happens when the answer is wrong?" }),
-    ).toHaveTextContent("high stakes, decide only when 90% sure");
+      within(scam).getByRole("combobox", { name: "What happens when this answer is wrong?" }),
+    ).toHaveTextContent(
+      "High stakes: a wrong answer hides, rejects or charges something, or accuses someone",
+    );
     expect(within(scam).getByRole("slider", { name: "Yes at or above" })).toHaveAttribute(
       "aria-valuetext",
       "90%",
     );
+    // The figures live in one line under the slider, never in the stakes' choice.
+    expect(
+      within(scam).getByText(
+        "Decides on its own at 90% or more (yes) and 10% or less (no); in between goes to review.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(scam).getByRole("combobox", { name: "What happens when this answer is wrong?" })
+        .textContent,
+    ).not.toMatch(/\d/);
 
     const category = question("category");
     expect(within(category).getByText("Pick one, low stakes")).toBeInTheDocument();
@@ -148,20 +160,79 @@ describe("the Questions page", () => {
     expect(
       within(category).getByRole("slider", { name: "Decide when confident at least" }),
     ).toHaveAttribute("aria-valuetext", "50%");
+    expect(
+      within(category).getByRole("combobox", { name: "What happens when this answer is wrong?" }),
+    ).toHaveTextContent("Low stakes: a wrong answer gets a second look");
+    expect(
+      within(category).getByText(
+        "Decides on its own at 50% confidence or more; below that goes to review.",
+      ),
+    ).toBeInTheDocument();
 
+    // One line until asked: the version in force, since when, and how many there are.
+    const section = screen.getByRole("region", { name: "Versions" });
+    expect(within(section).getByText(/^Version 3 since/)).toHaveTextContent(
+      /^Version 3 since .+ · 3 versions$/,
+    );
+    expect(
+      within(section)
+        .getByText(/^Version 3 since/)
+        .querySelector("time"),
+    ).toHaveAttribute("datetime", "2026-11-02T09:40:00.000Z");
+    expect(screen.queryByRole("list", { name: "Question-set versions of listings" })).toBeNull();
+    expect(within(section).queryByText(/A new version is made/)).toBeNull();
+    const show = within(section).getByRole("button", { name: "Show versions" });
+    expect(show).toHaveAttribute("aria-expanded", "false");
+
+    await studio.user.click(show);
+    expect(show).toHaveAttribute("aria-expanded", "true");
     const versions = screen.getByRole("list", { name: "Question-set versions of listings" });
     const entries = within(versions).getAllByRole("listitem");
     expect(entries.map((entry) => entry.textContent)).toEqual([
-      expect.stringContaining("Version 3, in force"),
-      expect.stringContaining("Version 2"),
-      expect.stringContaining("Version 1"),
+      expect.stringMatching(
+        /^Version 3 · .+ · The wording and the criteria of is_scam · in force$/,
+      ),
+      expect.stringMatching(/^Version 2 · .+ · category added$/),
+      expect.stringMatching(/^Version 1 · .+ · Created, with is_scam$/),
     ]);
-    expect(entries[0]).toHaveTextContent("The wording and the criteria of is_scam");
-    expect(entries[1]).toHaveTextContent("category added");
     expect(entries[0]?.querySelector("time")).toHaveAttribute(
       "datetime",
       "2026-11-02T09:40:00.000Z",
     );
+    expect(
+      within(section).getByText(
+        "A new version is made when a question's wording, fields or model change. Thresholds make none.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(section).queryByText(/records answered under an earlier version/)).toBeNull();
+
+    await studio.user.click(show);
+    expect(screen.queryByRole("list", { name: "Question-set versions of listings" })).toBeNull();
+  });
+
+  it("says a source with one version in one line, with no count", async () => {
+    const studio = await opened();
+    await studio.user.click(screen.getByRole("tab", { name: "support_messages" }));
+    await screen.findByRole("article", { name: "urgency" });
+    const section = screen.getByRole("region", { name: "Versions" });
+    expect(within(section).getByText(/^Version 1 since/)).not.toHaveTextContent("versions");
+  });
+
+  it("says a source with no version yet in those words, with nothing to show", async () => {
+    const api = fakeApi({
+      projectConfig: () =>
+        Promise.resolve({
+          ...SAMPLE_PROJECT_CONFIG,
+          versions: {
+            ...SAMPLE_PROJECT_CONFIG.versions,
+            listings: { inForce: null, earlier: false, versions: [], note: null },
+          },
+        }),
+    });
+    await opened({ api });
+    const none = screen.getByRole("region", { name: "Versions" });
+    expect(within(none).getByText("No version yet")).toBeInTheDocument();
+    expect(within(none).queryByRole("button", { name: "Show versions" })).toBeNull();
   });
 
   it("keeps the open tab in the address and the drafts of the others while the tabs change", async () => {
@@ -316,7 +387,7 @@ describe("the Questions page", () => {
     const stakes = async (key: "{ArrowDown}" | "{ArrowUp}") => {
       act(() => {
         within(scam())
-          .getByRole("combobox", { name: "What happens when the answer is wrong?" })
+          .getByRole("combobox", { name: "What happens when this answer is wrong?" })
           .focus();
       });
       await studio.user.keyboard("{ArrowDown}");
@@ -324,10 +395,15 @@ describe("the Questions page", () => {
       await studio.user.keyboard("{Enter}");
     };
     expect(
-      within(scam()).getByText(/A cut set by hand overrides the stakes' default/),
-    ).toHaveTextContent(
-      "A cut set by hand overrides the stakes' default: yes at or above 95%. At high stakes the default is yes at or above 90%, no at or below 10%.",
-    );
+      within(scam()).getByText(
+        "Set by hand: yes at 95% or more, no at 10% or less. The high-stakes default is 90% and 10%.",
+      ),
+    ).toBeInTheDocument();
+    // The stakes' choice names no figure the hand-set cut would make false.
+    expect(
+      within(scam()).getByRole("combobox", { name: "What happens when this answer is wrong?" })
+        .textContent,
+    ).not.toMatch(/\d/);
 
     await stakes("{ArrowDown}");
     expect(within(scam()).getByText("Yes or no, low stakes")).toBeInTheDocument();
@@ -335,9 +411,11 @@ describe("the Questions page", () => {
       "aria-valuetext",
       "95%",
     );
-    expect(within(scam()).getByText(/A cut set by hand/)).toHaveTextContent(
-      "A cut set by hand overrides the stakes' default: yes at or above 95%. At low stakes the default is yes at or above 70%, no at or below 30%.",
-    );
+    expect(
+      within(scam()).getByText(
+        "Set by hand: yes at 95% or more, no at 30% or less. The low-stakes default is 70% and 30%.",
+      ),
+    ).toBeInTheDocument();
     // The stakes are not read by the model: choosing them asks no preview.
     advance(studio, 10_000);
     expect(sent(api, "previewDraft")).toHaveLength(1);
@@ -353,14 +431,18 @@ describe("the Questions page", () => {
       });
     });
 
-    await studio.user.click(
-      within(scam()).getByRole("button", { name: "Use the stakes' default" }),
-    );
+    await studio.user.click(within(scam()).getByRole("button", { name: "Use the default" }));
     expect(within(scam()).getByRole("slider", { name: "Yes at or above" })).toHaveAttribute(
       "aria-valuetext",
       "90%",
     );
-    expect(within(scam()).queryByText(/A cut set by hand/)).toBeNull();
+    expect(within(scam()).queryByText(/Set by hand/)).toBeNull();
+    expect(within(scam()).queryByRole("button", { name: "Use the default" })).toBeNull();
+    expect(
+      within(scam()).getByText(
+        "Decides on its own at 90% or more (yes) and 10% or less (no); in between goes to review.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("sends no preview when the config changes under a draft nobody edited; the rows say so and wait", async () => {
@@ -432,7 +514,7 @@ describe("the Questions page", () => {
     // High stakes to low: the default no at or below 30% now sits above the hand-set yes at 20%.
     act(() => {
       within(scam())
-        .getByRole("combobox", { name: "What happens when the answer is wrong?" })
+        .getByRole("combobox", { name: "What happens when this answer is wrong?" })
         .focus();
     });
     await studio.user.keyboard("{ArrowDown}");
@@ -441,7 +523,7 @@ describe("the Questions page", () => {
 
     expect(
       within(scam()).getByText(
-        "The cut lines cross: no at or below 30% is not lower than yes at or above 20%. A cut set by hand stays when the stakes change: use the stakes' default, or choose the stakes again.",
+        "The cut lines cross: yes at 20% sits below no at 30%. Move one, or use the default.",
       ),
     ).toBeInTheDocument();
     expect(within(scam()).queryByRole("slider")).toBeNull();
@@ -467,13 +549,18 @@ describe("the Questions page", () => {
         .filter((call) => /^(validateDraft|previewDraft|testEstimate|applyDiff) /.test(call)),
     ).toEqual([]);
 
-    await studio.user.click(
-      within(scam()).getByRole("button", { name: "Use the stakes' default" }),
-    );
+    // The hand-set line is not repeated beside the problem: its figures are the crossed ones.
+    expect(within(scam()).queryByText(/Set by hand/)).toBeNull();
+    await studio.user.click(within(scam()).getByRole("button", { name: "Use the default" }));
     expect(within(scam()).getByRole("slider", { name: "Yes at or above" })).toHaveAttribute(
       "aria-valuetext",
       "70%",
     );
+    expect(
+      within(scam()).getByText(
+        "Decides on its own at 70% or more (yes) and 30% or less (no); in between goes to review.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
   });
 
@@ -698,7 +785,7 @@ describe("the Questions page", () => {
 
     await studio.user.click(within(dialog).getByRole("button", { name: "Apply this draft" }));
     const apply = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await within(apply).findByRole("region", { name: "The changes to facetdb.config.ts" });
+    await within(apply).findByRole("region", { name: "Changes to facetdb.config.ts" });
     expect(sent(api, "applyDiff")).toHaveLength(1);
     expect(screen.queryByRole("dialog", { name: /^Test/ })).toBeNull();
   });
@@ -719,16 +806,22 @@ describe("the Questions page", () => {
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
     const diff = await within(dialog).findByRole("region", {
-      name: "The changes to facetdb.config.ts",
+      name: "Changes to facetdb.config.ts",
     });
     // Text content as a reader gets it: runs of spaces read as one.
     expect(diff).toHaveTextContent('+ "is_scam": noul("Is this listing a scam or a fake?"');
+    // Plain words: what the person gets, and no command, version or git step.
     expect(
-      within(dialog).getByText(/comments and\s+code of your own in it do not stay/),
+      within(dialog).getByText("The worker starts answering listings with this."),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText(/facetdb backfill --source listings --question is_scam\./),
+      within(dialog).getByText(
+        "Records already answered keep their answers. You can answer them with the new questions after this.",
+      ),
     ).toBeInTheDocument();
+    expect(within(dialog).queryAllByText(/facetdb backfill|version|git/)).toEqual([]);
+    // The file is FacetDB's own form: rewriting it loses nothing of the person's, so no warning.
+    expect(within(dialog).queryByText(/comments and code of your own/)).toBeNull();
     // The diff was asked with the draft as typed; nothing is written yet.
     expect(sent(studio.api, "applyDiff")[0]?.questions["is_scam"]).toMatchObject({
       instructions: "Is this listing a scam or a fake?",
@@ -737,7 +830,7 @@ describe("the Questions page", () => {
 
     const configReads = studio.api.calls.filter((call) => call === "projectConfig").length;
     // The person's yes, given twice while the write runs: one write.
-    const write = within(dialog).getByRole("button", { name: "Write facetdb.config.ts" });
+    const write = within(dialog).getByRole("button", { name: "Apply" });
     await studio.user.click(write);
     await studio.user.click(write);
     expect(write).toBeDisabled();
@@ -745,7 +838,7 @@ describe("the Questions page", () => {
       writing[0]?.(SAMPLE_APPLIED);
       await Promise.resolve();
     });
-    await within(dialog).findByText(/Written\. facetdb\.config\.ts holds the draft/);
+    await within(dialog).findByText("Applied.");
     const writes = studio.api.calls.filter((call) => call.startsWith("applyWrite "));
     expect(writes).toHaveLength(1);
     expect(JSON.parse(writes[0]?.slice("applyWrite ".length) ?? "{}")).toMatchObject({
@@ -753,8 +846,18 @@ describe("the Questions page", () => {
       force: false,
       draft: { name: "listings" },
     });
-    expect(within(dialog).getByText("restarted with the new question set")).toBeInTheDocument();
-    expect(within(dialog).getByText(/then answers with version 4/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("listings now answers with the new questions."),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("support_messages is unchanged.")).toBeInTheDocument();
+    // The worker's own sentence waits behind Details, for the engineer who wants it.
+    const worker = /then answers with version 4/;
+    expect(within(dialog).queryByText(worker)).not.toBeVisible();
+    const details = within(dialog).getByRole("button", { name: "Details of listings" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    await studio.user.click(details);
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialog).getByText(worker)).toBeVisible();
     // The worker reloaded: the config is read again.
     await waitFor(() => {
       expect(studio.api.calls.filter((call) => call === "projectConfig").length).toBeGreaterThan(
@@ -763,14 +866,90 @@ describe("the Questions page", () => {
     });
   });
 
-  it("shows the refusal of a write over uncommitted changes with the force choice, and sends force only once it is chosen", async () => {
-    const uncommitted = {
-      message: "facetdb.config.ts has changes git has not committed, and Apply would replace them",
-      fix: 'commit them (git add facetdb.config.ts && git commit), or apply again with force ("force": true) to replace them',
-    };
+  it("says nothing is asked again when no wording changes, and warns of the person's own lines only when the rewrite drops them", async () => {
+    const api = fakeApi({
+      applyDiff: () => Promise.resolve({ ...SAMPLE_APPLY_DIFF, dropsOwnText: true }),
+    });
+    const studio = await opened({ api });
+    await studio.user.click(screen.getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
+    await within(dialog).findByRole("region", { name: "Changes to facetdb.config.ts" });
+    expect(within(dialog).getByText("Nothing is asked again.")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "The file is rewritten whole; comments and code of your own in it are lost.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "ignored",
+      "Git keeps no copy of this file, so the version you have now cannot be brought back.",
+    ],
+    ["modified", "This file has changes git has not saved."],
+    ["untracked", "Git does not track this file yet."],
+    ["no-repository", "No copy of this file is kept anywhere else."],
+    ["no-git", "No copy of this file is kept anywhere else."],
+    ["unreadable", "No copy of this file is kept anywhere else."],
+  ] as const)(
+    "says in plain words what replacing a file git calls %s risks",
+    async (state, words) => {
+      const api = fakeApi({
+        applyDiff: () =>
+          Promise.resolve({
+            ...SAMPLE_APPLY_DIFF,
+            uncommitted: {
+              state,
+              message: "facetdb.config.ts: the worker's words for the terminal",
+              fix: 'apply again with force ("force": true), or commit it',
+            },
+          }),
+      });
+      const studio = await opened({ api });
+      await studio.user.click(screen.getByRole("button", { name: "Apply" }));
+      const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
+      expect(await within(dialog).findByText(words)).toBeInTheDocument();
+      expect(within(dialog).getByRole("checkbox", { name: "Replace it anyway" })).not.toBeChecked();
+      // The terminal's words (force, commit) are not the page's.
+      expect(within(dialog).queryAllByText(/force|commit|the worker's words/)).toEqual([]);
+    },
+  );
+
+  it("waits for Replace it anyway where git keeps no copy of the file, then sends force", async () => {
     const forces: boolean[] = [];
     const api = fakeApi({
-      applyDiff: () => Promise.resolve({ ...SAMPLE_APPLY_DIFF, uncommitted }),
+      applyDiff: () =>
+        Promise.resolve({
+          ...SAMPLE_APPLY_DIFF,
+          uncommitted: {
+            state: "ignored",
+            message: "facetdb.config.ts is ignored by git",
+            fix: 'apply again with force ("force": true) to replace it',
+          },
+        }),
+      applyWrite: (_draft, confirm) => {
+        forces.push(confirm.force);
+        return Promise.resolve(SAMPLE_APPLIED);
+      },
+    });
+    const studio = await opened({ api });
+    await studio.user.click(screen.getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
+    const choice = await within(dialog).findByRole("checkbox", { name: "Replace it anyway" });
+    const apply = within(dialog).getByRole("button", { name: "Apply" });
+    expect(apply).toBeDisabled();
+
+    await studio.user.click(choice);
+    expect(apply).toBeEnabled();
+    await studio.user.click(apply);
+    await within(dialog).findByText("Applied.");
+    expect(forces).toEqual([true]);
+  });
+
+  it("offers Replace it anyway when the write is refused over a file git no longer keeps, and sends force only once it is chosen", async () => {
+    const forces: boolean[] = [];
+    const api = fakeApi({
       applyWrite: (_draft, confirm) => {
         forces.push(confirm.force);
         return confirm.force
@@ -779,8 +958,8 @@ describe("the Questions page", () => {
               new ApiError(
                 409,
                 "uncommitted_changes",
-                `${uncommitted.message}. Nothing was written.`,
-                uncommitted.fix,
+                "facetdb.config.ts has changes git has not committed, and Apply would replace them. Nothing was written.",
+                'commit them (git add facetdb.config.ts && git commit), or apply again with force ("force": true) to replace them',
               ),
             );
       },
@@ -788,26 +967,21 @@ describe("the Questions page", () => {
     const studio = await opened({ api });
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await within(dialog).findByText(uncommitted.message);
-    const choice = within(dialog).getByRole("checkbox", {
-      name: "Replace facetdb.config.ts anyway: git keeps no copy of it as it is now",
-    });
-    expect(choice).not.toBeChecked();
+    // The diff said git keeps the file: nothing to choose, Apply is there.
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
 
-    await studio.user.click(
-      within(dialog).getByRole("button", { name: "Write facetdb.config.ts" }),
-    );
     expect(
-      await within(dialog).findByText(`${uncommitted.message}. Nothing was written.`),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByText(uncommitted.fix)).toBeInTheDocument();
+      await within(dialog).findByText("No copy of this file is kept anywhere else."),
+    ).toHaveAttribute("role", "alert");
+    expect(within(dialog).queryAllByText(/force|git commit/)).toEqual([]);
     expect(forces).toEqual([false]);
+    const apply = within(dialog).getByRole("button", { name: "Apply" });
+    expect(apply).toBeDisabled();
 
-    await studio.user.click(choice);
-    await studio.user.click(
-      within(dialog).getByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/Written\./);
+    await studio.user.click(within(dialog).getByRole("checkbox", { name: "Replace it anyway" }));
+    await studio.user.click(apply);
+    await within(dialog).findByText("Applied.");
     expect(forces).toEqual([false, true]);
   });
 
@@ -841,18 +1015,14 @@ describe("the Questions page", () => {
     const studio = await opened({ api });
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await studio.user.click(
-      await within(dialog).findByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/changed since the diff you read, so nothing was written/);
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText(/changed in the meantime, so nothing was applied/);
     expect(
-      within(dialog).getByRole("region", { name: "The changes to facetdb.config.ts" }),
+      within(dialog).getByRole("region", { name: "Changes to facetdb.config.ts" }),
     ).toHaveTextContent("+// a line someone added");
 
-    await studio.user.click(
-      within(dialog).getByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/Written\./);
+    await studio.user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await within(dialog).findByText("Applied.");
     expect(plans).toEqual(["plan-1", "plan-2"]);
   });
 
@@ -871,14 +1041,10 @@ describe("the Questions page", () => {
     const studio = await opened({ api });
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await studio.user.click(
-      await within(dialog).findByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/changed since the diff you read/);
-    await studio.user.click(
-      within(dialog).getByRole("button", { name: "Write facetdb.config.ts" }),
-    );
-    await within(dialog).findByText(/Written\./);
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
+    await within(dialog).findByText(/changed in the meantime/);
+    await studio.user.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await within(dialog).findByText("Applied.");
     expect(writes).toBe(2);
   });
 
@@ -905,9 +1071,7 @@ describe("the Questions page", () => {
     await studio.user.type(box, "Is it a fake?");
     await studio.user.click(screen.getByRole("button", { name: "Apply" }));
     const dialog = await screen.findByRole("dialog", { name: "Apply this draft" });
-    await studio.user.click(
-      await within(dialog).findByRole("button", { name: "Write facetdb.config.ts" }),
-    );
+    await studio.user.click(await within(dialog).findByRole("button", { name: "Apply" }));
     expect(
       await within(dialog).findByText(
         "The configuration the worker runs now says what you wrote: the write went through, and the page shows it.",

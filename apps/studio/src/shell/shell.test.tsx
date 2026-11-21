@@ -99,6 +99,22 @@ describe("the rail", () => {
     }
   });
 
+  it("keeps the Questions page's head in view while scrolling, and no other page's", async () => {
+    renderStudio({ path: "/questions" });
+    const questions = (await screen.findByRole("heading", { level: 1, name: "Questions" })).closest(
+      "header",
+    );
+    expect(questions).toHaveAttribute("data-sticky");
+    expect(questions).toHaveClass("sticky", "top-0", "bg-canvas", "border-b");
+
+    const sources = renderStudio({ path: "/sources" });
+    const head = (
+      await within(sources.container).findByRole("heading", { level: 1, name: "Sources" })
+    ).closest("header");
+    expect(head).not.toHaveAttribute("data-sticky");
+    expect(head).not.toHaveClass("sticky");
+  });
+
   it("opens the setup flow and the why page inside the shell", async () => {
     renderStudio({ path: "/sources/new" });
     expect(await screen.findByRole("heading", { level: 1, name: "Add a source" })).toBeVisible();
@@ -120,7 +136,13 @@ describe("the rail", () => {
   it("shows no count when nobody's cards wait", async () => {
     const api = fakeApi({
       reviewQueue: () =>
-        Promise.resolve({ count: 0, oldestSince: null, oldestWaitMs: null, cards: [] }),
+        Promise.resolve({
+          count: 0,
+          oldestSince: null,
+          oldestWaitMs: null,
+          cards: [],
+          sources: [],
+        }),
     });
     renderStudio({ api });
     await waitFor(() => {
@@ -140,10 +162,12 @@ describe("the rail", () => {
     renderStudio();
     const foot = await screen.findByRole("region", { name: "Worker and spending" });
     expect(await within(foot).findByText("Worker beating, 2 s ago")).toBeVisible();
+    expect(within(foot).getByText("3.2M of 25M tokens")).toBeVisible();
+    // What the tokens cost, under them.
     expect(within(foot).getByText("$3.20 of $25")).toBeVisible();
     expect(
       within(foot).getByRole("img", {
-        name: "13% of the $25 monthly cap. The project pauses at 100%.",
+        name: "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
       }),
     ).toBeInTheDocument();
   });
@@ -161,7 +185,27 @@ describe("the rail", () => {
     });
     const foot = await screen.findByRole("region", { name: "Worker and spending" });
     expect(await within(foot).findByText("Paused at the cap")).toBeVisible();
-    expect(within(foot).getByText("$3.20 of $25")).toBeVisible();
+    expect(within(foot).getByText("3.2M of 25M tokens")).toBeVisible();
+  });
+
+  it("says at its foot when the file sets another cap than the worker's, which Settings applies", async () => {
+    // A file edited by hand since the last reload: the worker enforces the cap it took up last.
+    renderStudio({
+      api: fakeApi({
+        spendingConfig: () => Promise.resolve({ tokens: null, onCapReached: "pause" }),
+      }),
+    });
+    const foot = await screen.findByRole("region", { name: "Worker and spending" });
+    const line = await within(foot).findByText(
+      "facetdb.config.ts sets another cap: apply it from Settings.",
+    );
+    expect(line).toBeVisible();
+    expect(line).toHaveAttribute(
+      "title",
+      "facetdb.config.ts sets no monthly cap, which the worker has not taken up: apply it from Settings.",
+    );
+    // The figure stays the worker's.
+    expect(within(foot).getByText("3.2M of 25M tokens")).toBeVisible();
   });
 
   it("says when the worker could not be read, rather than showing nothing", async () => {
@@ -250,6 +294,10 @@ describe("on a phone", () => {
     expect(screen.queryByRole("navigation", { name: "Pages" })).toBeNull();
     expect(await screen.findByRole("combobox", { name: "Project" })).toBeVisible();
     expect(screen.getByRole("heading", { level: 1, name: "Questions" })).toBeVisible();
+    // The page's head stops under the top bar, not behind it.
+    const head = screen.getByRole("heading", { level: 1, name: "Questions" }).closest("header");
+    expect(head).toHaveClass("sticky", "top-[57px]");
+    expect(head).not.toHaveClass("top-0");
   });
 
   it("opens the drawer with the pages, the instrument and the theme switch; Escape closes it", async () => {

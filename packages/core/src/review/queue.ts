@@ -44,6 +44,13 @@ export type ReviewCard = ReviewEntry & {
 };
 
 /** What `list` narrows the queue to (the screen's filters; `facetdb review --source --question --below --limit`). */
+/** What `ReviewQueue.count` answers: the cards the viewer may open, and when the oldest arrived. */
+export type QueueCount = {
+  readonly count: number;
+  /** The oldest card's `since`; undefined when none waits. */
+  readonly oldestSince: Date | undefined;
+};
+
 export type ReviewFilter = {
   readonly source?: string;
   /** Only cards on which this question is still open. */
@@ -53,6 +60,8 @@ export type ReviewFilter = {
    * question's figure).
    */
   readonly below?: number;
+  /** One record's card alone (with `source`): the open of a named record reads no other card. */
+  readonly key?: RecordKey;
   readonly limit?: number;
 };
 
@@ -91,6 +100,13 @@ export type ReviewQueue = {
    * left out, and the cards this viewer skipped come after the rest.
    */
   list(filter: ReviewFilter, viewer: string, nowMs: number): Promise<readonly ReviewCard[]>;
+  /**
+   * How many cards `list` would give the viewer under the filter, and the oldest's `since`, in one
+   * statement that carries no card: the studio's count beside Review and the top bar's figures ask
+   * this every few seconds and on every decision, and read the queue's rows only for the page shown
+   * (two full listings of 1,660 cards a click, the Review page's own slowness).
+   */
+  count(filter: Omit<ReviewFilter, "limit">, viewer: string, nowMs: number): Promise<QueueCount>;
   /**
    * Takes the card for `REVIEW_LOCK_MS` from `nowMs`; refused (`held`) while another reviewer's
    * lease has not expired. The viewer's own lease is extended.

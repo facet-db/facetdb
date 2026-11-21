@@ -862,7 +862,11 @@ function planBody(plan: SetupPlan, source: string, token: string, hide: (text: s
     uncommitted:
       plan.uncommitted === null
         ? null
-        : { message: hide(plan.uncommitted.message), fix: hide(plan.uncommitted.fix) },
+        : {
+            state: plan.uncommitted.state,
+            message: hide(plan.uncommitted.message),
+            fix: hide(plan.uncommitted.fix),
+          },
     warnings: plan.warnings,
     backfill: {
       records: plan.estimate.records,

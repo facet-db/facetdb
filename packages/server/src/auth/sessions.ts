@@ -6,7 +6,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
 import { z } from "zod";
 import { ApiError } from "../errors.ts";
-import { bodyProblems, readJson } from "../request.ts";
+import { bodyProblems, readJson, requireOwnPage } from "../request.ts";
 import { fromThisMachine } from "./loopback.ts";
 import type { AppEnv } from "./middleware.ts";
 
@@ -273,11 +273,15 @@ export function requireReviewer(sessions: Sessions, projectId: string) {
   });
 }
 
-/** `POST /v1/session` signs in and sets the cookie; `DELETE /v1/session` clears it. Public routes. */
+/**
+ * `POST /v1/session` signs in and sets the cookie; `DELETE /v1/session` clears it. Public routes.
+ * Sign-in still takes only the studio's own page or a program (`requireOwnPage`): a page of another
+ * site must not be able to sign this browser in to an account it chose (login CSRF).
+ */
 export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
 
-  route.post("/", async (c) => {
+  route.post("/", requireOwnPage(), async (c) => {
     const body = signInBody.safeParse(await readJson(c.req));
     if (!body.success) {
       throw new ApiError(

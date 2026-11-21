@@ -73,6 +73,12 @@ describe("the store's purge of one source's log", () => {
          values ($1, '1', 'h', '["scam"]', '{"scam": 0.5}', now())`,
         [owner],
       );
+      // Store migration 8: the set each source's worker runs goes with its versions.
+      await client.query(
+        `insert into facetdb.question_sets_in_force (source_id, version, question_set, recorded_at)
+         values ($1, 1, '{}', now())`,
+        [owner],
+      );
     }
 
     await runAll(client, storePurgeStatements(source));
@@ -83,6 +89,9 @@ describe("the store's purge of one source's log", () => {
       { source_id: other },
     ]);
     expect(await client.query("select source_id from facetdb.reviews")).toEqual([
+      { source_id: other },
+    ]);
+    expect(await client.query("select source_id from facetdb.question_sets_in_force")).toEqual([
       { source_id: other },
     ]);
   });

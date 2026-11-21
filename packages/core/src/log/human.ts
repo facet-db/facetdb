@@ -138,6 +138,12 @@ export async function applyHumanDecision(
   record: ReviewedRecord,
   log: DecisionLog,
   write: DecisionWriter,
+  /**
+   * The record's history as the caller just read it, so the first write needs no read of its own
+   * (`[...before, entry]`, as `writeAnswer` does); without it the log is read after the append.
+   * Either way the re-read after each write stands, so a decision logged meanwhile is written too.
+   */
+  before?: readonly LogEntry[],
 ): Promise<HumanResult> {
   if (isHumanDecision(entry) && record.status !== "needs_review") {
     throw new Error(
@@ -163,7 +169,11 @@ export async function applyHumanDecision(
   // Overlapping reviewers: each one re-reads the log after its write and writes again when a
   // person decided something meanwhile, so the write that lands last always carries every
   // decision logged before it (an entry appended after that re-read comes with its own write).
-  let history = await log.history(record.key);
+  // With `before`, the window the first write can miss spans the caller's own read too: a
+  // decision logged between that read and this append is carried back by the second write,
+  // one round trip later; only a death between the two writes leaves the row short of it until
+  // the card is opened again (the same class as a logged, unwritten decision).
+  let history = before === undefined ? await log.history(record.key) : [...before, entry];
   for (;;) {
     const { decisions, status } = withPeople(record, history);
     const result = await write(record.key, { decisions, status, reviewed: true }, record.hash);

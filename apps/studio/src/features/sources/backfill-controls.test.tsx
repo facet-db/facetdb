@@ -48,7 +48,7 @@ const WAITING = sampleBackfill("waiting", {
   token: "token-1",
   expiresAt: "2026-11-06T12:10:00.000Z",
   words:
-    "Estimated: 1,200 records, about 102,000 input tokens, $0.0043. Nothing is asked until it is started; an estimate not started within 10 minutes is dropped.",
+    "Estimated: 1,200 records, about 102k input tokens, $0.0043. Nothing is asked until it is started; an estimate not started within 10 minutes is dropped.",
 });
 
 function running(records: number): BackfillStatus {
@@ -81,7 +81,7 @@ const EXPIRED = sampleBackfill("stopped", {
 });
 
 const PAUSED_WHY =
-  "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts or wait for next month, then estimate again: it resumes after the last finished page.";
+  "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts (Settings can change it) and restart facetdb worker, or wait for next month, then estimate again: it resumes after the last finished page.";
 const PAUSED = sampleBackfill("paused", {
   counts: COUNTS(300),
   endedAt: "2026-11-06T12:00:20.000Z",
@@ -212,7 +212,7 @@ describe("a source's backfill from the Sources page", () => {
     job.status = WAITING;
     await refreshed(
       studio,
-      "Estimated: 1,200 records, about $0.004 (102,000 input tokens), at 50 records a second: about 24 seconds.",
+      "Estimated: 1,200 records, about $0.004 (102k input tokens), at 50 records a second: about 24 seconds.",
     );
     expect(within(group).getByText("Estimated, not started")).toBeVisible();
     expect(
@@ -302,7 +302,7 @@ describe("a source's backfill from the Sources page", () => {
     expect(await within(group).findByText("Finished")).toBeVisible();
     expect(
       await within(group).findByText(
-        /^The worker is paused at the spending cap, so the records queued for it wait/,
+        /^The worker is paused at the spending cap, so the records queued for it wait: raise the cap in Settings, which applies at once, or they are answered when the month resets\./,
       ),
     ).toBeVisible();
   });
@@ -319,7 +319,7 @@ describe("a source's backfill from the Sources page", () => {
     expect(
       await refreshed(
         studio,
-        "Estimated: 1,200 records, about $0.004 (102,000 input tokens), at 50 records a second: about 24 seconds. That is more than what is left under this month's cap (50,000 input tokens), so the answering pauses at the cap, part way.",
+        "Estimated: 1,200 records, about $0.004 (102k input tokens), at 50 records a second: about 24 seconds. That is more than what is left this month under the cap the worker runs with (50k input tokens), so the answering pauses at the cap, part way.",
       ),
     ).toBeVisible();
     // Start stays the person's call: the worker's state enforces the cap, not the page.
@@ -342,7 +342,7 @@ describe("a source's backfill from the Sources page", () => {
     expect(
       await refreshed(
         studio,
-        /That is more than what is left under this month's cap \(50,000 input tokens\), so it goes past the cap, as the config says\.$/,
+        /That is more than what is left this month under the cap the worker runs with \(50k input tokens\), so it goes past the cap, as the worker was started to do\.$/,
       ),
     ).toBeVisible();
   });
@@ -670,7 +670,7 @@ describe("the offer after an installed question", () => {
     removed: [],
   };
 
-  const NOT_RUNNING_HEADING = /is written to facetdb\.config\.ts and is not running yet$/;
+  const NOT_RUNNING_HEADING = /is not running yet\.$/;
 
   it("says the records that were there have no answer for the question, with its estimate first and Start", async () => {
     const config: { pending: readonly PendingSource[] } = { pending: [LISTINGS_ADDED] };
@@ -696,18 +696,14 @@ describe("the offer after an installed question", () => {
     );
 
     expect(
-      await screen.findByText(
-        /^Installed on public\.listings\. listings answers with version 4 now/,
-      ),
+      await screen.findByText("Installed. listings now answers with is_vehicle."),
     ).toBeVisible();
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: NOT_RUNNING_HEADING })).toBeNull();
     });
     // The block went and the offer stays: one sentence, then the same controls for the question.
     expect(
-      screen.getByText(
-        "The records that were in listings before have no answer for is_vehicle yet: answering them shows the estimate first.",
-      ),
+      screen.getByText("Records from before have no answer for is_vehicle yet."),
     ).toBeVisible();
     const group = screen.getByRole("group", { name: "Backfill of listings" });
     expect(button(group, "Start")).toBeDisabled();
@@ -719,7 +715,7 @@ describe("the offer after an installed question", () => {
     job.status = { ...WAITING, questions: ["is_vehicle"] };
     await refreshed(
       studio,
-      "Estimated for is_vehicle: 1,200 records, about $0.004 (102,000 input tokens), at 50 records a second: about 24 seconds.",
+      "Estimated for is_vehicle: 1,200 records, about $0.004 (102k input tokens), at 50 records a second: about 24 seconds.",
     );
     expect(button(group, "Start")).toBeEnabled();
 
@@ -768,7 +764,7 @@ describe("the offer after an installed question", () => {
     );
 
     expect(
-      await screen.findByText(/^Installed on public\.listings\. The question is_vehicle is not/),
+      await screen.findByText("Installed. listings does not answer with is_vehicle yet."),
     ).toBeVisible();
     expect(screen.queryByText(/have no answer for is_vehicle yet/)).toBeNull();
     expect(screen.queryByRole("group", { name: "Backfill of listings" })).toBeNull();

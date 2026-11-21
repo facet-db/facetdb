@@ -29,6 +29,18 @@ import {
 /** A draft source as the project JSON writes one: its `name`, and any of its fields to change. */
 export type SourceDraft = { readonly name: string } & Readonly<Record<string, unknown>>;
 
+/**
+ * A draft of the project's own spending settings (Settings): the monthly cap in billable input
+ * tokens, `null` removing it, and what happens at 100%. The route sends no other key.
+ */
+export type ProjectDraft = {
+  readonly spendingCap?: number | null;
+  readonly onCapReached?: "pause" | "continue";
+};
+
+/** What Apply places into facetdb.config.ts: one source, or the project's spending settings. */
+export type ConfigDraft = { readonly source: SourceDraft } | { readonly project: ProjectDraft };
+
 /** A problem the loader found, with its field path as the config file writes it (`sources[0].questions.urgency.levels`). */
 export type DraftIssue = { readonly path: string; readonly message: string };
 
@@ -76,6 +88,14 @@ export type ProjectConfigDoor = {
 
 /** A refusal in plain words, with what to do about it. */
 export type Words = { readonly message: string; readonly fix: string };
+
+/**
+ * Why Apply replaces the file only with `force`: what git says of it (anything but committed and
+ * unmodified), with the terminal's words; the studio words each state its own way.
+ */
+export type UncommittedWords = Words & {
+  readonly state: "modified" | "untracked" | "ignored" | "no-repository" | "no-git" | "unreadable";
+};
 
 /** What happened to one source when the worker reloaded the config. */
 export type SourceReload = {
@@ -135,7 +155,7 @@ export type ReloadSummary =
   | {
       readonly loaded: true;
       readonly sources: readonly SourceReload[];
-      /** Changes to the project as a whole, which take a restart of the worker. */
+      /** Changes to the project as a whole that take a restart of the worker (the model URL, the alert channels; never the spending cap). */
       readonly notes: readonly string[];
     }
   | ({ readonly loaded: false } & Words);
@@ -152,7 +172,9 @@ export type FileDiff =
       /** Sent back to confirm: names this exact change, so what is written is what was shown. */
       readonly plan: string;
       /** Why the write would be refused without `force` (git keeps no copy of what is there now). */
-      readonly uncommitted: Words | null;
+      readonly uncommitted: UncommittedWords | null;
+      /** The file holds lines of the person's own (comments, code) the whole-file write drops. */
+      readonly dropsOwnText: boolean;
       readonly warnings: readonly DraftWarning[];
     }
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
@@ -172,7 +194,7 @@ export type FileApply =
   | { readonly kind: "stale" }
   /** The written file did not load, so the text it replaced was put back: nothing changed. */
   | ({ readonly kind: "reverted" } & Words)
-  | ({ readonly kind: "uncommitted" } & Words)
+  | ({ readonly kind: "uncommitted" } & UncommittedWords)
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
   | ({ readonly kind: "unreadable" } & Words);
 
@@ -180,9 +202,9 @@ export type FileApply =
 export type ConfigFileDoor = {
   /** Reads the file again and applies it to the running loops, as after a write. */
   reload(): Promise<ReloadSummary>;
-  diff(draft: SourceDraft): Promise<FileDiff>;
+  diff(draft: ConfigDraft): Promise<FileDiff>;
   apply(
-    draft: SourceDraft,
+    draft: ConfigDraft,
     options: { readonly plan: string; readonly force: boolean },
   ): Promise<FileApply>;
 };
@@ -272,12 +294,12 @@ export type ConfigService = {
     draft: SourceDraft,
     options: { readonly sample: number; readonly estimateOnly: boolean },
   ): Promise<TestOutcome>;
-  /** The diff a draft makes to the config file; nothing is written. */
-  diff(projectId: string, draft: SourceDraft): Promise<FileOutcome<FileDiff>>;
+  /** The diff a source or project draft makes to the config file; nothing is written. */
+  diff(projectId: string, draft: ConfigDraft): Promise<FileOutcome<FileDiff>>;
   /** Writes the file the confirmed plan names, and the worker reloads it. */
   apply(
     projectId: string,
-    draft: SourceDraft,
+    draft: ConfigDraft,
     options: { readonly plan: string; readonly force: boolean },
   ): Promise<FileOutcome<FileApply>>;
   /** Check again: the worker reads the file and its databases again; nothing is written. */

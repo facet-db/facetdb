@@ -163,6 +163,7 @@ function rig(door: BackfillJobsDoor | undefined) {
       reviewers: {
         list: () => Promise.reject(new Error("these tests list no reviewers")),
         add: () => Promise.reject(new Error("these tests add no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
     },
@@ -243,7 +244,7 @@ describe("who may reach the backfill routes", () => {
             error: {
               code: "cross_origin",
               message:
-                "This request came from a page on another site, and a backfill asks the model and writes answers into your database.",
+                "This request came from a page on another site, and the studio takes a write only from its own pages or a program.",
             },
           },
         });

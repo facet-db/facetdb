@@ -1,5 +1,5 @@
 import type { QuestionSet } from "@facetdb/core";
-import type { ProjectConfig } from "./dsl.ts";
+import type { OnCapReached, ProjectConfig } from "./dsl.ts";
 import { fromProjectJson, toProjectJson } from "./json.ts";
 import { ConfigError, type ConfigIssue } from "./schema.ts";
 import { type ConfigWarning, wordingWarnings } from "./warnings.ts";
@@ -63,12 +63,7 @@ export function judgeDraftSource(
   }
   // A draft comes over HTTP: it sees only the variables the loaded config already names, so naming
   // any other one tells its sender nothing about whether it is set or what it holds.
-  const named = [
-    ...new Set([
-      ...config.sources.flatMap((source) => source.databaseEnv ?? []),
-      ...(setup === undefined ? [] : [setup.variable]),
-    ]),
-  ].sort();
+  const named = namedVariables(config, setup === undefined ? [] : [setup.variable]);
   const refused = (path: string): DraftJudgement => ({
     ok: false,
     issues: [
@@ -92,7 +87,7 @@ export function judgeDraftSource(
   if (direct !== undefined && (typeof direct !== "string" || !named.includes(direct))) {
     return refused("databaseEnv");
   }
-  const seen = Object.fromEntries(named.map((name) => [name, env[name]]));
+  const seen = seenOf(named, env);
   const json = toProjectJson(config);
   const index = json.sources.findIndex((source) => source.name === draft.name);
   const sources: unknown[] =
@@ -165,4 +160,94 @@ function setupRefusal(
     };
   }
   return undefined;
+}
+
+/** The connection variables the config's sources name (and `also`), sorted, each once. */
+function namedVariables(config: ProjectConfig, also: readonly string[]): string[] {
+  return [
+    ...new Set([...config.sources.flatMap((source) => source.databaseEnv ?? []), ...also]),
+  ].sort();
+}
+
+/** The environment as a draft's judgement reads it: only the variables `named` lists. */
+function seenOf(
+  named: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  return Object.fromEntries(named.map((name) => [name, env[name]]));
+}
+
+/**
+ * A draft of the project's own settings (Settings' spending section): the monthly cap in billable
+ * input tokens, `null` removing it, and what happens at 100%. Any other key is refused by
+ * `judgeDraftProject` in plain words; the HTTP route already sends only these two.
+ */
+export type ProjectDraft = {
+  readonly spendingCap?: number | null;
+  readonly onCapReached?: OnCapReached;
+} & Readonly<Record<string, unknown>>;
+
+export type ProjectDraftJudgement =
+  | {
+      readonly ok: true;
+      /** The whole project with the draft in place: what Apply renders into the file. */
+      readonly config: ProjectConfig;
+    }
+  | { readonly ok: false; readonly issues: readonly ConfigIssue[] };
+
+/** The project keys a draft may change: the spending cap and what happens when it is reached. */
+const PROJECT_DRAFT_KEYS: ReadonlySet<string> = new Set(["spendingCap", "onCapReached"]);
+
+/**
+ * Why a project key stays out of a project draft, said where a draft names it. `modelUrl` decides
+ * where every record's state is sent and `alerts` where alerts post: the operator's, edited by hand
+ * as `where` and actions are. `model` and `sources` are each source's own draft's, or the file's.
+ */
+const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
+  model:
+    "a project draft cannot change the model: change a source's model on the Questions page, or the project's model in facetdb.config.ts by hand",
+  modelUrl:
+    "a draft cannot change modelUrl: it decides where every record's state is sent; edit modelUrl in facetdb.config.ts by hand",
+  alerts:
+    "a draft cannot change alerts: they decide where the worker posts its alerts; edit alerts in facetdb.config.ts by hand",
+  sources:
+    "a project draft does not carry sources: change a source with its own draft (the Questions page), or edit facetdb.config.ts by hand",
+};
+
+/**
+ * Judges a project draft within `config`: the draft over `toProjectJson(config)`, `spendingCap`
+ * removed where the draft sends `null`, read back through `fromProjectJson` with only the connection
+ * variables the file already names (as a source draft is), so the cap meets the loader's own rules
+ * at its own path (`spendingCap`). Nothing is written.
+ */
+export function judgeDraftProject(
+  config: ProjectConfig,
+  draft: ProjectDraft,
+  env: Readonly<Record<string, string | undefined>>,
+): ProjectDraftJudgement {
+  const refused = Object.keys(draft)
+    .filter((key) => !PROJECT_DRAFT_KEYS.has(key))
+    .sort()
+    .map(
+      (key): ConfigIssue => ({
+        path: key,
+        message:
+          REFUSED_PROJECT_KEYS[key] ??
+          `a project draft changes only spendingCap and onCapReached, not ${key}; edit facetdb.config.ts by hand`,
+      }),
+    );
+  if (refused.length > 0) {
+    return { ok: false, issues: refused };
+  }
+  const { spendingCap, ...rest } = { ...toProjectJson(config), ...draft };
+  // `null` removes the cap; a project with none, and a draft that does not name it, write no key.
+  const json = spendingCap === null || spendingCap === undefined ? rest : { ...rest, spendingCap };
+  try {
+    return { ok: true, config: fromProjectJson(json, seenOf(namedVariables(config, []), env)) };
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      return { ok: false, issues: error.issues };
+    }
+    throw error;
+  }
 }

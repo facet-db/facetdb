@@ -1,14 +1,13 @@
-// The local end-to-end's project: marketplace listings with two questions, written as a user
-// writes facetdb.config.ts (the DSL, loaded by its loader). The directory's name is the project's
-// name.
-import { choice, facetdb, noul } from "facetdb";
+// The local end-to-end's project: the marketplace listings with its two questions, written as a
+// user writes facetdb.config.ts (loaded by its loader). The directory's name is the project's name.
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
   sources: [
     {
       name: "listings",
-      database: process.env["DATABASE_URL"],
+      database: env("DATABASE_URL"),
       table: "listings",
       read: ["title", "description"],
       questions: {

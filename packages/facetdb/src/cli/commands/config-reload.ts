@@ -23,12 +23,12 @@ import type {
 import {
   type ApplyPlan,
   apply,
+  type ConfigDraft,
   ConfigError,
   type ConfigFiles,
   type ProjectConfig,
   planApply,
   type SourceConfig,
-  type SourceDraft,
   toProjectJson,
   uncommittedWords,
 } from "../../config/index.ts";
@@ -116,8 +116,9 @@ export type InstallCheck =
 
 export type FleetDeps = {
   /**
-   * Records the source's question-set version, opens what it reads and builds its worker. The fleet
-   * closes what it returns.
+   * Records the source's question-set version, opens what it reads and builds its worker, and last
+   * writes the set in force (store migration 8): from its return on, a restart only swaps loops,
+   * which fails on nothing. The fleet closes what it returns.
    */
   readonly open: (source: SourceConfig, config: ProjectConfig) => Promise<SourceLoop>;
   /**
@@ -133,6 +134,12 @@ export type FleetDeps = {
    * and a source added again under that name is made anew).
    */
   readonly removed?: (source: SourceConfig) => void;
+  /**
+   * The project's settings a running worker takes up without a restart (the spending cap and what
+   * happens at 100%): told each config that loads, at open and at every reload, before the
+   * sources are swapped, so the gate reads the new cap at its next check.
+   */
+  readonly project?: (config: ProjectConfig) => void;
   /** Reads facetdb.config.ts again through the loader; a `ConfigError` when it does not load. */
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
@@ -328,9 +335,13 @@ export function planReload(
   return steps;
 }
 
-/** The project's own settings a running worker holds from its start: a change takes a restart. */
+/**
+ * The project's own settings a running worker holds from its start: a change takes a restart. The
+ * spending cap and what happens at 100% are not among them: the fleet hands each loaded config to
+ * `deps.project`, and the worker's gate reads the cap in force on every check.
+ */
 function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
-  const fields = (["modelUrl", "spendingCap", "onCapReached", "alerts"] as const).filter(
+  const fields = (["modelUrl", "alerts"] as const).filter(
     (field) => JSON.stringify(started[field]) !== JSON.stringify(next[field]),
   );
   return fields.length === 0
@@ -706,6 +717,7 @@ export function createFleet(deps: FleetDeps): Fleet {
     const steps = planReload(new Map([...slots].map(([name, slot]) => [name, slot.loop])), next);
     const notes = started === undefined ? [] : projectNotes(started, next);
     current = next;
+    deps.project?.(next);
     const sources: SourceReload[] = [];
     const restarts: { slot: Slot; fresh: SourceLoop }[] = [];
     const removals: Slot[] = [];
@@ -1007,6 +1019,7 @@ export function createFleet(deps: FleetDeps): Fleet {
     async open(config) {
       current = config;
       started = config;
+      deps.project?.(config);
       for (const source of config.sources) {
         slots.set(source.name, slotOf(await deps.open(source, config)));
       }
@@ -1152,10 +1165,11 @@ export function fileQueue(): FileQueue {
 }
 
 /**
- * The studio's door to facetdb.config.ts (`ServerDeps.config.file`): the diff a draft makes, and on
- * confirmation the write and the fleet's reload. The draft is judged within the project as the file
- * loads now, so a change committed to the file since the worker started is kept, not reverted.
- * Applies run one at a time.
+ * The studio's door to facetdb.config.ts (`ServerDeps.config.file`): the diff a draft makes (one
+ * source, or the project's spending settings from Settings), and on confirmation the write and the
+ * fleet's reload, which puts the written cap in force at once. The draft is judged within the
+ * project as the file loads now, so a change committed to the file since the worker started is
+ * kept, not reverted. Applies run one at a time.
  */
 export function configFileDoor(deps: {
   /** The config file, as `--config` names it. */
@@ -1175,7 +1189,7 @@ export function configFileDoor(deps: {
   const serial = deps.serial ?? fileQueue();
 
   async function plan(
-    draft: SourceDraft,
+    draft: ConfigDraft,
   ): Promise<
     | { readonly ok: true; readonly plan: ApplyPlan }
     | Extract<FileDiff, { readonly kind: "invalid" | "unreadable" }>
@@ -1231,6 +1245,7 @@ export function configFileDoor(deps: {
           uncommitted: shown.changed
             ? (uncommittedWords(await files.gitState(path), path) ?? null)
             : null,
+          dropsOwnText: shown.dropsOwnText,
           warnings: shown.warnings,
         };
       }),
@@ -1258,7 +1273,12 @@ export function configFileDoor(deps: {
               fix: `make ${path} a regular file in the project, then apply again`,
             };
           case "uncommitted":
-            return { kind: "uncommitted", message: written.message, fix: written.fix };
+            return {
+              kind: "uncommitted",
+              state: written.state,
+              message: written.message,
+              fix: written.fix,
+            };
           case "written": {
             const reload = await deps.reload();
             if (reload.loaded) {

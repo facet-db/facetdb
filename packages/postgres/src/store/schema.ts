@@ -364,6 +364,26 @@ $$`,
       ),
     ],
   },
+  {
+    version: 8,
+    statements: [
+      // The set each source's worker runs, one row per source, written at every loop open (the
+      // worker's `start`). A version's content hash leaves out the thresholds, the where filter,
+      // the stakes, the probability columns and the questions' order, so a change to any of them
+      // makes no new version and the append-only `question_set_versions` keeps the set as it was
+      // when the version was made. `facetdb review` and `facetdb test` judged by that stale set:
+      // cards decided under thresholds the worker no longer ran, and a file put back to the stored
+      // values passed while the worker ran the new ones. This row is what the worker runs, so the
+      // terminal review judges by it and compares the file with it exactly. Mutable (the worker
+      // inserts and updates it), so not among the append-only grants.
+      `create table if not exists facetdb.question_sets_in_force (
+  source_id text primary key,
+  version integer not null,
+  question_set jsonb not null,
+  recorded_at timestamptz not null
+)`,
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */
@@ -412,6 +432,7 @@ export const STORE_TABLES: readonly string[] = [
   "sources",
   "projects",
   "question_set_versions",
+  "question_sets_in_force",
   "decisions",
   "jobs",
   "records",
@@ -443,6 +464,13 @@ export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versio
  * login holds select on them and nothing more.
  */
 export const STORE_WORKER_READ_ONLY_TABLES: readonly string[] = ["users"];
+
+/**
+ * The store's tables the worker login writes but never deletes from (store migration 8): the set
+ * each source's worker runs, upserted at every loop open. Only the admin's `uninstall` and the
+ * store's purge delete a source's row, so the worker holds select, insert and update.
+ */
+export const STORE_WORKER_UPSERT_TABLES: readonly string[] = ["question_sets_in_force"];
 
 /**
  * Every function the store's migrations create, by signature: `facetdb migrate` grants the worker

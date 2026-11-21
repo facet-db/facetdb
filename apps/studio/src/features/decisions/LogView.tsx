@@ -25,9 +25,10 @@ import { logQuery } from "./queries.ts";
 
 const RECORD_LINK = `${focusBrackets} font-medium text-text underline decoration-hairline underline-offset-4 hover:decoration-text-2`;
 
+/** By the tag, never the words: an option named "withdrawn" or "needs review" is a decided value. */
 function Decided({ line }: { readonly line: LogLine }) {
-  switch (line.decided) {
-    case "needs review":
+  switch (line.outcome) {
+    case "needs_review":
       return <StatusWord status="needs_review" size="small" />;
     case "withdrawn":
       return <StatusWord status="skipped" size="small" label="withdrawn" />;
@@ -38,7 +39,7 @@ function Decided({ line }: { readonly line: LogLine }) {
           unknown<span className="sr-only">, the question set it ran under is no longer kept</span>
         </span>
       );
-    default:
+    case "decided":
       return <StatusWord status="done" size="small" label={line.decided} />;
   }
 }

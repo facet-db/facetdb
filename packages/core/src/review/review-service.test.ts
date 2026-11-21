@@ -205,6 +205,61 @@ describe("open: the next card, locked for the viewer", () => {
     await openOrFail(t.service, "alice");
     expect(await t.service.open("bob", {})).toBeNull();
   });
+
+  it("reads the queue a short batch at a time, never whole, and walks past a batch of stale cards (2026-11-12)", async () => {
+    const t = setup();
+    for (let n = 1; n <= 9; n += 1) {
+      await t.seed(`r${n}`, `Listing ${n}`, { scam: UNSURE_SCAM, team: SURE_BILLING });
+    }
+    // The first eight records changed since their cards were made: each is withdrawn when met.
+    for (let n = 1; n <= 8; n += 1) {
+      t.db.edit(`r${n}`, { body: `Listing ${n}, edited` });
+    }
+    const listings: (number | undefined)[] = [];
+    const list = t.queue.list.bind(t.queue);
+    t.queue.list = (filter, viewer, nowMs) => {
+      listings.push(filter.limit);
+      return list(filter, viewer, nowMs);
+    };
+
+    const card = await openOrFail(t.service, "alice");
+
+    expect(card.key).toBe("r9");
+    // A listing of eight, then a wider one, never one of everything first; the stale eight are
+    // gone from the queue.
+    expect(listings).toEqual([8, 64]);
+    expect(t.queue.rows.map((row) => row.key)).toEqual(["r9"]);
+  });
+
+  it("gets past cards of a source the worker no longer runs, which stay in the queue until purge", async () => {
+    const t = setup();
+    // Eight orphans older than every live card: they are never withdrawn, only passed over.
+    for (let n = 1; n <= 8; n += 1) {
+      await t.queue.upsert({
+        source: "acme:gone",
+        key: `g${n}`,
+        stateHash: `h-g${n}`,
+        openQuestions: ["scam"],
+        numbers: { scam: 0.5 },
+        since: new Date(START - 60_000 + n),
+      });
+    }
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const listings: (number | undefined)[] = [];
+    const list = t.queue.list.bind(t.queue);
+    t.queue.list = (filter, viewer, nowMs) => {
+      listings.push(filter.limit);
+      return list(filter, viewer, nowMs);
+    };
+
+    const card = await openOrFail(t.service, "alice");
+
+    expect(card.key).toBe("r1");
+    expect(listings).toEqual([8, 64]);
+    // Nothing locked or withdrawn on the orphans.
+    expect(t.queue.rows.filter((row) => row.source === "acme:gone")).toHaveLength(8);
+    expect(t.queue.rows.every((row) => row.source !== "acme:gone" || row.lock === null)).toBe(true);
+  });
 });
 
 describe("decide: one door for a person's decision", () => {

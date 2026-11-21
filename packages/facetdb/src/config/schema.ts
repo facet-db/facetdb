@@ -280,7 +280,9 @@ const sourceSchema = strict({
   name: identifier("a source name"),
   api: z.boolean().default(false),
   database: z.string().min(1).exactOptional(),
-  databaseEnv: z.string().regex(ENV_NAME, `databaseEnv ${ENV_NAME_RULE}`).exactOptional(),
+  // The name `env("X")` carries (the DSL puts it here); judged below, so the issue points at the
+  // field the file writes: `database`.
+  databaseEnv: z.string().exactOptional(),
   // The scheme picks the engine, this overrides it.
   connector: z
     .enum(["polling"], {
@@ -326,6 +328,13 @@ const sourceSchema = strict({
     if (kind !== undefined) {
       context.addIssue({ code: "custom", path: [field], message: secretMessage(field, kind) });
     }
+  }
+  if (source.databaseEnv !== undefined && !ENV_NAME.test(source.databaseEnv)) {
+    context.addIssue({
+      code: "custom",
+      path: ["database"],
+      message: `env(...) ${ENV_NAME_RULE}`,
+    });
   }
   const capture = captureIssue(source);
   if (capture !== undefined) {
@@ -380,9 +389,11 @@ function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] 
       "lastChanged",
     ] as const) {
       if (source[field] !== undefined) {
+        // The file writes database: env("X"); databaseEnv is the loader's name for it.
+        const written = field === "databaseEnv" ? "database" : field;
         issues.push({
-          path: `${at}.${field}`,
-          message: `an API source has no ${field}: your code sends its records to /v1/check; remove ${field}, or drop api: true to read a table`,
+          path: `${at}.${written}`,
+          message: `an API source has no ${written}: your code sends its records to /v1/check; remove ${written}, or drop api: true to read a table`,
         });
       }
     }
@@ -486,7 +497,6 @@ function conditionIssues(
 function duplicateIssues(sources: readonly ParsedSource[]): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
   const names = new Map<string, number>();
-  const tables = new Map<string, number>();
   sources.forEach((source, index) => {
     const firstName = names.get(source.name);
     if (firstName === undefined) {
@@ -497,7 +507,30 @@ function duplicateIssues(sources: readonly ParsedSource[]): ConfigIssue[] {
         message: `the name "${source.name}" is already used by sources[${firstName}]; give each source its own name`,
       });
     }
-    if (source.api || source.table === undefined) {
+  });
+  return [...issues, ...duplicateTableIssues(sources)];
+}
+
+/** What the one-table-one-source check reads of a source: a table source's database and table. */
+type TableIdentity = {
+  readonly name: string;
+  readonly api?: boolean | undefined;
+  readonly table?: string | undefined;
+  readonly database?: string | undefined;
+  readonly databaseEnv?: string | undefined;
+};
+
+/**
+ * One table is exactly one source. The schema keys a source by its connection string, or by the
+ * variable's name where the file wrote env("X") and no string is known yet, so the loader runs this
+ * again once it has read every variable: two names over one database and one table are one table
+ * twice, and only the values say so.
+ */
+export function duplicateTableIssues(sources: readonly TableIdentity[]): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  const tables = new Map<string, number>();
+  sources.forEach((source, index) => {
+    if (source.api === true || source.table === undefined) {
       return;
     }
     const key = `${source.database ?? source.databaseEnv ?? ""}\u0000${source.table}`;

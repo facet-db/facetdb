@@ -159,7 +159,7 @@ describe("the card", () => {
     const refund = within(card).getByRole("region", {
       name: "Is the customer asking for their money back?",
     });
-    expect(within(refund).getByText("Yes or no")).toBeInTheDocument();
+    expect(within(refund).getByText("Yes or no, high stakes")).toBeInTheDocument();
     expect(within(refund).getByText("The model says 84% likely yes.")).toBeInTheDocument();
     // A yes-or-no question has no probabilities row: the sentence says it.
     expect(within(refund).queryByRole("list")).toBeNull();
@@ -169,6 +169,66 @@ describe("the card", () => {
     expect(within(team).getByText("Decided")).toBeInTheDocument();
     expect(team.textContent).toContain("billing");
     expect(within(team).queryByRole("button")).toBeNull();
+  });
+
+  it("tags a high-stakes question and says at what figure the worker decides alone, for each kind of threshold", async () => {
+    // A high-stakes choice beside the sample's score on its config line and high-stakes yes-or-no.
+    const team: ReviewCard["open"][number] = {
+      name: "team",
+      type: "choice",
+      instructions: "Which team should handle it?",
+      said: "billing, 40% sure",
+      figure: 0.4,
+      top: "billing",
+      options: [
+        { name: "billing", description: "Money questions", probability: 0.6 },
+        { name: "tech", description: "Technical questions", probability: 0.2 },
+        { name: "other", description: "Anything else", probability: 0.2 },
+      ],
+      stakes: "high",
+      thresholds: { kind: "confidence", confidenceAtLeast: 0.75 },
+    };
+    const sure: ReviewCard["open"][number] = {
+      ...REFUND,
+      name: "is_spam",
+      instructions: "Is this message spam?",
+      stakes: "low",
+      thresholds: { kind: "yes-no", yesAbove: 0.7, noBelow: 0.3 },
+    };
+    await openReview({
+      reviewOpen: scripted({ ...SAMPLE_CARD, open: [URGENCY, REFUND, team, sure], decided: [] }),
+    });
+    const card = screen.getByRole("article");
+
+    // A low-stakes score: the kind alone, and its one confidence line (the config's 60%).
+    const urgency = within(card).getByRole("region", { name: URGENCY.instructions });
+    expect(within(urgency).getByText("Rate on a scale")).toBeInTheDocument();
+    expect(
+      within(urgency).getByText("It decides on its own at 60% confidence or more."),
+    ).toBeInTheDocument();
+
+    // A high-stakes yes-or-no: tagged so, with both of its lines, as the terminal says them.
+    const refund = within(card).getByRole("region", { name: REFUND.instructions });
+    const tag = within(refund).getByText("Yes or no, high stakes");
+    expect(
+      within(refund).getByText("It decides on its own at 90% or more, or 10% or less."),
+    ).toBeInTheDocument();
+    // The stakes are said, never colored: the tag keeps the neutral square.
+    expect(tag).toHaveAttribute("data-tone", "neutral");
+
+    // A high-stakes choice: the terminal tags only a yes-or-no's stakes, and the line says the rest.
+    const choice = within(card).getByRole("region", { name: team.instructions });
+    expect(within(choice).getByText("Pick one")).toBeInTheDocument();
+    expect(
+      within(choice).getByText("It decides on its own at 75% confidence or more."),
+    ).toBeInTheDocument();
+
+    // A low-stakes yes-or-no: the kind alone, and the defaults' lines.
+    const spam = within(card).getByRole("region", { name: sure.instructions });
+    expect(within(spam).getByText("Yes or no")).toBeInTheDocument();
+    expect(
+      within(spam).getByText("It decides on its own at 70% or more, or 30% or less."),
+    ).toBeInTheDocument();
   });
 
   it("counts the queue and the oldest wait in the top bar", async () => {
@@ -405,11 +465,24 @@ describe("the keys", () => {
     dialog.remove();
     expect(calls(api, "reviewSkip")).toEqual([]);
 
-    // A filter's listbox owns the letters (type-ahead): `s` there picks nothing for the card.
-    screen.getByRole("combobox", { name: "Source" }).focus();
-    await user.keyboard("s");
+    // A filter's listbox owns the letters (type-ahead): `s` in its open list moves to the source
+    // it starts (support_messages) and does nothing to the card.
+    const source = screen.getByRole("combobox", { name: "Source" });
+    source.focus();
     await user.keyboard("{ArrowDown}");
+    await screen.findByRole("option", { name: "support_messages" });
     await user.keyboard("s");
+    expect(calls(api, "reviewSkip")).toEqual([]);
+    await user.keyboard("{Escape}");
+    expect(calls(api, "reviewOpen")).toEqual(["reviewOpen"]);
+
+    // On the closed listbox a letter is type-ahead too: it picks that source, and the card opens
+    // under it; the card in hand is given back, never skipped.
+    source.focus();
+    await user.keyboard("s");
+    await screen.findByText("Where is my order");
+    expect(calls(api, "reviewOpen")).toEqual(["reviewOpen", "reviewOpen source=support_messages"]);
+    expect(calls(api, "reviewRelease")).toEqual(["reviewRelease 5521"]);
     expect(calls(api, "reviewSkip")).toEqual([]);
   });
 
@@ -1113,6 +1186,55 @@ describe("the empty queue and the filters", () => {
     });
   });
 
+  it("offers every source and question the worker runs, a card waiting or not, and a source's own questions once one is chosen", async () => {
+    const limits: (number | undefined)[] = [];
+    const { api, user } = await openReview({
+      reviewQueue: (options) => {
+        limits.push(options?.limit);
+        return Promise.resolve(SAMPLE_QUEUE);
+      },
+    });
+    const names = async () =>
+      (await screen.findAllByRole("option")).map((option) => option.textContent);
+
+    // Three sources run; the one card waiting is of listings.
+    const source = screen.getByRole("combobox", { name: "Source" });
+    source.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(await names()).toEqual(["Every source", "listings", "profiles", "support_messages"]);
+    await user.keyboard("{Escape}");
+
+    // The waiting card has is_scam open alone: the rest are the worker's question sets.
+    const question = screen.getByRole("combobox", { name: "Question" });
+    question.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(await names()).toEqual([
+      "Every question",
+      "category",
+      "is_bot",
+      "is_scam",
+      "team",
+      "urgency",
+      "wants_refund",
+    ]);
+    await user.keyboard("{Escape}");
+
+    // Choosing a source with no card waiting opens under it and narrows the questions to its own.
+    source.focus();
+    await user.keyboard("{ArrowDown}");
+    await screen.findByRole("option", { name: "profiles" });
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    await screen.findByText("Where is my order");
+    expect(calls(api, "reviewOpen")).toEqual(["reviewOpen", "reviewOpen source=profiles"]);
+    question.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(await names()).toEqual(["Every question", "is_bot"]);
+
+    // The choices came off the top bar's own one-card answer: no wider read of the queue for them.
+    expect(limits.length).toBeGreaterThan(0);
+    expect(limits.every((limit) => limit === 1)).toBe(true);
+  });
+
   it("offers a certainty band, and a band narrows the open", async () => {
     const { api, user } = await openReview({ reviewOpen: scripted(SAMPLE_CARD, NEXT_CARD) });
     const band = screen.getByRole("combobox", { name: "Certainty" });
@@ -1334,12 +1456,9 @@ describe("the top bar when the worker cannot be reached", () => {
     expect(await screen.findByText("The queue could not be counted.")).toBeInTheDocument();
   });
 
-  it("offers only the 'every' choices when the filter choices never loaded", async () => {
+  it("offers only the 'every' choices when the queue never answered", async () => {
     const api = fakeApi({
-      reviewQueue: (options) =>
-        options?.limit === 200
-          ? Promise.reject(refusal(503, "unavailable", "No queue."))
-          : Promise.resolve(SAMPLE_QUEUE),
+      reviewQueue: () => Promise.reject(refusal(503, "unavailable", "No queue.")),
     });
     const { user } = renderStudio({ path: "/review", api });
     await screen.findByRole("article");
@@ -1391,7 +1510,7 @@ describe("under StrictMode, as main.tsx mounts it", () => {
 describe("the rail's count", () => {
   it("follows a decision", async () => {
     let waiting = 37;
-    const { user } = await openReview({
+    const { api, user } = await openReview({
       reviewQueue: () => Promise.resolve({ ...SAMPLE_QUEUE, count: waiting }),
       reviewDecide: () => {
         waiting = 36;
@@ -1402,6 +1521,8 @@ describe("the rail's count", () => {
     await waitFor(() => {
       expect(within(rail).getByRole("link", { name: /Review/ }).textContent).toContain("37");
     });
+    // The rail and the top bar read the queue under one key: one request served both.
+    expect(calls(api, "reviewQueue")).toHaveLength(1);
     await user.keyboard("1");
     await waitFor(() => {
       expect(within(rail).getByRole("link", { name: /Review/ }).textContent).toContain("36");

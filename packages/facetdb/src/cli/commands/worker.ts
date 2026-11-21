@@ -46,7 +46,7 @@ import {
   type SourceConfig,
   toProjectJson,
 } from "../../config/index.ts";
-import { projectSpending } from "../backfill-wiring.ts";
+import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
   type CliDeps,
@@ -133,6 +133,44 @@ export const OUTBOX_EVERY_MS = 2_000;
  */
 export const WORKER_CONNECTIONS = DEFAULT_WORKER_LIMITS.maxInFlight + 2;
 
+/** The fewest connections a worker runs on: one lane, the LISTEN connection and one for the rest. */
+const LEAST_CONNECTIONS = 3;
+
+/** `--connections` as a count: a whole number from 3 up; the lanes shrink to fit under it. */
+export function parseConnections(text: string): number {
+  const count = Number(text);
+  if (!Number.isInteger(count) || count < LEAST_CONNECTIONS || count > 1_000) {
+    throw new CliError(
+      "connections",
+      `--connections is a whole number of connections from ${LEAST_CONNECTIONS} to 1000, not "${text}"`,
+      `pass --connections ${WORKER_CONNECTIONS} (the default), or 6 under a Supabase session pooler`,
+      EXIT_USAGE,
+    );
+  }
+  return count;
+}
+
+/** The connections this run holds per database: the flag, else FACETDB_CONNECTIONS, else the default. */
+export function connectionsOf(
+  options: Pick<WorkerOptions, "connections">,
+  env: Readonly<Record<string, string | undefined>>,
+): number {
+  const given = options.connections ?? env["FACETDB_CONNECTIONS"];
+  return given === undefined || given === "" ? WORKER_CONNECTIONS : parseConnections(given);
+}
+
+/**
+ * The loop's limits under a connection budget: the lanes in flight never exceed what the pool can
+ * hold beside the LISTEN connection and one more, so a smaller budget slows a loop rather than
+ * starving it of a connection mid-batch.
+ */
+export function limitsFor(connections: number): typeof DEFAULT_WORKER_LIMITS {
+  return {
+    ...DEFAULT_WORKER_LIMITS,
+    maxInFlight: Math.min(DEFAULT_WORKER_LIMITS.maxInFlight, connections - 2),
+  };
+}
+
 export type WorkerOptions = {
   readonly config: string;
   readonly port: string;
@@ -144,6 +182,14 @@ export type WorkerOptions = {
   /** False under `--no-http`. */
   readonly http: boolean;
   readonly once: boolean;
+  /**
+   * `--connections <n>` (or FACETDB_CONNECTIONS): the connections this worker may hold open on each
+   * database, the store's pool and every connector's; the loop's lanes fit inside it. Set it under
+   * a pooler that counts every session of the worker login (a Supabase session pooler allows 15 per
+   * login and database): a real run hit its limit with one studio and its backfill beside a process
+   * just closed, and the pass's failure stopped the studio.
+   */
+  readonly connections?: string;
   /** `--allow-insecure`: the store may be reached without TLS, on a network the operator trusts. */
   readonly allowInsecure?: boolean;
   /**
@@ -304,6 +350,9 @@ export async function runWorkers(
   const { options, deps, print } = context;
   const { config, project, store } = parts;
   const { clock } = deps;
+  // The budget per database: the store's pool (opened by the process's caller with the same
+  // figure), every connector's and the backfill's, the lanes fitting inside it.
+  const connections = connectionsOf(options, deps.env);
   const port = parsePort(options.port);
   // Before anything starts: a surface open to other machines needs an account to sign in with.
   if (options.http) {
@@ -328,7 +377,20 @@ export async function runWorkers(
   await store.ensureProject(project);
   /** The source's id in the store: its log, versions, records and queue are keyed by it. */
   const idOf = (source: SourceConfig) => storeSourceId(project.id, source.name);
-  const spending: SpendingGate = projectSpending(config, store, alerts, clock, project.id);
+  /**
+   * The project's spending settings in force: the file's at start, then each reload's (the fleet's
+   * `project` hook), so a cap saved from Settings is enforced at the gate's next check and Home
+   * shows it, with no restart. The model URL and the alert channels still take a restart: the
+   * reload's notes say so.
+   */
+  let projectInForce: ProjectSpendingSettings = config;
+  const spending: SpendingGate = spendingUnder(
+    () => capOf(projectInForce),
+    store,
+    alerts,
+    clock,
+    project.id,
+  );
 
   /**
    * The actions a source runs after a decision: the worker's own and a reviewer's decision in the
@@ -359,7 +421,7 @@ export async function runWorkers(
       actions: actionsOf(source),
       clock,
       limits: {
-        ...DEFAULT_WORKER_LIMITS,
+        ...limitsFor(connections),
         ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
       },
       questionSet,
@@ -382,7 +444,8 @@ export async function runWorkers(
 
   /**
    * Registers a source and records its question set: a new version only when the set's content
-   * changed (`store.questionSets.record`), at start and when a reload restarts it.
+   * changed (`store.questionSets.record`), at start and when a reload restarts it. The set in force
+   * is written apart, by `inForce`, once the whole loop has opened.
    */
   async function start(
     source: SourceConfig,
@@ -399,6 +462,20 @@ export async function runWorkers(
     return recorded.version;
   }
 
+  /**
+   * The whole set as the opened loop runs it (`run`, store migration 8): the version's row keeps
+   * only what its content hash sees, and `facetdb review` judges cards by what the worker runs, so
+   * a threshold or where filter changed with a restart must reach the store. Written as the open's
+   * last step: an open that fails before it leaves the row on the set the old loop still runs, and
+   * after it the fleet only puts the loop in place (`openAnew` and the swap fail on nothing; a
+   * worker stopping meanwhile runs no loop at all, and its next start writes the row again). A
+   * reload that keeps a loop reopens nothing, and its row rightly stays what it was.
+   */
+  async function inForce(loop: SourceLoop): Promise<SourceLoop> {
+    await store.questionSets.run(idOf(loop.source), loop.version, loop.questionSet);
+    return loop;
+  }
+
   /** One source's loop: its version recorded, its connector opened, its worker built. */
   async function openLoop(source: SourceConfig, from: ProjectConfig): Promise<SourceLoop> {
     const questionSet = questionSetOf(from, source);
@@ -407,7 +484,7 @@ export async function runWorkers(
     if (source.api) {
       const version = await start(source, "api", questionSet);
       const connector = store.connector({ sourceId: idOf(source), fields: source.read, workerId });
-      return {
+      return inForce({
         source,
         questionSet,
         version,
@@ -416,7 +493,7 @@ export async function runWorkers(
         keyText: undefined,
         outage,
         close: () => Promise.resolve(),
-      };
+      });
     }
     // Its facts for the dashboard, made once per loop (its doctor's cache with them) from the
     // source and project the loop is opened with, so Home checks the question set in force; before
@@ -424,14 +501,14 @@ export async function runWorkers(
     const table = await parts.tableFacts(source, from);
     const connector = await parts.openTable(
       source,
-      { workerId, maxConnections: WORKER_CONNECTIONS },
+      { workerId, maxConnections: connections },
       from,
     );
     // Its log and versions are kept in the store under the source's name, registered as a
     // plugin-kind source, as backfill does (the store has no third kind).
     try {
       const version = await start(source, "plugin", questionSet);
-      return {
+      return await inForce({
         source,
         questionSet,
         version,
@@ -441,7 +518,7 @@ export async function runWorkers(
         table,
         outage,
         close: () => connector.close(),
-      };
+      });
     } catch (error) {
       await connector.close();
       throw error;
@@ -507,6 +584,9 @@ export async function runWorkers(
       );
     },
     removed: (source) => parts.forgetTable?.(source),
+    project: (next) => {
+      projectInForce = next;
+    },
     load: () => {
       if (parts.configFile === undefined) {
         return Promise.reject(new Error("this worker has no config file to reload"));
@@ -535,7 +615,7 @@ export async function runWorkers(
         open: (loop, backfillId) =>
           parts.openTable(
             loop.source,
-            { workerId: backfillId, maxConnections: WORKER_CONNECTIONS },
+            { workerId: backfillId, maxConnections: connections },
             // The loop's own question set: the file's model may have moved on since it opened.
             { ...fleet.config(), model: loop.questionSet.model },
           ),
@@ -543,6 +623,7 @@ export async function runWorkers(
         queue: (name) => (fleet.loop(name) === undefined ? undefined : fleet.connector(name)),
         provider,
         spending,
+        maxInFlight: limitsFor(connections).maxInFlight,
         clock,
         cursors: store.cursors,
         log: (name) => store.log(storeSourceId(project.id, name)),
@@ -636,10 +717,10 @@ export async function runWorkers(
         storeDatabase: parts.storeClient,
         dashboard: {
           projectId: project.id,
-          cap:
-            config.spendingCap === undefined
-              ? undefined
-              : { inputTokens: config.spendingCap, onCapReached: config.onCapReached },
+          // The cap the gate enforces now: the one in force, which a reload replaces.
+          get cap() {
+            return projectInForce.spendingCap === undefined ? undefined : capOf(projectInForce);
+          },
           get sources() {
             return fleet.loops().map((loop) => ({
               name: loop.source.name,
@@ -794,6 +875,12 @@ export async function runWorkers(
             return fleet.loops().map((loop) => loop.source.name);
           },
           keyText: (name) => fleet.loop(name)?.keyText,
+          // The record now, through the connector of the loop in force, as explain reads it; a
+          // source the file no longer runs has none to read it through, and the log alone speaks.
+          current: async (name, key) =>
+            fleet.loop(name) === undefined
+              ? undefined
+              : (await fleet.connector(name).current([key])).get(key),
           store: {
             search: (search) => store.searchDecisions(search),
             history: (sourceId, key) => store.log(sourceId).history(key),
@@ -948,6 +1035,13 @@ function alertFailureLine({ event, error, final }: AlertFailure): string {
 const MISSING_OBJECT = new Set(["42P01", "42703", "ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"]);
 
 /**
+ * A database with no connection left for the worker login: Postgres's own too_many_connections
+ * (53300) and Supabase's session pooler, which answers EMAXCONNSESSION ("max clients reached in
+ * session mode") once the login's sessions, every process's together, reach its pool size.
+ */
+const TOO_MANY_CONNECTIONS = new Set(["53300", "EMAXCONNSESSION"]);
+
+/**
  * A loop's failure as the run reports it: one on a missing table or column names the source and how
  * to find out which, the database's words kept; anything else is left as it is. The worker starts
  * as it always did: nothing is checked before the first claim.
@@ -955,6 +1049,17 @@ const MISSING_OBJECT = new Set(["42P01", "42703", "ER_NO_SUCH_TABLE", "ER_BAD_FI
 export function installMissing(source: string, configPath: string, error: unknown): unknown {
   const code =
     typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+  if (typeof code === "string" && TOO_MANY_CONNECTIONS.has(code)) {
+    // Seen in a real run: a Supabase session pooler's 15 sessions per login, held by one studio
+    // with its backfill beside a process just closed, stopped the studio with the driver's words
+    // and "run facetdb doctor" as the fix.
+    const said = error instanceof Error ? error.message : String(error);
+    return new CliError(
+      "too-many-connections",
+      `the source "${source}" stopped: its database allows no more connections for the worker login (${said})`,
+      `a pooler counts every session of the worker login, and a process just closed keeps its sessions a minute: close any other facetdb worker, studio or doctor on this login, wait a minute, then start again with --connections 6 (or FACETDB_CONNECTIONS=6), which fits a Supabase session pooler's 15 beside one more process`,
+    );
+  }
   if (typeof code !== "string" || !MISSING_OBJECT.has(code)) {
     return error;
   }
@@ -1170,7 +1275,7 @@ export async function runWorkerProcess(
   // borrower closes nothing. The session cookie is signed under the store's secret: refused here,
   // in the store door's words, before the store opens or the surface could start.
   const sessionSecret = requireStoreSecret(deps.env);
-  const storeClient = deps.connect(storeUrl, { max: WORKER_CONNECTIONS });
+  const storeClient = deps.connect(storeUrl, { max: connectionsOf(options, deps.env) });
   const borrowed = (): StoreClient => ({ ...storeClient, close: () => Promise.resolve() });
   try {
     const store = await deps.store({
@@ -1221,10 +1326,17 @@ export const HOST_OPTION = {
   defaultValue: DEFAULT_HOST,
 } as const;
 
+/** `--connections`, as the worker and the studio take it. */
+export const CONNECTIONS_OPTION = {
+  flags: "--connections <n>",
+  description:
+    "the connections this worker may hold open on each database, the store's pool and every connector's (default 10, or FACETDB_CONNECTIONS); a Supabase session pooler allows 15 per login, so 6 leaves room for a second process and facetdb doctor",
+} as const;
+
 export const workerCommand = defineCommand<WorkerOptions>("worker", {
   description:
     "Runs the worker until stopped: answers every source, beats the heartbeat, delivers webhooks and serves the check API and the studio; run it next to the database, in the same region, because every record costs a few round trips to it",
-  options: [...OPTIONS, HOST_OPTION, ALLOW_INSECURE_OPTION],
+  options: [...OPTIONS, CONNECTIONS_OPTION, HOST_OPTION, ALLOW_INSECURE_OPTION],
   run: async (context) => {
     const { options, deps, print } = context;
     const config = await loadProjectConfig(deps, options.config);

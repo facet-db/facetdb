@@ -8,6 +8,7 @@ import {
   ConfigError,
   choice,
   configFileSource,
+  env,
   facetdb,
   fromProjectJson,
   loadConfig,
@@ -45,11 +46,16 @@ async function scratchDir(): Promise<string> {
   return dir;
 }
 
-const env = () => process.env;
+const processEnv = () => process.env;
 
 /** Loads a config from a project directory with the warnings left unprinted. */
 function load(projectDir: string, path = "facetdb.config.ts") {
-  return loadConfig(path, { projectDir, env: env(), stderr: { write: () => true }, quiet: true });
+  return loadConfig(path, {
+    projectDir,
+    env: processEnv(),
+    stderr: { write: () => true },
+    quiet: true,
+  });
 }
 
 function messagesOf(run: () => unknown): string[] {
@@ -134,6 +140,8 @@ describe("the example config", () => {
     const messages = config.sources[0];
     expect(messages?.database).toBe(CONNECTION);
     expect(messages?.databaseEnv).toBe("DATABASE_URL");
+    // The fixture writes env("DATABASE_URL"): the name is the file's own, never a guess.
+    expect(messages?.databaseEnvNamed).toBe(true);
     expect(messages?.questions.map((question) => question.name)).toEqual([
       "urgency",
       "team",
@@ -152,9 +160,14 @@ describe("the example config", () => {
     const json = toProjectJson(config);
     expect(JSON.stringify(json)).not.toContain("s3cret");
     expect(json.sources[0]?.database).toEqual({ env: "DATABASE_URL" });
-    const imported = fromProjectJson(JSON.parse(JSON.stringify(json)), env());
+    const imported = fromProjectJson(JSON.parse(JSON.stringify(json)), processEnv());
     expect(toProjectJson(imported)).toEqual(json);
-    expect(imported).toEqual(config);
+    // The loader's mark is the file's alone: the JSON never carries it, so the import lacks it.
+    expect(JSON.stringify(json)).not.toContain("databaseEnvNamed");
+    expect(imported).toEqual({
+      ...config,
+      sources: config.sources.map(({ databaseEnvNamed: _named, ...source }) => source),
+    });
   });
 
   it("exports a config file that loads to an equal project", async () => {
@@ -171,8 +184,11 @@ describe("the example config", () => {
   it("writes the exported file the way a developer would", async () => {
     const { config } = await load(fixtures);
     const source = configFileSource(config);
-    expect(source).toContain('import { actionCall, choice, facetdb, noul, score } from "facetdb";');
-    expect(source).toContain("database: process.env.DATABASE_URL,");
+    expect(source).toContain(
+      'import { actionCall, choice, env, facetdb, noul, score } from "facetdb";',
+    );
+    expect(source).toContain('database: env("DATABASE_URL"),');
+    expect(source).not.toContain("process.env");
     expect(source).toContain(
       'wants_refund": noul("Is the customer asking for their money back?", { stakes: "high" })',
     );
@@ -215,13 +231,51 @@ describe("the example config", () => {
     const parsed = parseProjectConfig(withEnv);
     if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
     const json = toProjectJson(parsed.config);
-    expect(toProjectJson(fromProjectJson(json, env()))).toEqual(json);
+    expect(toProjectJson(fromProjectJson(json, processEnv()))).toEqual(json);
 
     const dir = await scratchDir();
     await mkdir(join(dir, "node_modules"));
     await symlink(packageDir, join(dir, "node_modules", "facetdb"));
     await writeFile(join(dir, "facetdb.config.ts"), configFileSource(parsed.config));
     const { config: reloaded } = await load(dir);
+    expect(toProjectJson(reloaded)).toEqual(json);
+  });
+
+  it("writes no spendingCap line with no cap and no onCapReached line for the default pause, and reads both back", async () => {
+    const config = facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "orders",
+          database: CONNECTION,
+          table: "orders",
+          read: ["note"],
+          questions: { rush: noul("Rush?") },
+        },
+      ],
+    });
+    const source = config.sources[0];
+    if (source === undefined) throw new Error("fixture has a source");
+    const parsed = parseProjectConfig({
+      ...config,
+      sources: [{ ...source, databaseEnv: "DATABASE_URL" }],
+    });
+    if (!parsed.ok) throw new Error(JSON.stringify(parsed.issues));
+    const file = configFileSource(parsed.config);
+    // Settings' "no cap" and "pause" are the file without the lines, not a line holding a default.
+    expect(file).not.toContain("spendingCap");
+    expect(file).not.toContain("onCapReached");
+    const json = toProjectJson(parsed.config);
+    expect(json).not.toHaveProperty("spendingCap");
+    expect(json.onCapReached).toBe("pause");
+
+    const dir = await scratchDir();
+    await mkdir(join(dir, "node_modules"));
+    await symlink(packageDir, join(dir, "node_modules", "facetdb"));
+    await writeFile(join(dir, "facetdb.config.ts"), file);
+    const { config: reloaded } = await load(dir);
+    expect(reloaded.spendingCap).toBeUndefined();
+    expect(reloaded.onCapReached).toBe("pause");
     expect(toProjectJson(reloaded)).toEqual(json);
   });
 
@@ -249,7 +303,7 @@ describe("the example config", () => {
     expect(parsed.config.sources[0]?.connector).toBe("polling");
     const json = toProjectJson(parsed.config);
     expect(json.sources[0]?.connector).toBe("polling");
-    expect(toProjectJson(fromProjectJson(json, env()))).toEqual(json);
+    expect(toProjectJson(fromProjectJson(json, processEnv()))).toEqual(json);
     const file = configFileSource(parsed.config);
     expect(file).toContain('connector: "polling",');
 
@@ -338,7 +392,7 @@ describe("the example config", () => {
       expect(config.sources[0]?.lastChanged).toBe(lastChanged);
       const json = toProjectJson(config);
       expect(json.sources[0]?.lastChanged).toBe(lastChanged);
-      expect(toProjectJson(fromProjectJson(json, env()))).toEqual(json);
+      expect(toProjectJson(fromProjectJson(json, processEnv()))).toEqual(json);
       const file = configFileSource(config);
       expect(file).toContain(
         `table: "listings",\n      lastChanged: ${JSON.stringify(lastChanged)},\n`,
@@ -801,7 +855,7 @@ describe("what the schema refuses", () => {
               },
             ],
           },
-          env(),
+          processEnv(),
         ),
       );
     for (const wrong of [
@@ -898,5 +952,174 @@ describe("the loader", () => {
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).issues[0]).toMatchObject({ path: "sources[0].database" });
     expect((error as ConfigError).message).toContain("DATABASE_URL");
+  });
+
+  describe("a source's variable (env(...) names it, process.env leaves it to be found)", () => {
+    const set: string[] = [];
+    afterEach(() => {
+      for (const name of set.splice(0)) delete process.env[name];
+    });
+    const setVariable = (name: string, value: string) => {
+      set.push(name);
+      process.env[name] = value;
+    };
+
+    /** A project directory whose config file is `text`, with "facetdb" resolvable from it. */
+    async function projectWith(text: string): Promise<string> {
+      const dir = await scratchDir();
+      await mkdir(join(dir, "node_modules"));
+      await symlink(packageDir, join(dir, "node_modules", "facetdb"));
+      await writeFile(join(dir, "facetdb.config.ts"), text);
+      return dir;
+    }
+
+    const configText = (database: string, imports = "facetdb, noul") =>
+      [
+        `import { ${imports} } from "facetdb";`,
+        "export default facetdb({",
+        '  model: "jev-1.14.0",',
+        "  sources: [",
+        "    {",
+        '      name: "listings",',
+        `      database: ${database},`,
+        '      table: "listings",',
+        '      read: ["title"],',
+        '      questions: { is_scam: noul("Is this listing a scam?") },',
+        "    },",
+        "  ],",
+        "});",
+        "",
+      ].join("\n");
+
+    it("records the name env() gives even when another variable holds the same string", async () => {
+      // One database for the store and the table, the common Supabase setup.
+      setVariable("LISTINGS_URL", CONNECTION);
+      const named = await load(
+        await projectWith(configText('env("LISTINGS_URL")', "env, facetdb, noul")),
+      );
+      expect(named.config.sources[0]).toMatchObject({
+        database: CONNECTION,
+        databaseEnv: "LISTINGS_URL",
+        databaseEnvNamed: true,
+      });
+      expect(toProjectJson(named.config).sources[0]?.database).toEqual({ env: "LISTINGS_URL" });
+
+      // process.env hands the loader the string alone: the variable is found by its value,
+      // DATABASE_URL first, which is the guess env() exists to end.
+      const guessed = await load(await projectWith(configText("process.env.LISTINGS_URL")));
+      expect(guessed.config.sources[0]?.databaseEnv).toBe("DATABASE_URL");
+      expect(guessed.config.sources[0]).not.toHaveProperty("databaseEnvNamed");
+    });
+
+    it("refuses one table under two env() names that hold one string: one table is one source", async () => {
+      // The schema keys an env() source by its name, so only the loader, with every value read, can
+      // see that DATABASE_URL and LISTINGS_URL are one database.
+      setVariable("LISTINGS_URL", CONNECTION);
+      const text = [
+        'import { env, facetdb, noul } from "facetdb";',
+        "export default facetdb({",
+        '  model: "jev-1.14.0",',
+        "  sources: [",
+        '    { name: "first", database: env("DATABASE_URL"), table: "listings", read: ["title"], questions: { is_scam: noul("Scam?") } },',
+        '    { name: "second", database: env("LISTINGS_URL"), table: "listings", read: ["title"], questions: { is_scam: noul("Scam?") } },',
+        "  ],",
+        "});",
+        "",
+      ].join("\n");
+      const error = await load(await projectWith(text)).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).issues).toEqual([
+        {
+          path: "sources[1].table",
+          message:
+            'the table "listings" is already the source "first"; one table is exactly one source, so put its questions in that source',
+        },
+      ]);
+      // Two names over two databases are two sources.
+      setVariable("LISTINGS_URL", CONNECTION.replace("/shop", "/other"));
+      expect(process.env["LISTINGS_URL"]).not.toBe(CONNECTION);
+      const two = await load(await projectWith(text));
+      expect(two.config.sources.map((source) => source.databaseEnv)).toEqual([
+        "DATABASE_URL",
+        "LISTINGS_URL",
+      ]);
+    });
+
+    it("names the variable env() reads when it is not set", async () => {
+      const error = await load(
+        await projectWith(configText('env("ORDERS_URL")', "env, facetdb, noul")),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).issues).toEqual([
+        {
+          path: "sources[0].database",
+          message: "ORDERS_URL is not set; set it to the source's connection string",
+        },
+      ]);
+      setVariable("ORDERS_URL", "");
+      const empty = await load(
+        await projectWith(configText('env("ORDERS_URL")', "env, facetdb, noul")),
+      ).catch((caught: unknown) => caught);
+      expect((empty as ConfigError).issues[0]?.message).toContain("ORDERS_URL is not set");
+    });
+
+    it("refuses a connection string typed beside the variable's name", async () => {
+      const config = toProjectJson(facetdb(valid()));
+      const typed = (database: string) =>
+        `export default ${JSON.stringify({
+          ...config,
+          sources: [
+            {
+              ...config.sources[0],
+              api: false,
+              table: "tickets",
+              database,
+              databaseEnv: "DATABASE_URL",
+              questions: [{ type: "noul", name: "rush", instructions: "Rush?", stakes: "low" }],
+            },
+          ],
+        })};\n`;
+      const error = await load(
+        await projectWith(typed("postgres://me:hunter2@localhost/db")),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).issues[0]?.path).toBe("sources[0].database");
+      expect((error as ConfigError).message).toContain("written in the config file");
+      expect((error as ConfigError).message).not.toContain("hunter2");
+      // The variable's own value beside its name is what the loader would have read: it loads.
+      const same = await load(await projectWith(typed(CONNECTION)));
+      expect(same.config.sources[0]).toMatchObject({
+        database: CONNECTION,
+        databaseEnv: "DATABASE_URL",
+      });
+    });
+
+    it("points a name that is not a variable's at database", () => {
+      const result = parseProjectConfig(
+        facetdb(valid({ api: false, table: "tickets", database: env("listings-url") })),
+      );
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.issues.map((issue) => issue.path)).toEqual(["sources[0].database"]);
+        expect(result.issues[0]?.message).toContain("must name an environment variable");
+      }
+    });
+
+    it("exports a process.env file in the env() form, which loads back to the same project", async () => {
+      const first = await load(await projectWith(configText("process.env.DATABASE_URL")));
+      const exported = configFileSource(first.config);
+      expect(exported).toContain('import { env, facetdb, noul } from "facetdb";');
+      expect(exported).toContain('database: env("DATABASE_URL"),');
+      expect(exported).not.toContain("process.env");
+      const reloaded = await load(await projectWith(exported));
+      expect(reloaded.config.sources[0]?.databaseEnvNamed).toBe(true);
+      expect(toProjectJson(reloaded.config)).toEqual(toProjectJson(first.config));
+    });
+
+    it("imports env only where a table source names a variable", () => {
+      expect(configFileSource(facetdb(valid()))).toContain(
+        'import { facetdb, score } from "facetdb";',
+      );
+    });
   });
 });

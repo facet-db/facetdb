@@ -78,7 +78,9 @@ beforeEach(async () => {
     throw new Error("no source");
   }
   const questionSet = questionSetOf(config, listings);
-  await store.questionSets.record(LOG_ID, questionSet);
+  // As the worker's loop open does since store migration 8: the version, then the set it runs.
+  const recorded = await store.questionSets.record(LOG_ID, questionSet);
+  await store.questionSets.run(LOG_ID, recorded.version, questionSet);
   db.edit("r1", { body: "Cheap car, wire only" });
   const hash = stateHash(["body"], { body: "Cheap car, wire only" });
   const answers = {
@@ -292,6 +294,9 @@ describe("facetdb review against the store", () => {
       });
     }
 
+    // Each change the file might hold. Against the set the worker runs (its row, store migration
+    // 8) every one is `config-differs`; `fallback` is the code a store whose worker has not started
+    // since that migration gives, judging by the version's row alone.
     const drafts = {
       "a question added": {
         change: {
@@ -302,17 +307,17 @@ describe("facetdb review against the store", () => {
           },
         },
         says: "the questions",
-        code: "config-differs",
+        fallback: "config-differs",
       },
       "a threshold changed": {
         change: { thresholds: { scam: { yesAbove: 0.5 } } },
         says: "the thresholds",
-        code: "config-may-differ",
+        fallback: "config-may-differ",
       },
       "a field read added": {
         change: { read: ["body", "title"] },
         says: "the fields it reads",
-        code: "config-differs",
+        fallback: "config-differs",
       },
       "the questions put in another order": {
         change: {
@@ -322,7 +327,7 @@ describe("facetdb review against the store", () => {
           },
         },
         says: "the stakes or the order of the questions",
-        code: "config-may-differ",
+        fallback: "config-may-differ",
       },
       "a question reworded": {
         change: {
@@ -332,12 +337,12 @@ describe("facetdb review against the store", () => {
           },
         },
         says: "the questions",
-        code: "config-differs",
+        fallback: "config-differs",
       },
       "a where filter added": {
         change: { where: "body is not null" },
         says: "the where filter",
-        code: "config-may-differ",
+        fallback: "config-may-differ",
       },
     } as const;
 
@@ -350,14 +355,23 @@ describe("facetdb review against the store", () => {
         "decisions",
         "sources",
         "projects",
+        "question_sets_in_force",
       ]) {
         rows.push(await world.client.query(`select * from facetdb.${table} order by 1, 2`));
       }
       return JSON.stringify(rows);
     }
 
+    /** What the review says when the file is not what the worker's own row records. */
+    function expectDiffers(stderr: string): void {
+      expect(stderr).toContain("the worker is not running what facetdb.config.ts says");
+      expect(stderr).toContain(
+        "fix: restart facetdb worker with this file so it runs these changes, or review in the studio, which judges by what the worker runs",
+      );
+    }
+
     it.each(Object.entries(drafts))(
-      "%s: stops with the fix, locks and writes nothing",
+      "%s: stops with the restart as the fix, locks and writes nothing",
       async (_name, draft) => {
         const before = await stored();
         const file = drafted(draft.change);
@@ -367,26 +381,8 @@ describe("facetdb review against the store", () => {
         expect(result.code).toBe(1);
         expect(result.stderr).toContain("runs version 1");
         expect(result.stderr).toContain(draft.says);
-        if (draft.code === "config-differs") {
-          // The hash sees it: a worker restarted with the file would record a new version.
-          expect(result.stderr).toContain("the worker is not running what facetdb.config.ts says");
-          expect(result.stderr).toContain(
-            "fix: restart facetdb worker with this file so it runs these changes, or review in the studio, which judges by what the worker runs",
-          );
-        } else {
-          // The store keeps these as they were when version 1 was made: a restart proves nothing,
-          // and neither does putting the file back, so neither is suggested.
-          expect(result.stderr).toContain(
-            "error: this check cannot tell whether the worker already runs facetdb.config.ts",
-          );
-          expect(result.stderr).toContain(
-            "because the store keeps those values as they were when that version was made",
-          );
-          expect(result.stderr).toContain(
-            "fix: review in the studio, which judges cards by what the worker runs",
-          );
-          expect(result.stderr).not.toMatch(/restart|edit|put the file back|change the file/i);
-        }
+        // The worker's row holds the whole set it runs: thresholds, where, stakes and order too.
+        expectDiffers(result.stderr);
         expect(await stored()).toBe(before);
         expect(await waitingFor("maya")).toEqual(["r1"]);
         expect(await humanEntries()).toEqual([]);
@@ -401,9 +397,95 @@ describe("facetdb review against the store", () => {
       expect(result.code).toBe(1);
       expect(JSON.parse(result.stdout)).toMatchObject({
         ok: false,
-        error: { code: draft.code },
+        error: { code: "config-differs" },
       });
       expect(await stored()).toBe(before);
+    });
+
+    it("follows a worker restarted with new thresholds: the new file passes and the old one is refused, though the version is the same", async () => {
+      const retuned = drafted({ thresholds: { scam: { yesAbove: 0.5 } } });
+      const [listings] = retuned.sources;
+      if (listings === undefined) {
+        throw new Error("no source");
+      }
+      // The restart's loop open: no new version (the hash leaves thresholds out), a new row.
+      const set = questionSetOf(retuned, listings);
+      const recorded = await store.questionSets.record(LOG_ID, set);
+      expect(recorded.version).toBe(1);
+      await store.questionSets.run(LOG_ID, recorded.version, set);
+
+      const now = await run(["--json"], [], [], undefined, retuned);
+      expect(now.code, now.stderr).toBe(0);
+      expect(JSON.parse(now.stdout)).toMatchObject({ count: 1, cards: [{ key: "r1" }] });
+
+      // The file put back to the version's values: the version's row agrees, the worker does not.
+      const before = await stored();
+      const back = await run([], ["y"]);
+      expect(back.code).toBe(1);
+      expect(back.stderr).toContain(
+        "listings runs version 1, and the file differs in the thresholds",
+      );
+      expectDiffers(back.stderr);
+      expect(await stored()).toBe(before);
+      expect(await humanEntries()).toEqual([]);
+    });
+
+    describe("a store whose worker has not started since store migration 8", () => {
+      beforeEach(async () => {
+        // No row of what the worker runs: only the version's, which keeps what its hash sees.
+        await world.client.query("delete from facetdb.question_sets_in_force");
+      });
+
+      it.each(Object.entries(drafts))(
+        "%s: judged by the version's row, as before the migration",
+        async (_name, draft) => {
+          const before = await stored();
+
+          const result = await run([], ["y"], [], undefined, drafted(draft.change));
+
+          expect(result.code).toBe(1);
+          expect(result.stderr).toContain("runs version 1");
+          expect(result.stderr).toContain(draft.says);
+          if (draft.fallback === "config-differs") {
+            // The hash sees it: a worker restarted with the file would record a new version.
+            expectDiffers(result.stderr);
+          } else {
+            // The version's row keeps these as they were when version 1 was made: the check cannot
+            // tell, and a restarted worker records what it runs so the check then can. Putting the
+            // file back proves nothing and is not suggested.
+            expect(result.stderr).toContain(
+              "error: this check cannot tell whether the worker already runs facetdb.config.ts",
+            );
+            expect(result.stderr).toContain(
+              "because the store keeps those values as they were when that version was made, and no worker has recorded what it runs since the store last migrated",
+            );
+            expect(result.stderr).toContain(
+              "fix: restart facetdb worker with this file (it records what it runs, and this check can then tell), or review in the studio, which judges cards by what the worker runs",
+            );
+            expect(result.stderr).not.toMatch(/edit|put the file back|change the file/i);
+          }
+          expect(await stored()).toBe(before);
+          expect(await waitingFor("maya")).toEqual(["r1"]);
+          expect(await humanEntries()).toEqual([]);
+        },
+      );
+
+      it.each(Object.entries(drafts))("%s: --json stops the same way", async (_name, draft) => {
+        const result = await run(["--json"], [], [], undefined, drafted(draft.change));
+
+        expect(result.code).toBe(1);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          ok: false,
+          error: { code: draft.fallback },
+        });
+      });
+
+      it("reviews by the version's row when the file matches it", async () => {
+        const result = await run([], ["y"]);
+
+        expect(result.code, result.stderr).toBe(0);
+        expect(await humanEntries()).toMatchObject([{ version: 1 }]);
+      });
     });
 
     it("judges by the version in force: the decision carries it, whatever the version table says later", async () => {
@@ -419,6 +501,48 @@ describe("facetdb review against the store", () => {
       expect(after[3]).toEqual(before[3]);
       expect(after[4]).toEqual(before[4]);
       expect(await humanEntries()).toMatchObject([{ version: 1 }]);
+    });
+
+    it("judges by the worker's row at version 1 when facetdb backfill recorded version 2 after it", async () => {
+      // facetdb backfill records the file's set as a version (backfill-wiring.ts) and writes no
+      // row of what a worker runs: the worker still runs version 1.
+      const [listings] = config.sources;
+      if (listings === undefined) {
+        throw new Error("no source");
+      }
+      const reworded = drafted({
+        questions: {
+          scam: noul("Is this listing a scam or a fake?"),
+          team: choice("Which team owns this?", { billing: "Money", tech: "Technical" }),
+        },
+      });
+      const [next] = reworded.sources;
+      if (next === undefined) {
+        throw new Error("no source");
+      }
+      const recorded = await store.questionSets.record(LOG_ID, questionSetOf(reworded, next));
+      expect(recorded.version).toBe(2);
+      expect((await store.questionSets.latest(LOG_ID))?.version).toBe(2);
+      expect(await store.questionSets.inForce(LOG_ID)).toMatchObject({
+        version: 1,
+        questionSet: questionSetOf(config, listings),
+      });
+
+      // The file at version 2 is not what the worker runs.
+      const ahead = await run(["--json"], [], [], undefined, reworded);
+      expect(ahead.code).toBe(1);
+      expect(JSON.parse(ahead.stdout)).toMatchObject({
+        ok: false,
+        error: { code: "config-differs" },
+      });
+
+      // The file at version 1 is, so the review goes on, and the decision carries version 1.
+      const result = await run([], ["y"]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(await humanEntries()).toMatchObject([
+        { question: "scam", value: true, reviewer: "os:alex", version: 1 },
+      ]);
     });
 
     it("says a source that never ran a worker has no cards, and reviews the others", async () => {

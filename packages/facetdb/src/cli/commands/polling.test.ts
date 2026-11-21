@@ -229,7 +229,7 @@ describe('facetdb migrate with connector: "polling"', () => {
         `error: the source "listings" has connector: "polling" and connects to the FacetDB store's database as the store's own login (the one in DATABASE_URL); the polling connector installs the table's columns and none of the store's tables, so the source and the store need two logins`,
       );
       expect(result.stderr).toContain(
-        "fix: keep the two credentials apart: set LISTINGS_URL to the worker login's connection string, postgres://facetdb_worker:<a long random password>@<host>/<database>, read with database: process.env.LISTINGS_URL in facetdb.config.ts, and keep the store owner's connection string in DATABASE_URL; the same database is fine",
+        "fix: keep the two credentials apart: set LISTINGS_URL to the worker login's connection string, postgres://facetdb_worker:<a long random password>@<host>/<database>, named with database: env(\"LISTINGS_URL\") in facetdb.config.ts, and keep the store owner's connection string in DATABASE_URL; the same database is fine",
       );
       expect(result.stdout + result.stderr).not.toContain("s3cret");
     }

@@ -25,9 +25,12 @@ import {
 } from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
 import {
+  type QuestionSetInForce,
   readQuestionSetHistory,
+  readQuestionSetInForce,
   readQuestionSets,
   type StoredQuestionSetVersion,
+  writeQuestionSetInForce,
 } from "./question-sets.ts";
 import { createReviewQueue } from "./reviews.ts";
 import { integer, text, toMs } from "./rows.ts";
@@ -117,7 +120,11 @@ export type Store = {
    * The question-set versions of one source: `record` stores the set under the version it should
    * run under, which is the previous one when its content is unchanged and the next otherwise.
    * `versions` reads the saved sets of the given versions; one the store does not keep is absent.
-   * `history` reads the newest `limit` versions, newest first, with their times and sets.
+   * `history` reads the newest `limit` versions, newest first, with their times and sets. `run`
+   * writes the set the source's worker runs from now on, whole, under its version (store migration
+   * 8; the worker calls it after `record` at every loop open), and `inForce` reads it: null until a
+   * worker has recorded one. `record` alone writes no such row: `facetdb backfill` records a
+   * version too, and must not pass for the worker.
    */
   questionSets: {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
@@ -127,6 +134,8 @@ export type Store = {
       sourceId: string,
       versions: readonly number[],
     ): Promise<ReadonlyMap<number, QuestionSet>>;
+    inForce(sourceId: string): Promise<QuestionSetInForce | null>;
+    run(sourceId: string, version: number, questionSet: QuestionSet): Promise<void>;
   };
   /** The queue and records of one source, claimed with `skip locked`. */
   connector(options: StoreConnectorOptions): StoreConnector;
@@ -285,6 +294,9 @@ export async function createStore(options: StoreOptions): Promise<Store> {
         latest: (sourceId) => latestVersion(client.query, sourceId),
         history: (sourceId, limit) => readQuestionSetHistory(client.query, sourceId, limit),
         versions: (sourceId, versions) => readQuestionSets(client.query, sourceId, versions),
+        inForce: (sourceId) => readQuestionSetInForce(client.query, sourceId),
+        run: (sourceId, version, questionSet) =>
+          writeQuestionSetInForce(client.query, sourceId, version, questionSet, clock.now()),
         async record(sourceId, questionSet) {
           return client.transaction(async (query) => {
             await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);

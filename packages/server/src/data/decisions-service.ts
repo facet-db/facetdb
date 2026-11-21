@@ -1,9 +1,12 @@
 import {
+  type CurrentDecision,
   type ExplainedEntry,
   explainHistory,
+  isHumanDecision,
   type KeyText,
   type LogEntry,
   type QuestionSet,
+  type RecordStatus,
 } from "@facetdb/core";
 import {
   type DecisionSearchPage,
@@ -54,6 +57,12 @@ export type DecisionsServiceDeps = {
   readonly sources: readonly string[];
   /** How a source's keys are written for a person (MongoDB's `65f1…`); undefined where a key is its own text. */
   readonly keyText: (source: string) => KeyText | undefined;
+  /**
+   * The record as its source holds it now, through the connector of the loop in force (what
+   * `facetdb explain` prints under "Now"); undefined when the source does not run in this worker
+   * or the record is gone. The key is the source's own, already read from the person's text.
+   */
+  readonly current: (source: string, key: string) => Promise<CurrentDecision | undefined>;
 };
 
 /** The filters of `GET /v1/decisions`, parsed; the cursor is the previous page's `next`, as text. */
@@ -72,8 +81,10 @@ export type DecisionsQuery = {
 /**
  * One log row in the export's shape (`facetdb export`, JSONL): `time`, `kind`, `record_key`,
  * `version`, `state_hash`, then `model` and `answers` for a model call, or `question`, `value`,
- * `decided_by` and `note` for a person. Every answer carries `decision`, what its version's
- * thresholds made of it, in explain's words; a human row carries it as `decision` too.
+ * `decided_by`, `note` and `withdrawn` for a person. Every answer carries `decision`, what its
+ * version's thresholds made of it, in explain's words, with `outcome` as its tag (an option may be
+ * named "needs review"; the tag says which it is), and a choice or a score carries the option or
+ * level it named as `value`, as the export does; a human row carries its word as `decision` too.
  */
 export type DecisionRow = {
   readonly time: string;
@@ -97,6 +108,13 @@ export type WhyOutcome =
       readonly kind: "history";
       readonly source: string;
       readonly key: string;
+      /**
+       * The record's status now, read from the record itself as `facetdb explain` reads it, and
+       * whether a person ever decided a question of it; both null when the source does not run in
+       * this worker or the record is gone, and the log alone is left to speak.
+       */
+      readonly status: RecordStatus | null;
+      readonly reviewed: boolean | null;
       /** Oldest first, exactly as `facetdb explain` builds it. */
       readonly entries: readonly ExplainedEntry[];
     }
@@ -139,13 +157,16 @@ function rowOf(found: FoundDecision, shown: (key: string) => string): DecisionRo
     state_hash: entry.stateHash,
   };
   if (entry.kind === "human") {
-    const value = decisions[entry.question] ?? String(entry.value);
+    const value = decisions[entry.question]?.words ?? String(entry.value);
     return {
       ...common,
       question: entry.question,
       value,
       decision: value,
       decided_by: entry.reviewer,
+      // A reviewer's undo is told by this, never by the word "withdrawn", which an option may be
+      // called.
+      withdrawn: !isHumanDecision(entry),
       ...(entry.note === undefined ? {} : { note: entry.note }),
     };
   }
@@ -153,10 +174,19 @@ function rowOf(found: FoundDecision, shown: (key: string) => string): DecisionRo
     ...common,
     model: entry.model,
     answers: Object.fromEntries(
-      Object.entries(entry.answers).map(([name, answer]) => [
-        name,
-        { ...answer, decision: decisions[name] ?? "unknown" },
-      ]),
+      Object.entries(entry.answers).map(([name, answer]) => {
+        const found = decisions[name] ?? { words: "unknown", outcome: "unknown", value: "" };
+        return [
+          name,
+          {
+            ...answer,
+            // A noul's answer is its probability; a name is for the option or level it chose.
+            ...(answer.type === "noul" ? {} : { value: found.value }),
+            decision: found.words,
+            outcome: found.outcome,
+          },
+        ];
+      }),
     ),
   };
 }
@@ -221,10 +251,13 @@ export function createDecisionsService(deps: DecisionsServiceDeps): DecisionsSer
       const versions = await store.questionSets(sourceId, [
         ...new Set(history.map((entry) => entry.version)),
       ]);
+      const current = await deps.current(source, key);
       return {
         kind: "history",
         source,
         key: keyText?.toText(key) ?? key,
+        status: current?.status ?? null,
+        reviewed: current?.reviewed ?? null,
         entries: explainHistory(history, versions),
       };
     },

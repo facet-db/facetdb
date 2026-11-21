@@ -2,6 +2,7 @@ import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { PendingSource, ProjectConfig } from "../../api/index.ts";
 import { fakeApi, renderStudio, SAMPLE_PROJECT_CONFIG } from "../../testing/index.ts";
+import { aboutRows } from "./rows.ts";
 
 /**
  * The Sources page's row for a source the file names and the worker does not run (a real run, where
@@ -46,7 +47,7 @@ describe("a source the file names that the worker does not run", () => {
     const row = await screen.findByRole("article", { name: "agents" });
     expect(within(row).getByText("not running yet")).toBeVisible();
     const block = within(row).getByRole("region", {
-      name: "agents is written to facetdb.config.ts and is not running yet",
+      name: "agents is not running yet.",
     });
     expect(
       within(block).getByText(
@@ -77,9 +78,9 @@ describe("a source the file names that the worker does not run", () => {
 
     const row = await screen.findByRole("article", { name: "agents" });
     const block = within(row).getByRole("region", {
-      name: "agents is written to facetdb.config.ts and is not running yet",
+      name: "agents is not running yet.",
     });
-    expect(within(block).getByText(/^Press Check again, below/)).toBeVisible();
+    expect(within(block).getByText(/^Press Check again on this page/)).toBeVisible();
     expect(within(block).getByRole("button", { name: "Check again" })).toBeEnabled();
   });
 
@@ -94,5 +95,28 @@ describe("a source the file names that the worker does not run", () => {
     ).toBeVisible();
     expect(within(row).queryByRole("region")).toBeNull();
     expect(within(row).queryByText(/restart|stop facetdb worker/)).toBeNull();
+  });
+});
+
+describe("a source's size", () => {
+  it("is the database's estimate beside its answers, rounded, and nothing where there is none", async () => {
+    renderStudio({ path: "/sources" });
+
+    // The fake's listings: 41,237 rows by the database's statistics.
+    const listings = await screen.findByRole("article", { name: "listings" });
+    expect(within(listings).getByText(/^Inline columns on public\.listings/)).toHaveTextContent(
+      "Inline columns on public.listings. 2 questions, version 3. · about 41,000 rows",
+    );
+    const api = await screen.findByRole("article", { name: "support_tickets" });
+    expect(within(api).queryByText(/rows/)).toBeNull();
+  });
+
+  it("is said in plain words at every size", () => {
+    expect(aboutRows(4_137)).toBe("about 4,100 rows");
+    expect(aboutRows(41_237)).toBe("about 41,000 rows");
+    expect(aboutRows(1_250_000)).toBe("about 1,300,000 rows");
+    expect(aboutRows(47)).toBe("about 47 rows");
+    expect(aboutRows(1)).toBe("about 1 row");
+    expect(aboutRows(0)).toBe("no rows");
   });
 });

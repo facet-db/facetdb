@@ -52,6 +52,11 @@ export type SourceRow = {
   /** The start of the worker's newest pass that claimed a change, ISO 8601; null when none has. */
   readonly lastChangeAt: string | null;
   readonly answers: string;
+  /**
+   * The database's estimate of the table's rows (its statistics, no count run); null when it has
+   * none, and for an API source, which has no table.
+   */
+  readonly rows: number | null;
   readonly backfill: BackfillState;
   /** What the worker login may read and write; null for an API source, which has no login. */
   readonly login: Line | null;
@@ -198,10 +203,11 @@ export function createSourcesService(deps: SourcesDeps): SourcesService {
   const { door, reads, doctors, clock } = deps;
 
   async function rowOf(source: SourceFacts): Promise<SourceRow> {
-    const [seen, verdict, backfill] = await Promise.all([
+    const [seen, verdict, backfill, rows] = await Promise.all([
       reads.lastChange(sourceIdOf(door.projectId, source.name)),
       doctors.verdict(source),
       backfillOf(door, source, reads),
+      source.table === undefined ? null : source.table.estimateRows(),
     ]);
     const lastSeen =
       seen === undefined
@@ -212,6 +218,7 @@ export function createSourcesService(deps: SourcesDeps): SourcesService {
       verdict: verdict.verdict,
       lastChangeAt: seen === undefined ? null : new Date(seen).toISOString(),
       answers: answersWords(source),
+      rows,
       backfill,
     };
     const { table } = source;

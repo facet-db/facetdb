@@ -155,10 +155,11 @@ export type CliDeps = {
   readonly env: Readonly<Record<string, string | undefined>>;
   /**
    * Sets one variable of the environment this process runs in, which the config file reads when it
-   * is imported (`database: process.env.DATABASE_URL`) and `env` reads back: `facetdb dev` points
-   * DATABASE_URL at its embedded database before the file loads, so the file, the loader and the
-   * studio's setup read one address. The process's own environment in the process; a test's record
-   * in a test. No other command sets anything.
+   * is imported (`database: process.env.DATABASE_URL`) and `env` reads back (the loader reads
+   * `env("DATABASE_URL")` from it): `facetdb dev` points DATABASE_URL at its embedded database
+   * before the file loads, so the file, the loader and the studio's setup read one address. The
+   * process's own environment in the process; a test's record in a test. No other command sets
+   * anything.
    */
   readonly setEnv: (name: string, value: string) => void;
   /**

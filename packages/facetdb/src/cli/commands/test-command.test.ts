@@ -382,6 +382,31 @@ describe("facetdb test", () => {
     expect(result.stdout).toContain("the thresholds are the same, so nothing would change");
   });
 
+  it("compares the file with the set the worker runs, not with the version's row, after a stakes-only restart (store migration 8)", async () => {
+    await seedVersionOne();
+    // The worker restarted with high stakes: the content hash leaves stakes out, so the version
+    // stays 1 and its row keeps low; the worker's row of what it runs says high.
+    const high = setOf(configWith("high"));
+    const recorded = await store.questionSets.record(LOG_ID, high);
+    expect(recorded.version).toBe(1);
+    await store.questionSets.run(LOG_ID, recorded.version, high);
+
+    const same = realistic();
+    const unchanged = await run(["test", "--yes"], same, { config: configWith("high") });
+    expect(unchanged.code, unchanged.stderr).toBe(0);
+    expect(unchanged.stdout).toContain("the thresholds are the same, so nothing would change");
+    expect(same.callCount).toBe(0);
+
+    // The file put back to the version's row: that is a change from what the worker runs.
+    const back = realistic();
+    const tested = await run(["test", "--sample", "5", "--yes"], back, {
+      config: configWith("low"),
+    });
+    expect(tested.code, tested.stderr).toBe(0);
+    expect(tested.stdout).not.toContain("nothing would change");
+    expect(back.callCount).toBeGreaterThan(0);
+  });
+
   it("explains that there is no version to test against before the worker has run", async () => {
     const provider = realistic();
 

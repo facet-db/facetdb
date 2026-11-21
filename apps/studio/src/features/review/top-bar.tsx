@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect } from "react";
 import { type ReviewFilter, SHELL_REFRESH_MS } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
-import { facetsOf, reviewFacetsQuery, reviewQueueQuery } from "./queries.ts";
+import { facetsOf, reviewQueueQuery } from "./queries.ts";
 import { countWords, timeWords, waitWords } from "./words.ts";
 
 /**
@@ -40,7 +40,9 @@ export function TopBar({
   const api = useApi();
   const schedule = useSchedule();
   const queue = useQuery(reviewQueueQuery(api, filter));
-  const facets = facetsOf(useQuery(reviewFacetsQuery(api)).data, filter.source);
+  // The filters offer every source and question the worker runs, read off the same answer as the
+  // figures: a filter that narrows the cards never narrows the choices.
+  const facets = facetsOf(queue.data, filter.source);
 
   // The figures are asked for again on the injected scheduler, so a test moves the time by hand.
   const { refetch } = queue;

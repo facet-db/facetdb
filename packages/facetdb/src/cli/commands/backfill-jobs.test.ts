@@ -142,6 +142,9 @@ class Provider implements ModelProvider {
   readonly asked: { readonly body: string; readonly questions: readonly string[] }[] = [];
   /** The record whose request fails, by its body. */
   failOn: string | undefined;
+  /** The most requests in flight at once: the job's lanes. */
+  peak = 0;
+  #inFlight = 0;
   readonly #hooks: Hooks;
   readonly #journal: Step[];
 
@@ -154,9 +157,15 @@ class Provider implements ModelProvider {
     const body = String(request.state["body"]);
     this.#journal.push("ask");
     this.asked.push({ body, questions: request.questions.map((question) => question.name) });
-    await this.#hooks.beforeAnswer(body);
-    if (body === this.failOn) {
-      throw new Error("the model is unreachable");
+    this.#inFlight += 1;
+    this.peak = Math.max(this.peak, this.#inFlight);
+    try {
+      await this.#hooks.beforeAnswer(body);
+      if (body === this.failOn) {
+        throw new Error("the model is unreachable");
+      }
+    } finally {
+      this.#inFlight -= 1;
     }
     const answers: Record<string, { type: "noul"; probability: number }> = {};
     for (const question of request.questions) {
@@ -262,7 +271,9 @@ const range = (from: number, to: number) =>
   Array.from({ length: from - to + 1 }, (_, n) => `k${from - n}`);
 
 /** 30 rows `k1` to `k30` (body `row-<n>`) in pages of ten, newest first: k30 to k21 is page one. */
-function rig(table: { readonly rows?: number; readonly pageSize?: number } = {}) {
+function rig(
+  table: { readonly rows?: number; readonly pageSize?: number; readonly maxInFlight?: number } = {},
+) {
   const rows = table.rows ?? 30;
   const clock = new FakeClock(START_MS);
   const database = new FakeDatabase({ fields: ["body"], pageSize: table.pageSize ?? 10, clock });
@@ -332,6 +343,7 @@ function rig(table: { readonly rows?: number; readonly pageSize?: number } = {})
     queue: (name) => (loops.has(name) ? queue : undefined),
     provider,
     spending: gate,
+    ...(table.maxInFlight === undefined ? {} : { maxInFlight: table.maxInFlight }),
     clock,
     cursors,
     log: () => log,
@@ -495,7 +507,7 @@ describe("a backfill job: the estimate first", () => {
     });
     expect(waiting.estimate).toMatchObject({ records: 30, sampled: 30 });
     expect(waiting.estimate?.dollars).toBeGreaterThan(0);
-    expect(waiting.words).toMatch(/^Estimated: 30 records, about [\d,]+ input tokens, /);
+    expect(waiting.words).toMatch(/^Estimated: 30 records, about [\d,.]+[kMB]? input tokens, /);
     expect(waiting.words).toMatch(
       /Nothing is asked until it is started; an estimate not started within 10 minutes is dropped\.$/,
     );
@@ -559,6 +571,29 @@ describe("a backfill job: the estimate first", () => {
       "listings: backfill started under version 1.",
       "listings: backfill finished. Finished: 30 records queued for the worker, 0 already answered.",
     ]);
+  });
+
+  it("keeps the lanes the worker's connection budget allows, not the engine's eight (2026-11-12)", async () => {
+    // Each request yields before it answers, so lanes overlap and the peak shows.
+    const capped = rig({ maxInFlight: 2 });
+    capped.hooks.beforeAnswer = () => Promise.resolve();
+    await capped.answered("scam");
+    await capped.jobs.estimate("listings", ["spam"]);
+    await capped.reaches("waiting");
+    await capped.jobs.start("listings", "token-1");
+    await capped.reaches("finished");
+    expect(capped.provider.asked).toHaveLength(30);
+    expect(capped.provider.peak).toBeLessThanOrEqual(2);
+
+    // Without the budget the engine's default runs a whole page's lanes at once.
+    const open = rig();
+    open.hooks.beforeAnswer = () => Promise.resolve();
+    await open.answered("scam");
+    await open.jobs.estimate("listings", ["spam"]);
+    await open.reaches("waiting");
+    await open.jobs.start("listings", "token-1");
+    await open.reaches("finished");
+    expect(open.provider.peak).toBeGreaterThan(2);
   });
 
   it("asks named questions alone through the workers' provider and spending gate, and merges with the answers each record has", async () => {
@@ -1012,7 +1047,7 @@ describe("a backfill job that cannot go on", () => {
     const paused = await t.reaches("paused");
 
     expect(paused.why).toBe(
-      "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts or wait for next month, then estimate again: it resumes after the last finished page.",
+      "The project's spending cap was reached, so the backfill paused before its next request; the page it was on is not saved, and nothing is lost. Raise spendingCap in facetdb.config.ts (Settings can change it) and restart facetdb worker, or wait for next month, then estimate again: it resumes after the last finished page.",
     );
     // Page one, and five records of page two before the gate said no: none asked without it.
     expect(t.provider.asked).toHaveLength(15);

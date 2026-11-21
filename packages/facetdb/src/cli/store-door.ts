@@ -292,7 +292,7 @@ export function storeVariableMisuse(
   return new CliError(
     "store-not-postgres",
     `the source "${source.name}" reads DATABASE_URL, the store's variable, and its database is not a Postgres (${schemeOf(url) ?? "no scheme"}); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
-    `write database: process.env.${variable} for the source in facetdb.config.ts, set ${variable} to its connection string, and point DATABASE_URL at the store's Postgres`,
+    `write database: env("${variable}") for the source in facetdb.config.ts, set ${variable} to its connection string, and point DATABASE_URL at the store's Postgres`,
   );
 }
 
@@ -326,7 +326,7 @@ export function pollingStoreClash(
   return new CliError(
     "store-polling",
     `the source "${source.name}" has connector: "polling" and connects to the FacetDB store's database as the store's own login (the one in DATABASE_URL); the polling connector installs the table's columns and none of the store's tables, so the source and the store need two logins`,
-    `keep the two credentials apart: set ${variable} to the worker login's connection string, postgres://facetdb_worker:<a long random password>@<host>/<database>, read with database: process.env.${variable} in facetdb.config.ts, and keep the store owner's connection string in DATABASE_URL; the same database is fine`,
+    `keep the two credentials apart: set ${variable} to the worker login's connection string, postgres://facetdb_worker:<a long random password>@<host>/<database>, named with database: env("${variable}") in facetdb.config.ts, and keep the store owner's connection string in DATABASE_URL; the same database is fine`,
   );
 }
 

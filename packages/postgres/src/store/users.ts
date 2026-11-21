@@ -153,6 +153,11 @@ export type UsersStore = {
   list(): Promise<readonly ReviewerAccount[]>;
   /** True when the account existed and is gone. */
   remove(name: string): Promise<boolean>;
+  /**
+   * Whether the login in use may make an account: false for the worker login, whose grant on
+   * `facetdb.users` is select only, so a page can say so before a name and a password are typed.
+   */
+  writable(): Promise<boolean>;
 };
 
 /**
@@ -259,6 +264,14 @@ export function createUsersStore(
         client.query("delete from facetdb.users where name = $1 returning name", [name]),
       );
       return rows.length > 0;
+    },
+
+    async writable() {
+      const rows = await client.query(
+        "select pg_catalog.has_table_privilege('facetdb.users', 'insert')::text as may",
+      );
+      const [row] = rows;
+      return row !== undefined && text(row, "may") === "true";
     },
   };
 }

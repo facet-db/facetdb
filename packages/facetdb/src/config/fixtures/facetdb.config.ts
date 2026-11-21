@@ -1,7 +1,6 @@
 // The example project config, except that `slack` comes from ./slack.ts because the real
-// @facetdb/slack package does not exist yet, and the environment is read as process.env["..."]
-// because this repository's tsconfig forbids dot access on an index signature.
-import { choice, facetdb, noul, score } from "facetdb";
+// @facetdb/slack package is a separate plugin.
+import { choice, env, facetdb, noul, score } from "facetdb";
 import { slack } from "./slack.ts";
 
 export default facetdb({
@@ -10,7 +9,7 @@ export default facetdb({
   sources: [
     {
       name: "support_messages",
-      database: process.env["DATABASE_URL"], // any supported database
+      database: env("DATABASE_URL"), // the variable's name, never its value; any supported database
       table: "support_messages",
       where: "channel <> 'internal'", // optional filter on state fields; the rest are skipped
       read: ["subject", "body", "channel"], // the state: only what the questions need

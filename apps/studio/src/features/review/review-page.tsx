@@ -2,12 +2,7 @@ import { Button, EmptyState, Kbd, StatusWord } from "@facetdb/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { type RefObject, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import {
-  projectQuery,
-  type ReviewCardId,
-  type ReviewOpenTarget,
-  reviewCountQuery,
-} from "../../api/index.ts";
+import { projectQuery, type ReviewCardId, type ReviewOpenTarget } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
 import { ReviewCardView } from "./card.tsx";
 import {
@@ -62,9 +57,8 @@ function useReviewController(): ReviewController {
       void api.reviewRelease(card).catch(() => undefined);
     },
     schedule,
-    // The same query the rail reads, and this page's own, ask again.
+    // The queue's figures ask again: the rail's count and this page's are one prefix.
     counted: () => {
-      void queryClient.invalidateQueries({ queryKey: reviewCountQuery(api).queryKey });
       void queryClient.invalidateQueries({ queryKey: REVIEW_QUEUE_KEY });
     },
     goHome: () => {

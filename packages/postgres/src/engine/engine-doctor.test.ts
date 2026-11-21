@@ -250,7 +250,7 @@ describe("doctor", () => {
         name: "distance",
         status: "warn",
         detail:
-          "the database is 150 ms away; run the worker next to it, the 1 second target assumes a same-region link",
+          "the database answers in 150 ms; run the worker in the same region for fast answers",
       },
     ]);
   });

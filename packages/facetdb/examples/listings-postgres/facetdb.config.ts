@@ -4,7 +4,7 @@
 // the same database. DATABASE_URL is the worker login's connection string
 // (postgres://facetdb_worker:<password>@<host>:5432/<database>?sslmode=require); the admin URL is
 // passed to migrate and uninstall on the command line and never stored.
-import { choice, facetdb, noul } from "facetdb";
+import { choice, env, facetdb, noul } from "facetdb";
 
 export default facetdb({
   model: "jev-1.14.0",
@@ -15,7 +15,7 @@ export default facetdb({
   sources: [
     {
       name: "listings",
-      database: process.env.DATABASE_URL,
+      database: env("DATABASE_URL"),
       table: "listings",
       read: ["title", "description"],
       questions: {

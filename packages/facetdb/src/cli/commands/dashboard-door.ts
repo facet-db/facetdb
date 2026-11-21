@@ -80,6 +80,18 @@ export function tableFacts(options: {
     answersIn: databaseOf(url)?.key === "mongodb" ? "fields" : "columns",
     login: loginFacts(engine, target, url),
     doctor: async () => (await engine.doctor(target, url, deps)).map(fromTheWorker),
+    estimateRows: async () => {
+      if (engine.estimateRows === undefined) {
+        return null;
+      }
+      try {
+        return await engine.estimateRows(target, url, deps);
+      } catch {
+        // The row count is a courtesy beside the source; the doctor's checks in the same row say
+        // why the database could not be read.
+        return null;
+      }
+    },
   };
 }
 

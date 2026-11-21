@@ -533,7 +533,7 @@ describe("spending: a cap changed mid-month (seen in a real run)", () => {
       "spending_paused",
     ]);
     expect(alerts.events.at(-1)?.what).toBe(
-      "This month's usage reached the spending cap: 5000 of 5000 input tokens.",
+      "This month's usage reached the spending cap: 5,000 of 5,000 input tokens.",
     );
 
     // Once per cap: the next check raises nothing more.
@@ -652,7 +652,7 @@ describe("spending: the 80% warning and the cap", () => {
       question: null,
       link: "https://app.facetdb.test/projects/market/settings#spending",
     });
-    expect(alerts.events[0]?.what).toContain("800 of 1000 input tokens");
+    expect(alerts.events[0]?.what).toContain("800 of 1,000 input tokens");
   });
 
   it("warns once per month, however many answers follow", async () => {

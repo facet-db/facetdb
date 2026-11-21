@@ -1,4 +1,4 @@
-import type { DecisionRow, LoggedAnswer } from "../../api/index.ts";
+import type { DecisionOutcome, DecisionRow, LoggedAnswer } from "../../api/index.ts";
 
 /**
  * The log as the table reads it: one line per question. A model call answers several questions at
@@ -27,6 +27,12 @@ export type LogLine = {
   readonly said?: Said;
   /** What the thresholds made of it, in explain's words: "yes", an option, "needs review", "unknown", "withdrawn". */
   readonly decided: string;
+  /**
+   * What `decided` is, by the tag the worker sends beside the words: an option may be named
+   * "needs review", "unknown" or "withdrawn", so the page reads this and never the words. A
+   * person's line is decided, or withdrawn when it takes back their own decision.
+   */
+  readonly outcome: DecisionOutcome | "withdrawn";
   readonly by: { readonly kind: "model" } | { readonly kind: "person"; readonly reviewer: string };
 };
 
@@ -44,7 +50,10 @@ function choiceConfidence(probabilities: readonly number[]): number {
   return options < 2 ? top : (top - 1 / options) / (1 - 1 / options);
 }
 
-/** Words for a level the row does not name: only its place among the levels. */
+/**
+ * Words for a level the row does not name (the worker no longer keeps the question-set version it
+ * ran under, so there are no levels to name it by): only its place among the levels.
+ */
 function leaning(probabilities: readonly number[]): string {
   const place = probabilities.indexOf(Math.max(...probabilities)) + 1;
   return `leans to level ${String(place)} of ${String(probabilities.length)}`;
@@ -67,9 +76,8 @@ export function saidOf(answer: LoggedAnswer): Said {
       };
     }
     case "score": {
-      // The row carries the level's name only when the thresholds decided it.
-      const named = answer.decision !== "needs review" && answer.decision !== "unknown";
-      const words = named ? answer.decision : leaning(answer.probabilities);
+      // The most likely level's name, as the export prints it; empty when its version is gone.
+      const words = answer.value === "" ? leaning(answer.probabilities) : answer.value;
       return {
         figure: answer.confidence,
         words,
@@ -97,6 +105,7 @@ export function logLines(rows: readonly DecisionRow[], question: string | undefi
               record: row.record_key,
               question: row.question,
               decided: row.decision,
+              outcome: row.withdrawn ? "withdrawn" : "decided",
               by: { kind: "person", reviewer: row.decided_by },
             },
           ];
@@ -110,6 +119,7 @@ export function logLines(rows: readonly DecisionRow[], question: string | undefi
         question: name,
         said: saidOf(answer),
         decided: answer.decision,
+        outcome: answer.outcome,
         by: { kind: "model" as const },
       }));
   });

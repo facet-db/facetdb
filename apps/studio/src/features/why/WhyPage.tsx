@@ -1,4 +1,4 @@
-import { Button, DecisionTimeline } from "@facetdb/ui";
+import { Button, DecisionTimeline, StatusWord, statusWord } from "@facetdb/ui";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
@@ -6,16 +6,17 @@ import { useApi, useDeps, useSchedule } from "../../deps.tsx";
 import { PageHead } from "../../shell/index.ts";
 import { Problem, StaleNote, ZoneNote } from "../decisions/index.ts";
 import { historyQuery } from "./queries.ts";
-import { StandingLines, standings } from "./standings.tsx";
+import { StandingLines, shellWord, standings } from "./standings.tsx";
 import { timelineEntries } from "./timeline.tsx";
 
 /**
- * "Why was this decided?" for one record: what the log says last about each question
- * (standings.tsx: only what the log proves, never the record's status), then the whole history as a
- * timeline, newest first, with the wording and the model of each entry. The entries are the ones
- * `facetdb explain` prints, from the same function on the worker. "Copy link" puts this address on
- * the clipboard inside the click, and where the browser refuses (a page that is not secure has no
- * clipboard) selects it for the reader.
+ * "Why was this decided?" for one record: under Now, the record's status as the worker reads it
+ * from the record itself, then the last entry of each question (standings.tsx); when the worker
+ * cannot read the record, the same block says it speaks from the log alone. Then the whole history
+ * as a timeline, newest first, with the wording and the model of each entry. The entries are the
+ * ones `facetdb explain` prints, from the same function on the worker. "Copy link" puts this
+ * address on the clipboard inside the click, and where the browser refuses (a page that is not
+ * secure has no clipboard) selects it for the reader.
  */
 
 type CopyState = "idle" | "copied" | "select";
@@ -126,20 +127,41 @@ export function WhyPage({
             </>
           ) : null}
           <article className="grid gap-3 border-y border-hairline py-4.5">
-            <h2 className="text-base font-bold">What the log says last</h2>
-            <p className="text-text-2">
-              The last entry for each question, read from the log alone. It is not the record's
-              status: that is read from the record itself by facetdb explain.
-            </p>
+            {history.data.status === null ? (
+              <>
+                <h2 className="text-base font-bold">What the log says last</h2>
+                <p className="text-text-2">
+                  {
+                    "The record's status cannot be read here: the worker does not run this source, or the record is no longer in it. Below is the last entry for each question, from the log alone. "
+                  }
+                  <code>{`facetdb explain ${shellWord(source)} ${shellWord(history.data.key)}`}</code>
+                  {" reads the record itself."}
+                </p>
+              </>
+            ) : (
+              <>
+                <h2 className="text-base font-bold">Now</h2>
+                <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-text-2">
+                  {/* facetdb_reviewed: a person decided one of its questions at least once. */}
+                  <StatusWord
+                    status={history.data.status}
+                    label={
+                      history.data.reviewed === true
+                        ? `${statusWord(history.data.status)}, reviewed`
+                        : statusWord(history.data.status)
+                    }
+                  />
+                  <span>
+                    The record's status, read from the record itself as facetdb explain reads it.
+                    Below, the last entry for each question in the log.
+                  </span>
+                </p>
+              </>
+            )}
             <ul className="grid gap-3">
               {standings(history.data.entries).map((standing) => (
                 <li key={standing.question} className="grid gap-1.5">
-                  <StandingLines
-                    standing={standing}
-                    source={source}
-                    recordKey={history.data.key}
-                    now={now}
-                  />
+                  <StandingLines standing={standing} now={now} />
                 </li>
               ))}
             </ul>

@@ -58,6 +58,7 @@ const SHARED = [
   "credentials",
   "sources",
   "projects",
+  "question_sets_in_force",
   "records",
   "usage",
   "usage_reservations",

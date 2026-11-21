@@ -4,6 +4,7 @@ import { type FormEvent, useId, useRef, useState } from "react";
 import { ApiError, projectQuery } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
 import { whenWords } from "../decisions/index.ts";
+import { CommandLine } from "../questions/index.ts";
 import { Field, type FieldProblem } from "./Field.tsx";
 import { reviewersQuery, studioAccessQuery } from "./queries.ts";
 import { Unreachable } from "./Unreachable.tsx";
@@ -14,6 +15,12 @@ import { osUserOf } from "./words.ts";
  * `POST /v1/reviewers` with the same rules and the same words (the endpoint answers in them, and
  * the page shows its message and its fix as they come). There is no removing here: that stays
  * `facetdb users remove`, which asks for the name back.
+ *
+ * In the default install the worker's login may read the accounts and not write them, so the form
+ * could only refuse, after a name and two passwords were typed. `GET /v1/studio` says beforehand
+ * whether accounts can be made here; when they cannot, the page shows the terminal command instead,
+ * with the name typed into it and a Copy. The owner's connection string is never asked for here: it
+ * belongs in the terminal, not in a browser.
  *
  * The password is handled so that it lives as short a time as it can. It is typed into uncontrolled
  * boxes, so no state of the page holds it; at submit it is read once and the boxes are emptied; it
@@ -173,10 +180,63 @@ function AddForm() {
   );
 }
 
+/** The account name rule, as `isUserName` of the users store spells it (NAME_RULE in words). */
+const USER_NAME = /^[a-z][a-z0-9_-]{1,39}$/;
+
+/**
+ * The way accounts are made when this worker's login cannot write them: the command, with the
+ * name filled in as it is typed once it is a name an account can have, and where it runs. The
+ * CLI's words (`facetdb users add`); a name the CLI would refuse is refused here, at the box.
+ */
+function TerminalAdd() {
+  const [name, setName] = useState("");
+  const typed = name.trim();
+  const named = USER_NAME.test(typed);
+  const command = `DATABASE_URL=<owner-url> facetdb users add ${named ? typed : "<name>"}`;
+  const problem: FieldProblem | undefined =
+    typed === "" || named
+      ? undefined
+      : {
+          message: `"${typed}" is not a name an account can have.`,
+          fix: "Choose a name like maya or review-team.",
+        };
+  return (
+    <div className="grid gap-4">
+      <p className="m-0 max-w-[64ch]">
+        Reviewer accounts are made from a terminal. The worker's login may read the accounts but not
+        change them, which is how it is made, so this page cannot add one.
+      </p>
+      <div className="grid gap-4 min-[760px]:grid-cols-3">
+        <Field
+          label="Name"
+          help={NAME_RULE}
+          problem={problem}
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+          }}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+        />
+      </div>
+      <div className="grid max-w-[64ch] gap-2">
+        <p className="m-0 text-text-2">
+          Run this where the worker runs, with <code>DATABASE_URL</code> set to the login{" "}
+          <code>facetdb migrate</code> ran as (with a separate store database, the store's own
+          login). It asks for the password twice and stores only its hash.
+        </p>
+        <CommandLine command={command} />
+      </div>
+    </div>
+  );
+}
+
 export function ReviewersSection() {
   const api = useApi();
   const schedule = useSchedule();
   const accounts = useQuery(reviewersQuery(api));
+  const access = useQuery(studioAccessQuery(api));
   const me = useQuery(projectQuery(api)).data?.reviewer;
   const headingId = useId();
   const now = new Date(schedule.now());
@@ -188,7 +248,9 @@ export function ReviewersSection() {
           Reviewers
         </h2>
         <span className="text-[13px] text-text-2">
-          Local accounts, made here or with <code>facetdb users add</code>.
+          {access.data?.accountsWritable === false
+            ? "Local accounts, made with facetdb users add."
+            : "Local accounts, made here or with facetdb users add."}
         </span>
       </div>
       {accounts.isError ? (
@@ -242,7 +304,23 @@ export function ReviewersSection() {
           ) : null}
         </>
       )}
-      <AddForm />
+      {/*
+        The form only once the access read says accounts can be made here; while it reads, nothing
+        to type into; when it failed, the terminal route, which always works.
+      */}
+      {access.data === undefined ? (
+        access.isError ? (
+          <TerminalAdd />
+        ) : (
+          <p role="status" className="text-text-2">
+            Reading how accounts are made.
+          </p>
+        )
+      ) : access.data.accountsWritable ? (
+        <AddForm />
+      ) : (
+        <TerminalAdd />
+      )}
     </section>
   );
 }

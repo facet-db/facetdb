@@ -27,11 +27,12 @@ import {
   projectConfigQuery,
   QuestionEditor,
   QuestionThresholds,
+  ReplaceAnyway,
   type SourceForm,
   TextField,
   usePreview,
 } from "../questions/index.ts";
-import { BackfillControls, sourcesQuery } from "../sources/index.ts";
+import { aboutRows, BackfillControls, sourcesQuery } from "../sources/index.ts";
 import {
   durationWords,
   firstRead,
@@ -1157,6 +1158,9 @@ function TableStep({
   // A connection that may read no table has nothing to choose: the list is shut and says so, rather
   // than opening on nothing ("clicking choose table doesn't do anything").
   const none = connection.tables.length === 0;
+  // The chosen table's size as the database estimates it; nothing when it has no estimate.
+  const estimate = picking || failure !== null ? null : (choices?.table.estimatedRows ?? null);
+  const size = estimate === null ? undefined : aboutRows(estimate);
   return (
     <div className="grid gap-5">
       <div className="grid max-w-[420px] gap-1.5">
@@ -1173,6 +1177,7 @@ function TableStep({
           disabled={picking || none}
           onValueChange={onPick}
         />
+        {size === undefined ? null : <p className="text-[13px] text-text-2">{size}</p>}
         {none ? (
           <div role="status" className="grid gap-1">
             <StatusWord status="warning" size="small" label="This connection can read no table" />
@@ -1423,11 +1428,7 @@ function PlanShown({
         </ul>
       )}
       {plan.uncommitted === null ? null : (
-        <div className="grid gap-2 border-l-2 border-review pl-3">
-          <p>{plan.uncommitted.message}</p>
-          <p className="text-text-2">{plan.uncommitted.fix}</p>
-          <Check label={`Replace ${plan.path} anyway`} checked={force} onChange={onForce} />
-        </div>
+        <ReplaceAnyway state={plan.uncommitted.state} checked={force} onChange={onForce} />
       )}
     </div>
   );

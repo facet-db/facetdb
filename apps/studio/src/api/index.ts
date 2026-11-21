@@ -16,6 +16,7 @@ export type {
   Cost,
   DecisionFilters,
   DecisionHistory,
+  DecisionOutcome,
   DecisionRow,
   DecisionsPage,
   DraftIssue,
@@ -58,12 +59,23 @@ export type {
   SourceRow,
   SourceVersions,
   SpendingConfig,
+  SpendingDraft,
   StudioAccess,
   TestEstimate,
   TestQuestionRow,
   TestResult,
   ThresholdOverride,
+  UncommittedState,
   WordingWarning,
 } from "./client.ts";
 export { ApiError, createApiClient, needsSignIn, SIGN_IN_CODE } from "./client.ts";
-export { homeQuery, projectQuery, reviewCountQuery, SHELL_REFRESH_MS } from "./queries.ts";
+export {
+  homeQuery,
+  projectQuery,
+  REVIEW_QUEUE_KEY,
+  reviewCountQuery,
+  reviewQueueQuery,
+  SHELL_REFRESH_MS,
+  SPENDING_CONFIG_KEY,
+  spendingConfigQuery,
+} from "./queries.ts";

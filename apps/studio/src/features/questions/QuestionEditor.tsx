@@ -25,33 +25,38 @@ const TYPES: readonly QuestionType[] = ["noul", "choice", "score"];
 
 const percent = (figure: number): string => `${String(Math.round(figure * 100))}%`;
 
-/** A threshold in words: "yes at or above 95%", "decide at 60% confidence". */
-function cutWords(thresholds: ThresholdOverride): string {
-  return [
-    ...(thresholds.yesAbove === undefined
-      ? []
-      : [`yes at or above ${percent(thresholds.yesAbove)}`]),
-    ...(thresholds.noBelow === undefined ? [] : [`no at or below ${percent(thresholds.noBelow)}`]),
-    ...(thresholds.confidenceAtLeast === undefined
-      ? []
-      : [`decide at ${percent(thresholds.confidenceAtLeast)} confidence`]),
-  ].join(", ");
-}
-
 /**
- * What the card says of a cut set by hand: it overrides the stakes' default, which is named, so a
- * change of the stakes never hides that the cut in force is not theirs.
+ * The one line under the slider that says when the question decides on its own. It is the only
+ * place the figures stand, so the stakes' choice never names a cut that is not in force; a cut set
+ * by hand names the cuts in force and the stakes' default beside them.
  */
-function handSetWords(question: QuestionForm): string | undefined {
+function thresholdWords(question: QuestionForm): {
+  readonly words: string;
+  readonly handSet: boolean;
+} {
+  const inForce = thresholdsOf(question);
   if (Object.keys(question.thresholds).length === 0) {
-    return undefined;
+    return {
+      handSet: false,
+      words:
+        inForce.kind === "cuts"
+          ? `Decides on its own at ${percent(inForce.yesAbove)} or more (yes) and ${percent(inForce.noBelow)} or less (no); in between goes to review.`
+          : `Decides on its own at ${percent(inForce.confidenceAtLeast)} confidence or more; below that goes to review.`,
+    };
   }
   const defaults = defaultsOf(question);
+  const set =
+    inForce.kind === "cuts"
+      ? `yes at ${percent(inForce.yesAbove)} or more, no at ${percent(inForce.noBelow)} or less`
+      : `${percent(inForce.confidenceAtLeast)} confidence or more`;
   const standard =
     defaults.kind === "cuts"
-      ? { yesAbove: defaults.yesAbove, noBelow: defaults.noBelow }
-      : { confidenceAtLeast: defaults.confidenceAtLeast };
-  return `A cut set by hand overrides the stakes' default: ${cutWords(question.thresholds)}. At ${question.stakes} stakes the default is ${cutWords(standard)}.`;
+      ? `${percent(defaults.yesAbove)} and ${percent(defaults.noBelow)}`
+      : percent(defaults.confidenceAtLeast);
+  return {
+    handSet: true,
+    words: `Set by hand: ${set}. The ${question.stakes}-stakes default is ${standard}.`,
+  };
 }
 
 /** The loader's problems about this question, by the field they stand under. */
@@ -155,7 +160,7 @@ function LinesEditor({
 
 /**
  * A question's thresholds: the slider over the preview's figures for this question, counted on the
- * page with no call, the words of a cut set by hand, and the problems tied to them.
+ * page with no call, the line that says when it decides on its own, and the problems tied to them.
  */
 export function QuestionThresholds({
   question,
@@ -179,7 +184,7 @@ export function QuestionThresholds({
 }) {
   const id = useId();
   const thresholds = thresholdsOf(question);
-  const handSet = handSetWords(question);
+  const caption = thresholdWords(question);
   const crossing = cutProblem(question);
   return (
     // A group named by its legend, so each question's sliders are told apart by more than
@@ -202,22 +207,22 @@ export function QuestionThresholds({
         // in their place until the stakes or the default put them in order.
         <FieldProblem id={`${id}-crossing`} words={crossing} />
       )}
-      {handSet === undefined ? null : (
-        <div className="grid gap-1.5">
-          <p className="m-0 text-[13px] text-text-2">{handSet}</p>
-          <div>
-            <Button
-              variant="quiet"
-              size="small"
-              onClick={() => {
-                onChange({ ...question, thresholds: {} });
-              }}
-            >
-              Use the stakes' default
-            </Button>
-          </div>
+      {crossing === undefined ? (
+        <p className="m-0 text-[13px] text-text-2">{caption.words}</p>
+      ) : null}
+      {caption.handSet ? (
+        <div>
+          <Button
+            variant="quiet"
+            size="small"
+            onClick={() => {
+              onChange({ ...question, thresholds: {} });
+            }}
+          >
+            Use the default
+          </Button>
         </div>
-      )}
+      ) : null}
       {figures.length > 0 ? null : (
         <p className="m-0 text-[12.5px] text-text-3">
           {previewed
@@ -369,15 +374,15 @@ export function QuestionEditor({
       ) : null}
       <div className="grid min-w-0 gap-1.5">
         <label htmlFor={stakesId} className="text-[13px] text-text-2">
-          What happens when the answer is wrong?
+          What happens when this answer is wrong?
         </label>
         <Listbox
           id={stakesId}
-          label="What happens when the answer is wrong?"
+          label="What happens when this answer is wrong?"
           width="full"
           options={(["high", "low"] as const).map((stakes) => ({
             value: stakes,
-            label: stakesWords(question.type, stakes),
+            label: stakesWords(stakes),
           }))}
           value={question.stakes}
           onValueChange={(value) => {

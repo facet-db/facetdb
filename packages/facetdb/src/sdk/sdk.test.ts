@@ -159,6 +159,7 @@ async function rig() {
       projectId: PROJECT,
       sources: [],
       keyText: () => undefined,
+      current: () => Promise.reject(new Error("the SDK reads no record's status")),
       store: {
         search: () => Promise.reject(new Error("the SDK searches no decisions")),
         history: () => Promise.reject(new Error("the SDK explains no record")),

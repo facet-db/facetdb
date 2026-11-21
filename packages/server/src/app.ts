@@ -9,6 +9,7 @@ import { configRoutes } from "./config/routes.ts";
 import type { ConfigService } from "./config/service.ts";
 import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
+import { requireOwnPage } from "./request.ts";
 import { reviewRoutes } from "./review/routes.ts";
 import type { ReviewEndpointService } from "./review/service.ts";
 import { type BackfillJobsDoor, NO_BACKFILL_JOBS } from "./sources/backfill-door.ts";
@@ -83,14 +84,19 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   //     A route added below is reviewer-only without any further line, so a forgotten line can
   //     only close a route, never open one. The pages' read routes (runs, decisions, the why
   //     page, Home, Sources) and the review routes are mounted on `studio`; a project key
-  //     does not reach them.
+  //     does not reach them. Every write among them (any method but GET, HEAD and OPTIONS) then
+  //     takes only the studio's own page or a program (`requireOwnPage`): the cookie rides along
+  //     with a request from any page open in the reviewer's browser, so a page of another site
+  //     must not be able to decide a card, make an account or spend model budget with it. The
+  //     reviewer check comes first, so a stranger is told to sign in, not about the body.
   const studio = new Hono<AppEnv>();
   studio.use("*", requireReviewer(deps.studio.sessions, deps.studio.projectId));
+  studio.use("*", requireOwnPage());
   studio.route("/", configRoutes(deps.config));
   studio.route("/", dataRoutes(deps.data));
   // The setup flow; its writing routes add the operator-only check of their own.
   studio.route("/", setupRoutes(deps.setup ?? NO_SETUP));
-  // The backfill jobs; their POSTs add Apply's check of their own.
+  // The backfill jobs.
   studio.route("/", backfillRoutes(deps.backfill ?? NO_BACKFILL_JOBS));
   studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));

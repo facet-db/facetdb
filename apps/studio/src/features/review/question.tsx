@@ -2,7 +2,7 @@ import { Button, Dither, DitherStrip, StatusWord, Tag } from "@facetdb/ui";
 import { useId } from "react";
 import type { ReviewDecidedQuestion, ReviewOpenQuestion } from "../../api/index.ts";
 import { hintFor, type KeyedAnswer } from "./keys.ts";
-import { modelSays, percent, pickWords, typeWords } from "./words.ts";
+import { decidesWords, kindWords, modelSays, percent, pickWords } from "./words.ts";
 
 /**
  * One question of the card (the review card): the question and its kind, the model's answer in
@@ -81,14 +81,19 @@ export function OpenQuestion({
         </h2>
         <span className="inline-flex items-center gap-2.5">
           <span className="font-mono text-xs text-text-3">{question.name}</span>
-          <Tag>{typeWords(question.type)}</Tag>
+          {/* The stakes travel in the words; the tag keeps its neutral square (no role names them) */}
+          <Tag>{kindWords(question)}</Tag>
         </span>
       </div>
       <div className="flex items-center gap-2.5">
         <span aria-hidden="true" className="inline-flex">
           <Dither value={question.figure} size={40} label={modelSays(question)} />
         </span>
-        <p className="m-0 min-w-0">{modelSays(question)}</p>
+        {/* The thresholds follow the answer in a quieter voice, as the mockup's review card has them */}
+        <p className="m-0 min-w-0">
+          {modelSays(question)}
+          <span className="text-text-2"> {decidesWords(question)}</span>
+        </p>
       </div>
       {question.type === "noul" ? null : <Probabilities question={question} />}
       <fieldset className="m-0 flex min-w-0 flex-wrap gap-2 border-0 p-0">

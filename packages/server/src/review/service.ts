@@ -9,8 +9,11 @@ import {
   type ReviewCard,
   type ReviewFilter,
   type ReviewServiceDeps,
+  resolveThresholds,
+  type Stakes,
   type StateValue,
   saidWords,
+  type Thresholds,
 } from "@facetdb/core";
 import { sourceIdOf } from "@facetdb/postgres";
 
@@ -48,6 +51,13 @@ export type OpenQuestionView = {
   /** The option or level with the highest probability. */
   readonly top: string;
   readonly options: readonly OptionView[];
+  /** What a wrong automatic answer costs: the card tags a high-stakes question. */
+  readonly stakes: Stakes;
+  /**
+   * The thresholds this question is decided by, the config's override over its stakes defaults:
+   * the card says at what figure the worker would have decided on its own.
+   */
+  readonly thresholds: Thresholds;
 };
 
 /** A question already decided, shown greyed out with its value. */
@@ -94,6 +104,17 @@ export type QueueView = {
   readonly oldestWaitMs: number | null;
   /** The first page, oldest first (the cards this reviewer skipped last). */
   readonly cards: readonly QueuedCardView[];
+  /**
+   * Every source the worker runs now, with its questions, whatever the filter: the screen's filters
+   * offer what the worker asks, not only what happens to wait in the first page.
+   */
+  readonly sources: readonly SourceView[];
+};
+
+/** One source of the fleet as the filters offer it: its config name and its questions' names. */
+export type SourceView = {
+  readonly name: string;
+  readonly questions: readonly string[];
 };
 
 /** What the queue and `open` narrow to; the names are the config's, as the request wrote them. */
@@ -262,19 +283,27 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
     if ("kind" in resolved) {
       return resolved;
     }
-    // The queue's contract has no count, so the whole matching listing is read once and sliced.
+    // The count and the oldest wait in one statement, and only the page shown read as cards: the
+    // studio asks this on every decision and every few seconds. Two statements, so a lock another
+    // reviewer takes between them can read as one more counted than listed for one refresh; the
+    // next read agrees again.
     const nowMs = clock.now();
-    const listed = await deps.queue.list(reviewFilter(filter, resolved.source), viewer, nowMs);
-    const oldest = listed.reduce<Date | undefined>(
-      (found, card) => (found === undefined || card.since < found ? card.since : found),
-      undefined,
-    );
+    const matching = reviewFilter(filter, resolved.source);
+    const [counted, listed] = await Promise.all([
+      deps.queue.count(matching, viewer, nowMs),
+      deps.queue.list({ ...matching, limit }, viewer, nowMs),
+    ]);
+    const oldest = counted.oldestSince;
     return {
       kind: "queue",
-      count: listed.length,
+      count: counted.count,
       oldestSince: oldest === undefined ? null : iso(oldest),
       oldestWaitMs: oldest === undefined ? null : Math.max(0, nowMs - oldest.getTime()),
-      cards: listed.slice(0, limit).map(queuedView),
+      cards: listed.map(queuedView),
+      sources: deps.sources().map((name) => ({
+        name,
+        questions: questionNames(sourceIdOf(deps.projectId, name)),
+      })),
     };
   }
 
@@ -302,6 +331,13 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
         said: saidWords(question, answer),
         figure,
         ...optionsOf(question, answer),
+        stakes: question.stakes,
+        // The override of the set in force now: a card left by a source the worker stopped
+        // running has no set, and says its stakes defaults.
+        thresholds: resolveThresholds(
+          question,
+          deps.questionSets.get(card.source)?.questionSet.thresholds[question.name],
+        ),
       })),
       decided: card.decided.map(({ question, value }) => ({
         name: question.name,

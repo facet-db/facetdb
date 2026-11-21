@@ -131,4 +131,28 @@ describe("a table source's facts for the dashboard", () => {
       checks[2],
     ]);
   });
+
+  it("asks the engine for the table's estimated rows, and reads none where it has no estimate or cannot read", async () => {
+    const asked: string[] = [];
+    const estimating = new FakeEngine({
+      estimateRows: (target) => {
+        asked.push(target.table);
+        return 4_137;
+      },
+    });
+    const secure = "postgres://facetdb_worker:pw@db.example.com/app?sslmode=require";
+    expect(await factsOf(secure, {}, estimating).estimateRows()).toBe(4_137);
+    expect(asked).toEqual(["listings"]);
+    // An engine with no estimate (every engine but Postgres's): none, and nothing is asked.
+    expect(await factsOf(secure).estimateRows()).toBeNull();
+    // A read the engine refuses is no estimate; the doctor in the same row says why.
+    expect(
+      await factsOf(
+        "postgres://facetdb_worker:pw@db.example.com/app",
+        {},
+        estimating,
+      ).estimateRows(),
+    ).toBeNull();
+    expect(asked).toEqual(["listings"]);
+  });
 });

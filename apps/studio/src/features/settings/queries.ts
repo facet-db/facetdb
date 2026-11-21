@@ -16,7 +16,4 @@ export function studioAccessQuery(api: ApiClient) {
   return queryOptions({ queryKey: ["studio", "access"], queryFn: () => api.studioAccess() });
 }
 
-/** The project's spending cap and what happens at 100%, as the config in force says. */
-export function spendingConfigQuery(api: ApiClient) {
-  return queryOptions({ queryKey: ["config", "spending"], queryFn: () => api.spendingConfig() });
-}
+// The spending cap's query is the api module's (`spendingConfigQuery`): Home and the rail read it too.

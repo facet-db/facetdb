@@ -6,6 +6,7 @@ import { useApi } from "../../deps.tsx";
 import { Problem } from "../decisions/index.ts";
 import { ConnectionField, type InstallFailure, installFailure } from "../setup/index.ts";
 import { BackfillControls } from "../sources/index.ts";
+import { Disclosure } from "./Disclosure.tsx";
 import { CONFIG_KEY } from "./queries.ts";
 
 /**
@@ -33,29 +34,34 @@ function capitalized(text: string): string {
   return text.slice(0, 1).toUpperCase() + text.slice(1);
 }
 
-/** What the reload after the install says of `source`, and whether the source now runs it. */
+/**
+ * What the reload after the install says of `source`, in the studio's own short words (no versions,
+ * no commands), and the worker's own sentence for Details.
+ */
 function installedWords(
   done: Migrated,
   source: string,
-): { readonly running: boolean; readonly words: string } {
+  questions: readonly string[],
+): { readonly running: boolean; readonly words: string; readonly details: string | null } {
   const reload = done.reload;
+  const waiting = `Installed. ${source} does not answer with ${namesOf(questions)} yet.`;
   if (!reload.loaded) {
     return {
       running: false,
-      words: `Installed on ${done.table}. ${capitalized(reload.message)}. ${reload.fix}`,
+      words: waiting,
+      details: `${capitalized(reload.message)}. ${reload.fix}`,
     };
   }
   const entry = reload.sources.find((candidate) => candidate.source === source);
+  const details = entry === undefined || entry.message === null ? null : capitalized(entry.message);
   if (entry?.outcome === "restarted" && entry.version !== null) {
     return {
       running: true,
-      words: `Installed on ${done.table}. ${source} answers with version ${entry.version} now: ${entry.message ?? "the worker switched it."}`,
+      words: `Installed. ${source} now answers with ${namesOf(questions)}.`,
+      details,
     };
   }
-  return {
-    running: false,
-    words: `Installed on ${done.table}. ${entry?.message === null || entry === undefined ? "The worker read facetdb.config.ts again." : capitalized(entry.message)}`,
-  };
+  return { running: false, words: waiting, details };
 }
 
 /**
@@ -65,26 +71,37 @@ function installedWords(
  */
 export type Installed = {
   readonly words: string;
+  /** The worker's own sentence of the reload, behind Details; null where it said nothing. */
+  readonly details: string | null;
   /** The source runs the new set: the added questions to answer the existing records with. */
   readonly backfill: { readonly source: string; readonly questions: readonly string[] } | null;
+  /** The worker's reload after the install: the Apply dialog's list of sources follows it. */
+  readonly reload: Migrated["reload"];
 };
 
 function noteOf(done: Migrated, source: string, questions: readonly string[]): Installed {
-  const { running, words } = installedWords(done, source);
-  return { words, backfill: running ? { source, questions } : null };
+  const { running, words, details } = installedWords(done, source, questions);
+  return { words, details, backfill: running ? { source, questions } : null, reload: done.reload };
 }
 
 /** The install's outcome in words, with the offer to answer the existing records where it applies. */
 export function InstalledNote({ note }: { readonly note: Installed }) {
   return (
-    <div className="grid gap-3 border-l-2 border-yes pl-3">
+    <div
+      className={`grid gap-3 border-l-2 pl-3 ${note.backfill === null ? "border-review" : "border-yes"}`}
+    >
       <p role="status" className="m-0 max-w-[64ch]">
         {note.words}
       </p>
+      {note.details === null ? null : (
+        <Disclosure label="Details">
+          <p className="m-0 max-w-[64ch] text-text-2">{note.details}</p>
+        </Disclosure>
+      )}
       {note.backfill === null ? null : (
         <>
           <p className="m-0 max-w-[64ch]">
-            {`The records that were in ${note.backfill.source} before have no answer for ${namesOf(note.backfill.questions)} yet: answering them shows the estimate first.`}
+            {`Records from before have no answer for ${namesOf(note.backfill.questions)} yet.`}
           </p>
           <BackfillControls source={note.backfill.source} questions={note.backfill.questions} />
         </>

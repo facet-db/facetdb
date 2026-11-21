@@ -1,9 +1,9 @@
 import { defineConfig } from "vitest/config";
 
 // The local end-to-end (`pnpm test:e2e`): PGlite in-process and the scripted fake provider, so it
-// needs no service, no network and nothing set in the shell. The fixture's config file reads
-// `process.env["DATABASE_URL"]` as a user's does; the suite supplies the worker login's connection
-// string here (PGlite ignores the host), so the loader sees a variable holding it.
+// needs no service, no network and nothing set in the shell. The fixture's config file names
+// `env("DATABASE_URL")` as a user's does; the suite supplies the worker login's connection string
+// here (PGlite ignores the host), so the loader reads it from that variable.
 export default defineConfig({
   test: {
     include: ["src/e2e/*.e2e.test.ts"],

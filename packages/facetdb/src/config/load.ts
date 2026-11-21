@@ -4,7 +4,12 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { QuestionSet } from "@facetdb/core";
 import type { ProjectConfig } from "./dsl.ts";
-import { ConfigError, type ConfigIssue, parseProjectConfig } from "./schema.ts";
+import {
+  ConfigError,
+  type ConfigIssue,
+  duplicateTableIssues,
+  parseProjectConfig,
+} from "./schema.ts";
 import { type ConfigWarning, formatWarnings, wordingWarnings } from "./warnings.ts";
 
 /**
@@ -82,8 +87,12 @@ function variableHolding(
 }
 
 /**
- * Records, for each source, the variable its connection string came from. A string that no variable
- * holds was typed into the file, and a secret never lives there.
+ * Records, for each source, the variable its connection string came from. A source written as
+ * `env("X")` names it, and the string is read from `env` here, so the name is the file's own
+ * (`databaseEnvNamed`, which Apply trusts). One written as `process.env.X` arrives as the string
+ * alone, and the variable is found by its value: DATABASE_URL first, then by name, a guess where two
+ * variables hold the same string. A string that no variable holds was typed into the file, and a
+ * secret never lives there.
  */
 function recordVariables(
   config: ProjectConfig,
@@ -91,20 +100,47 @@ function recordVariables(
 ): { config: ProjectConfig; issues: ConfigIssue[] } {
   const issues: ConfigIssue[] = [];
   const sources = config.sources.map((source, index) => {
-    if (source.database === undefined || source.databaseEnv !== undefined) {
+    const path = `sources[${index}].database`;
+    if (source.databaseEnv !== undefined) {
+      const name = source.databaseEnv;
+      const value = env[name];
+      // A string beside the name that is not the variable's value was typed into the file: the
+      // name alone would export, but the worker would reach the string, so the pair is refused.
+      if (source.database !== undefined && source.database !== value) {
+        issues.push({
+          path,
+          message: `this connection string is written in the config file beside env("${name}"), and secrets never live there; write database: env("${name}") alone and set ${name} to the connection string`,
+        });
+        return source;
+      }
+      if (value === undefined || value === "") {
+        issues.push({
+          path,
+          message: `${name} is not set; set it to the source's connection string`,
+        });
+        return source;
+      }
+      return { ...source, database: value, databaseEnvNamed: true as const };
+    }
+    if (source.database === undefined) {
       return source;
     }
     const variable = variableHolding(source.database, env);
     if (variable === undefined) {
       issues.push({
-        path: `sources[${index}].database`,
+        path,
         message:
-          "this connection string is written in the config file, and secrets never live there; read it from the environment: database: process.env.DATABASE_URL",
+          'this connection string is written in the config file, and secrets never live there; name the variable to read it from: database: env("DATABASE_URL")',
       });
       return source;
     }
     return { ...source, databaseEnv: variable };
   });
+  // Two variables may hold one connection string: now that every value is read, one table under
+  // two names is checked again by the value, where the schema could only go by the name.
+  if (issues.length === 0) {
+    issues.push(...duplicateTableIssues(sources));
+  }
   return { config: { ...config, sources }, issues };
 }
 

@@ -1,59 +1,34 @@
-import { queryOptions } from "@tanstack/react-query";
-import type { ApiClient, ReviewFilter, ReviewQueue } from "../../api/index.ts";
+import type { ReviewQueue } from "../../api/index.ts";
 
 /**
- * The Review page's own queries. The count beside Review in the rail is the shell's
- * (`reviewCountQuery`); a decision invalidates it and these together.
+ * The Review page's own queries. The queue's figures are the api module's (`reviewQueueQuery`):
+ * the rail's count is the same read under an empty filter, and a decision invalidates the prefix
+ * (`REVIEW_QUEUE_KEY`) for both. The same answer lists every source the worker runs with its
+ * questions, whatever the filter, so the filters are built from it too (`facetsOf`).
  */
-
-/** The prefix of every queue query of this page: one invalidation covers the filtered counts. */
-export const REVIEW_QUEUE_KEY = ["review", "queue"] as const;
-
-/** How many cards the facets read: the endpoint's most. */
-const FACETS_LIMIT = 200;
-
-/** The top bar's figures under the filter: how many wait and how long the oldest has. */
-export function reviewQueueQuery(api: ApiClient, filter: ReviewFilter) {
-  return queryOptions({
-    queryKey: [...REVIEW_QUEUE_KEY, filter],
-    queryFn: () => api.reviewQueue({ ...filter, limit: 1 }),
-    // Asked again every SHELL_REFRESH_MS by the top bar, on the injected scheduler.
-    // Changing a filter keeps the old figures on the bar until the new ones arrive.
-    placeholderData: (previous) => previous,
-  });
-}
-
-/**
- * What the filters can offer: the sources and questions of the cards waiting, unfiltered. The
- * endpoints list no sources or questions of their own, so a source or question with no card
- * waiting is not offered (and past 200 waiting cards, one that is rare may be missing).
- */
-export function reviewFacetsQuery(api: ApiClient) {
-  return queryOptions({
-    queryKey: ["review", "facets"],
-    queryFn: () => api.reviewQueue({ limit: FACETS_LIMIT }),
-  });
-}
+export { REVIEW_QUEUE_KEY, reviewQueueQuery } from "../../api/index.ts";
 
 export type Facets = {
   readonly sources: readonly string[];
   readonly questions: readonly string[];
 };
 
-/** The filter options a queue offers: every source, and the questions open on the chosen source's cards. */
+/**
+ * The filter options a queue offers: every source the worker runs, and the questions of the chosen
+ * source (of every source when none is chosen), whether or not a card of theirs is waiting.
+ */
 export function facetsOf(queue: ReviewQueue | undefined, source: string | undefined): Facets {
-  const sources = new Set<string>();
+  const fleet = queue?.sources ?? [];
   const questions = new Set<string>();
-  for (const card of queue?.cards ?? []) {
-    sources.add(card.source);
-    if (source === undefined || card.source === source) {
-      for (const open of card.open) {
-        questions.add(open.name);
+  for (const one of fleet) {
+    if (source === undefined || one.name === source) {
+      for (const question of one.questions) {
+        questions.add(question);
       }
     }
   }
   return {
-    sources: [...sources].sort((a, b) => a.localeCompare(b)),
+    sources: fleet.map((one) => one.name).sort((a, b) => a.localeCompare(b)),
     questions: [...questions].sort((a, b) => a.localeCompare(b)),
   };
 }

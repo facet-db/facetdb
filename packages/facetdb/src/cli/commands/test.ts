@@ -258,7 +258,11 @@ export const testCommand = defineCommand<TestOptions>("test", {
     const sourceId = storeSourceId(project.id, source.name);
     const store = await deps.store({ allowInsecure });
     try {
-      const version = await store.questionSets.latest(sourceId);
+      // The set the worker runs, whole (store migration 8), when a worker has recorded one; else
+      // the newest version's row, which keeps only what its content hash sees (a threshold changed
+      // since the version was made is invisible there; the worker's row shows it).
+      const inForce = await store.questionSets.inForce(sourceId);
+      const version = inForce ?? (await store.questionSets.latest(sourceId));
       if (version === undefined) {
         throw new CliError(
           "no-version",
@@ -266,8 +270,9 @@ export const testCommand = defineCommand<TestOptions>("test", {
           "run facetdb worker (or facetdb backfill) once so the file you have now becomes version 1, then edit it and run facetdb test",
         );
       }
-      const saved = await savedQuestionSets(deps, storeUrl, sourceId, [version.version]);
-      const current = saved.get(version.version);
+      const current =
+        inForce?.questionSet ??
+        (await savedQuestionSets(deps, storeUrl, sourceId, [version.version])).get(version.version);
       if (current === undefined) {
         throw new CliError(
           "question-set-version",

@@ -837,7 +837,7 @@ describe("the store is the Postgres DATABASE_URL names", () => {
       `error: the source "listings" reads DATABASE_URL, the store's variable, and its database is not a Postgres (mysql); the FacetDB store is always a Postgres, so a source of another kind reads a variable of its own`,
     );
     expect(result.stderr).toContain(
-      "fix: write database: process.env.LISTINGS_URL for the source in facetdb.config.ts, set LISTINGS_URL to its connection string, and point DATABASE_URL at the store's Postgres",
+      'fix: write database: env("LISTINGS_URL") for the source in facetdb.config.ts, set LISTINGS_URL to its connection string, and point DATABASE_URL at the store\'s Postgres',
     );
     expect(result.stdout + result.stderr).not.toContain("s3cret");
   });

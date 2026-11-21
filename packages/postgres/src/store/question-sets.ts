@@ -1,6 +1,6 @@
 import { parseQuestionSet, type QuestionSet, type QuestionSetVersion } from "@facetdb/core";
 import type { SqlQuery } from "../sql/index.ts";
-import { integer, text, toMs } from "./rows.ts";
+import { fromMs, integer, text, toMs } from "./rows.ts";
 
 /**
  * A version as the store keeps it: its number, hash and time, and the question set it was made
@@ -13,6 +13,17 @@ export type StoredQuestionSetVersion = QuestionSetVersion &
     | { readonly questionSet: QuestionSet; readonly unreadable: null }
     | { readonly questionSet: null; readonly unreadable: string }
   );
+
+/**
+ * The set a source's worker runs, as its last loop open recorded it (store migration 8): the
+ * version it runs under, the whole set (thresholds, where filter, stakes and order included, which
+ * the version's content hash leaves out), and when it was recorded.
+ */
+export type QuestionSetInForce = {
+  readonly version: number;
+  readonly questionSet: QuestionSet;
+  readonly recordedAt: Date;
+};
 
 function setText(raw: unknown, version: number, sourceId: string): string {
   if (typeof raw !== "string") {
@@ -88,4 +99,48 @@ export async function readQuestionSets(
     kept.set(version, parsedSet(row["question_set"], version, sourceId));
   }
   return kept;
+}
+
+/**
+ * The set the source's worker runs, or null when no worker has recorded one (none has started
+ * since the store reached version 8). A row that no longer parses is a corrupt store, said as
+ * `readQuestionSets` says it.
+ */
+export async function readQuestionSetInForce(
+  query: SqlQuery,
+  sourceId: string,
+): Promise<QuestionSetInForce | null> {
+  const rows = await query(
+    `select version::text as version, question_set::text as question_set,
+            ${toMs("recorded_at", "recorded_ms")}
+       from facetdb.question_sets_in_force where source_id = $1`,
+    [sourceId],
+  );
+  const row = rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  const version = integer(row, "version");
+  return {
+    version,
+    questionSet: parsedSet(row["question_set"], version, sourceId),
+    recordedAt: new Date(integer(row, "recorded_ms")),
+  };
+}
+
+/** Writes the set the worker runs from now on: one row per source, replaced whole at each loop open. */
+export async function writeQuestionSetInForce(
+  query: SqlQuery,
+  sourceId: string,
+  version: number,
+  questionSet: QuestionSet,
+  nowMs: number,
+): Promise<void> {
+  await query(
+    `insert into facetdb.question_sets_in_force (source_id, version, question_set, recorded_at)
+     values ($1, $2, $3::jsonb, ${fromMs("$4")})
+     on conflict (source_id) do update
+       set version = excluded.version, question_set = excluded.question_set, recorded_at = excluded.recorded_at`,
+    [sourceId, version, JSON.stringify(questionSet), nowMs],
+  );
 }

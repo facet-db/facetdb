@@ -6,11 +6,11 @@ import type { CheckService } from "../check/service.ts";
 import type { DataServices } from "../data/routes.ts";
 import { NO_REVIEW } from "../review/no-review.ts";
 import {
+  type ConfigDraft,
   type ConfigFileDoor,
   createConfigService,
   type FileApply,
   type FileDiff,
-  type SourceDraft,
 } from "./service.ts";
 
 /**
@@ -71,6 +71,7 @@ const PLANNED: FileDiff = {
   changed: true,
   plan: "plan-1",
   uncommitted: null,
+  dropsOwnText: false,
   warnings: [],
 };
 
@@ -87,7 +88,7 @@ const APPLIED: FileApply = {
 
 /** The CLI's door as a recorder: what each call was asked, and the outcome the test hands back. */
 function fileDoor(outcomes: { diff?: FileDiff; apply?: FileApply } = {}) {
-  const calls: { kind: string; draft: SourceDraft; options?: unknown }[] = [];
+  const calls: { kind: string; draft: ConfigDraft; options?: unknown }[] = [];
   const door: ConfigFileDoor = {
     reload: () => Promise.reject(new Error("Apply reloads inside its own write")),
     diff: (draft) => {
@@ -132,6 +133,7 @@ function rig(file: ConfigFileDoor | undefined) {
       reviewers: {
         list: () => Promise.reject(new Error("these tests list no reviewers")),
         add: () => Promise.reject(new Error("these tests add no reviewer")),
+        canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
     },
@@ -142,10 +144,12 @@ function rig(file: ConfigFileDoor | undefined) {
     who: {
       readonly peer?: { readonly remoteAddress: string };
       readonly headers?: Readonly<Record<string, string>>;
+      /** The request's address as the worker sees it (from the Host header, as serve.ts builds it). */
+      readonly url?: string;
     } = {},
   ) => {
     const response = await app.request(
-      "/v1/apply",
+      who.url ?? "/v1/apply",
       {
         method: "POST",
         headers: { "content-type": "application/json", ...who.headers },
@@ -199,6 +203,37 @@ describe("POST /v1/apply", () => {
     expect(own.status).toBe(200);
   });
 
+  it("takes the studio's own page behind a reverse proxy that rewrites Host", async () => {
+    const t = fileDoor();
+    const call = rig(t.door);
+    // nginx's default: the worker sees its own address as Host, while the page's Origin is the
+    // public one. The browser computed Sec-Fetch-Site against the public address, so it decides.
+    const proxied = await call(
+      { source: DRAFT },
+      {
+        url: "http://127.0.0.1:4040/v1/apply",
+        peer: ELSEWHERE,
+        headers: {
+          cookie: MAYA,
+          host: "127.0.0.1:4040",
+          origin: "https://studio.example.com",
+          "sec-fetch-site": "same-origin",
+        },
+      },
+    );
+    expect(proxied.status).toBe(200);
+    // The same Origin with no Sec-Fetch-Site (an older browser) is still held to the Host.
+    const old = await call(
+      { source: DRAFT },
+      {
+        url: "http://127.0.0.1:4040/v1/apply",
+        peer: ELSEWHERE,
+        headers: { cookie: MAYA, host: "127.0.0.1:4040", origin: "https://studio.example.com" },
+      },
+    );
+    expect(old).toMatchObject({ status: 403, json: { error: { code: "cross_origin" } } });
+  });
+
   it("answers the diff and its plan without confirm, and writes nothing", async () => {
     const t = fileDoor();
     const response = await rig(t.door)({ source: DRAFT });
@@ -212,10 +247,26 @@ describe("POST /v1/apply", () => {
         changed: true,
         plan: "plan-1",
         uncommitted: null,
+        dropsOwnText: false,
         warnings: [],
       },
     });
-    expect(t.calls).toEqual([{ kind: "diff", draft: DRAFT }]);
+    expect(t.calls).toEqual([{ kind: "diff", draft: { source: DRAFT } }]);
+  });
+
+  it("passes what git says of the file, and whether lines of the person's own go, to the studio", async () => {
+    const uncommitted = {
+      state: "ignored",
+      message: "facetdb.config.ts is ignored by git, so git keeps no copy of it",
+      fix: 'apply again with force ("force": true) to replace it',
+    } as const;
+    const t = fileDoor({ diff: { ...PLANNED, uncommitted, dropsOwnText: true } });
+    const response = await rig(t.door)({ source: DRAFT });
+
+    expect(response).toMatchObject({
+      status: 200,
+      json: { written: false, uncommitted, dropsOwnText: true },
+    });
   });
 
   it("writes on confirm with the plan, and answers the reload", async () => {
@@ -236,7 +287,7 @@ describe("POST /v1/apply", () => {
       },
     });
     expect(t.calls).toEqual([
-      { kind: "apply", draft: DRAFT, options: { plan: "plan-1", force: false } },
+      { kind: "apply", draft: { source: DRAFT }, options: { plan: "plan-1", force: false } },
     ]);
     await rig(t.door)({ source: DRAFT, confirm: "plan-1", force: true });
     expect(t.calls.at(-1)?.options).toEqual({ plan: "plan-1", force: true });
@@ -256,6 +307,7 @@ describe("POST /v1/apply", () => {
     [
       {
         kind: "uncommitted",
+        state: "modified",
         message:
           "facetdb.config.ts has changes git has not committed, and Apply would replace them",
         fix: 'commit them, or apply again with force ("force": true) to replace them',
@@ -303,6 +355,51 @@ describe("POST /v1/apply", () => {
     const t = fileDoor();
     const shaped = await rig(t.door)({ source: DRAFT, confirm: "plan-1", overwrite: true });
     expect(shaped).toMatchObject({ status: 400, json: { error: { code: "invalid_request" } } });
+    expect(t.calls).toEqual([]);
+  });
+
+  it("carries the project's spending settings as a draft of their own, null removing the cap", async () => {
+    const t = fileDoor();
+    const call = rig(t.door);
+    expect(
+      (await call({ project: { spendingCap: 2_000_000, onCapReached: "continue" } })).status,
+    ).toBe(200);
+    expect(
+      (await call({ project: { spendingCap: null }, confirm: "plan-1", force: true })).status,
+    ).toBe(200);
+    expect(t.calls).toEqual([
+      {
+        kind: "diff",
+        draft: { project: { spendingCap: 2_000_000, onCapReached: "continue" } },
+      },
+      {
+        kind: "apply",
+        draft: { project: { spendingCap: null } },
+        options: { plan: "plan-1", force: true },
+      },
+    ]);
+  });
+
+  it("refuses a body with both drafts, with neither, and a project key a draft does not change", async () => {
+    const t = fileDoor();
+    const call = rig(t.door);
+    const both = await call({ source: DRAFT, project: { spendingCap: 1000 } });
+    expect(both).toMatchObject({ status: 400, json: { error: { code: "invalid_request" } } });
+    expect(JSON.stringify(both.json)).toContain("both");
+    const neither = await call({ confirm: "plan-1" });
+    expect(neither).toMatchObject({ status: 400, json: { error: { code: "invalid_request" } } });
+    expect(JSON.stringify(neither.json)).toContain("no draft");
+    // modelUrl decides where every record's state is sent: the operator's, never a draft's.
+    for (const project of [
+      { modelUrl: "https://elsewhere.example" },
+      { alerts: { channels: ["slack:#x"] } },
+      { spendingCap: 0 },
+      { spendingCap: 1.5 },
+      { onCapReached: "stop" },
+    ]) {
+      const response = await call({ project });
+      expect(response).toMatchObject({ status: 400, json: { error: { code: "invalid_request" } } });
+    }
     expect(t.calls).toEqual([]);
   });
 });

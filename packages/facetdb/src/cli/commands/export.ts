@@ -9,6 +9,7 @@ import {
   isHumanDecision,
   type KeyText,
   type LogEntry,
+  namedValue,
   type Question,
   type QuestionSet,
   resolveThresholds,
@@ -94,15 +95,14 @@ export function readAnswer(set: QuestionSet | undefined, name: string, answer: A
         confidence: choiceConfidence(answer.probabilities),
         decision,
       };
-    case "score": {
-      const top = answer.probabilities.indexOf(Math.max(...answer.probabilities));
+    case "score":
       return {
-        value: question?.type === "score" ? (question.levels[top]?.name ?? "") : "",
+        // The level's name by the version's levels (core's, which the Decisions page reads too).
+        value: namedValue(question, answer),
         probability: Math.max(...answer.probabilities),
         confidence: answer.confidence,
         decision,
       };
-    }
   }
 }
 

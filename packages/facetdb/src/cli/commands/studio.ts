@@ -1,6 +1,7 @@
 import { defineCommand } from "../program.ts";
 import { ALLOW_INSECURE_OPTION, loadProjectConfig } from "./database.ts";
 import {
+  CONNECTIONS_OPTION,
   DEFAULT_PORT,
   HOST_OPTION,
   hostInUrl,
@@ -46,6 +47,7 @@ export const studioCommand = defineCommand<StudioOptions>("studio", {
       description: "the port of the studio and the check API",
       defaultValue: String(DEFAULT_PORT),
     },
+    CONNECTIONS_OPTION,
     HOST_OPTION,
     { flags: "--no-open", description: "print the address and open no browser" },
     {

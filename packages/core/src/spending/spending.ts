@@ -1,5 +1,6 @@
 import type { AlertEvent, AlertOutcome, Alerts } from "../alerts/index.ts";
 import type { Clock } from "../contracts/index.ts";
+import { tokensOfCap } from "./figures.ts";
 
 /**
  * The cap a project sets: billable input tokens a calendar month may use, and what happens at 100%.
@@ -406,7 +407,7 @@ export function createSpending(deps: SpendingDeps): Spending {
     const warningLevel = total * 100 >= cap.inputTokens * 80;
     const atCap = total >= cap.inputTokens;
     const pauses = cap.onCapReached === "pause";
-    const usage = `${total} of ${cap.inputTokens} input tokens`;
+    const usage = tokensOfCap(total, cap.inputTokens);
     // Settled before any alert goes out, so a failed alert cannot change it.
     let current: SpendingStatus;
     if (!warningLevel) {

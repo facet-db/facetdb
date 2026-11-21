@@ -702,6 +702,60 @@ describe("alerts, cursors and question-set versions", () => {
     expect(await scalar(db, "select count(*)::int from facetdb.question_set_versions")).toBe(2);
   });
 
+  it("keeps the set a worker runs whole, one row per source, replaced at each loop open and read back exactly (store migration 8)", async () => {
+    const { store, db, clock } = await newStore();
+    const set: QuestionSet = {
+      questions: [
+        { type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" },
+        { type: "noul", name: "urgent", instructions: "Is it urgent?", stakes: "low" },
+      ],
+      read: ["body"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    // Nothing until a worker records what it runs: `record` alone (a backfill's) writes no row.
+    const recorded = await store.questionSets.record("src", set);
+    expect(await store.questionSets.inForce("src")).toBeNull();
+
+    await store.questionSets.run("src", recorded.version, set);
+    expect(await store.questionSets.inForce("src")).toEqual({
+      version: 1,
+      questionSet: set,
+      recordedAt: new Date(1_700_000_000_000),
+    });
+    expect(await store.questionSets.inForce("other")).toBeNull();
+
+    // A threshold, a where filter and the questions' order change no version (the content hash
+    // leaves them out), and the row shows them all the same: it is the whole set.
+    clock.advance(60_000);
+    const [scam, urgent] = set.questions;
+    const retuned: QuestionSet = {
+      ...set,
+      questions: [urgent as (typeof set.questions)[number], scam as (typeof set.questions)[number]],
+      thresholds: { scam: { yesAbove: 0.5 } },
+      where: "body is not null",
+    };
+    const again = await store.questionSets.record("src", retuned);
+    expect(again.version).toBe(1);
+    await store.questionSets.run("src", again.version, retuned);
+    expect(await store.questionSets.inForce("src")).toEqual({
+      version: 1,
+      questionSet: retuned,
+      recordedAt: new Date(1_700_000_060_000),
+    });
+    expect(await scalar(db, "select count(*)::int from facetdb.question_sets_in_force")).toBe(1);
+    expect(await scalar(db, "select count(*)::int from facetdb.question_set_versions")).toBe(1);
+
+    // A row that no longer parses is a corrupt store, said with the version and the source.
+    await db.query(
+      `update facetdb.question_sets_in_force set question_set = $1::jsonb where source_id = 'src'`,
+      [JSON.stringify({ ...set, model: "jev-latest" })],
+    );
+    await expect(store.questionSets.inForce("src")).rejects.toThrow(
+      /question set v1 of "src" in the FacetDB store cannot be read/,
+    );
+  });
+
   it("read a source's version history newest first, each with its time and the set it was made from, up to a limit", async () => {
     const { store, clock } = await newStore();
     const set: QuestionSet = {

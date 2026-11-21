@@ -2,15 +2,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
-import { bodyProblems, readJson, requireOwnPage } from "../request.ts";
+import { bodyProblems, readJson } from "../request.ts";
 import type { BackfillJobStatus, BackfillJobsDoor } from "./backfill-door.ts";
 
 /**
  * The studio's backfill endpoints: `POST /v1/sources/:name/backfill/estimate`, `/backfill/start`
  * and `/backfill/stop`, and `GET /v1/sources/:name/backfill`. Parse, one door call, map; the
- * reviewer was checked by the middleware, and the three POSTs, which spend model budget and write
- * answers into the customer's table, take only a page of the studio itself, as Apply does
- * (`requireOwnPage`). Nothing is asked until a start carries the token its estimate gave.
+ * reviewer, and that the three POSTs (which spend model budget and write answers into the
+ * customer's table) come from a page of the studio itself or a program, were checked by app.ts's
+ * middleware. Nothing is asked until a start carries the token its estimate gave.
  */
 
 /** A question's name as the config writes one; the body is a boundary. */
@@ -32,13 +32,6 @@ const SHAPES = {
     '{} for the whole question set, or {"questions": ["<question name>", …]} for questions just added',
   start: '{"token": "<the token the estimate answered with>"}',
   stop: "{}",
-} as const;
-
-/** `requireOwnPage`'s words: these routes ask the model and write into the source's table. */
-const BACKFILL_PAGE = {
-  what: "A backfill",
-  does: "a backfill asks the model and writes answers into your database",
-  from: "Start and stop backfills from the studio this worker serves, or from a program on a machine you trust.",
 } as const;
 
 async function parsed<Schema extends z.ZodType>(
@@ -100,11 +93,10 @@ function busyWords(status: BackfillJobStatus): string {
 
 export function backfillRoutes(door: BackfillJobsDoor): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
-  const guard = (request: Parameters<typeof requireOwnPage>[0]) => {
+  const guard = () => {
     if (!door.available) {
       throw unavailable();
     }
-    requireOwnPage(request, BACKFILL_PAGE);
   };
 
   // Where the source's job stands: its state, the estimate, the counts so far, and why it ended.
@@ -124,7 +116,7 @@ export function backfillRoutes(door: BackfillJobsDoor): Hono<AppEnv> {
   // on, and GET .../backfill shows it, then the estimate and the token a start takes.
   route.post("/sources/:name/backfill/estimate", async (c) => {
     const name = nameOf(c.req.param("name"));
-    guard(c.req);
+    guard();
     const body = await parsed(estimateBody, c.req, SHAPES.estimate);
     const outcome = await door.estimate(name, body.questions);
     switch (outcome.kind) {
@@ -159,7 +151,7 @@ export function backfillRoutes(door: BackfillJobsDoor): Hono<AppEnv> {
   // The start carries the estimate's token: nothing is asked or queued on an estimate nobody saw.
   route.post("/sources/:name/backfill/start", async (c) => {
     const name = nameOf(c.req.param("name"));
-    guard(c.req);
+    guard();
     const body = await parsed(startBody, c.req, SHAPES.start);
     const outcome = await door.start(name, body.token);
     const again = `Ask for a new estimate (POST /v1/sources/${name}/backfill/estimate), look at the cost, then start it with the token it gives.`;
@@ -203,7 +195,7 @@ export function backfillRoutes(door: BackfillJobsDoor): Hono<AppEnv> {
 
   route.post("/sources/:name/backfill/stop", async (c) => {
     const name = nameOf(c.req.param("name"));
-    guard(c.req);
+    guard();
     await parsed(stopBody, c.req, SHAPES.stop);
     const outcome = await door.stop(name);
     switch (outcome.kind) {

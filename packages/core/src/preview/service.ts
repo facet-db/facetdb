@@ -161,7 +161,7 @@ export type PreviewService = {
 export const PREVIEW_CAPPED = {
   message:
     "This month's usage reached the project's spending cap, so the preview asked the model nothing.",
-  fix: "Raise spendingCap in facetdb.config.ts, or wait for the month to reset; records stay pending meanwhile and nothing is lost.",
+  fix: "Raise spendingCap in facetdb.config.ts (Settings can change it) and restart facetdb worker, or wait for the month to reset; records stay pending meanwhile and nothing is lost.",
 } as const;
 
 /** Reads pages of `scan`, newest first, until `limit` rows or the last page. */

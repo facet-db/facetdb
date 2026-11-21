@@ -127,14 +127,18 @@ const studio: StudioAccess = {
   reviewers: {
     list: () => Promise.reject(new Error("these tests list no reviewers")),
     add: () => Promise.reject(new Error("these tests add no reviewer")),
+    canAdd: () => Promise.resolve(false),
   },
   projectId: PROJECT,
 };
 
 type Notify = { readonly to: string };
 
-/** One source behind the endpoints, the world a test sets, and the app that serves it. */
-function setup() {
+/**
+ * One source behind the endpoints, the world a test sets, and the app that serves it; `set` is the
+ * source's question set, the module's unless a test needs other stakes or thresholds.
+ */
+function setup(set: QuestionSet = questionSet) {
   const clock = new FakeClock(START);
   const db = new FakeDatabase({ fields: ["body"], clock });
   db.install();
@@ -149,7 +153,7 @@ function setup() {
     log: new Map([[SOURCE_ID, log]]),
     connectors: new Map([[SOURCE_ID, connector]]),
     actions: new Map([[SOURCE_ID, [configureAction("notify", notify, { to: "#mods" })]]]),
-    questionSets: new Map([[SOURCE_ID, { questionSet, version: VERSION }]]),
+    questionSets: new Map([[SOURCE_ID, { questionSet: set, version: VERSION }]]),
     clock,
   });
   const app = createApp({
@@ -177,7 +181,7 @@ function setup() {
       at: new Date(clock.now()),
     };
     const written: Parameters<typeof reviewEntryOf>[0]["decisions"][] = [];
-    await recordAnswer(entry, questionSet, log, (k, decision, expected) => {
+    await recordAnswer(entry, set, log, (k, decision, expected) => {
       written.push(decision.decisions);
       return connector.write(k, decision, expected);
     });
@@ -200,7 +204,11 @@ function setup() {
   async function send(
     method: "GET" | "POST",
     path: string,
-    options: { body?: unknown; as?: "os" | "maya" | "nobody" } = {},
+    options: {
+      body?: unknown;
+      as?: "os" | "maya" | "nobody";
+      headers?: Readonly<Record<string, string>>;
+    } = {},
   ): Promise<Sent> {
     const as = options.as ?? "os";
     const peer: Peer = as === "os" ? THIS_MACHINE : ELSEWHERE;
@@ -209,8 +217,11 @@ function setup() {
       {
         method,
         headers: {
-          ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+          // Every write is declared JSON, body-less ones too, as the studio's client sends them;
+          // a case's own headers replace it.
+          ...(method === "GET" ? {} : { "content-type": "application/json" }),
           ...(as === "maya" ? { cookie: `${SESSION_COOKIE}=maya` } : {}),
+          ...options.headers,
         },
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       },
@@ -311,14 +322,22 @@ describe("GET /v1/review/queue", () => {
           ],
         },
       ],
+      // The worker's sources with their questions, for the filters: the fleet, not the page.
+      sources: [{ name: SOURCE, questions: ["scam", "team"] }],
     });
     expect(JSON.stringify(queue.body)).not.toContain("Cheap car");
   });
 
-  it("answers an empty queue with a zero count and no oldest wait", async () => {
+  it("answers an empty queue with a zero count and no oldest wait, and still lists the fleet", async () => {
     const t = setup();
     const queue = await t.send("GET", "/v1/review/queue");
-    expect(queue.body).toEqual({ count: 0, oldestSince: null, oldestWaitMs: null, cards: [] });
+    expect(queue.body).toEqual({
+      count: 0,
+      oldestSince: null,
+      oldestWaitMs: null,
+      cards: [],
+      sources: [{ name: SOURCE, questions: ["scam", "team"] }],
+    });
   });
 
   it("narrows by source, question and the probability band, passed through as the queue reads them", async () => {
@@ -446,6 +465,9 @@ describe("POST /v1/review/open", () => {
               { name: "yes", probability: 0.5 },
               { name: "no", probability: 0.5 },
             ],
+            // Low stakes with no override: the noul defaults.
+            stakes: "low",
+            thresholds: { kind: "yes-no", yesAbove: 0.7, noBelow: 0.3 },
           },
         ],
         decided: [
@@ -480,7 +502,39 @@ describe("POST /v1/review/open", () => {
         { name: "billing", description: "Money questions", probability: 0.6 },
         { name: "tech", description: "Technical questions", probability: 0.4 },
       ],
+      stakes: "low",
+      thresholds: { kind: "confidence", confidenceAtLeast: 0.5 },
     });
+  });
+
+  it("says each question's stakes and the thresholds it is decided by: the config's override over the stakes defaults", async () => {
+    const t = setup({
+      ...questionSet,
+      questions: [
+        { ...scam, stakes: "high" },
+        { ...team, stakes: "high" },
+      ],
+      thresholds: { scam: { yesAbove: 0.95 }, team: { confidenceAtLeast: 0.8 } },
+    });
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: UNSURE_TEAM });
+    const { card } = (await t.send("POST", "/v1/review/open", { body: {} })).body as {
+      card: { open: { name: string; stakes: string; thresholds: unknown }[] };
+    };
+    expect(card.open.map(({ name, stakes, thresholds }) => ({ name, stakes, thresholds }))).toEqual(
+      [
+        // The override names the yes line only; the no line is the high-stakes default.
+        {
+          name: "scam",
+          stakes: "high",
+          thresholds: { kind: "yes-no", yesAbove: 0.95, noBelow: 0.1 },
+        },
+        {
+          name: "team",
+          stakes: "high",
+          thresholds: { kind: "confidence", confidenceAtLeast: 0.8 },
+        },
+      ],
+    );
   });
 
   it("answers an empty queue with a null card, not an error", async () => {
@@ -555,7 +609,7 @@ describe("POST /v1/review/open", () => {
     }
     const notJson = await t.app.request(
       "/v1/review/open",
-      { method: "POST", body: "{" },
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{" },
       THIS_MACHINE,
     );
     expect(notJson.status).toBe(400);
@@ -970,6 +1024,69 @@ describe("POST /v1/review/undo", () => {
     expect(undone.status).toBe(409);
     expect(undone.body).toEqual(error("cannot_undo"));
     expect(JSON.stringify(undone.body)).not.toContain("Cheap car");
+  });
+});
+
+describe("a review write from a page of another site", () => {
+  // The reviewer's browser carries the session cookie to a request any open page makes; a text/plain
+  // body needs no preflight, and a sibling subdomain is same-site, which SameSite=Lax lets through.
+  const FORGED = [
+    { headers: { "content-type": "text/plain" }, code: "json_only", status: 415 },
+    { headers: { origin: "https://evil.example" }, code: "cross_origin", status: 403 },
+    { headers: { "sec-fetch-site": "same-site" }, code: "cross_origin", status: 403 },
+  ] as const;
+
+  it("decides nothing, and the card stays open", async () => {
+    const t = setup();
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const card = await openCard(t, "maya");
+    for (const forged of FORGED) {
+      const decided = await t.send("POST", "/v1/review/r1/decide", {
+        body: { ...cardOf(card), question: "scam", value: true },
+        as: "maya",
+        headers: forged.headers,
+      });
+      expect(decided, JSON.stringify(forged.headers)).toMatchObject({
+        status: forged.status,
+        body: error(forged.code),
+      });
+    }
+    expect(t.db.decisionOf("r1")?.status).toBe("needs_review");
+    expect(t.notify.calls).toEqual([]);
+    // The studio's own page decides it.
+    const own = await t.send("POST", "/v1/review/r1/decide", {
+      body: { ...cardOf(card), question: "scam", value: true },
+      as: "maya",
+      headers: { origin: "https://studio.example.com", "sec-fetch-site": "same-origin" },
+    });
+    expect(own.status).toBe(200);
+  });
+
+  it("undoes nothing, though undo takes no body", async () => {
+    const t = setup();
+    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const card = await openCard(t, "maya");
+    await t.send("POST", "/v1/review/r1/decide", {
+      body: { ...cardOf(card), question: "scam", value: true },
+      as: "maya",
+    });
+    for (const forged of FORGED) {
+      const undone = await t.send("POST", "/v1/review/undo", {
+        as: "maya",
+        headers: forged.headers,
+      });
+      expect(undone, JSON.stringify(forged.headers)).toMatchObject({
+        status: forged.status,
+        body: error(forged.code),
+      });
+    }
+    expect(t.db.decisionOf("r1")?.status).toBe("done");
+    const own = await t.send("POST", "/v1/review/undo", {
+      as: "maya",
+      headers: { "sec-fetch-site": "same-origin" },
+    });
+    expect(own.status).toBe(200);
+    expect(t.db.decisionOf("r1")?.status).toBe("needs_review");
   });
 });
 

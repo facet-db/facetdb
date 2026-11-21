@@ -34,6 +34,7 @@ import {
   STORE_TABLES,
   STORE_VERSION_TABLE,
   STORE_WORKER_READ_ONLY_TABLES,
+  STORE_WORKER_UPSERT_TABLES,
   storeInstallStatements,
 } from "../store/index.ts";
 import { scramVerifier } from "./scram.ts";
@@ -407,12 +408,15 @@ export function installSql(
   const onChange = source.onChange ?? "reset";
   const appendOnly = new Set(STORE_APPEND_ONLY_TABLES);
   const readOnly = new Set(STORE_WORKER_READ_ONLY_TABLES);
+  const upsertOnly = new Set(STORE_WORKER_UPSERT_TABLES);
   const storeRights = (name: string) =>
     readOnly.has(name)
       ? "select"
       : appendOnly.has(name)
         ? "select, insert"
-        : "select, insert, update, delete";
+        : upsertOnly.has(name)
+          ? "select, insert, update"
+          : "select, insert, update, delete";
   const policy = (name: string, command: "select" | "update") =>
     `  if not exists (select 1 from pg_catalog.pg_policies
                  where schemaname = current_setting('${SCHEMA_SETTING}')
@@ -692,7 +696,8 @@ end $$`,
     // The store's tables, owned by the admin: row access and nothing else (no create, no ownership).
     // The logs are append-only (read and insert); the reviewer accounts and the version table are
     // read-only, so the worker checks a password but never makes an account, and sees the store is
-    // current but never migrates. The queue and the projects serve the source's database whatever
+    // current but never migrates; the set in force is upserted, never deleted from by the worker.
+    // The queue and the projects serve the source's database whatever
     // the store; the rest are the store's.
     ...STORE_TABLES.map((name) =>
       plain(
@@ -707,6 +712,15 @@ end $$`,
       plain(
         "grants",
         `revoke update, delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} from ${worker}`,
+        "store",
+      ),
+    ),
+    // The first install of store migration 8 granted delete on the set in force too; the worker
+    // only upserts it (uninstall and purge delete as the admin), so it converges the same way.
+    ...STORE_WORKER_UPSERT_TABLES.map((name) =>
+      plain(
+        "grants",
+        `revoke delete on ${quoteIdent(SCHEMA)}.${quoteIdent(name)} from ${worker}`,
         "store",
       ),
     ),

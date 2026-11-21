@@ -274,6 +274,7 @@ describe("the log-only purge, after a plain uninstall", () => {
         "credentials",
         "sources",
         "projects",
+        "question_sets_in_force",
         "records",
         "usage",
         "usage_reservations",

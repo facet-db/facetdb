@@ -7,7 +7,7 @@
 /**
  * A check's words in two parts: the first clause, which the status word carries, and what is left
  * (what happened and what FacetDB did), shown under it. "Worker not running. The worker has not
- * beat..." splits at the full stop; "Three sources, logins as installed; listings: ..." at the
+ * beat..." splits at the full stop; "Three sources, reachable and installed; listings: ..." at the
  * semicolon.
  */
 export function splitCheck(words: string): { readonly line: string; readonly rest: string } {

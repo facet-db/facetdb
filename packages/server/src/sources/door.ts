@@ -4,6 +4,7 @@ import type {
   DraftWarning,
   ReloadSummary,
   SourceDraft,
+  UncommittedWords,
   Words,
 } from "../config/service.ts";
 
@@ -80,7 +81,7 @@ export type SetupPlan = {
   readonly diff: string;
   readonly diffPlan: string;
   /** Why the write would be refused without `force`: git keeps no copy of the file as it is. */
-  readonly uncommitted: Words | null;
+  readonly uncommitted: UncommittedWords | null;
   readonly warnings: readonly DraftWarning[];
   /** The first backfill's cost: every row of the table, priced from up to 100 of them. */
   readonly estimate: BackfillEstimate;

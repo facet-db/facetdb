@@ -56,6 +56,7 @@ function localStudio(projectId: string): StudioAccess {
     reviewers: {
       list: () => Promise.reject(new Error("these tests list no reviewers")),
       add: () => Promise.reject(new Error("these tests add no reviewer")),
+      canAdd: () => Promise.resolve(false),
     },
     projectId,
   };
@@ -82,6 +83,9 @@ const NO_CONFIG: ConfigService = {
 const ok = (name: string, detail: string): DoctorCheck => ({ name, status: "ok", detail });
 
 const INSTALLED = "facetdb schema, jobs table, trigger and answer columns are in place";
+/** The Postgres doctor's distance warning, as it words it (packages/postgres, engine/doctor.ts). */
+const DISTANCE =
+  "the database answers in 190 ms; run the worker in the same region for fast answers";
 
 /** A doctor that answers its script and counts its runs. */
 function scripted(checks: readonly DoctorCheck[]) {
@@ -105,6 +109,7 @@ function table(facts: Partial<TableFacts> & Pick<TableFacts, "doctor">): TableFa
     storage: "inline",
     answersIn: "columns",
     login: { kind: "user", user: "facetdb_worker", reach: "columns" },
+    estimateRows: () => Promise.resolve(null),
     ...facts,
   };
 }
@@ -202,7 +207,7 @@ function rig(
       read: READ,
       questions: 2,
       version: 3,
-      table: table({ doctor: listingsDoctor.run }),
+      table: table({ doctor: listingsDoctor.run, estimateRows: () => Promise.resolve(4_137) }),
     },
     {
       name: "support_messages",
@@ -349,7 +354,7 @@ describe("GET /v1/home", () => {
       checks: [
         { name: "worker", status: "ok", words: "Worker beating, 2 s ago" },
         { name: "model", status: "ok", words: "Model healthy" },
-        { name: "sources", status: "ok", words: "Three sources, logins as installed" },
+        { name: "sources", status: "ok", words: "Three sources, reachable and installed" },
       ],
       sources: [
         { name: "listings", verdict: "healthy", words: "as installed" },
@@ -380,7 +385,10 @@ describe("GET /v1/home", () => {
       inputTokens: 76_190_477,
       cap: { inputTokens: 595_238_096, onCapReached: "pause" },
       warningAt: 0.8,
-      words: { figure: "$3.20", sub: "13% of the $25 monthly cap. The project pauses at 100%." },
+      words: {
+        figure: "76.2M of 595M",
+        sub: "Input tokens this month: 13% of the monthly cap, about $3.20 of $25. The project pauses at 100%.",
+      },
     });
     expect(home.spending.fraction).toBeCloseTo(0.128, 3);
     expect(home.alerts).toEqual([
@@ -484,7 +492,7 @@ describe("GET /v1/home", () => {
     ];
     t.doctors.listings.checks = [
       ok("database", "logged in"),
-      { name: "distance", status: "warn", detail: "the database is 190 ms away" },
+      { name: "distance", status: "warn", detail: DISTANCE },
     ];
     const home = await t.home();
     expect(home.health.words).toBe("Connector lost access");
@@ -499,6 +507,21 @@ describe("GET /v1/home", () => {
       "failing",
       "healthy",
     ]);
+  });
+
+  it("says sources that answer with one far away as reachable and installed, then the doctor's warning", async () => {
+    const t = rig();
+    busyDay(t.world);
+    t.doctors.listings.checks = [
+      ok("database", "logged in"),
+      { name: "distance", status: "warn", detail: DISTANCE },
+    ];
+    const home = await t.home();
+    expect(home.health.checks[2]).toEqual({
+      name: "sources",
+      status: "warn",
+      words: `Three sources, reachable and installed; listings: ${DISTANCE}`,
+    });
   });
 
   it("@timing runs each source's doctor at most once a minute, shared by Home and Sources", async () => {
@@ -530,7 +553,10 @@ describe("GET /v1/home", () => {
       status: "uncapped",
       cap: null,
       fraction: null,
-      words: { figure: "$0", sub: "No monthly cap is set, so the project never pauses." },
+      words: {
+        figure: "0",
+        sub: "Input tokens this month, $0. No monthly cap is set, so the project never pauses.",
+      },
     });
     expect(home.alerts).toEqual([]);
   });
@@ -542,25 +568,27 @@ describe("GET /v1/home", () => {
     expect((await warned.home()).spending).toMatchObject({
       status: "warned",
       words: {
-        figure: "$0.03",
-        sub: "80% of the $0.04 monthly cap, past the 80% warning. The project pauses at 100%.",
+        figure: "800k of 1M",
+        sub: "Input tokens this month: 80% of the monthly cap, past the 80% warning, about $0.03 of $0.04. The project pauses at 100%.",
       },
     });
     warned.world.tokens = 799_999;
     expect((await warned.home()).spending).toMatchObject({
       status: "ok",
-      words: { sub: "79% of the $0.04 monthly cap. The project pauses at 100%." },
+      words: {
+        sub: "Input tokens this month: 79% of the monthly cap, about $0.03 of $0.04. The project pauses at 100%.",
+      },
     });
     warned.world.tokens = 999_999;
     expect((await warned.home()).spending.words.sub).toBe(
-      "99% of the $0.04 monthly cap, past the 80% warning. The project pauses at 100%.",
+      "Input tokens this month: 99% of the monthly cap, past the 80% warning, about $0.04 of $0.04. The project pauses at 100%.",
     );
     warned.world.tokens = 1_000_000;
     expect((await warned.home()).spending).toMatchObject({
       status: "paused",
       fraction: 1,
       words: {
-        sub: "The $0.04 monthly cap is reached: the project is paused until the month resets or the cap changes.",
+        sub: "Input tokens this month: the monthly cap is reached (about $0.04), so the project is paused until the month resets or the cap changes.",
       },
     });
 
@@ -572,13 +600,13 @@ describe("GET /v1/home", () => {
       // What the worker does at 100%, as it started: the Settings page compares it with the file.
       cap: { inputTokens: 1_000_000, onCapReached: "continue" },
       words: {
-        sub: "The $0.04 monthly cap is reached; the project keeps answering, as the config says.",
+        sub: "Input tokens this month: the monthly cap is reached (about $0.05); the project keeps answering, as the config says.",
       },
     });
     continuing.world.tokens = 10;
     expect((await continuing.home()).spending.words).toEqual({
-      figure: "less than $0.01",
-      sub: "0% of the $0.04 monthly cap. The project keeps answering past 100%.",
+      figure: "10 of 1M",
+      sub: "Input tokens this month: 0% of the monthly cap, less than $0.01 of $0.04. The project keeps answering past 100%.",
     });
   });
 
@@ -633,6 +661,8 @@ describe("GET /v1/sources", () => {
       },
       lastChangeAt: "2026-11-05T14:09:48.000Z",
       answers: "Inline columns on public.listings. Two questions, version 3.",
+      // The database's own estimate, as it gave it; the page rounds it.
+      rows: 4_137,
       backfill: {
         state: "part-way",
         fraction: null,
@@ -650,6 +680,8 @@ describe("GET /v1/sources", () => {
     });
     expect(messages).toMatchObject({
       connector: "MySQL, trigger",
+      // An engine with no estimate, or a table never analysed: none is made up.
+      rows: null,
       how: {
         label: "Wakes",
         words: "Within a second, on the poll of facetdb_jobs. Last change seen 3 minutes ago.",
@@ -680,6 +712,7 @@ describe("GET /v1/sources", () => {
       },
       lastChangeAt: null,
       answers: "Kept in the FacetDB store. One question, version 2. Unsure records land in Review.",
+      rows: null,
       backfill: {
         state: "none",
         fraction: null,

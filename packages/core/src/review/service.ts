@@ -232,6 +232,10 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
    * The card's record, or the reason, in words, the card no longer shows it: deleted, edited since,
    * no longer in one of `statuses`, or without a logged answer at this state for every question of
    * the set (only the worker can answer those).
+   *
+   * Three reads of one key, none depending on another, so they go out together (on a far database
+   * each round trip is the Review page's whole budget); the latest answer is the history's last
+   * answer entry, so no fourth read. The checks still run in their order.
    */
   async function load(
     source: Source,
@@ -239,7 +243,11 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     statuses: readonly RecordStatus[],
   ): Promise<Loaded | { readonly stale: string }> {
     const { questionSet } = source.questions;
-    const { rows } = await source.connector.read([card.key]);
+    const [{ rows }, currents, history] = await Promise.all([
+      source.connector.read([card.key]),
+      source.connector.current([card.key]),
+      source.log.history(card.key),
+    ]);
     const [row] = rows;
     if (row === undefined) {
       return { stale: "the record was deleted, so its card left the queue" };
@@ -247,21 +255,25 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (row.hash !== card.stateHash) {
       return { stale: EDITED };
     }
-    const current = (await source.connector.current([card.key])).get(card.key);
+    const current = currents.get(card.key);
     if (current === undefined || !statuses.includes(current.status)) {
       return { stale: "the record is no longer waiting for review, so its card left the queue" };
     }
-    const answer = await source.log.latestAnswer(card.key);
+    const answer = history.findLast(isAnswerEntry);
     if (answer === undefined || answer.stateHash !== card.stateHash) {
       return { stale: REASKED };
     }
-    const history = await source.log.history(card.key);
     const byThresholds = decideRecord(questionSet, questionSet.thresholds, answer, []);
     const decisions = decideRecord(questionSet, questionSet.thresholds, answer, history);
     if (byThresholds === undefined || decisions === undefined) {
       return { stale: REASKED };
     }
     return { row, status: current.status, answer, history, byThresholds, decisions };
+  }
+
+  /** The history's last model call: what `DecisionLog.latestAnswer` reads, without the read. */
+  function isAnswerEntry(entry: LogEntry): entry is AnswerEntry {
+    return entry.kind === "answer";
   }
 
   function cardOf(
@@ -369,6 +381,9 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       },
       source.log,
       write,
+      // The history just loaded stands in for the first re-read: the read after the write still
+      // catches a person's decision logged meanwhile.
+      loaded.history,
     );
     // The last write is the one that landed: `applyHumanDecision` writes again only after a landed one.
     return result.written ? writes.at(-1) : undefined;
@@ -392,25 +407,54 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     return cardOf(source, card, loaded, loaded.decisions, lockedUntil);
   }
 
+  /**
+   * How many cards an open reads at a time: eight first, since the first is nearly always the one
+   * opened and the rest cover a card another reviewer takes between the listing and the lock, or
+   * one gone stale; then wider, and last the whole queue as before, so cards that are never
+   * consumed (a source the worker no longer runs, whose cards stay until purge) cannot hold the
+   * front of every listing. Never the whole queue first (1,759 cards with their figures took 3.8 s
+   * to list before the first was even locked).
+   */
+  const OPEN_BATCHES: readonly (number | undefined)[] = [8, 64, 512, undefined];
+
   async function open(viewer: string, filter: ReviewFilter): Promise<OpenedCard | null> {
     const nowMs = clock.now();
-    for (const listed of await queue.list(filter, viewer, nowMs)) {
-      const source = sourceOf(listed.source);
-      if (source === undefined) {
-        continue;
-      }
-      const lock = await queue.lock(listed.source, listed.key, viewer, nowMs);
-      if (lock.kind !== "locked") {
-        // Another reviewer took it between the list and the lock, or it left the queue.
-        continue;
-      }
-      const card = await openLocked(
-        source,
-        { source: listed.source, key: listed.key, stateHash: listed.stateHash },
-        lock.until,
+    /** Cards met and passed over (no source here, or taken meanwhile): not locked again. */
+    const passed = new Set<string>();
+    for (const limit of OPEN_BATCHES) {
+      const listed = await queue.list(
+        limit === undefined ? filter : { ...filter, limit },
+        viewer,
+        nowMs,
       );
-      if (card !== undefined) {
-        return card;
+      for (const candidate of listed) {
+        const id = `${candidate.source}\u0000${candidate.key}`;
+        if (passed.has(id)) {
+          continue;
+        }
+        const source = sourceOf(candidate.source);
+        if (source === undefined) {
+          passed.add(id);
+          continue;
+        }
+        const lock = await queue.lock(candidate.source, candidate.key, viewer, nowMs);
+        if (lock.kind !== "locked") {
+          // Another reviewer took it between the list and the lock, or it left the queue.
+          passed.add(id);
+          continue;
+        }
+        const card = await openLocked(
+          source,
+          { source: candidate.source, key: candidate.key, stateHash: candidate.stateHash },
+          lock.until,
+        );
+        if (card !== undefined) {
+          return card;
+        }
+      }
+      // A short batch was the queue's end; a full one, consumed or passed over, has more behind it.
+      if (limit === undefined || listed.length < limit) {
+        return null;
       }
     }
     return null;
@@ -430,9 +474,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     // But the worker may have re-answered the record since the lock, and a card at a new hash
     // starts with no lease (the queue's rule): unless the listed card carries the lease just taken,
     // it is not the viewer's to see, and no state comes back.
-    const listed = (await queue.list({ source: sourceId }, viewer, nowMs)).find(
-      (card) => card.key === key,
-    );
+    const [listed] = await queue.list({ source: sourceId, key, limit: 1 }, viewer, nowMs);
     if (
       listed === undefined ||
       listed.lock?.by !== viewer ||
@@ -469,17 +511,30 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (misfit !== undefined) {
       return { kind: "refused", reason: misfit };
     }
-    const lease = await queue.renew(card.source, card.key, viewer, clock.now());
+    // The lease and the card's reads go out together (reads only: a lease not the viewer's
+    // decides first, and what was read is then dropped, a failed read included), one round trip
+    // instead of two.
+    const [leased, read] = await Promise.allSettled([
+      queue.renew(card.source, card.key, viewer, clock.now()),
+      load(source, card, ["needs_review"]),
+    ]);
+    if (leased.status === "rejected") {
+      throw leased.reason;
+    }
+    const lease = leased.value;
     if (lease.kind === "held") {
       return { kind: "held", by: lease.by, until: lease.until };
     }
     if (lease.kind === "lost") {
       return { kind: "lost" };
     }
+    if (lease.kind !== "gone" && read.status === "rejected") {
+      throw read.reason;
+    }
     const loaded =
-      lease.kind === "gone"
+      lease.kind === "gone" || read.status === "rejected"
         ? { stale: "the card left the queue: the record was decided or changed meanwhile" }
-        : await load(source, card, ["needs_review"]);
+        : read.value;
     if ("stale" in loaded) {
       await queue.withdraw(card.source, card.key, card.stateHash);
       return { kind: "stale", reason: loaded.stale };
