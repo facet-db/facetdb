@@ -1,0 +1,423 @@
+{
+  "pack": "marketplace",
+  "fields": ["title", "description"],
+  "answers": ["yes", "no", "unsure"],
+  "about": "50 listings written for this sample: invented text, invented names and brands, phone numbers in the 555-0100 to 555-0199 range kept for fiction, and addresses on the reserved .example domain, which never resolves. Each listing carries the answer a careful moderator would give to each question from its text alone. \"unsure\" means that moderator would not decide from the text alone and would send the listing to review: a live run counts it as agreement when the model's probability lands anywhere in the question's review band, which is strictly between 0.10 and 0.90 for a high-stakes question (scam, banned_item, counterfeit) and strictly between 0.30 and 0.70 for a low-stakes one (off_platform), so the evidence reports the agreement on unsure listings per stakes level, and reports an automatic yes or no on an unsure listing apart from the answers that are wrong. The criteria describe kinds of situations and share no distinctive phrase with any listing.",
+  "listings": [
+    {
+      "id": "m01",
+      "title": "Case of red wine, twelve bottles, unopened",
+      "description": "Bought on a vineyard trip and never opened, kept in a cool cupboard on its side. Collection only, cash when you pick it up.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m02",
+      "title": "Mountain bike, nearly new, price for a quick sale",
+      "description": "Good day and thank you for your interest. I am currently working offshore, so the bike is held by a delivery company. Once you send the deposit as gift card codes, they will bring it to your door. I kindly ask for your understanding and wish you a blessed week.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "yes", "counterfeit": "no" }
+    },
+    {
+      "id": "m03",
+      "title": "Campervan, two berth, full service history",
+      "description": "Well looked after van with a new cambelt and both keys. Viewings and test drives welcome at my house at weekends. If you want me to hold it for you after the viewing, I ask for a deposit by bank transfer, with the rest paid when you collect.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "yes", "counterfeit": "no" }
+    },
+    {
+      "id": "m04",
+      "title": "Replica Roman legionary helmet, display piece",
+      "description": "Brass reproduction of a first-century helmet, made for reenactment and display, with a wooden stand. It is a modern copy, sold as one. Collection, or postage through the site.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m05",
+      "title": "Replica flintlock pistol for wall display",
+      "description": "Decorative copy of an old pistol with a walnut grip and brass trim. It does not fire and is sold for display only. Collection from the town centre, cash please.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "unsure",
+        "off_platform": "no",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m06",
+      "title": "Shotgun microphone with windshield",
+      "description": "Directional mic for video, used on two student films. Comes with the furry windshield, shock mount and cable. Works perfectly. Paid through the site and posted the next working day.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m07",
+      "title": "Killer deal: three-seat sofa, grey",
+      "description": "Moving abroad, so the sofa has to go. Grey fabric, no stains, pet-free home. You collect and I will help carry it down the stairs. Cash or pay through the app.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m08",
+      "title": "Flagship smartphone, sealed, 70% off",
+      "description": "Brand new in the sealed box, won in a raffle and I already have one. First to pay gets it. Payment in crypto or gift cards only, I post as soon as it clears. Text 555-0134 for the wallet details.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "yes", "counterfeit": "no" }
+    },
+    {
+      "id": "m09",
+      "title": "Air rifle with scope and soft case",
+      "description": "Lightly used for target practice in the garden. Comes with a scope, a padded case and two tins of pellets. Collection only, proof of age needed.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m10",
+      "title": "Unopened prescription painkillers",
+      "description": "A leftover box from after my operation, never opened and still sealed. Selling cheaply rather than throwing it away. Can post or you can collect.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m11",
+      "title": "Kittens ready for new homes",
+      "description": "Three playful kittens, litter trained and used to children. Their mum can be seen. A small rehoming fee so they go to caring families. Message here to arrange a visit.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m12",
+      "title": "Garden landscaping, small jobs welcome",
+      "description": "Patios, fencing and new lawns laid by a local team. Fully insured, and quotes are free after a visit. Reviews of our past work are easy to find under our trading name.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "unsure",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m13",
+      "title": "Hand-knitted baby blankets, made to order",
+      "description": "Soft merino blankets in five colours, each knitted to order. I also take them to craft fairs around the county, so ask me where I will be next.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "unsure",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m14",
+      "title": "Fireworks left over from the village fete",
+      "description": "Two boxes of rockets and a large barrage, never lit, kept dry in the loft. Collection only.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m15",
+      "title": "Police uniform jacket with badge",
+      "description": "Genuine issue jacket with the force badge still sewn on, found in a family clear-out. Size large. Offers welcome through the site.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m16",
+      "title": "Pool chlorine granules, large sealed tub",
+      "description": "Bought too much for the summer. Sealed tub, stored in the garage away from heat. Collection only, as it cannot be posted. My number is on the label in the last photo.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "unsure",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m17",
+      "title": "CBD gummies, unopened jars",
+      "description": "Full spectrum gummies, bought online. They helped me sleep but I have switched to something else. Can post.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "unsure",
+        "off_platform": "no",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m18",
+      "title": "Hunting knife with leather sheath",
+      "description": "Fixed blade, very sharp, used for one season of deer stalking. Comes with the original sheath and a sharpening stone. Buyer must be an adult. Collection only.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "unsure",
+        "off_platform": "no",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m19",
+      "title": "Baby sleeper, recalled model, still works fine",
+      "description": "I know this model was recalled, but we used it for both our babies with no problems. Folds flat, washable cover. Cheap to a good home.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m20",
+      "title": "Drill, grinder and circular saw, quick sale",
+      "description": "All nearly new. No receipts or boxes. Need them gone today, cash only, no questions please.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "unsure",
+        "off_platform": "no",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m21",
+      "title": "Spare passport, still valid",
+      "description": "Got a new one after changing my name, so this one is spare. Still valid. Can post anywhere.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m22",
+      "title": "Sea-view apartment, available now, bargain rent",
+      "description": "I am working overseas this year, so I cannot show the apartment, but the photos say it all. Book it with the deposit through the site's booking button and I will mail you the keys.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m23",
+      "title": "1:18 die-cast Astrelle GT, officially licensed",
+      "description": "Die-cast replica of the Astrelle GT sports car, made under licence and carrying the maker's badge on the bonnet. Opening doors, boxed with its certificate. Pay through the site, posted tracked.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m24",
+      "title": "Two concert tickets, front standing",
+      "description": "Can't make it any more, selling at face value. They are e-tickets, so I will email them to you once you have paid by bank transfer.",
+      "expected": {
+        "scam": "unsure",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m25",
+      "title": "Games console, boxed, barely used",
+      "description": "Bought for my son, who prefers his old one. Boxed with two controllers. I can only post it, and payment by bank transfer first, please.",
+      "expected": {
+        "scam": "unsure",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m26",
+      "title": "Smart TV, free to the first reply",
+      "description": "Upgrading, so this large TV is free. To claim it, reply here with your full name, home address and bank account number so I can confirm you are a real person.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m27",
+      "title": "1:1 replica Corvanne chronograph",
+      "description": "Mirror quality copy, same weight and same logo as the original, nobody will tell the difference. Comes in a branded box. Paid through the site and sent tracked.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m28",
+      "title": "Quillmora tote, AAA grade",
+      "description": "High-grade copy of the Quillmora tote with the gold logo clasp and a dust bag. Looks identical to the shop version for a fraction of the price. Several colours, ask through the app.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m29",
+      "title": "Zentro trainers, replicas, all sizes",
+      "description": "Factory replicas with full logos and the box, every size. Order by email at orders@kicks.example and pay with a payment app. I ship worldwide.",
+      "expected": {
+        "scam": "unsure",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "yes"
+      }
+    },
+    {
+      "id": "m30",
+      "title": "Quillmora shoulder bag, second-hand",
+      "description": "Bought from a friend who said it came from the brand's own shop. The stitching on the strap looks a little different from the ones in store, so make of that what you will. Pay through the site.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "no",
+        "counterfeit": "unsure"
+      }
+    },
+    {
+      "id": "m31",
+      "title": "Designer belt, fake but looks real",
+      "description": "Black leather belt with the big double-letter buckle of a famous fashion house. It's a fake, I'm being honest, but it looks the part. Waist size 90 cm.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m32",
+      "title": "Football shirts, unofficial copies",
+      "description": "Unofficial copies of top club shirts with the club badges and sponsor logos printed on. All sizes, discount for team orders. Pay through the site.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m33",
+      "title": "Replica home shirt, last season",
+      "description": "Replica home shirt from last season, worn twice, washed and folded. Medium. Collection or postage through the site.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "no",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m34",
+      "title": "Designer sunglasses, ten pairs",
+      "description": "Copies of a famous designer's aviators with the logo on the arms. Ten pairs, sold together. Cash when you collect.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m35",
+      "title": "Quillmora-inspired tote, vegan leather",
+      "description": "Same shape and stitching as the famous tote, without any logo. Roomy, with an inside zip pocket. Pay through the app, posted in two days.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "no",
+        "counterfeit": "unsure"
+      }
+    },
+    {
+      "id": "m36",
+      "title": "Luxury watch bought on holiday",
+      "description": "Bought it at a market stall while travelling. I can't vouch that it is genuine, so I am selling it as seen. Keeps good time.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "no",
+        "counterfeit": "unsure"
+      }
+    },
+    {
+      "id": "m37",
+      "title": "Branded running shoes, factory B-grade",
+      "description": "Factory seconds with tiny marks on the sole, no tags and no box. Several sizes available. Collection or postage through the site.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "no",
+        "counterfeit": "unsure"
+      }
+    },
+    {
+      "id": "m38",
+      "title": "Wireless headphones, unbranded",
+      "description": "Unbranded over-ear headphones that sound as good as the famous ones at a fraction of the price. Barely used. Happy to sort out payment whatever way suits you.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "unsure",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m39",
+      "title": "Puppies ready now, delivery arranged",
+      "description": "Beautiful pedigree puppies, vaccinated. I live far away, so the puppy travels by pet courier once you pay the reservation fee in gift cards. Viewing is not possible, but I can send photos.",
+      "expected": {
+        "scam": "yes",
+        "banned_item": "yes",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m40",
+      "title": "New tablet, sealed, well under shop price",
+      "description": "Spare one from a bulk order at work, still sealed in the box. I will send you a payment link once you confirm you want it, and it goes in the post straight after.",
+      "expected": {
+        "scam": "unsure",
+        "banned_item": "no",
+        "off_platform": "unsure",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m41",
+      "title": "Replica Corvanne diver's watch, for display only",
+      "description": "Display piece with the Corvanne logo on the dial and the case back, made to look like the real model. Sold for display only and not as a working timepiece. Payment through the site.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "yes" }
+    },
+    {
+      "id": "m42",
+      "title": "Room in a shared house, reserve now",
+      "description": "Lovely room with a desk and lots of light. To reserve it, email a copy of your ID and your bank details to rooms@lettings.example and I will hold it for you. Viewing after reservation.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "yes", "counterfeit": "no" }
+    },
+    {
+      "id": "m43",
+      "title": "Box of cigars, still sealed",
+      "description": "A present for someone who has since given up smoking, so the box is still in its wrapper. Happy to meet in town, and you pay through the site.",
+      "expected": { "scam": "no", "banned_item": "yes", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m44",
+      "title": "Electric bikes, brand new, 80% off",
+      "description": "Ex-display stock from my warehouse overseas, shipped to your door. Buy now with the site's checkout while the offer lasts, as only a handful are left. No viewings and no returns.",
+      "expected": { "scam": "yes", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    },
+    {
+      "id": "m45",
+      "title": "Designer wool coat, need the money",
+      "description": "Selling because of hospital bills. The coat was a gift and I can't promise it is authentic, but it is beautiful. Post only, paid first through a payment app.",
+      "expected": {
+        "scam": "unsure",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "unsure"
+      }
+    },
+    {
+      "id": "m46",
+      "title": "Double room near the university",
+      "description": "Furnished double room in a quiet house. The landlord asks for a small reservation fee by payment app to book a viewing, refunded if you take the room.",
+      "expected": {
+        "scam": "yes",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m47",
+      "title": "Handmade stoneware mugs",
+      "description": "Wheel-thrown mugs in a speckled glaze, each one slightly different. There is a bigger choice at my stall in the covered market at weekends. Postage through the site.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "unsure",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m48",
+      "title": "Reproduction enamel advertising sign",
+      "description": "New enamel sign made in the style of an old railway poster, sold openly as a reproduction for a kitchen or a garage wall. More of my designs on my site, signs.example.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m49",
+      "title": "Oak dining table and four chairs",
+      "description": "Solid oak, seats six with the leaf in. A couple of marks on the top. Better price if we sort it out between ourselves. Collection only.",
+      "expected": {
+        "scam": "no",
+        "banned_item": "no",
+        "off_platform": "yes",
+        "counterfeit": "no"
+      }
+    },
+    {
+      "id": "m50",
+      "title": "Empty steel ammo can, used as a toolbox",
+      "description": "Army surplus box, empty, with a good seal on the lid. I kept sockets and spanners in it. Great for camping kit. Pay through the site, collection or post.",
+      "expected": { "scam": "no", "banned_item": "no", "off_platform": "no", "counterfeit": "no" }
+    }
+  ]
+}
