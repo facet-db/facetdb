@@ -32,6 +32,8 @@ import {
   createOutbox,
   createServer,
   type DeliveryReport,
+  gaveUpAlert,
+  gaveUpSubject,
   OpenSurfaceError,
   onlyRecord,
   openStudioBuild,
@@ -674,12 +676,10 @@ export async function runWorkers(
         }
         return secret;
       },
-      onGiveUp: (event) => {
-        // Alert channels arrive later; the event goes to the worker's log.
-        print(
-          `webhook to ${event.host} given up after ${event.attempts} attempts in 24 hours (delivery ${event.deliveryId})`,
-        );
-        return Promise.resolve();
+      // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
+      // worker's other alerts are; one that cannot be raised is the outbox's to retry.
+      onGiveUp: async (event, _signal, lastError) => {
+        await alerts.raise(gaveUpAlert(event, lastError));
       },
     });
 
@@ -1041,10 +1041,11 @@ function printAlertFailures(
 function alertFailureLine({ event, error, final }: AlertFailure): string {
   const reason = error instanceof Error ? error.message : String(error);
   const attempts = `${event.attempts} attempt${event.attempts === 1 ? "" : "s"}`;
-  return `webhook to ${event.host} (delivery ${event.deliveryId}) was given up after ${attempts} in 24 hours, and its alert could not be raised: ${reason}. ${
+  const row = "host" in event ? "webhook" : "action";
+  return `${gaveUpSubject(event)} (delivery ${event.deliveryId}) was given up after ${attempts} in 24 hours, and its alert could not be raised: ${reason}. ${
     final
-      ? "That was the alert's last try: the webhook is closed, and this line is its only alert."
-      : "FacetDB tries the alert once more on the webhook's next attempt; the webhook itself is not sent again."
+      ? `That was the alert's last try: the ${row} is closed, and this line is its only alert.`
+      : `FacetDB tries the alert once more on the ${row}'s next attempt; the ${row} itself is not ${"host" in event ? "sent" : "run"} again.`
   }`;
 }
 

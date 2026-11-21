@@ -130,11 +130,18 @@ export type ProjectKeptBy =
   | "cursors"
   /** Records of one of the project's store sources. */
   | "records"
-  /** Webhooks of the project neither delivered nor given up (retried for 24 hours). */
+  /** Webhooks and plugin actions of the project neither delivered nor given up (retried for 24 hours). */
   | "pending-deliveries";
 
 /** The command that deletes a log left behind by a plain uninstall, once nothing uses its source. */
 export type LogOnlyPurge = { readonly source: string; readonly command: string };
+
+/** A plugin's action still to be delivered from the outbox (a row that names a plugin), counted. */
+export type PendingAction = {
+  readonly plugin: string;
+  readonly action: string;
+  readonly count: number;
+};
 
 /** An installed table other than the one uninstalled, as `schema.table`, with its project. */
 export type OtherTable = {
@@ -235,8 +242,13 @@ export type UninstallPlan = {
   readonly otherTables: readonly OtherTable[];
   /** The other projects of the store; any keeps the shared tables. */
   readonly otherProjects: readonly string[];
-  /** Webhook deliveries of the project still pending; they and their project row stay. */
+  /**
+   * Deliveries of the project still pending, webhooks and plugin actions; they and their project
+   * row stay.
+   */
   readonly pendingDeliveries: number;
+  /** The plugin actions among `pendingDeliveries`, by plugin and action (none before store migration 9). */
+  readonly pendingActions: readonly PendingAction[];
   /** Webhook deliveries of other projects still pending; any keeps the shared tables. */
   readonly pendingElsewhere: number;
   /** After a plain uninstall that leaves a log nothing else uses, the command that deletes it. */
@@ -291,7 +303,11 @@ const PROJECT_STATE: readonly (readonly [table: string, column: string, kept: Pr
   ["heartbeats", "project", "heartbeats"],
 ];
 
-/** A webhook still to be sent: neither delivered nor given up (retried for 24 hours). */
+/**
+ * A webhook or a plugin's action still to be delivered: neither delivered nor given up. An action
+ * row closed untried (superseded by a later one, or closed by its runner) carries `gave_up_at` too,
+ * so it is not pending, and this reads the same on a store from before migration 9.
+ */
 const PENDING_DELIVERY = "delivered_at is null and gave_up_at is null";
 
 /**
@@ -885,6 +901,36 @@ async function storeRows(
   return Number(rows[0]?.["n"]);
 }
 
+/**
+ * The project's pending plugin actions, named by their plugin and action where a webhook is
+ * counted by its endpoint: a row that names a plugin is an action, as the outbox reads it. None
+ * while the outbox has no `plugin` column (a store from before migration 9).
+ */
+async function pendingActionsOf(query: SqlQuery, project: string): Promise<PendingAction[]> {
+  const hasPlugin = flag(
+    await query(
+      `select exists (select 1 from pg_catalog.pg_attribute
+                       where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'plugin'
+                         and attnum > 0 and not attisdropped) as present`,
+    ),
+  );
+  if (!hasPlugin) {
+    return [];
+  }
+  const rows = await query(
+    `select plugin, action, count(*)::int as n from facetdb.webhook_outbox
+      where project_id = $1 and ${PENDING_DELIVERY} and plugin is not null
+      group by plugin, action
+      order by plugin, action`,
+    [project],
+  );
+  return rows.map((row) => ({
+    plugin: String(row["plugin"]),
+    action: String(row["action"]),
+    count: Number(row["n"]),
+  }));
+}
+
 /** Whether `facetdb.table_owners` has a row for the table: the mark that install claimed it. */
 async function hasOwnerRow(query: SqlQuery, schema: string, table: string): Promise<boolean> {
   return (
@@ -1121,6 +1167,7 @@ type StoreForecast = Pick<
   | "otherTables"
   | "otherProjects"
   | "pendingDeliveries"
+  | "pendingActions"
   | "pendingElsewhere"
   | "unfinishedCursors"
   | "markerTablesDropped"
@@ -1229,6 +1276,7 @@ async function forecastStore(
     `project_id = $1 and ${PENDING_DELIVERY}`,
     [project],
   );
+  const pendingActions = pendingDeliveries === 0 ? [] : await pendingActionsOf(query, project);
   const keptBy: ProjectKeptBy[] = [];
   const keep = (reason: ProjectKeptBy, present: boolean) => {
     if (present && !keptBy.includes(reason)) {
@@ -1318,6 +1366,7 @@ async function forecastStore(
     otherTables,
     otherProjects,
     pendingDeliveries,
+    pendingActions,
     pendingElsewhere,
     unfinishedCursors,
   };
@@ -1428,11 +1477,31 @@ function cursorNote(forecast: StoreForecast, projectId: string): string | undefi
   return `the project ${projectId} and the store's shared tables stay because of an unfinished backfill cursor that names no source (run ${runs.join(", ")}); it was written before a backfill kept its place per source, no backfill resumes it any more, and it keeps the shared tables until it is deleted: ${deleteCursorsSql(runs)}`;
 }
 
-function pendingNote(n: number, projectId: string): string | undefined {
+function pendingNote(
+  plan: Pick<UninstallPlan, "pendingDeliveries" | "pendingActions">,
+  projectId: string,
+): string | undefined {
+  const n = plan.pendingDeliveries;
   if (n === 0) {
     return undefined;
   }
-  return `${n} webhook deliver${n === 1 ? "y" : "ies"} of project ${projectId} still pending: the project and the webhook outbox stay until each is delivered or given up (retried for 24 hours).`;
+  const stay =
+    "the project and the webhook outbox stay until each is delivered or given up (retried for 24 hours).";
+  if (plan.pendingActions.length === 0) {
+    return `${n} webhook deliver${n === 1 ? "y" : "ies"} of project ${projectId} still pending: ${stay}`;
+  }
+  // An action row has no endpoint to name it: it is named by its plugin and action.
+  const actions = plan.pendingActions.reduce((sum, pending) => sum + pending.count, 0);
+  const webhooks = n - actions;
+  const named = plan.pendingActions
+    .map(
+      (pending) =>
+        `${pending.action} of ${pending.plugin}${pending.count === 1 ? "" : ` (${pending.count})`}`,
+    )
+    .join(", ");
+  return `${n} deliver${n === 1 ? "y" : "ies"} of project ${projectId} still pending: ${
+    webhooks === 0 ? "" : `${webhooks} webhook${webhooks === 1 ? "" : "s"} and `
+  }${actions} plugin action${actions === 1 ? "" : "s"} (${named}); ${stay}`;
 }
 
 const SIDE_TABLE_FACTS = `select obj_description(c.oid, 'pg_class') as mark,
@@ -1618,7 +1687,7 @@ async function draftLogOnlyPurge(
     otherSourceLogs: [],
     leftInPlace: [],
   };
-  const pending = pendingNote(plan.pendingDeliveries, projectId);
+  const pending = pendingNote(plan, projectId);
   const cursor = cursorNote(forecast, projectId);
   return {
     ok: true,
@@ -1728,7 +1797,7 @@ export async function draftUninstall(
     leftInPlace: orphan === undefined ? [] : [orphan.name],
   };
   const kept = purge ? undefined : keptLogNote(log, later);
-  const pending = pendingNote(plan.pendingDeliveries, installed.project.id);
+  const pending = pendingNote(plan, installed.project.id);
   const cursor = cursorNote(forecast, installed.project.id);
   return {
     ok: true,

@@ -352,6 +352,28 @@ describe("GET /v1/alerts", () => {
     );
   });
 
+  it("lists an action that gave up with the title core gives the kind", async () => {
+    const gaveUp = event("action_gave_up", {
+      source: "issues",
+      what: "The action label of plugin github for source issues did not succeed after 31 attempts in 24 hours (delivery 7); the last error: GitHub answered 502.",
+      did: "stopped trying after 24 hours; the decision is in the log",
+      link: "https://docs.facetdb.dev/fix/actions",
+    });
+    const t = rig({ history: [record("raised", NOW, gaveUp, { severity: "warning" })] });
+
+    const events = (await t.get("/v1/alerts")).json["events"] as readonly Record<string, unknown>[];
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "action_gave_up",
+        title: "Action gave up",
+        severity: "warning",
+        source: "issues",
+        standing: { phase: "raised" },
+      }),
+    ]);
+  });
+
   it("keeps a resolved message whose alert is older than the lines read, marked as raised earlier", async () => {
     const lost = event("connector_lost_access", { what: "The login lost access.", did: "Held." });
     const t = rig({ history: [record("resolved", NOW, lost)] });

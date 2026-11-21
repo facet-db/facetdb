@@ -468,6 +468,7 @@ describe("severities", () => {
       backfill_finished: "information",
       backfill_failed: "warning",
       question_set_changed: "information",
+      action_gave_up: "warning",
     });
   });
 });

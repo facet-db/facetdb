@@ -54,6 +54,7 @@ export {
   type LogOnlyPurge,
   type OtherSourceLog,
   type OtherTable,
+  type PendingAction,
   type ProjectKeptBy,
   ranNote,
   type SourceLog,

@@ -148,9 +148,21 @@ export type { StudioBuild, StudioFiles } from "./studio/build.ts";
 export { openStudioBuild, STUDIO_INDEX_FILE, STUDIO_ROUTES_FILE } from "./studio/build.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
+export {
+  ACTION_GAVE_UP_LINK,
+  GAVE_UP_DID,
+  gaveUpAlert,
+  gaveUpSubject,
+  WEBHOOK_GAVE_UP_LINK,
+} from "./webhooks/gave-up.ts";
 export type {
+  ActionClose,
+  ActionDelivery,
+  ActionGaveUp,
   AlertFailure,
   DeliveryReport,
+  EndpointGaveUp,
+  NewAction,
   NewWebhook,
   Outbox,
   OutboxDatabase,
@@ -159,6 +171,8 @@ export type {
   WebhookGaveUp,
 } from "./webhooks/outbox.ts";
 export {
+  ACTION_ERROR_NOT_KEPT,
+  ActionFailed,
   createOutbox,
   DEFAULT_FETCH_TIMEOUT_MS,
   GIVE_UP_AFTER_MS,

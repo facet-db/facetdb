@@ -13,6 +13,8 @@ export const ALERT_KINDS = [
   "backfill_finished",
   "backfill_failed",
   "question_set_changed",
+  // A plugin action, or a webhook, the outbox stopped trying after 24 hours.
+  "action_gave_up",
 ] as const;
 
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -36,6 +38,7 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   backfill_finished: "information",
   backfill_failed: "warning",
   question_set_changed: "information",
+  action_gave_up: "warning",
 };
 
 /** No heartbeat for this long and the worker is not running. */
@@ -60,6 +63,7 @@ export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
   backfill_finished: "Backfill finished",
   backfill_failed: "Backfill failed",
   question_set_changed: "Question set changed",
+  action_gave_up: "Action gave up",
 };
 
 /** One alert per event per this long until it resolves. */
