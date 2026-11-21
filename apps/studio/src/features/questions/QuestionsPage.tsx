@@ -8,6 +8,7 @@ import { Problem, StaleNote } from "../decisions/index.ts";
 import { ApplyDialog } from "./ApplyDialog.tsx";
 import { type Draft, draftOf, formOf, reconcile, rewordedQuestions } from "./draft.ts";
 import { SourceTabs } from "./fields.tsx";
+import { type Installed, InstalledNote } from "./InstallQuestion.tsx";
 import { NotRunning } from "./NotRunning.tsx";
 import { projectConfigQuery } from "./queries.ts";
 import { SourceEditor } from "./SourceEditor.tsx";
@@ -40,7 +41,7 @@ export function QuestionsPage({
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyOpened, setApplyOpened] = useState(0);
   /** Per source, what the reload said after an install from the page. */
-  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, string>>(
+  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, Installed>>(
     () => new Map(),
   );
 
@@ -177,6 +178,7 @@ export function QuestionsPage({
         const held = drafts.get(candidate.name);
         // The worker's own list: the block goes when the list no longer names the source.
         const waiting = data.pending.find((entry) => entry.source === candidate.name);
+        const note = installedNotes.get(candidate.name);
         return (
           <div
             key={candidate.name}
@@ -186,12 +188,13 @@ export function QuestionsPage({
             hidden={candidate.name !== chosen}
           >
             {waiting === undefined ? (
-              // An install from the block ran and the block went: what the reload said stays.
-              installedNotes.has(candidate.name) ? (
-                <p role="status" className="mb-6 max-w-[64ch] border-l-2 border-yes pl-3">
-                  {installedNotes.get(candidate.name)}
-                </p>
-              ) : null
+              // An install from the block ran and the block went: what it left stays, with the
+              // backfill of the question added where the source runs it.
+              note === undefined ? null : (
+                <div className="mb-6">
+                  <InstalledNote note={note} />
+                </div>
+              )
             ) : (
               <div className="mb-6">
                 <NotRunning
@@ -202,8 +205,8 @@ export function QuestionsPage({
                   added={waiting.added}
                   removed={waiting.removed}
                   checkAgain={waiting.checkAgain}
-                  onInstalled={(words) => {
-                    setInstalledNotes((before) => new Map(before).set(candidate.name, words));
+                  onInstalled={(note) => {
+                    setInstalledNotes((before) => new Map(before).set(candidate.name, note));
                   }}
                 />
               </div>

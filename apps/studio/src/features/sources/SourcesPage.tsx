@@ -1,11 +1,4 @@
-import {
-  buttonClasses,
-  DitherStrip,
-  EmptyState,
-  type StatusKind,
-  StatusWord,
-  Tag,
-} from "@facetdb/ui";
+import { buttonClasses, EmptyState, type StatusKind, StatusWord, Tag } from "@facetdb/ui";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type ReactNode, useId } from "react";
@@ -14,18 +7,18 @@ import { useApi, useSchedule } from "../../deps.tsx";
 import { PageHead } from "../../shell/index.ts";
 import { Problem, whenWords } from "../decisions/index.ts";
 import { projectConfigQuery } from "../questions/index.ts";
+import { BackfillControls } from "./BackfillControls.tsx";
 import { SOURCES_REFRESH_MS, sourcesQuery } from "./queries.ts";
 
 /**
  * The Sources page: a ruled row per source, its connector as the tag, how a change reaches the
  * worker and when it last saw one, where its answers live, its backfill as a strip with its words,
  * and the worker login's reach in words, all as `GET /v1/sources` says them; the page computes
- * nothing. A source the config names that the worker does not run yet (added by the setup flow,
- * before the restart) is a row of its own that says so. "Add a source" is the page's one primary
- * action.
+ * nothing. A table source's backfill line is also where one is estimated, started, stopped and
+ * resumed (BackfillControls). A source the config names that the worker does not run yet (added by
+ * the setup flow, before the restart) is a row of its own that says so. "Add a source" is the
+ * page's one primary action.
  */
-
-const STRIP_WIDTH = 120;
 
 /** The install line under the worker login, as a status word and its square. */
 const INSTALL_STATUS: Readonly<Record<NonNullable<SourceRow["install"]>["status"], StatusKind>> = {
@@ -62,17 +55,11 @@ function Row({ source }: { readonly source: SourceRow }) {
         <Line label={source.how.label}>{source.how.words}</Line>
         <Line label="Answers">{source.answers}</Line>
         <Line label="Backfill">
-          {backfill.fraction === null ? (
+          {source.kind === "api" ? (
+            // Records arrive one by one through the check API: nothing to go back over.
             <span className="text-text-2">{backfill.words}</span>
           ) : (
-            <span className="flex flex-wrap items-center gap-3">
-              <DitherStrip
-                value={backfill.fraction}
-                width={STRIP_WIDTH}
-                label={`Backfill ${String(Math.round(backfill.fraction * 100))}% done`}
-              />
-              <span>{backfill.words}</span>
-            </span>
+            <BackfillControls source={source.name} known={backfill} />
           )}
         </Line>
         {source.login === null ? null : (

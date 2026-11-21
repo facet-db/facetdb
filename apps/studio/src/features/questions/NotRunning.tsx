@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { ApiError, type ApplyReload, type PendingSource } from "../../api/index.ts";
 import { useApi, useDeps } from "../../deps.tsx";
-import { InstallQuestion } from "./InstallQuestion.tsx";
+import { type Installed, InstallQuestion } from "./InstallQuestion.tsx";
 import { CONFIG_KEY } from "./queries.ts";
 
 /**
@@ -158,7 +158,7 @@ function InstallHere({
 }: {
   readonly source: string;
   readonly added: readonly string[];
-  readonly onInstalled: (words: string) => void;
+  readonly onInstalled: (note: Installed) => void;
 }) {
   const api = useApi();
   const access = useQuery({
@@ -211,8 +211,8 @@ export function NotRunning({
 }: Pick<PendingSource, "source" | "outcome" | "migrate" | "added" | "removed" | "checkAgain"> & {
   /** The reload's own words for it. */
   readonly why: string;
-  /** An install from the page ran: the reload's words, for after the block goes. */
-  readonly onInstalled?: (words: string) => void;
+  /** An install from the page ran: what it left, for after the block goes. */
+  readonly onInstalled?: (note: Installed) => void;
 }) {
   const id = useId();
   const steps = stepsOf({ source, outcome, migrate, added, checkAgain });
@@ -238,8 +238,8 @@ export function NotRunning({
         <InstallHere
           source={source}
           added={added}
-          onInstalled={(words) => {
-            onInstalled?.(words);
+          onInstalled={(note) => {
+            onInstalled?.(note);
           }}
         />
       ) : null}

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { SAMPLE_HOME, SAMPLE_PROJECT, SAMPLE_QUEUE } from "../testing/index.ts";
+import {
+  SAMPLE_BACKFILL_IDLE,
+  SAMPLE_HOME,
+  SAMPLE_PROJECT,
+  SAMPLE_QUEUE,
+  sampleBackfill,
+} from "../testing/index.ts";
 import { ApiError, createApiClient, type Fetch, needsSignIn } from "./client.ts";
 
 /**
@@ -164,6 +170,70 @@ describe("the review calls", () => {
     const wrong = recording(() => json({ card: { source: "x" } }));
     await expect(createApiClient(wrong.fetch).reviewOpen()).rejects.toMatchObject({
       code: "unexpected-answer",
+    });
+  });
+});
+
+describe("the backfill calls", () => {
+  it("names the source in the path, sends the questions and the token, and parses each state", async () => {
+    const waiting = sampleBackfill("waiting", { token: "token-1" });
+    const answers: Record<string, [unknown, number]> = {
+      backfill: [SAMPLE_BACKFILL_IDLE, 200],
+      // The estimate answers 202: the count runs on.
+      estimate: [sampleBackfill("estimating", { surveyed: 0, estimate: null }), 202],
+      start: [sampleBackfill("running"), 200],
+      stop: [sampleBackfill("stopping"), 200],
+    };
+    const t = recording((path) => {
+      const [body, status] = answers[path.split("/").at(-1) ?? ""] ?? [waiting, 200];
+      return json(body, status);
+    });
+    const api = createApiClient(t.fetch);
+
+    expect((await api.backfillStatus("a/b 1")).state).toBe("idle");
+    expect((await api.backfillEstimate("a/b 1")).state).toBe("estimating");
+    expect((await api.backfillEstimate("a/b 1", ["is_vehicle", "colour"])).surveyed).toBe(0);
+    expect((await api.backfillStart("a/b 1", "token-1")).state).toBe("running");
+    expect((await api.backfillStop("a/b 1")).state).toBe("stopping");
+    expect(t.sent.map((one) => [one.init?.method, one.path, one.init?.body])).toEqual([
+      ["GET", "/v1/sources/a%2Fb%201/backfill", undefined],
+      ["POST", "/v1/sources/a%2Fb%201/backfill/estimate", "{}"],
+      ["POST", "/v1/sources/a%2Fb%201/backfill/estimate", '{"questions":["is_vehicle","colour"]}'],
+      ["POST", "/v1/sources/a%2Fb%201/backfill/start", '{"token":"token-1"}'],
+      ["POST", "/v1/sources/a%2Fb%201/backfill/stop", "{}"],
+    ]);
+
+    // A state this studio does not know, or a figure out of range, is refused at the boundary.
+    const unknown = recording(() => json({ ...SAMPLE_BACKFILL_IDLE, state: "resumed" }));
+    await expect(createApiClient(unknown.fetch).backfillStatus("listings")).rejects.toMatchObject({
+      code: "unexpected-answer",
+    });
+    const negative = recording(() => json(sampleBackfill("running", { pace: 0 })));
+    await expect(createApiClient(negative.fetch).backfillStatus("listings")).rejects.toMatchObject({
+      code: "unexpected-answer",
+    });
+  });
+
+  it("turns the worker's refusals into the error with its code and fix", async () => {
+    const t = recording(() =>
+      json(
+        {
+          error: {
+            code: "no_estimate",
+            message:
+              'No estimate of a backfill of "listings" is waiting to be started, so nothing was started.',
+            fix: "Ask for a new estimate (POST /v1/sources/listings/backfill/estimate), look at the cost, then start it with the token it gives.",
+          },
+        },
+        409,
+      ),
+    );
+    const refused = createApiClient(t.fetch).backfillStart("listings", "token-9");
+    await expect(refused).rejects.toBeInstanceOf(ApiError);
+    await expect(refused).rejects.toMatchObject({
+      status: 409,
+      code: "no_estimate",
+      fix: expect.stringMatching(/^Ask for a new estimate/),
     });
   });
 });

@@ -816,6 +816,64 @@ const migratedSchema = z.object({
 });
 export type Migrated = z.infer<typeof migratedSchema>;
 
+/**
+ * A source's backfill from the page: where the job stands, as `GET /v1/sources/:name/backfill` and
+ * the three POSTs answer it. The nine states are the door's
+ * (packages/server/src/sources/backfill-door.ts); `words` is the worker's own sentence for the
+ * state, and the page composes the estimate's line from the figures.
+ */
+const backfillStateSchema = z.enum([
+  "idle",
+  "estimating",
+  "waiting",
+  "running",
+  "stopping",
+  "stopped",
+  "finished",
+  "failed",
+  "paused",
+]);
+const backfillEstimateSchema = z.object({
+  records: z.number().int().min(0),
+  sampled: z.number().int().min(0),
+  tokensPerRecord: z.number().min(0),
+  tokens: z.number().min(0),
+  dollars: z.number().min(0),
+});
+const backfillStatusSchema = z.object({
+  source: z.string().min(1),
+  state: backfillStateSchema,
+  /** The added questions the job asks alone; null for the whole question set. */
+  questions: z.array(z.string()).nullable(),
+  version: z.number().nullable(),
+  /** Records the survey has counted so far, while estimating. */
+  surveyed: z.number().int().min(0).nullable(),
+  estimate: backfillEstimateSchema.nullable(),
+  /** Records started per second. */
+  pace: z.number().positive().nullable(),
+  /** What a start takes; only while waiting. */
+  token: z.string().nullable(),
+  /** When an estimate nobody started is dropped; only while waiting. */
+  expiresAt: z.string().nullable(),
+  counts: z
+    .object({
+      records: z.number().int().min(0),
+      queued: z.number().int().min(0),
+      answered: z.number().int().min(0),
+      alreadyAnswered: z.number().int().min(0),
+      deferred: z.number().int().min(0),
+    })
+    .nullable(),
+  since: z.string().nullable(),
+  endedAt: z.string().nullable(),
+  /** Why it stopped, failed or paused, in the worker's words. */
+  why: z.string().nullable(),
+  words: z.string(),
+});
+export type BackfillStatus = z.infer<typeof backfillStatusSchema>;
+export type BackfillState = BackfillStatus["state"];
+export type BackfillEstimate = z.infer<typeof backfillEstimateSchema>;
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -902,6 +960,21 @@ export type ApiClient = {
   readonly migratePlan: (source: string, admin: string) => Promise<MigratePlan>;
   /** Runs the install the token names, then the worker reloads the file. */
   readonly migrateRun: (source: string, admin: string, token: string) => Promise<Migrated>;
+  // A source's backfill from the page: the worker's job, at most one per source.
+  /** Where the source's job stands: idle, the estimate, the counts so far, why it ended. */
+  readonly backfillStatus: (source: string) => Promise<BackfillStatus>;
+  /**
+   * Starts the count and the pricing, for the whole set or for the questions named (added ones,
+   * asked alone); nothing is asked until a start. Answers the job as it begins to count.
+   */
+  readonly backfillEstimate: (
+    source: string,
+    questions?: readonly string[],
+  ) => Promise<BackfillStatus>;
+  /** Lets the estimated job run; `token` is the one the estimate shown on the page gave. */
+  readonly backfillStart: (source: string, token: string) => Promise<BackfillStatus>;
+  /** Stops the job after the page in hand (at once, when nothing was asked yet). */
+  readonly backfillStop: (source: string) => Promise<BackfillStatus>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -1080,5 +1153,26 @@ export function createApiClient(fetch: Fetch): ApiClient {
         admin,
         token,
       }),
+    backfillStatus: (source) =>
+      call(backfillStatusSchema, "GET", `/sources/${encodeURIComponent(source)}/backfill`),
+    // The route's body: {} for the whole set, {"questions": [...]} for the ones named.
+    backfillEstimate: (source, questions) =>
+      call(
+        backfillStatusSchema,
+        "POST",
+        `/sources/${encodeURIComponent(source)}/backfill/estimate`,
+        questions === undefined ? {} : { questions: [...questions] },
+      ),
+    backfillStart: (source, token) =>
+      call(backfillStatusSchema, "POST", `/sources/${encodeURIComponent(source)}/backfill/start`, {
+        token,
+      }),
+    backfillStop: (source) =>
+      call(
+        backfillStatusSchema,
+        "POST",
+        `/sources/${encodeURIComponent(source)}/backfill/stop`,
+        {},
+      ),
   };
 }

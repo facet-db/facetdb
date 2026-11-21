@@ -4,6 +4,7 @@ import {
   ApiError,
   type ApplyDiff,
   type ApplyWritten,
+  type BackfillStatus,
   type DecisionHistory,
   type DecisionsPage,
   type DraftPreview,
@@ -802,6 +803,57 @@ export const SAMPLE_MIGRATED: Migrated = {
   },
 };
 
+/**
+ * A backfill job of `source` in `state`, shaped as the worker's door reports one: the sample
+ * estimate is 1,200 records at about $0.0043, paced at 50 a second; a test overrides what differs.
+ */
+export function sampleBackfill(
+  state: BackfillStatus["state"],
+  more: Partial<BackfillStatus> = {},
+): BackfillStatus {
+  return {
+    source: "listings",
+    state,
+    questions: null,
+    version: 3,
+    surveyed: 1_200,
+    estimate: {
+      records: 1_200,
+      sampled: 100,
+      tokensPerRecord: 85,
+      tokens: 102_000,
+      dollars: 0.0043,
+    },
+    pace: 50,
+    token: null,
+    expiresAt: null,
+    counts: { records: 0, queued: 0, answered: 0, alreadyAnswered: 0, deferred: 0 },
+    since: "2026-11-06T12:00:00.000Z",
+    endedAt: null,
+    why: null,
+    words: `The backfill of listings is ${state}.`,
+    ...more,
+  };
+}
+
+/** No job since the worker started: what GET /v1/sources/:name/backfill answers at first. */
+export const SAMPLE_BACKFILL_IDLE: BackfillStatus = {
+  source: "listings",
+  state: "idle",
+  questions: null,
+  version: null,
+  surveyed: null,
+  estimate: null,
+  pace: null,
+  token: null,
+  expiresAt: null,
+  counts: null,
+  since: null,
+  endedAt: null,
+  why: null,
+  words: "No backfill is running. Estimate one to see its cost first.",
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -887,6 +939,19 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     // An added question's install.
     migratePlan: () => Promise.resolve(SAMPLE_MIGRATE_PLAN),
     migrateRun: () => Promise.resolve(SAMPLE_MIGRATED),
+    // A source's backfill: idle until a test scripts the job's states.
+    backfillStatus: (source) => Promise.resolve({ ...SAMPLE_BACKFILL_IDLE, source }),
+    backfillEstimate: (source, questions) =>
+      Promise.resolve(
+        sampleBackfill("estimating", {
+          source,
+          questions: questions === undefined ? null : [...questions],
+          surveyed: 0,
+          estimate: null,
+        }),
+      ),
+    backfillStart: (source) => Promise.resolve(sampleBackfill("running", { source })),
+    backfillStop: (source) => Promise.resolve(sampleBackfill("stopping", { source })),
     ...answers,
   };
   const admins: string[] = [];
@@ -931,6 +996,25 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
       admins.push(admin);
       calls.push(`migrateRun ${source} ${token}`);
       return answer.migrateRun(source, admin, token);
+    },
+    // The backfill calls: the questions named ride in the note, the token too.
+    backfillStatus: (source) => {
+      calls.push(`backfillStatus ${source}`);
+      return answer.backfillStatus(source);
+    },
+    backfillEstimate: (source, questions) => {
+      calls.push(
+        `backfillEstimate ${source}${questions === undefined ? "" : ` ${questions.join(",")}`}`,
+      );
+      return answer.backfillEstimate(source, questions);
+    },
+    backfillStart: (source, token) => {
+      calls.push(`backfillStart ${source} ${token}`);
+      return answer.backfillStart(source, token);
+    },
+    backfillStop: (source) => {
+      calls.push(`backfillStop ${source}`);
+      return answer.backfillStop(source);
     },
     project: () => {
       calls.push("project");

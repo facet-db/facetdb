@@ -5,6 +5,7 @@ import { ApiError, type Migrated, type MigratePlan } from "../../api/index.ts";
 import { useApi } from "../../deps.tsx";
 import { Problem } from "../decisions/index.ts";
 import { ConnectionField, type InstallFailure, installFailure } from "../setup/index.ts";
+import { BackfillControls } from "../sources/index.ts";
 import { CONFIG_KEY } from "./queries.ts";
 
 /**
@@ -57,6 +58,41 @@ function installedWords(
   };
 }
 
+/**
+ * What an install from the page left, kept by the page after the block goes: the reload's words,
+ * and, when the source runs the new set, the backfill of the questions added, since the records
+ * that were there before have no answer for them.
+ */
+export type Installed = {
+  readonly words: string;
+  /** The source runs the new set: the added questions to answer the existing records with. */
+  readonly backfill: { readonly source: string; readonly questions: readonly string[] } | null;
+};
+
+function noteOf(done: Migrated, source: string, questions: readonly string[]): Installed {
+  const { running, words } = installedWords(done, source);
+  return { words, backfill: running ? { source, questions } : null };
+}
+
+/** The install's outcome in words, with the offer to answer the existing records where it applies. */
+export function InstalledNote({ note }: { readonly note: Installed }) {
+  return (
+    <div className="grid gap-3 border-l-2 border-yes pl-3">
+      <p role="status" className="m-0 max-w-[64ch]">
+        {note.words}
+      </p>
+      {note.backfill === null ? null : (
+        <>
+          <p className="m-0 max-w-[64ch]">
+            {`The records that were in ${note.backfill.source} before have no answer for ${namesOf(note.backfill.questions)} yet: answering them shows the estimate first.`}
+          </p>
+          <BackfillControls source={note.backfill.source} questions={note.backfill.questions} />
+        </>
+      )}
+    </div>
+  );
+}
+
 /** What a run that failed left, in the page's words: never "nothing changed" when it may have. */
 function failureWords(failed: InstallFailure, source: string): { title: string; error: Error } {
   switch (failed.kind) {
@@ -89,8 +125,8 @@ export function InstallQuestion({
   readonly source: string;
   /** The questions the file adds to the source, as the worker's list names them. */
   readonly questions: readonly string[];
-  /** The install ran and the worker reloaded: what the reload said, for after the block goes. */
-  readonly onInstalled: (words: string) => void;
+  /** The install ran and the worker reloaded: what it left, for after the block goes. */
+  readonly onInstalled: (note: Installed) => void;
   readonly onClose: () => void;
 }) {
   const api = useApi();
@@ -123,7 +159,7 @@ export function InstallQuestion({
       // The string is not needed any more: dropped from the page at once.
       setTyped("");
       setRevealed(false);
-      onInstalled(installedWords(migrated, source).words);
+      onInstalled(noteOf(migrated, source, questions));
     },
     onError: (error) => {
       const sorted = installFailure(error);
@@ -166,7 +202,7 @@ export function InstallQuestion({
   const names = namesOf(questions);
   const sqlId = `${id}-sql`;
   const failure = failed === null ? null : failureWords(failed, source);
-  const outcome = done === null ? null : installedWords(done, source);
+  const outcome = done === null ? null : noteOf(done, source, questions);
 
   return (
     <section
@@ -177,9 +213,7 @@ export function InstallQuestion({
         {`Install ${names} from this page`}
       </h4>
       {outcome !== null ? (
-        <p role="status" className="m-0 max-w-[64ch]">
-          {outcome.words}
-        </p>
+        <InstalledNote note={outcome} />
       ) : (
         <>
           <p className="m-0 max-w-[64ch] text-text-2">

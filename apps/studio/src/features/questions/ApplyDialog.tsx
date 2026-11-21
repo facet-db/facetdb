@@ -13,6 +13,7 @@ import { ApiError, type ApplyDiff, type ApplyReload, type SourceDraft } from "..
 import { useApi } from "../../deps.tsx";
 import { Problem } from "../decisions/index.ts";
 import { sameDraft } from "./draft.ts";
+import { type Installed, InstalledNote } from "./InstallQuestion.tsx";
 import { NotRunning } from "./NotRunning.tsx";
 import { CONFIG_KEY, projectConfigQuery } from "./queries.ts";
 
@@ -97,8 +98,8 @@ function NotRunningFromReload({
 }) {
   const api = useApi();
   const config = useQuery(projectConfigQuery(api));
-  /** Per source, what the reload said after an install from the block. */
-  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, string>>(
+  /** Per source, what an install from the block left (its backfill offer). */
+  const [installedNotes, setInstalledNotes] = useState<ReadonlyMap<string, Installed>>(
     () => new Map(),
   );
   // The write's own read is under way when this first renders (Apply asks for it before it shows
@@ -122,6 +123,7 @@ function NotRunningFromReload({
       list === "read"
         ? config.data?.pending.find((candidate) => candidate.source === source.source)
         : undefined;
+    const note = installedNotes.get(source.source);
     if (entry !== undefined) {
       return (
         <NotRunning
@@ -133,8 +135,8 @@ function NotRunningFromReload({
           added={entry.added}
           removed={entry.removed}
           checkAgain={entry.checkAgain}
-          onInstalled={(words) => {
-            setInstalledNotes((before) => new Map(before).set(source.source, words));
+          onInstalled={(note) => {
+            setInstalledNotes((before) => new Map(before).set(source.source, note));
           }}
         />
       );
@@ -152,12 +154,11 @@ function NotRunningFromReload({
         removed={[]}
         checkAgain={false}
       />
-    ) : installedNotes.has(source.source) ? (
-      // An install from the block ran and the block went: what the reload said stays.
-      <p key={source.source} role="status" className="m-0 border-l-2 border-yes pl-3">
-        {installedNotes.get(source.source)}
-      </p>
-    ) : null;
+    ) : note === undefined ? null : (
+      // An install from the block ran and the block went: what it left stays, with the backfill of
+      // the question added where the source runs it.
+      <InstalledNote key={source.source} note={note} />
+    );
   });
 }
 
