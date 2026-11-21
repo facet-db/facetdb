@@ -26,6 +26,7 @@ import {
   type DecisionsServiceDeps,
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
+import type { PluginsDoor } from "./plugins/index.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
 import type { BackfillJobsDoor } from "./sources/backfill-door.ts";
 import type { MigrateDoor, SetupDoor } from "./sources/door.ts";
@@ -114,6 +115,11 @@ export type ServerDeps = {
    * as only the CLI can build them. Absent, the studio is told this worker runs none.
    */
   readonly backfill?: BackfillJobsDoor;
+  /**
+   * The Plugins page's door: the plugins the worker hosts, the registry's gallery and the packs, as
+   * only the CLI builds them. Absent, the endpoints answer empty lists.
+   */
+  readonly plugins?: PluginsDoor;
 };
 
 /**
@@ -163,6 +169,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
           }),
         }),
     ...(deps.backfill === undefined ? {} : { backfill: deps.backfill }),
+    ...(deps.plugins === undefined ? {} : { plugins: deps.plugins }),
     studio: {
       sessions: createSessions({
         secret: deps.sessionSecret,

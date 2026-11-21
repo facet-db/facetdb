@@ -136,6 +136,7 @@ describe("facetdb users add", () => {
       osUser: () => "tester",
       stopSignal: unused,
       webhookFetch: unused,
+      fetch: unused,
       abortAfter: unused,
       random: unused,
       embedded: { open: unused, wipe: unused },

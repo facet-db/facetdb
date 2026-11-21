@@ -89,6 +89,16 @@ export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
 export type { ServerDeps } from "./main.ts";
 export { createServer } from "./main.ts";
+export type {
+  Gallery,
+  GalleryEntry,
+  InstalledPlugin,
+  JsonObject,
+  PackView,
+  PluginsDoor,
+  PluginVariableView,
+} from "./plugins/index.ts";
+export { NO_PLUGINS } from "./plugins/index.ts";
 export { QUEUE_DEFAULT_LIMIT, QUEUE_MAX_LIMIT } from "./review/routes.ts";
 export type {
   CardView,

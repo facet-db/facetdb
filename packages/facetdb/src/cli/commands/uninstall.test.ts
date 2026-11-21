@@ -146,6 +146,7 @@ async function runSeeingPrompts(
         throw new Error("no stop signal");
       },
       webhookFetch: unused,
+      fetch: unused,
       abortAfter: () => {
         throw new Error("no timeout signal");
       },

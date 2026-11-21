@@ -60,7 +60,7 @@ export const studioCommand = defineCommand<StudioOptions>("studio", {
   run: async (context) => {
     const { options, deps, print } = context;
     // The worker's own start: the plugins the config names are loaded and checked, as it does.
-    const { config } = await loadWorkerConfig(deps, options.config);
+    const { config, plugins } = await loadWorkerConfig(deps, options.config);
     requireModel(config, deps.env);
     parsePort(options.port);
     // Before the address can reach the opener: a host is an address or a plain name (worker.ts).
@@ -78,6 +78,7 @@ export const studioCommand = defineCommand<StudioOptions>("studio", {
       config,
       {
         studio,
+        plugins,
         listening: async (host, port) => {
           const url = studioUrl(host, port);
           if (!open) {

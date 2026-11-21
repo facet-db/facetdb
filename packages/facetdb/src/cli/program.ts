@@ -235,6 +235,11 @@ export type CliDeps = {
   /** Sends a webhook from the outbox: `fetch` in the process, a recording fake in a test. */
   readonly webhookFetch: WebhookFetch;
   /**
+   * A GET of an address on the network (the plugin registry's index): `fetch` in the process, a
+   * handwritten fake in a test, which reaches no network. Aborts with `signal`.
+   */
+  readonly fetch: (url: string, init: { readonly signal: AbortSignal }) => Promise<Response>;
+  /**
    * A signal that aborts `ms` milliseconds from now, bounding one webhook send or give-up alert:
    * the platform's timeout signal in the process, a fake on the test's clock in a test.
    */
@@ -523,6 +528,7 @@ type OptionalInTests =
   | "osUser"
   | "stopSignal"
   | "webhookFetch"
+  | "fetch"
   | "abortAfter"
   | "random"
   | "embedded"
@@ -607,6 +613,7 @@ export async function runInProcess(
         throw new Error("this test gave the command no stop signal");
       },
       webhookFetch: () => Promise.reject(new Error("this test gave the command no webhook fetch")),
+      fetch: () => Promise.reject(new Error("this test gave the command no network fetch")),
       abortAfter: () => {
         throw new Error("this test gave the command no timeout signal");
       },

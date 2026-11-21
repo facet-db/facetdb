@@ -222,6 +222,7 @@ async function runSeeingPrompts(
         throw new Error("no stop signal");
       },
       webhookFetch: () => Promise.reject(new Error("no webhook fetch")),
+      fetch: () => Promise.reject(new Error("no network fetch")),
       abortAfter: () => {
         throw new Error("no timeout signal");
       },

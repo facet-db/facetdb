@@ -179,7 +179,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
       `${STORE_VARIABLE} holds ${DEV_URL} for this run${had === undefined || had === "" ? "" : ", in place of the value the shell had"}, so facetdb.config.ts reads the embedded database.`,
     );
     // The worker's own start: the plugins the config names are loaded and checked, as it does.
-    const { config } = await loadWorkerConfig(deps, options.config);
+    const { config, plugins } = await loadWorkerConfig(deps, options.config);
     const marker = markerOf(options.unsure);
     const seed: Seed | undefined =
       options.seed === undefined ? undefined : await readSeed(deps.workspace, options.seed);
@@ -322,6 +322,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
             databases: embeddedDatabases(engine),
             provider,
             sessionSecret: secret,
+            plugins,
             ...(studio === undefined ? {} : { studio: studio.build }),
           },
         );

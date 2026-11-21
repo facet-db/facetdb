@@ -553,6 +553,7 @@ export function processDeps(
     },
     stopSignal: run.stopSignal,
     webhookFetch: (url, init) => globalThis.fetch(url, init),
+    fetch: (url, init) => globalThis.fetch(url, init),
     // Unref'd by the platform: a pending timeout keeps no idle process alive.
     abortAfter: (ms) => AbortSignal.timeout(ms),
     random: Math.random,

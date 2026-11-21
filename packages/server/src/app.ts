@@ -9,6 +9,7 @@ import { configRoutes } from "./config/routes.ts";
 import type { ConfigService } from "./config/service.ts";
 import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
+import { NO_PLUGINS, type PluginsDoor, pluginsRoutes } from "./plugins/index.ts";
 import { requireOwnPage } from "./request.ts";
 import { reviewRoutes } from "./review/routes.ts";
 import type { ReviewEndpointService } from "./review/service.ts";
@@ -46,6 +47,8 @@ export type AppDeps = {
   readonly setup?: SetupService;
   /** The worker's backfill jobs; absent, every backfill route says this worker runs none. */
   readonly backfill?: BackfillJobsDoor;
+  /** The hosted plugins, the registry's gallery and the packs; absent, every list is empty. */
+  readonly plugins?: PluginsDoor;
   readonly studio: StudioAccess;
   /**
    * The studio's built app, served after every `/v1` route; absent, no file is served (a worker
@@ -98,6 +101,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   studio.route("/", setupRoutes(deps.setup ?? NO_SETUP));
   // The backfill jobs.
   studio.route("/", backfillRoutes(deps.backfill ?? NO_BACKFILL_JOBS));
+  // The plugins, the gallery and the packs.
+  studio.route("/", pluginsRoutes(deps.plugins ?? NO_PLUGINS));
   studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
   studio.route("/", projectRoutes());

@@ -1,0 +1,109 @@
+import type { PluginKind, Question, ThresholdOverride } from "@facetdb/core";
+
+/**
+ * The CLI's door for the studio's Plugins page: the plugins the worker hosts, the registry's
+ * gallery and the question packs of the hosted plugins. Only the `facetdb` package can build one
+ * (the plugin host imports the plugins, the registry reader checks the index), so the server is
+ * handed these plain operations and never imports that package. Everything here is data for the
+ * page: a variable is its name and whether it is set, never its value, and the registry's words are
+ * text from outside.
+ */
+
+/** A JSON value the page reads and the server does not look inside: a schema, a setting. */
+export type JsonObject = { readonly [key: string]: unknown };
+
+/** One variable a plugin's settings name: where it is written, its name, and whether it is set. */
+export type PluginVariableView = {
+  /** Inside the plugin's settings: `token`, `auth.password`, `hooks[0].secret`. */
+  readonly path: string;
+  /** The variable's name. Its value is never part of any response. */
+  readonly variable: string;
+  /** Whether the plugin's schema marks the field as a secret (`z.secret()`). */
+  readonly secret: boolean;
+  /** Whether the worker's environment has a non-empty value for it. */
+  readonly set: boolean;
+};
+
+/** A plugin the config names, loaded and with its settings checked. */
+export type InstalledPlugin = {
+  /** The short name: `github`. */
+  readonly name: string;
+  /** The package it came from: `@facetdb/github`. */
+  readonly package: string;
+  readonly version: string;
+  readonly kinds: readonly PluginKind[];
+  /** The names of what it provides, by kind: `{ source: ["issues"], action: ["label"], ... }`. */
+  readonly provides: { readonly [kind in PluginKind]: readonly string[] };
+  /** The range of FacetDB core versions it supports, and whether this one is inside it. */
+  readonly core: { readonly range: string; readonly holds: boolean };
+  readonly settings: {
+    /**
+     * The settings schema as a JSON schema (zod's own conversion of the manifest's one schema;
+     * a secret field carries `"secret": true`), or null when zod cannot write it as one.
+     */
+    readonly schema: JsonObject | null;
+    /** The settings as the config file writes them: a variable is `{ "env": "NAME" }`. */
+    readonly values: JsonObject;
+    readonly variables: readonly PluginVariableView[];
+  };
+};
+
+/** A registry entry as the gallery shows it. Its text is from outside: data, never markup or a command. */
+export type GalleryEntry = {
+  /** The short name, checked by the registry reader. */
+  readonly name: string;
+  readonly package: string;
+  readonly description: string;
+  readonly kinds: readonly PluginKind[];
+  /** The range of FacetDB core versions the entry says it supports. */
+  readonly facetdb: string;
+  readonly verified: boolean;
+  readonly downloads: number;
+  readonly homepage: string | null;
+  /** Whether the worker hosts a plugin from this entry's package. */
+  readonly installed: boolean;
+  /** `facetdb add <name>`, built from the checked short name alone. */
+  readonly command: string;
+};
+
+export type Gallery =
+  | {
+      readonly reachable: true;
+      readonly address: string;
+      readonly plugins: readonly GalleryEntry[];
+    }
+  | {
+      readonly reachable: false;
+      /** The address that was tried, without any credentials or query it held. */
+      readonly address: string;
+      /** In words: the registry could not be reached or its index could not be read. */
+      readonly why: string;
+    };
+
+/** One question pack of a hosted plugin, in the shape a source draft's questions take. */
+export type PackView = {
+  /** The plugin's short name and package. */
+  readonly plugin: string;
+  readonly package: string;
+  readonly name: string;
+  readonly description: string | null;
+  /** By question name, as `POST /v1/config/validate`'s source draft writes them. */
+  readonly questions: { readonly [name: string]: Omit<Question, "name"> };
+  readonly thresholds: { readonly [question: string]: ThresholdOverride };
+};
+
+export type PluginsDoor = {
+  /** Every plugin the worker hosts, in the order the config first names each. */
+  installed(): readonly InstalledPlugin[];
+  /** The registry's entries that match `search` (every word of it, anywhere in an entry); all when absent. */
+  gallery(search: string | undefined): Promise<Gallery>;
+  /** The packs of the hosted plugins. */
+  packs(): readonly PackView[];
+};
+
+/** A surface with no plugin host (a test's app): every list is empty and the registry is not asked. */
+export const NO_PLUGINS: PluginsDoor = {
+  installed: () => [],
+  gallery: () => Promise.resolve({ reachable: true, address: "", plugins: [] }),
+  packs: () => [],
+};

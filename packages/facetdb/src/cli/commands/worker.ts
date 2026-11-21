@@ -46,6 +46,8 @@ import {
   type SourceConfig,
   toProjectJson,
 } from "../../config/index.ts";
+import { VERSION } from "../../index.ts";
+import type { PluginHost } from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
@@ -86,6 +88,7 @@ import {
 } from "./database.ts";
 import { installRuns, readInstall } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
+import { createPluginsDoor, registryAddress } from "./plugins-door.ts";
 import {
   createSetupDoor,
   type DoorDatabases,
@@ -259,6 +262,11 @@ export type WorkerParts = {
   readonly sessionSecret: string;
   /** The studio build the surface serves beside the API; absent, the API alone. */
   readonly studio?: StudioBuild;
+  /**
+   * The plugins the config names, as the host loaded them when it did: the Plugins page's installed
+   * plugins and packs. Absent, those endpoints answer empty lists.
+   */
+  readonly plugins?: PluginHost;
   /**
    * Called once the surface listens, with the host it was told and the port it got: `facetdb studio`
    * opens the browser there.
@@ -754,6 +762,20 @@ export async function runWorkers(
         // The built studio, served after the API; without it the API alone.
         ...(parts.studio === undefined ? {} : { studioApp: parts.studio }),
         ...(jobs === undefined ? {} : { backfill: jobs }),
+        // The Plugins page: the hosted plugins, the registry's gallery, the packs.
+        ...(parts.plugins === undefined
+          ? {}
+          : {
+              plugins: createPluginsDoor({
+                host: parts.plugins,
+                env: deps.env,
+                coreVersion: VERSION,
+                registry: registryAddress(deps.env),
+                fetch: deps.fetch,
+                abortAfter: deps.abortAfter,
+                clock,
+              }),
+            }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
@@ -1186,7 +1208,11 @@ export async function workerStudio(
 export async function runWorkerProcess(
   context: CommandContext<WorkerOptions>,
   config: ProjectConfig,
-  surface: Pick<WorkerParts, "listening"> & { readonly studio: ServedStudio | undefined },
+  surface: Pick<WorkerParts, "listening"> & {
+    readonly studio: ServedStudio | undefined;
+    /** The plugins the config names, as `loadWorkerConfig` hosted them (the Plugins page's door). */
+    readonly plugins: PluginHost;
+  },
 ): Promise<WorkerSummary> {
   const { options, deps } = context;
   const storeUrl = deps.env[STORE_VARIABLE] ?? "";
@@ -1308,6 +1334,7 @@ export async function runWorkerProcess(
         },
         provider: deps.provider(config),
         sessionSecret,
+        plugins: surface.plugins,
         ...(surface.studio === undefined ? {} : { studio: surface.studio.build }),
         ...(surface.listening === undefined ? {} : { listening: surface.listening }),
       });
@@ -1341,7 +1368,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
   run: async (context) => {
     const { options, deps, print } = context;
     // Every plugin the config names is loaded and its settings checked here, a dry run included.
-    const { config } = await loadWorkerConfig(deps, options.config);
+    const { config, plugins } = await loadWorkerConfig(deps, options.config);
     requireModel(config, deps.env);
     parsePort(options.port);
     parseHost(options.host);
@@ -1356,7 +1383,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
       );
       return { ok: true, dryRun: true };
     }
-    return runWorkerProcess(context, config, { studio });
+    return runWorkerProcess(context, config, { studio, plugins });
   },
 });
 
