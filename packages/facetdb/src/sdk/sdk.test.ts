@@ -170,7 +170,7 @@ async function rig() {
     storeDatabase: {
       query: () => Promise.reject(new Error("the SDK reads no dashboard figure")),
     },
-    dashboard: { projectId: PROJECT, cap: undefined, sources: [] },
+    dashboard: { projectId: PROJECT, cap: undefined, sources: [], stopped: [] },
     // Nor the Alerts and Settings pages' channels and access.
     host: "127.0.0.1",
     alertChannels: () => [],

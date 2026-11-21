@@ -500,7 +500,7 @@ describe("the reload after the door's run", () => {
       load: () => Promise.resolve(state.file),
       beat: () => Promise.resolve(),
       // The swap's heartbeat waits for ever: nothing here runs the loops.
-      clock: { sleep: () => new Promise(() => undefined) },
+      clock: { sleep: () => new Promise(() => undefined), now: () => 0 },
       print: () => undefined,
       onPass: () => () => undefined,
     });

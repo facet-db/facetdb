@@ -9,11 +9,12 @@ import {
   readableTokenCounts,
   type SpendingCap,
   WORKER_NOT_RUNNING_WHAT,
+  whenUtc,
 } from "@facetdb/core";
 import { Hono } from "hono";
 import type { AppEnv } from "../auth/middleware.ts";
 import { type Doctors, INSTALL_CHECK, type Verdict } from "./doctor.ts";
-import type { DashboardDoor } from "./door.ts";
+import type { DashboardDoor, StoppedSource } from "./door.ts";
 import { counted, dollarsOf, duration, grouped, money, percent } from "./figures.ts";
 import { sourceIds, unknownProject } from "./project.ts";
 import type { DashboardReads, Day } from "./reads.ts";
@@ -229,12 +230,34 @@ function failingWords(sources: readonly SourceState[]): string {
   ].join(" ");
 }
 
-function sourcesCheck(sources: readonly SourceState[]): HealthCheck {
-  if (sources.length === 0) {
+/**
+ * The title of Home's state when a source's loop failed and it stopped alone, and no failure the
+ * alerts name comes first. It is no alert kind: "connector lost access" is not raised here.
+ */
+export const SOURCE_STOPPED_TITLE = "A source stopped";
+
+/** Times in the house form, as the worker's own lines say them: `YYYY-MM-DD HH:MM UTC`. */
+function stoppedWords(stopped: StoppedSource): string {
+  const said = `${stopped.source} stopped: ${stopped.why.replace(/\.$/, "")}.`;
+  return stopped.retryAt === null
+    ? `${said} Not tried again until it is fixed: then Check again on the Sources page, or restart facetdb worker.`
+    : `${said} Trying again at ${whenUtc(new Date(stopped.retryAt))}.`;
+}
+
+function sourcesCheck(
+  sources: readonly SourceState[],
+  stopped: readonly StoppedSource[],
+): HealthCheck {
+  if (sources.length === 0 && stopped.length === 0) {
     return { name: "sources", status: "ok", words: "No source is installed yet" };
   }
-  if (sources.some((source) => source.verdict === "failing")) {
-    return { name: "sources", status: "fail", words: failingWords(sources) };
+  const failing = sources.some((source) => source.verdict === "failing");
+  if (failing || stopped.length > 0) {
+    return {
+      name: "sources",
+      status: "fail",
+      words: [...(failing ? [failingWords(sources)] : []), ...stopped.map(stoppedWords)].join(" "),
+    };
   }
   const all =
     sources.length === 1
@@ -258,8 +281,13 @@ function attentionOf(failed: HealthCheck, sources: readonly SourceState[]): stri
     case "model":
       return ALERT_TITLES.model_failing;
     case "sources":
-      // Lost access wins over a missing install when a project has both.
-      return sources.some(lost) ? ALERT_TITLES.connector_lost_access : INSTALL_BEHIND_TITLE;
+      // Lost access wins over a missing install when a project has both, and both over a source
+      // whose loop stopped (which alone fails the check otherwise).
+      return sources.some(lost)
+        ? ALERT_TITLES.connector_lost_access
+        : sources.some(behind)
+          ? INSTALL_BEHIND_TITLE
+          : SOURCE_STOPPED_TITLE;
   }
 }
 
@@ -435,7 +463,12 @@ export function createHomeService(deps: HomeDeps): HomeService {
         reads.monthTokens(projectId, month),
         reads.recentAlerts(projectId, RECENT_ALERTS),
       ]);
-      const checks = [workerCheck(last, now), modelCheck(failing), sourcesCheck(sources)];
+      // Read after the doctors: a source that stopped meanwhile is named here, not dropped.
+      const checks = [
+        workerCheck(last, now),
+        modelCheck(failing),
+        sourcesCheck(sources, door.stopped),
+      ];
       const failed = checks.find((check) => check.status === "fail");
       return {
         kind: "home",

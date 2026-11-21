@@ -73,6 +73,7 @@ import { createBackfillJobs } from "./backfill-jobs.ts";
 import {
   configFileDoor,
   createFleet,
+  failureWords,
   fileQueue,
   reviewLookups,
   type SourceLoop,
@@ -654,6 +655,8 @@ export async function runWorkers(
   // Apply and the setup flow write the one file, one write at a time.
   const writes = fileQueue();
   let listener: HttpListener | undefined;
+  /** Under --once, the first source that failed: the command exits with it at the end. */
+  let onceFailure: { readonly error: unknown } | undefined;
   try {
     await fleet.open(config);
     for (const loop of fleet.loops()) {
@@ -738,6 +741,10 @@ export async function runWorkers(
               version: loop.version,
               table: loop.table,
             }));
+          },
+          // A source whose loop failed is no loop: Home names it with why and its next try.
+          get stopped() {
+            return fleet.stopped();
           },
         },
         // The Alerts and Settings pages: where this surface listens, the channel addresses the
@@ -931,7 +938,16 @@ export async function runWorkers(
           try {
             report = await loop.worker.runOnce();
           } catch (error) {
-            throw installMissing(loop.source.name, options.config, error);
+            // A source that fails stops alone; the others finish their pass, and the command exits
+            // with the first failure. Nothing is tried again under --once. Each failing source says
+            // its own error, scrubbed of its connection string.
+            const worded = installMissing(loop.source.name, options.config, error);
+            onceFailure ??= { error: worded };
+            print(`${loop.source.name} stopped: ${failureWords(loop.source, worded)}.`);
+            print(
+              `${loop.source.name} stopped; the other sources finish their pass, then the worker exits with its error.`,
+            );
+            break;
           }
           onPass(report);
           const settled =
@@ -949,9 +965,8 @@ export async function runWorkers(
       }
       printAlertFailures(await outbox.deliverDue(clock.now()), print);
     } else {
-      // One loop failing (its database gone, say) stops the others too, so every claim is settled
-      // before the connectors close; the first failure is what the run reports (the fleet's run
-      // throws it once every loop has stopped).
+      // A loop that fails stops alone and is tried again; the fleet's run rejects only for a
+      // failure of the fleet itself, which stops the rest.
       const stopped = deps.stopSignal();
       const stopAll = new AbortController();
       const signal = AbortSignal.any([stopped, stopAll.signal]);
@@ -980,6 +995,9 @@ export async function runWorkers(
       print(
         `${entry.source}: answered ${entry.answered}, already answered ${entry.alreadyAnswered}, failed ${entry.failed}`,
       );
+    }
+    if (onceFailure !== undefined) {
+      throw onceFailure.error;
     }
   } finally {
     await listener?.close();

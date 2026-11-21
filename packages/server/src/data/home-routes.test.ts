@@ -238,6 +238,7 @@ function rig(
         ? undefined
         : (options.cap ?? { inputTokens: 595_238_096, onCapReached: "pause" }),
     sources,
+    stopped: [],
   };
   const deps = { door, reads: readsOf(world), doctors: createDoctors(clock), clock };
   const appFor = (studioProject: string) =>

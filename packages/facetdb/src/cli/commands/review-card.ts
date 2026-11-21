@@ -9,7 +9,11 @@ import {
   type QuestionSet,
   resolveThresholds,
   saidWords,
+  whenUtc,
 } from "@facetdb/core";
+
+// The house form of a time is core's (the worker's lines and Home say it the same way).
+export { whenUtc };
 
 /**
  * One review card drawn for a terminal: where the record is and how long it has waited, its state
@@ -220,11 +224,6 @@ function stateLines(state: CardView["card"]["state"], width: number, style: Styl
     });
   });
   return lines;
-}
-
-/** `YYYY-MM-DD HH:MM UTC`: the same hour on every machine, as `facetdb explain` prints it. */
-export function whenUtc(at: Date): string {
-  return `${at.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 /** "14 minutes", "3 hours": how long a card has waited, in the largest whole unit. */

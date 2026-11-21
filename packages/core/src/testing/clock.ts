@@ -17,9 +17,13 @@ export class FakeClock implements Clock {
     return this.#time;
   }
 
-  sleep(ms: number): Promise<void> {
+  /** A sleep whose `signal` has already aborted ends at once without moving time. */
+  sleep(ms: number, signal?: AbortSignal): Promise<void> {
     if (!Number.isFinite(ms) || ms < 0) {
       return Promise.reject(new Error(`a sleep needs a finite, non-negative duration, not ${ms}`));
+    }
+    if (signal?.aborted === true) {
+      return Promise.resolve();
     }
     this.sleeps.push(ms);
     this.#time += ms;

@@ -6,6 +6,9 @@
 export type Clock = {
   /** Milliseconds since the Unix epoch. */
   now(): number;
-  /** Resolves after `ms` milliseconds have passed on this clock. */
-  sleep(ms: number): Promise<void>;
+  /**
+   * Resolves after `ms` milliseconds have passed on this clock, or as soon as `signal` aborts, its
+   * timer cleared then: a cancelled wait holds no timer, so it never keeps a stopping process alive.
+   */
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
 };

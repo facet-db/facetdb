@@ -53,10 +53,29 @@ export class SteppedClock implements Clock {
   now(): number {
     return this.#time;
   }
-  sleep(ms: number): Promise<void> {
+  /** An abort takes the sleeper off the clock and wakes it, as the real clock clears its timer. */
+  sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((wake) => {
-      this.#sleepers.push({ due: this.#time + ms, wake });
+      if (signal?.aborted === true) {
+        wake();
+        return;
+      }
+      const sleeper = { due: this.#time + ms, wake };
+      this.#sleepers.push(sleeper);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          this.#sleepers = this.#sleepers.filter((other) => other !== sleeper);
+          wake();
+        },
+        { once: true },
+      );
     });
+  }
+
+  /** When each sleep still on the clock ends, soonest first: what a stop must not leave behind. */
+  pending(): readonly number[] {
+    return this.#sleepers.map((sleeper) => sleeper.due).sort((a, b) => a - b);
   }
   advance(ms: number): void {
     this.#time += ms;

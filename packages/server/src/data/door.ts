@@ -59,10 +59,29 @@ export type SourceFacts = {
   readonly table: TableFacts | undefined;
 };
 
+/**
+ * A source the worker ran whose loop failed: it stopped alone, the others answering on, and the
+ * worker tries it again at `retryAt`. It is not among `DashboardDoor.sources`.
+ */
+export type StoppedSource = {
+  readonly source: string;
+  /** The failure in words. */
+  readonly why: string;
+  /** When it stopped, ISO 8601. */
+  readonly since: string;
+  /**
+   * When the worker tries it again, ISO 8601; null when its engine refused it (another worker holds
+   * a SQLite file's lock, say), which no wait mends: Check again or a restart tries it.
+   */
+  readonly retryAt: string | null;
+};
+
 export type DashboardDoor = {
   readonly projectId: string;
   /** The project's monthly cap; undefined when the config sets none. */
   readonly cap: SpendingCap | undefined;
   /** Every source the worker runs, in config order. */
   readonly sources: readonly SourceFacts[];
+  /** The sources whose loop failed and stopped alone, waiting for their next try. */
+  readonly stopped: readonly StoppedSource[];
 };

@@ -20,6 +20,14 @@ export function percent(probability: number): string {
   return `${Math.round(probability * 100)}%`;
 }
 
+/**
+ * "YYYY-MM-DD HH:MM UTC": how a time reads anywhere a user sees one in words, the same hour on
+ * every machine (`facetdb explain`, the terminal review, the worker's lines and Home's).
+ */
+export function whenUtc(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
 /** "58% likely yes": how a probability reads anywhere a user sees one. */
 export function likelyYes(probability: number): string {
   return `${percent(probability)} likely yes`;

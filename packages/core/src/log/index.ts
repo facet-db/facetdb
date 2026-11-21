@@ -16,6 +16,7 @@ export {
   namedValue,
   percent,
   saidWords,
+  whenUtc,
 } from "./explain.ts";
 export type { DecisionWriter, HumanResult, ReviewedRecord } from "./human.ts";
 export {

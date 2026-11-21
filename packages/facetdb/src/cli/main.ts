@@ -72,7 +72,24 @@ import { quietTypelessPackageWarning } from "./warnings.ts";
 
 const clock: Clock = {
   now: () => Date.now(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  // An abort clears the timer and resolves at once (a stop during a stopped source's wait for its
+  // next try must not keep the process alive until the wait ends).
+  sleep: (ms, signal) =>
+    new Promise((resolve) => {
+      if (signal?.aborted === true) {
+        resolve();
+        return;
+      }
+      const ended = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", ended);
+        resolve();
+      }, ms);
+      signal?.addEventListener("abort", ended, { once: true });
+    }),
 };
 
 /**

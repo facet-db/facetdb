@@ -67,7 +67,7 @@ function source(name: string, checks: readonly DoctorCheck[]): SourceFacts {
 
 async function homeOf(...sources: SourceFacts[]): Promise<Home> {
   const clock = new FakeClock(NOW);
-  const door: DashboardDoor = { projectId: PROJECT, cap: undefined, sources };
+  const door: DashboardDoor = { projectId: PROJECT, cap: undefined, sources, stopped: [] };
   const outcome = await createHomeService({
     door,
     reads,

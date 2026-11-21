@@ -14,7 +14,10 @@ import { questionSetOf } from "./database.ts";
 
 const URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
 
-const NEVER_SLEEPS: Pick<Clock, "sleep"> = { sleep: () => new Promise<void>(() => undefined) };
+const NEVER_SLEEPS: Pick<Clock, "sleep" | "now"> = {
+  sleep: () => new Promise<void>(() => undefined),
+  now: () => 0,
+};
 
 /** What the loader makes of `database: process.env.DATABASE_URL`: the value and the variable. */
 function loaded(config: ProjectConfig): ProjectConfig {

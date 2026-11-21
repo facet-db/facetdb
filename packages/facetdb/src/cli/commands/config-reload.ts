@@ -1,24 +1,28 @@
-import type {
-  ActionStep,
-  Clock,
-  Connector,
-  DecisionLog,
-  KeyText,
-  PassReport,
-  Question,
-  QuestionSet,
-  RecordKey,
-  ReviewServiceDeps,
-  Worker,
+import {
+  type ActionStep,
+  type Clock,
+  type Connector,
+  type DecisionLog,
+  EngineRefusal,
+  type KeyText,
+  type PassReport,
+  type Question,
+  type QuestionSet,
+  type RecordKey,
+  type ReviewServiceDeps,
+  type Worker,
+  whenUtc,
 } from "@facetdb/core";
-import type {
-  ConfigFileDoor,
-  FileApply,
-  FileDiff,
-  PendingSource,
-  ReloadSummary,
-  SourceReload,
-  TableFacts,
+import {
+  type ConfigFileDoor,
+  type FileApply,
+  type FileDiff,
+  hideSecrets,
+  type PendingSource,
+  type ReloadSummary,
+  type SourceReload,
+  secretParts,
+  type TableFacts,
 } from "@facetdb/server";
 import {
   type ApplyPlan,
@@ -63,10 +67,29 @@ import { hasUrl, variableOf } from "./database.ts";
  *  - a file that does not load leaves every source as it was, and the worker says what to fix.
  * While a stopping source finishes its pass the fleet beats the heartbeat itself, so the heartbeat
  * never stops during a reload; the sources that keep running beat on every pass as always.
+ *
+ * A source whose loop fails (its database gone, an outside service down) stops alone: its connector
+ * is closed and it leaves the running loops, while every other loop, the outbox and the HTTP
+ * surface go on untouched. The fleet keeps why and when, `pending()` says so, and the source is
+ * tried again through a reload's `add` path (`installed`, then `open`, then launch) after
+ * `RETRY_FIRST_MS`, the wait doubling up to `RETRY_MAX_MS` and starting over once a pass of its
+ * loop works. Retries and reloads run one at a time in the same queue, so a retry never opens a
+ * loop for a source a reload started meanwhile. A stop cancels the wait; a reload during it tries
+ * the source at once (the wait cancelled), and one that removes or changes the source replaces the
+ * failure with what the file now says. A loop its engine refuses (another worker holds a SQLite
+ * file's lock, say) stops alone as well, but no wait mends a refusal: it is tried on Check again or
+ * a restart only, and a run left with no loop and nothing to try ends with the refusal, as the
+ * worker's start would have.
  */
 
 /** How often the fleet beats while a source it restarts finishes its pass in hand. */
 export const RELOAD_BEAT_EVERY_MS = 15_000;
+
+/** The wait before a stopped source is first tried again. */
+export const RETRY_FIRST_MS = 30_000;
+
+/** The longest wait between two tries of a stopped source: the wait doubles up to it. */
+export const RETRY_MAX_MS = 10 * 60_000;
 
 /** One source's loop and what it holds, as the fleet opened it. */
 export type SourceLoop = {
@@ -144,13 +167,14 @@ export type FleetDeps = {
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
   readonly beat: (source: string) => Promise<void>;
-  readonly clock: Pick<Clock, "sleep">;
+  /** `now` times a stopped source's next try. */
+  readonly clock: Pick<Clock, "sleep" | "now">;
   readonly print: (line: string) => void;
   /** Sees each pass of a source's loop. */
   readonly onPass: (loop: SourceLoop) => (report: PassReport) => void;
   /**
-   * The failure a loop stopped with, as the run reports it: the error itself unless the worker
-   * words it for its source (a missing install names the source and the fix).
+   * The failure a loop stopped with, in words: the error itself unless the worker words it for its
+   * source (a missing install names the source and the fix).
    */
   readonly failure?: (source: string, error: unknown) => unknown;
 };
@@ -163,6 +187,17 @@ export type Fleet = {
    * reload's own plan, judged now, so it is empty once the worker runs the file.
    */
   pending(): readonly PendingSource[];
+  /**
+   * The sources whose loop failed and that wait for their next try, as Home's door names them
+   * (`DashboardDoor.stopped`): why, since when, and when they are tried again (ISO 8601). The
+   * fleet's own state, read without planning a reload. `retryAt` is null for a refusal.
+   */
+  stopped(): readonly {
+    readonly source: string;
+    readonly why: string;
+    readonly since: string;
+    readonly retryAt: string | null;
+  }[];
   /** Every source that runs, in the config's order. */
   loops(): readonly SourceLoop[];
   loop(name: string): SourceLoop | undefined;
@@ -175,8 +210,9 @@ export type Fleet = {
   /** Opens every source of `config`, one after another; the caller closes the fleet on a failure. */
   open(config: ProjectConfig): Promise<void>;
   /**
-   * Runs every loop until `signal` aborts or one loop fails, which stops the others; then waits for
-   * every loop and any reload in hand, and throws the first failure.
+   * Runs every loop until `signal` aborts; then waits for any reload or retry in hand and every
+   * loop. A loop that fails stops alone and is tried again, so it rejects only for a failure of the
+   * fleet itself: every source it ran was refused, and none is left to run or try.
    */
   run(signal: AbortSignal): Promise<void>;
   /** Reads the file again and applies it to the running loops; resolves once the plan is made. */
@@ -384,6 +420,17 @@ type NotStarted =
   | { readonly kind: "refused"; readonly message: string; readonly fix: string }
   /** The check held, and the source could not be opened. */
   | { readonly kind: "failed"; readonly why: string; readonly rightsRead: boolean }
+  /**
+   * It ran, and its loop failed: it stopped alone at `at` and is tried again at `retryAt`, or at
+   * once by a reload.
+   */
+  | {
+      readonly kind: "stopped";
+      readonly why: string;
+      readonly at: number;
+      /** Null for a refusal: no wait mends it, so only Check again or a restart tries it. */
+      readonly retryAt: number | null;
+    }
   | Unswitched;
 
 /** Whether a reload asked for again can start it: the reasons a reading of the database may change. */
@@ -391,6 +438,7 @@ function checkAgainStarts(reason: NotStarted): boolean {
   switch (reason.kind) {
     case "unchecked":
     case "unread":
+    case "stopped":
       return true;
     case "missing":
     case "failed":
@@ -427,7 +475,34 @@ function notStartedMessage(name: string, reason: NotStarted): string {
       return `${NEW_AND_NOT_ANSWERED}: its database could not be read to check its install (${reason.why}). Check again once the database answers; facetdb doctor says what is wrong.`;
     case "cannot-tell":
       return `${NEW_AND_NOT_ANSWERED}: its install cannot be checked from here (${reason.why}), so it waits for a restart. Run facetdb migrate --source ${name} if the install did not finish, then restart facetdb worker.`;
+    case "stopped":
+      return reason.retryAt === null
+        ? `stopped at ${clockTime(reason.at)}: ${reason.why}. The other sources keep answering; no wait mends this, so fix it, then Check again or restart facetdb worker.`
+        : `stopped at ${clockTime(reason.at)}: ${reason.why}. The other sources keep answering; the worker tries ${name} again at ${clockTime(reason.retryAt)}, or at once on Check again.`;
   }
+}
+
+/** A time as the worker's lines say it, in the house form: `YYYY-MM-DD HH:MM UTC`. */
+function clockTime(ms: number): string {
+  return whenUtc(new Date(ms));
+}
+
+/**
+ * A loop's failure in words, scrubbed of the source's connection string (its whole string, its
+ * password and credentials, its user and its host) as the setup and migrate doors scrub a driver's
+ * words: a driver message often names them, and these words reach the log, Home and the Sources
+ * page. `failure` is the worker's wording of the error, when it has one; the "the source "x"
+ * stopped: " that wording begins with is left out, as every line names the source itself, and so is
+ * a closing full stop.
+ */
+export function failureWords(source: SourceConfig, failure: unknown): string {
+  const said = wordsOf(failure);
+  const words =
+    source.database === undefined || source.database === ""
+      ? said
+      : hideSecrets(said, secretParts(source.database));
+  const prefix = `the source "${source.name}" stopped: `;
+  return (words.startsWith(prefix) ? words.slice(prefix.length) : words).replace(/\.$/, "");
 }
 
 /** What a reload says of a source new in the file that it started. */
@@ -495,6 +570,7 @@ function migrateHelps(reason: NotStarted): boolean {
     case "stopping":
     case "refused":
     case "unread":
+    case "stopped":
       return false;
   }
 }
@@ -520,6 +596,47 @@ type Slot = {
   idle: (() => void)[];
 };
 
+/** A source whose loop failed, waiting for its next try. */
+type Stopped = {
+  /** The source and project as its loop ran them: a try opens the same. */
+  readonly source: SourceConfig;
+  readonly config: ProjectConfig;
+  /**
+   * The file and its source when it stopped: a reload that changes the source replaces the try.
+   * Compared (`sourceKey`) only when a reload asks, never as it stops: nothing may throw there.
+   */
+  readonly file: { readonly config: ProjectConfig; readonly source: SourceConfig } | undefined;
+  /** The failure in words: the loop's, then the last try's. */
+  why: string;
+  /** When its loop failed. */
+  readonly at: number;
+  /** When the next try is due; null for a refusal, which no wait mends (`refuse`). */
+  retryAt: number | null;
+  /**
+   * The wait in force, by its token: a try that comes due runs only while its token is still this
+   * one, so a reload's own try (which starts a new wait) leaves one timer per source, never two.
+   */
+  wait: object | undefined;
+  /** Ends the wait for the next try, its timer cleared. */
+  cancel: () => void;
+  /**
+   * The failed loop's outage policy: the records it holds (error or unchecked during a model
+   * outage) are handed to the loop a try opens, as a reload's swap hands them on.
+   */
+  readonly outage: SourceLoop["outage"];
+};
+
+/** Resolves once `signal` aborts. */
+function whenAborted(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve();
+    } else {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }
+  });
+}
+
 export function createFleet(deps: FleetDeps): Fleet {
   const slots = new Map<string, Slot>();
   /** The config as the file loaded last; the project settings the worker started with. */
@@ -527,10 +644,21 @@ export function createFleet(deps: FleetDeps): Fleet {
   let started: ProjectConfig | undefined;
   /** Set by `run`: the stop of every loop, and whether loops are launched. */
   let ending: AbortSignal | undefined;
-  const failed = new AbortController();
-  let failure: { readonly error: unknown } | undefined;
-  /** Reloads one at a time, each after the swap of the one before. */
+  /** Reloads and retries one at a time, each after the swap of the one before. */
   let queue: Promise<void> = Promise.resolve();
+  /** The sources whose loop failed and that wait for their next try, by name. */
+  const stopped = new Map<string, Stopped>();
+  /**
+   * The wait before each source's next try should its loop fail again: doubled at every try, up to
+   * `RETRY_MAX_MS`, and forgotten once a pass of its loop works.
+   */
+  const backoff = new Map<string, number>();
+  /** Failed loops still closing (review calls in flight finish first): `close` waits for them. */
+  const closing = new Set<Promise<void>>();
+  /** The first refusal a stopped source met (`refuse`), and the fleet's end once nothing is left. */
+  let refusal: { readonly error: unknown } | undefined;
+  /** Aborted when nothing runs and nothing waits for a try; `run` makes it anew if a source did. */
+  let exhausted = new AbortController();
   /**
    * The last reading of each source whose added questions were not switched to, for the file's
    * source as it was then: `pending()` says the same until a reload reads the database again.
@@ -601,16 +729,233 @@ export function createFleet(deps: FleetDeps): Fleet {
   }
 
   function launch(slot: Slot, stop: AbortSignal): void {
+    const name = slot.loop.source.name;
+    const seen = deps.onPass(slot.loop);
     slot.done = slot.loop.worker
-      .run(AbortSignal.any([stop, slot.halt.signal]), deps.onPass(slot.loop))
+      .run(AbortSignal.any([stop, slot.halt.signal]), (report) => {
+        // A pass that works: the next failure waits the first wait again.
+        backoff.delete(name);
+        seen(report);
+      })
       .catch((error: unknown) => {
-        // One loop failing (its database gone, say) stops the others too, so every claim is
-        // settled before the connectors close; the first failure is what the run reports.
-        failure ??= {
-          error: deps.failure === undefined ? error : deps.failure(slot.loop.source.name, error),
-        };
-        failed.abort();
+        stopAlone(slot, error);
       });
+  }
+
+  /** The config as the file loaded last; the fleet is opened before anything asks for it. */
+  function inForce(): ProjectConfig {
+    if (current === undefined) {
+      throw new Error("the fleet was never opened");
+    }
+    return current;
+  }
+
+  /** A loop's failure as the worker words it, scrubbed (`failureWords`). */
+  function whyOf(source: SourceConfig, error: unknown): string {
+    return failureWords(
+      source,
+      deps.failure === undefined ? error : deps.failure(source.name, error),
+    );
+  }
+
+  /**
+   * One loop failed: it alone leaves the running loops and its connector is closed once the review
+   * calls in flight on it settle (its pass gave back the batch it could before it threw; a claim
+   * its database could not take back returns when its lease ends). The others, the outbox and the
+   * HTTP surface are never touched. A loop that fails while a reload or the worker stops it is said
+   * and left to that stop, which closes it.
+   */
+  function stopAlone(slot: Slot, error: unknown): void {
+    const name = slot.loop.source.name;
+    const why = whyOf(slot.loop.source, error);
+    if (
+      slots.get(name) !== slot ||
+      slot.halt.signal.aborted ||
+      ending === undefined ||
+      ending.aborted
+    ) {
+      deps.print(`${name}: its loop failed as it stopped: ${why}`);
+      return;
+    }
+    slots.delete(name);
+    const file = inForce();
+    const wanted = file.sources.find((source) => source.name === name);
+    const now = deps.clock.now();
+    const entry: Stopped = {
+      source: slot.loop.source,
+      // The loop's own question set: the file's model may have moved on since it opened.
+      config: { ...file, model: slot.loop.questionSet.model },
+      file: wanted === undefined ? undefined : { config: file, source: wanted },
+      why,
+      at: now,
+      retryAt: null,
+      wait: undefined,
+      cancel: () => undefined,
+      outage: slot.loop.outage,
+    };
+    stopped.set(name, entry);
+    const closed = retire(slot);
+    closing.add(closed);
+    void closed.then(() => closing.delete(closed));
+    if (error instanceof EngineRefusal) {
+      refuse(name, entry, deps.failure === undefined ? error : deps.failure(name, error));
+      return;
+    }
+    const retryAt = schedule(name, entry);
+    deps.print(
+      `${name} stopped: ${why}. The other sources keep running; the worker tries ${name} again at ${clockTime(retryAt)}.`,
+    );
+  }
+
+  /**
+   * A stopped source its engine refused (another worker holds a SQLite file's lock, the table is
+   * another project's) or the CLI's own checks refused: no wait mends that, so it is not tried
+   * again until a reload asks (Check again) or the worker restarts. A fleet left with no loop
+   * running and no source waiting for a try has nothing more to do: its run ends with the first
+   * refusal, as the worker's start would have (no running loop is touched by it, there is none).
+   */
+  function refuse(name: string, entry: Stopped, error: unknown): void {
+    entry.retryAt = null;
+    refusal ??= { error };
+    deps.print(
+      `${name} stopped: ${entry.why}. The other sources keep running; no wait mends this, so the worker does not try ${name} again until Check again or a restart.`,
+    );
+    if (slots.size === 0 && [...stopped.values()].every((other) => other.retryAt === null)) {
+      exhausted.abort();
+    }
+  }
+
+  /**
+   * Waits the source's next wait, then tries it in the queue. The wait is the source's only one: a
+   * wait made before it is cancelled and its token retired, and a stop or `entry.cancel` ends the
+   * sleep itself, its timer cleared, so a stopping worker holds no timer for it.
+   */
+  function schedule(name: string, entry: Stopped): number {
+    entry.cancel();
+    const wait = backoff.get(name) ?? RETRY_FIRST_MS;
+    backoff.set(name, Math.min(wait * 2, RETRY_MAX_MS));
+    const retryAt = deps.clock.now() + wait;
+    entry.retryAt = retryAt;
+    const token = {};
+    entry.wait = token;
+    const cancelled = new AbortController();
+    entry.cancel = () => {
+      cancelled.abort();
+      if (entry.wait === token) {
+        entry.wait = undefined;
+      }
+    };
+    const signal =
+      ending === undefined ? cancelled.signal : AbortSignal.any([cancelled.signal, ending]);
+    void deps.clock.sleep(wait, signal).then(() => {
+      if (!signal.aborted && entry.wait === token) {
+        const tried = queue.then(() => startAgain(name, entry, token));
+        queue = tried.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+    });
+    return retryAt;
+  }
+
+  /**
+   * Tries a stopped source again as a reload's `add` starts one: the worker's own reading of its
+   * database, then its loop opened, put in place and launched. A reading that finds the install
+   * missing, a database that does not answer, or an open that fails keeps it stopped, and the next
+   * try waits longer; a reading that cannot tell (an engine whose doctor reads no rights) lets the
+   * open try, since the source ran on that install. Skipped when a reload took the source meanwhile
+   * (started, removed or changed it), when `token` names a wait no longer in force (a reload tried
+   * the source and made a wait of its own since), or the worker is stopping: nothing opens then. A
+   * reload's own try passes no token. The loop it opens takes the records the failed loop's outage
+   * policy holds, as a reload's swap hands them on.
+   */
+  async function startAgain(
+    name: string,
+    entry: Stopped,
+    token?: object,
+  ): Promise<
+    | { readonly kind: "started"; readonly version: number }
+    | { readonly kind: "stopped" }
+    | { readonly kind: "skipped" }
+  > {
+    const stopping = () => ending === undefined || ending.aborted;
+    if (
+      stopped.get(name) !== entry ||
+      slots.has(name) ||
+      stopping() ||
+      (token !== undefined && entry.wait !== token)
+    ) {
+      return { kind: "skipped" };
+    }
+    // This try is the one in force: the wait that led here is spent.
+    entry.cancel();
+    /** Kept stopped: tried again after the next wait, or not at all for a refusal. */
+    const failedAgain = (why: string, error?: unknown) => {
+      entry.why = why;
+      if (error instanceof CliError || error instanceof EngineRefusal) {
+        refuse(name, entry, error);
+      } else {
+        const retryAt = schedule(name, entry);
+        deps.print(
+          `${name}: could not start again (${why}); the worker tries it again at ${clockTime(retryAt)}.`,
+        );
+      }
+      return { kind: "stopped" } as const;
+    };
+    if (!entry.source.api) {
+      let check: InstallCheck;
+      try {
+        check = await deps.installed(entry.source, entry.config);
+      } catch (error) {
+        return stopping()
+          ? { kind: "skipped" }
+          : failedAgain(failureWords(entry.source, error), error);
+      }
+      if (check.kind === "missing") {
+        return failedAgain(
+          failureWords(entry.source, `its database does not hold its install: ${check.missing}`),
+        );
+      }
+    }
+    if (stopping()) {
+      return { kind: "skipped" };
+    }
+    let fresh: SourceLoop;
+    try {
+      fresh = await deps.open(entry.source, entry.config);
+    } catch (error) {
+      return stopping() ? { kind: "skipped" } : failedAgain(whyOf(entry.source, error), error);
+    }
+    if (stopping() || ending === undefined) {
+      try {
+        await fresh.close();
+      } catch (error) {
+        deps.print(`${name}: closing its connection failed: ${messageOf(error)}`);
+      }
+      return { kind: "skipped" };
+    }
+    stopped.delete(name);
+    // The records the failed loop's outage policy holds are the new loop's to retry, as a swap's.
+    if (entry.outage !== undefined && fresh.outage !== undefined) {
+      fresh.outage.hold(entry.outage.held);
+    }
+    const slot = slotOf(fresh);
+    slots.set(name, slot);
+    launch(slot, ending);
+    deps.print(
+      `${name}: started again after it stopped; it answers with version ${fresh.version}.`,
+    );
+    return { kind: "started", version: fresh.version };
+  }
+
+  /** Forgets a stopped source: its wait cancelled, its next wait dropped. */
+  function forget(name: string): Stopped | undefined {
+    const entry = stopped.get(name);
+    entry?.cancel();
+    stopped.delete(name);
+    backoff.delete(name);
+    return entry;
   }
 
   /** Stops one loop after its pass in hand: every claim of that pass acked or released. */
@@ -654,6 +999,10 @@ export function createFleet(deps: FleetDeps): Fleet {
     const work = Promise.all([
       ...restarts.map(async ({ slot, fresh }) => {
         await stop(slot);
+        // A loop that failed while the reload opened its successor stopped alone and was closed:
+        // the new loop takes its place, and the old one's next try is forgotten.
+        const failed = slots.get(fresh.source.name) !== slot;
+        forget(fresh.source.name);
         // The records the old loop's outage policy holds are the new one's to retry: a restart
         // drops none of them (each comes back on the new policy's next retry).
         if (slot.loop.outage !== undefined && fresh.outage !== undefined) {
@@ -665,10 +1014,16 @@ export function createFleet(deps: FleetDeps): Fleet {
         if (ending !== undefined && !ending.aborted) {
           launch(next, ending);
         }
-        await retire(slot);
+        if (!failed) {
+          await retire(slot);
+        }
       }),
       ...removals.map(async (slot) => {
         await stop(slot);
+        // One that failed meanwhile was closed then, and the reload forgot it.
+        if (slots.get(slot.loop.source.name) !== slot) {
+          return;
+        }
         slots.delete(slot.loop.source.name);
         await retire(slot);
         deps.removed?.(slot.loop.source);
@@ -848,9 +1203,44 @@ export function createFleet(deps: FleetDeps): Fleet {
         case "unchanged":
           say({ source: step.name, outcome: "unchanged", version, message: null });
           break;
-        case "add":
-          await startAdded(step.source);
+        case "add": {
+          const entry = stopped.get(step.name);
+          if (
+            entry === undefined ||
+            entry.file === undefined ||
+            sourceKey(entry.file.config, entry.file.source) !== sourceKey(next, step.source)
+          ) {
+            // A source changed in the file since its loop failed is the file's now: started as a
+            // new one is, and no longer tried on what the failed loop ran.
+            forget(step.name);
+            await startAdded(step.source);
+            break;
+          }
+          // Stopped, and the file says of it what it said: tried at once, the wait cancelled.
+          entry.cancel();
+          const tried = await startAgain(step.name, entry);
+          say(
+            tried.kind === "started"
+              ? {
+                  source: step.name,
+                  outcome: "started",
+                  version: tried.version,
+                  message: `it had stopped, and it started again: it answers every change from now on with version ${tried.version}.`,
+                }
+              : {
+                  source: step.name,
+                  outcome: "not-started",
+                  version: null,
+                  message: notStartedMessage(
+                    step.name,
+                    tried.kind === "stopped"
+                      ? { kind: "stopped", why: entry.why, at: entry.at, retryAt: entry.retryAt }
+                      : { kind: "stopping" },
+                  ),
+                },
+          );
           break;
+        }
         case "keep":
           say({
             source: step.name,
@@ -924,6 +1314,18 @@ export function createFleet(deps: FleetDeps): Fleet {
         unstarted.delete(name);
       }
     }
+    // A stopped source taken out of the file is tried no more, and what was made for it dropped.
+    for (const name of [...stopped.keys()]) {
+      if (!next.sources.some((source) => source.name === name)) {
+        const entry = forget(name);
+        if (entry !== undefined) {
+          deps.removed?.(entry.source);
+        }
+        deps.print(
+          `${name}: no longer in facetdb.config.ts; it had stopped, and the worker no longer tries it.`,
+        );
+      }
+    }
     const swapped = restarts.length + removals.length === 0 ? done : swap(restarts, removals);
     return { summary: { loaded: true, sources, notes }, swapped };
   }
@@ -950,6 +1352,26 @@ export function createFleet(deps: FleetDeps): Fleet {
     for (const step of steps) {
       const wanted = file.sources.find((source) => source.name === step.name);
       if (step.kind === "add" && wanted !== undefined) {
+        const halted = stopped.get(step.name);
+        if (halted !== undefined) {
+          // It ran and its loop failed: why, and when the worker tries it again.
+          const reason = {
+            kind: "stopped",
+            why: halted.why,
+            at: halted.at,
+            retryAt: halted.retryAt,
+          } as const;
+          pending.push({
+            source: step.name,
+            outcome: "not-started",
+            message: notStartedMessage(step.name, reason),
+            migrate: migrateHelps(reason),
+            added: [],
+            removed: [],
+            checkAgain: checkAgainStarts(reason),
+          });
+          continue;
+        }
         // What the file says of it, else the last reading of its database for the file as it is
         // now, else not read since the file changed: a reload reads it again.
         const read = unstarted.get(step.name);
@@ -1005,13 +1427,15 @@ export function createFleet(deps: FleetDeps): Fleet {
   }
 
   return {
-    config() {
-      if (current === undefined) {
-        throw new Error("the fleet was never opened");
-      }
-      return current;
-    },
+    config: inForce,
     pending: pendingNow,
+    stopped: () =>
+      [...stopped].map(([name, entry]) => ({
+        source: name,
+        why: entry.why,
+        since: new Date(entry.at).toISOString(),
+        retryAt: entry.retryAt === null ? null : new Date(entry.retryAt).toISOString(),
+      })),
     loops: loopsInOrder,
     loop: (name) => slots.get(name)?.loop,
     connector: routed,
@@ -1026,24 +1450,31 @@ export function createFleet(deps: FleetDeps): Fleet {
     },
 
     async run(signal) {
-      const stop = AbortSignal.any([signal, failed.signal]);
-      ending = stop;
+      ending = signal;
       for (const slot of slots.values()) {
-        launch(slot, stop);
+        launch(slot, signal);
       }
-      await new Promise<void>((resolve) => {
-        if (stop.aborted) {
-          resolve();
-        } else {
-          stop.addEventListener("abort", () => resolve(), { once: true });
+      // The stop also ends every stopped source's wait: nothing is tried again from now on. A
+      // fleet whose every source was refused has no loop left to stop (`refuse`).
+      for (;;) {
+        const ended = exhausted.signal;
+        await whenAborted(AbortSignal.any([signal, ended]));
+        // A reload or retry in hand finishes (it starts nothing once the worker stops).
+        await queue;
+        if (signal.aborted) {
+          break;
         }
-      });
-      // A reload in hand finishes its swap (it starts nothing now), then every loop has stopped.
-      await queue;
-      await Promise.all([...slots.values()].map((slot) => slot.done));
-      if (failure !== undefined) {
-        throw failure.error;
+        // Nothing ran when the last source was refused, but a reload queued then may have started
+        // one: the run goes on with it, and a later stop ends it cleanly.
+        const waiting = [...stopped.values()].some((entry) => entry.retryAt !== null);
+        if (slots.size === 0 && !waiting && refusal !== undefined) {
+          throw refusal.error;
+        }
+        if (exhausted.signal === ended) {
+          exhausted = new AbortController();
+        }
       }
+      await Promise.all([...slots.values()].map((slot) => slot.done));
     },
 
     reload() {
@@ -1059,6 +1490,7 @@ export function createFleet(deps: FleetDeps): Fleet {
 
     async close() {
       await queue;
+      await Promise.all(closing);
       for (const slot of slots.values()) {
         // A review call still in flight finishes on its pool first.
         while (slot.busy > 0) {
