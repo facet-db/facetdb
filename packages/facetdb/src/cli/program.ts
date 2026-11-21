@@ -210,8 +210,12 @@ export type CliDeps = {
     /** Hears of a stored row the store cannot trust (a reviewer's unreadable hash); never a secret. */
     readonly warn?: (message: string) => void;
   }) => Promise<Store>;
-  /** The model provider for a config: `modelUrl`'s server, else TypeSafe with `TYPESAFE_API_KEY`. */
-  readonly provider: (config: ProjectConfig) => ModelProvider;
+  /**
+   * The model provider for a config: `provider`'s preset with its own key variable, or the plugin's
+   * (built from `plugins`, the host of a plugin's provider); with no `provider`, `modelUrl`'s
+   * server, else TypeSafe with `TYPESAFE_API_KEY`.
+   */
+  readonly provider: (config: ProjectConfig, plugins: PluginHost | undefined) => ModelProvider;
   /**
    * Everything a backfill of one source needs, wired by the composition root: the source's
    * connector, the decision log, the cursor store, the spending gate. The caller closes it. With
@@ -221,7 +225,12 @@ export type CliDeps = {
   readonly backfill: (
     config: ProjectConfig,
     source: SourceConfig,
-    mode: { readonly dryRun: boolean; readonly allowInsecure?: boolean },
+    mode: {
+      readonly dryRun: boolean;
+      readonly allowInsecure?: boolean;
+      /** The plugin host of a config whose `provider` is a plugin's; the setup builds the provider from it. */
+      readonly plugins?: PluginHost;
+    },
   ) => Promise<BackfillSetup>;
   /**
    * Binds the HTTP surface on a host and port (`facetdb worker --host --port`); the composition

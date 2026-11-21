@@ -377,7 +377,7 @@ export function planReload(
  * `deps.project`, and the worker's gate reads the cap in force on every check.
  */
 function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
-  const fields = (["modelUrl", "alerts"] as const).filter(
+  const fields = (["modelUrl", "provider", "alerts"] as const).filter(
     (field) => JSON.stringify(started[field]) !== JSON.stringify(next[field]),
   );
   return fields.length === 0

@@ -9,6 +9,7 @@ import {
   type PluginSettings,
   type PluginVariable,
   type ProjectConfig,
+  pluginProviderOf,
   pluginVariables,
   suggestedVariable,
 } from "../config/index.ts";
@@ -218,6 +219,10 @@ function usesOf(config: ProjectConfig): Use[] {
     name,
     where: formatPath(["plugins", name]),
   }));
+  const providedBy = config.provider === undefined ? undefined : pluginProviderOf(config.provider);
+  if (providedBy !== undefined) {
+    uses.push({ name: providedBy.plugin, where: "provider" });
+  }
   config.sources.forEach((source, index) => {
     source.actions.forEach((action, position) => {
       uses.push({

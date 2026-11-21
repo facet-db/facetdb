@@ -45,6 +45,7 @@ export type SourceJson = {
 export type ProjectJson = {
   readonly model: string;
   readonly modelUrl?: string;
+  readonly provider?: string;
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
@@ -91,6 +92,7 @@ export function toProjectJson(config: ProjectConfig): ProjectJson {
   return {
     model: config.model,
     ...(config.modelUrl === undefined ? {} : { modelUrl: config.modelUrl }),
+    ...(config.provider === undefined ? {} : { provider: config.provider }),
     ...(config.alerts === undefined ? {} : { alerts: config.alerts }),
     ...(config.spendingCap === undefined ? {} : { spendingCap: config.spendingCap }),
     onCapReached: config.onCapReached,
@@ -295,6 +297,7 @@ export function configFileSource(config: ProjectConfig): string {
   }
   const head: string[] = [`model: ${text(config.model)}`];
   if (config.modelUrl !== undefined) head.push(`modelUrl: ${text(config.modelUrl)}`);
+  if (config.provider !== undefined) head.push(`provider: ${text(config.provider)}`);
   if (config.alerts !== undefined) head.push(`alerts: ${text(config.alerts)}`);
   if (config.spendingCap !== undefined) head.push(`spendingCap: ${config.spendingCap}`);
   if (config.onCapReached !== "pause") head.push(`onCapReached: ${text(config.onCapReached)}`);

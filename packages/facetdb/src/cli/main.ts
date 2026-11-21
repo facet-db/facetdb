@@ -20,7 +20,6 @@ import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import type { Clock, OpenConnector } from "@facetdb/core";
-import { selectProvider } from "@facetdb/model";
 import {
   connectPostgres,
   createPostgresDialect,
@@ -29,7 +28,12 @@ import {
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
-import { BUILTIN_PLUGINS, createPluginHost, importFromProject } from "../plugin/index.ts";
+import {
+  BUILTIN_PLUGINS,
+  createPluginHost,
+  importFromProject,
+  type PluginHost,
+} from "../plugin/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
 import { systemBrowser } from "./browser.ts";
 import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
@@ -49,6 +53,7 @@ import {
   runProgram,
   type Workspace,
 } from "./program.ts";
+import { modelProviderOf } from "./provider-door.ts";
 import { serveHttp } from "./serve.ts";
 import { requireStoreSecret, requireStoreUrl, storeSharedFor } from "./store-door.ts";
 import { diskStudioFiles } from "./studio-files.ts";
@@ -557,7 +562,7 @@ export function processDeps(
         ...(options?.warn === undefined ? {} : { warn: options.warn }),
       });
     },
-    provider: (config) => provider(config, env),
+    provider: (config, plugins) => provider(config, env, run.stopSignal, plugins),
     serve: serveHttp,
     osUser: () => {
       try {
@@ -605,7 +610,7 @@ export function processDeps(
           project: projectRef(projectDir),
           store,
           connector,
-          provider: provider(config, env),
+          provider: provider(config, env, run.stopSignal, mode.plugins),
           clock,
         });
         const opened = connector;
@@ -642,13 +647,13 @@ function studioDistDir(): string | undefined {
   }
 }
 
-function provider(config: ProjectConfig, env: Readonly<Record<string, string | undefined>>) {
-  return selectProvider({
-    modelUrl: config.modelUrl,
-    apiKey: env["TYPESAFE_API_KEY"],
-    fetch: globalThis.fetch,
-    clock,
-  });
+function provider(
+  config: ProjectConfig,
+  env: Readonly<Record<string, string | undefined>>,
+  stopSignal: () => AbortSignal,
+  plugins: PluginHost | undefined,
+) {
+  return modelProviderOf({ config, env, fetch: globalThis.fetch, clock, stopSignal, plugins });
 }
 
 /**

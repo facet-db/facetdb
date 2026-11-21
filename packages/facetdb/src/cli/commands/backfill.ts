@@ -9,6 +9,7 @@ import { requireUsableUrl } from "../engines.ts";
 import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
 import { ALLOW_INSECURE_OPTION, loadProjectConfig, singleTarget, sourceTable } from "./database.ts";
+import { pluginHostForProvider } from "./model-provider.ts";
 
 /**
  * `facetdb backfill`: answers every existing row of a source, newest first, at a pace, resumable.
@@ -133,9 +134,12 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
     if (!options.dryRun && storeUrl !== undefined) {
       requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
     }
+    // A plugin's provider needs its plugin host, built as the worker builds it; no other does.
+    const plugins = await pluginHostForProvider(deps, config, options.config);
     const setup = await deps.backfill(config, source, {
       dryRun: options.dryRun,
       ...(options.allowInsecure === true ? { allowInsecure: true } : {}),
+      ...(plugins === undefined ? {} : { plugins }),
     });
     try {
       const backfill = createBackfill(setup.deps);

@@ -61,7 +61,7 @@ export const studioCommand = defineCommand<StudioOptions>("studio", {
     const { options, deps, print } = context;
     // The worker's own start: the plugins the config names are loaded and checked, as it does.
     const { config, plugins } = await loadWorkerConfig(deps, options.config);
-    requireModel(config, deps.env);
+    requireModel(config, deps.env, plugins);
     parsePort(options.port);
     // Before the address can reach the opener: a host is an address or a plain name (worker.ts).
     parseHost(options.host);

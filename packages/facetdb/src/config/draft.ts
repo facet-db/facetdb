@@ -208,6 +208,8 @@ const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
     "a project draft cannot change the model: change a source's model on the Questions page, or the project's model in facetdb.config.ts by hand",
   modelUrl:
     "a draft cannot change modelUrl: it decides where every record's state is sent; edit modelUrl in facetdb.config.ts by hand",
+  provider:
+    "a draft cannot change provider: it decides where every record's state is sent and which key goes with it; edit provider in facetdb.config.ts by hand",
   alerts:
     "a draft cannot change alerts: they decide where the worker posts its alerts; edit alerts in facetdb.config.ts by hand",
   sources:

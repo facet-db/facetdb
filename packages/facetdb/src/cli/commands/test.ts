@@ -33,6 +33,7 @@ import {
   singleTarget,
   sourceTable,
 } from "./database.ts";
+import { pluginHostForProvider } from "./model-provider.ts";
 
 /**
  * `facetdb test`: the draft in `facetdb.config.ts` as it stands on disk, run on the newest records
@@ -312,10 +313,12 @@ export const testCommand = defineCommand<TestOptions>("test", {
       try {
         // Made on the first request only, so a test that asks nothing needs no model key. The
         // backoff and the in-flight limit are the worker's: a test is a thousand requests.
+        // A plugin's provider needs its plugin host, built here so a refusal comes before any row.
+        const plugins = await pluginHostForProvider(deps, config, options.config);
         let provider: ModelProvider | undefined;
         const lazyProvider: ModelProvider = {
           ask: (request) => {
-            provider ??= createResilientProvider(deps.provider(config), {
+            provider ??= createResilientProvider(deps.provider(config, plugins), {
               backoff: createBackoff({ clock: deps.clock, random: deps.random }),
               limiter: createInFlightLimiter({ clock: deps.clock }),
             });

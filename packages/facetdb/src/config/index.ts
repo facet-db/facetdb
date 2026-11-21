@@ -41,6 +41,8 @@ export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";
 export type { LoadedConfig, LoadOptions, PluginVariable } from "./load.ts";
 export { loadConfig, pluginVariables } from "./load.ts";
+export type { PluginProviderRef } from "./provider.ts";
+export { pluginProviderOf } from "./provider.ts";
 export type { ConfigIssue, ConfigParseResult } from "./schema.ts";
 export { ConfigError, formatPath, parseProjectConfig, suggestedVariable } from "./schema.ts";
 export { unifiedDiff } from "./text-diff.ts";

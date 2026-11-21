@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { Answer, DatabaseEngine, ModelProvider, OpenConnector } from "@facetdb/core";
 import { createFakeProvider } from "@facetdb/model";
-import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
+import { type ProjectConfig, pluginProviderOf, type SourceConfig } from "../../config/index.ts";
 import { embeddedParts } from "../embedded.ts";
 import { stoppedError } from "../engines.ts";
 import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
@@ -180,6 +180,18 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     );
     // The worker's own start: the plugins the config names are loaded and checked, as it does.
     const { config, plugins } = await loadWorkerConfig(deps, options.config);
+    if (
+      options.modelUrl !== undefined &&
+      config.provider !== undefined &&
+      pluginProviderOf(config.provider) !== undefined
+    ) {
+      throw new CliError(
+        "model-provider",
+        `--model-url cannot be used with the plugin's provider ${config.provider}: the plugin names its own address, so the flag would be ignored`,
+        "run facetdb dev without --model-url to answer with the scripted fake provider, or take provider out of the config to ask the server at --model-url",
+        EXIT_USAGE,
+      );
+    }
     const marker = markerOf(options.unsure);
     const seed: Seed | undefined =
       options.seed === undefined ? undefined : await readSeed(deps.workspace, options.seed);
@@ -202,7 +214,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     const provider =
       options.modelUrl === undefined
         ? unsureOn(marker, createFakeProvider({ defaults: DEV_ANSWERS }))
-        : deps.provider(devConfig);
+        : deps.provider(devConfig, plugins);
     if (options.modelUrl === undefined) {
       print(
         `note: no --model-url, so answers come from the scripted fake provider (certain, made up, free): a certain no to every question, except that a record whose text holds ${marker} is answered unsure (50%) on every yes-or-no question and waits for review. Pass --model-url http://localhost:11434 to ask Ollama or another compatible server.`,

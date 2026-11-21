@@ -207,6 +207,13 @@ export type SourceInput = {
 export type ProjectInput = {
   readonly model: string;
   readonly modelUrl?: string;
+  /**
+   * Which provider answers: a built-in preset (`openrouter`, `vercel-ai-gateway`,
+   * `cloudflare-ai-gateway`, `ollama`, `strands-decider`, `solar-decide`), each reading its own key
+   * variable, or `<plugin>/<entry>` for a provider an installed plugin supplies. `modelUrl` beside
+   * a preset replaces its address. Absent: TypeSafe direct, or the server at `modelUrl`.
+   */
+  readonly provider?: string;
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached?: OnCapReached;
@@ -255,6 +262,8 @@ export type SourceConfig = {
 export type ProjectConfig = {
   readonly model: string;
   readonly modelUrl?: string;
+  /** A built-in preset's name, or `<plugin>/<entry>`; absent when the file names none. */
+  readonly provider?: string;
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
@@ -332,6 +341,7 @@ export function facetdb(project: ProjectInput): ProjectConfig {
   return withDefined<ProjectConfig>({
     model: project.model,
     modelUrl: project.modelUrl,
+    provider: project.provider,
     alerts: project.alerts,
     spendingCap: project.spendingCap,
     onCapReached: project.onCapReached ?? "pause",

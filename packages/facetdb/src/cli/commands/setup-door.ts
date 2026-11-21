@@ -14,6 +14,7 @@ import {
   type ReadRowsResult,
   type SpendingGate,
 } from "@facetdb/core";
+import { PRESET_KEYS } from "@facetdb/model";
 import {
   hideSecrets,
   type InspectOutcome,
@@ -299,6 +300,8 @@ const OWN_SECRETS: readonly string[] = [
   STORE_SECRET_VARIABLE,
   "TYPESAFE_API_KEY",
   "FACETDB_API_KEY",
+  // Each built-in provider's key (`PRESET_KEYS`), for the same reason as the model's.
+  ...Object.values(PRESET_KEYS).map((preset) => preset.variable),
 ];
 
 function ownSecret(variable: string): SetupInvalidOut | undefined {

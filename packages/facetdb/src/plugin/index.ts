@@ -42,6 +42,13 @@ export type {
 export { action, channel, pack, provider, source } from "./kinds.ts";
 export type { FoundPlugin, LoadPluginOptions } from "./load.ts";
 export { findPlugin, loadPlugin, PluginNotInstalledError } from "./load.ts";
+export type { PluginProviderOptions } from "./provider.ts";
+export {
+  checkPluginProvider,
+  createPluginProvider,
+  PluginProviderError,
+  PluginProviderFailure,
+} from "./provider.ts";
 // The reader's side of the registry; the generator's functions stay in registry.ts for
 // registry-build.ts and the tests.
 export type { RegistryIndex, RegistryListing } from "./registry.ts";

@@ -1,6 +1,7 @@
 import { type QuestionSet, questionSetSchema } from "@facetdb/core";
 import { z } from "zod";
 import { type ActionCall, isEnvReference, type ProjectConfig, type SourceConfig } from "./dsl.ts";
+import { providerIssues } from "./provider.ts";
 
 /**
  * The config boundary: the one schema that judges a project, whether it came from
@@ -474,6 +475,9 @@ const projectSchema = strict({
       "modelUrl never carries a username or password: this file and its JSON export carry no credential; a gateway key is read from the environment",
     )
     .exactOptional(),
+  provider: z
+    .string({ error: 'provider is text: a preset such as "openrouter", or "<plugin>/<entry>"' })
+    .exactOptional(),
   alerts: strict({
     channels: z.array(channelAddress).min(1, "alerts.channels needs at least one channel"),
   }).exactOptional(),
@@ -713,6 +717,10 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
     });
   }
 
+  if (project.provider !== undefined) {
+    issues.push(...providerIssues(project.provider, project.modelUrl));
+  }
+
   const sets: (QuestionSet | undefined)[] = [];
   project.sources.forEach((source, index) => {
     const at = `sources[${index}]`;
@@ -765,6 +773,7 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
     config: {
       model: projectModel,
       ...(project.modelUrl === undefined ? {} : { modelUrl: project.modelUrl }),
+      ...(project.provider === undefined ? {} : { provider: project.provider }),
       ...(project.alerts === undefined ? {} : { alerts: project.alerts }),
       ...(project.spendingCap === undefined ? {} : { spendingCap: project.spendingCap }),
       onCapReached: project.onCapReached,

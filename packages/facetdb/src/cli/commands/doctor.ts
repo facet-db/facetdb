@@ -1,6 +1,17 @@
 import type { DatabaseEngine, DoctorCheck, Question } from "@facetdb/core";
-import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
-import { PluginHostError } from "../../plugin/index.ts";
+import {
+  ConfigError,
+  type PluginProviderRef,
+  type ProjectConfig,
+  pluginProviderOf,
+  type SourceConfig,
+} from "../../config/index.ts";
+import {
+  checkPluginProvider,
+  type PluginHost,
+  PluginHostError,
+  PluginProviderError,
+} from "../../plugin/index.ts";
 import { DATABASES_PAGE, databaseOf, engineFor } from "../engines.ts";
 import {
   type CliDeps,
@@ -31,6 +42,7 @@ import {
   variableOf,
   WORKER_LOGIN,
 } from "./database.ts";
+import { presetKeyOf } from "./model-provider.ts";
 
 /**
  * `facetdb doctor`: runs the checks in order, prints one line each with the fix, and exits 1 naming
@@ -205,14 +217,17 @@ function fromCheck(check: DoctorCheck, scrub: (text: string) => string, group?: 
 async function configLoads(environment: DoctorEnvironment): Promise<{
   readonly result: CheckResult;
   readonly config?: ProjectConfig;
+  /** The plugin host, when the plugins the config names loaded: a plugin's provider needs it. */
+  readonly plugins?: PluginHost;
 }> {
   const path = environment.options.config;
   try {
     const config = await environment.deps.loadConfig(path);
     // The plugins the config names are loaded and their settings checked as the worker does at its
     // start. The file itself loaded, so the checks after this one still run.
+    let plugins: PluginHost;
     try {
-      await environment.deps.pluginHost(config, path);
+      plugins = await environment.deps.pluginHost(config, path);
     } catch (error) {
       if (error instanceof PluginHostError) {
         // A check is one line: the schema's listed reasons follow the heading, joined.
@@ -234,6 +249,7 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
     return {
       result: ok(`${path} loads, with ${sources} ${sources === 1 ? "source" : "sources"}`),
       config,
+      plugins,
     };
   } catch (error) {
     if (error instanceof ConfigError) {
@@ -256,8 +272,61 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
   }
 }
 
+/** The check line's words when the config names a plugin's provider. */
+function pluginProviderKey(
+  provider: string,
+  ref: PluginProviderRef,
+  plugins: PluginHost | undefined,
+): CheckResult {
+  if (plugins === undefined) {
+    return fail(
+      `the provider ${provider} comes from the plugin ${ref.plugin}, which did not load`,
+      "do what the config check says, then run facetdb doctor again",
+    );
+  }
+  try {
+    checkPluginProvider({ provider, ref, host: plugins });
+  } catch (error) {
+    if (error instanceof PluginProviderError) {
+      return fail(error.message, error.fix);
+    }
+    throw error;
+  }
+  return ok(
+    `the provider ${provider} is supplied by the plugin ${ref.plugin}, which reads the variables its settings name (the config check read them)`,
+  );
+}
+
 /** A model key is set, or the config names a compatible server that needs none. */
-function modelKey({ deps }: DoctorEnvironment, config: ProjectConfig): CheckResult {
+function modelKey(
+  { deps }: DoctorEnvironment,
+  config: ProjectConfig,
+  plugins: PluginHost | undefined,
+): CheckResult {
+  const chosen = presetKeyOf(config);
+  if (chosen !== undefined) {
+    const set = (deps.env[chosen.variable] ?? "") !== "";
+    if (set && chosen.withheld) {
+      return ok(
+        `the ${chosen.provider} provider reads ${chosen.variable}, and it is set, but it is not sent: ${chosen.address} is plain http to another machine, where a key would cross the network in the clear; use an https modelUrl to send it`,
+      );
+    }
+    if (set) {
+      return ok(`the ${chosen.provider} provider reads ${chosen.variable}, and it is set`);
+    }
+    return chosen.required
+      ? fail(
+          `${chosen.variable} is not set, so FacetDB has no key for the ${chosen.provider} provider`,
+          `set ${chosen.variable} to your ${chosen.provider} key where FacetDB runs`,
+        )
+      : ok(
+          `the ${chosen.provider} provider reads ${chosen.variable} when it is set; it is not, so the server is asked with no key`,
+        );
+  }
+  const plugin = config.provider === undefined ? undefined : pluginProviderOf(config.provider);
+  if (config.provider !== undefined && plugin !== undefined) {
+    return pluginProviderKey(config.provider, plugin, plugins);
+  }
   if (config.modelUrl !== undefined) {
     return ok(`the model is served from ${config.modelUrl}, so no TypeSafe key is needed`);
   }
@@ -282,24 +351,41 @@ const PING_QUESTION: Question = {
 async function modelReachable(
   { deps, options }: DoctorEnvironment,
   config: ProjectConfig,
+  plugins: PluginHost | undefined,
 ): Promise<CheckResult> {
+  const chosen = presetKeyOf(config);
+  // A preset the FacetDB team has not run against its vendor says so, whatever the answer was.
+  const unrun =
+    chosen === undefined || chosen.proven
+      ? ""
+      : `; the FacetDB team has not run the ${chosen.provider} provider yet, so tell us how it went`;
   if (options.offline) {
-    return skip("skipped because of --offline");
+    return skip(`skipped because of --offline${unrun}`);
   }
   try {
-    const response = await deps.provider(config).ask({
+    const response = await deps.provider(config, plugins).ask({
       model: config.model,
       state: { note: "This is a test from facetdb doctor." },
       questions: [PING_QUESTION],
     });
-    return ok(`${response.model} answered a test question`);
+    return ok(`${response.model} answered a test question${unrun}`);
   } catch (error) {
-    return fail(
-      `the model did not answer: ${plainMessage(error, [deps.env["TYPESAFE_API_KEY"]])}`,
-      config.modelUrl === undefined
-        ? "check TYPESAFE_API_KEY and this machine's network access to TypeSafe, or run facetdb doctor --offline to leave this check out"
-        : `check that ${config.modelUrl} is running and reachable from this machine, or run facetdb doctor --offline to leave this check out`,
-    );
+    const keys = [deps.env["TYPESAFE_API_KEY"]];
+    if (chosen !== undefined) {
+      keys.push(deps.env[chosen.variable]);
+    }
+    const leave = "or run facetdb doctor --offline to leave this check out";
+    let fix: string;
+    if (chosen !== undefined) {
+      fix = `check ${chosen.variable} and that ${chosen.address ?? "the provider's address"} is running and reachable from this machine, ${leave}`;
+    } else if (config.provider !== undefined) {
+      fix = `check the settings and variables of the plugin that supplies ${config.provider}, and that its service is reachable from this machine, ${leave}`;
+    } else if (config.modelUrl === undefined) {
+      fix = `check TYPESAFE_API_KEY and this machine's network access to TypeSafe, ${leave}`;
+    } else {
+      fix = `check that ${config.modelUrl} is running and reachable from this machine, ${leave}`;
+    }
+    return fail(`the model did not answer: ${plainMessage(error, keys)}${unrun}`, fix);
   }
 }
 
@@ -307,11 +393,12 @@ async function modelReachable(
 async function modelLines(
   environment: DoctorEnvironment,
   config: ProjectConfig,
+  plugins: PluginHost | undefined,
 ): Promise<readonly CheckLine[]> {
-  const key = line(MODEL_KEY, modelKey(environment, config));
+  const key = line(MODEL_KEY, modelKey(environment, config, plugins));
   const reachable =
     key.status === "ok"
-      ? await modelReachable(environment, config)
+      ? await modelReachable(environment, config, plugins)
       : skip(`not checked: the ${MODEL_KEY.label} check did not pass`);
   return [key, line(MODEL_REACHABLE, reachable)];
 }
@@ -517,7 +604,7 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
   const { deps } = environment;
   const loaded = await configLoads(environment);
   const lines: CheckLine[] = [line(CONFIG_CHECK, loaded.result)];
-  const { config } = loaded;
+  const { config, plugins } = loaded;
   if (config === undefined) {
     const notChecked = skip("not checked: the config did not load");
     for (const id of ["database", "pooler", "install", "worker"]) {
@@ -530,7 +617,11 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
   }
   // What an engine says is scrubbed of the CLI's own secrets, which no engine is given.
   const scrub = (text: string) =>
-    plainMessage(text, [deps.env[STORE_SECRET_VARIABLE], deps.env["TYPESAFE_API_KEY"]]);
+    plainMessage(text, [
+      deps.env[STORE_SECRET_VARIABLE],
+      deps.env["TYPESAFE_API_KEY"],
+      deps.env[presetKeyOf(config)?.variable ?? "TYPESAFE_API_KEY"],
+    ]);
   const tables = tableSourcesOf(config, deps.env);
   const [only] = tables;
   const eightLines =
@@ -548,11 +639,11 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
       // The engine reads the heartbeat when the store is its database; the store door otherwise.
       lines.push(checked.worker ?? fromCheck(await heartbeat(environment), scrub));
     }
-    lines.push(...(await modelLines(environment, config)));
+    lines.push(...(await modelLines(environment, config, plugins)));
     lines.push(line(SECRET, secretCheck(deps.env)));
     return lines;
   }
-  lines.push(...(await modelLines(environment, config)));
+  lines.push(...(await modelLines(environment, config, plugins)));
   for (const table of tables) {
     const group = `source ${table.source.name}`;
     lines.push(...(await sourceLines(environment, config, table, scrub, group)).lines);

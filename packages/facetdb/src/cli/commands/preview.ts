@@ -35,6 +35,7 @@ import {
   sourceTable,
   type TableTarget,
 } from "./database.ts";
+import { pluginHostForProvider } from "./model-provider.ts";
 
 /**
  * `facetdb preview`: reads the most recent rows of a source through its engine's connector (`scan`,
@@ -265,10 +266,12 @@ export const previewCommand = defineCommand<PreviewOptions>("preview", {
           );
     const shown = (key: RecordKey) => keyWords(keyText, key);
     // Made on the first request only, so a table with no rows needs no model.
+    // A plugin's provider needs its plugin host, built here so its refusal comes before any row is read.
+    const plugins = await pluginHostForProvider(deps, config, options.config);
     let provider: ModelProvider | undefined;
     const lazyProvider: ModelProvider = {
       ask: (request) => {
-        provider ??= deps.provider(config);
+        provider ??= deps.provider(config, plugins);
         return provider.ask(request);
       },
     };

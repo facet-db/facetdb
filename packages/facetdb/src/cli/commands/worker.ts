@@ -45,11 +45,12 @@ import {
   type ConfigFiles,
   judgeDraftSource,
   type ProjectConfig,
+  pluginProviderOf,
   type SourceConfig,
   toProjectJson,
 } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
-import type { PluginHost } from "../../plugin/index.ts";
+import { checkPluginProvider, type PluginHost, PluginProviderError } from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import {
@@ -91,6 +92,7 @@ import {
 } from "./database.ts";
 import { installRuns, readInstall } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
+import { presetKeyOf } from "./model-provider.ts";
 import { createPluginsDoor, registryAddress } from "./plugins-door.ts";
 import {
   createSetupDoor,
@@ -1113,11 +1115,41 @@ export function installMissing(source: string, configPath: string, error: unknow
   );
 }
 
-/** Without a model the worker would only fail: it refuses to start, and says what to set. */
+/**
+ * Without a model the worker would only fail: it refuses to start, and says what to set. A built-in
+ * provider's key is its own variable's; a plugin's provider must be one its plugin supplies.
+ */
 export function requireModel(
   config: ProjectConfig,
   env: Readonly<Record<string, string | undefined>>,
+  plugins?: PluginHost,
 ): void {
+  const chosen = presetKeyOf(config);
+  if (chosen !== undefined) {
+    const value = env[chosen.variable];
+    if (chosen.required && (value === undefined || value === "")) {
+      throw new CliError(
+        "model-key",
+        `${chosen.variable} is not set, so the worker has no key for the ${chosen.provider} provider`,
+        `set ${chosen.variable} to your ${chosen.provider} key, then run facetdb worker again; facetdb dev answers offline without one`,
+      );
+    }
+    return;
+  }
+  const ref = config.provider === undefined ? undefined : pluginProviderOf(config.provider);
+  if (config.provider !== undefined && ref !== undefined) {
+    if (plugins !== undefined) {
+      try {
+        checkPluginProvider({ provider: config.provider, ref, host: plugins });
+      } catch (error) {
+        if (error instanceof PluginProviderError) {
+          throw new CliError("model-provider", error.message, error.fix);
+        }
+        throw error;
+      }
+    }
+    return;
+  }
   const key = env["TYPESAFE_API_KEY"];
   if (config.modelUrl === undefined && (key === undefined || key === "")) {
     throw new CliError(
@@ -1332,6 +1364,8 @@ export async function runWorkerProcess(
       warn: (message) => deps.io.stderr(`warning: ${message}\n`),
     });
     try {
+      // A plugin's provider is built over the plugin host the start hosted.
+      const model = deps.provider(config, surface.plugins);
       return await runWorkers(context, {
         config,
         project,
@@ -1351,7 +1385,7 @@ export async function runWorkerProcess(
         forgetTable: (source) => {
           tables.delete(source.name);
         },
-        provider: deps.provider(config),
+        provider: model,
         sessionSecret,
         plugins: surface.plugins,
         ...(surface.studio === undefined ? {} : { studio: surface.studio.build }),
@@ -1388,7 +1422,7 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
     const { options, deps, print } = context;
     // Every plugin the config names is loaded and its settings checked here, a dry run included.
     const { config, plugins } = await loadWorkerConfig(deps, options.config);
-    requireModel(config, deps.env);
+    requireModel(config, deps.env, plugins);
     parsePort(options.port);
     parseHost(options.host);
     const studio = await workerStudio(deps, options, print);

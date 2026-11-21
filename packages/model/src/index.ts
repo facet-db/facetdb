@@ -46,10 +46,27 @@ export type { CompatibleProvider, CompatibleProviderOptions } from "./providers/
 export { createCompatibleProvider } from "./providers/compatible.ts";
 export type { ModelList } from "./providers/models.ts";
 export { assertPinned, listModels, ModelNotPinnedError } from "./providers/models.ts";
-export type { PresetName, PresetOptions, ProviderPreset } from "./providers/presets.ts";
-export { createPresetProvider, PROVIDER_PRESETS } from "./providers/presets.ts";
+export type {
+  PresetKey,
+  PresetName,
+  PresetOptions,
+  ProviderPreset,
+} from "./providers/presets.ts";
+export {
+  createPresetProvider,
+  isPresetName,
+  keyWithheld,
+  mayCarryKey,
+  PRESET_KEYS,
+  PRESET_NAMES,
+  PROVIDER_PRESETS,
+} from "./providers/presets.ts";
 export type { SelectProviderOptions } from "./providers/select.ts";
-export { selectProvider } from "./providers/select.ts";
+export {
+  ProviderKeyMissingError,
+  selectProvider,
+  UnknownProviderError,
+} from "./providers/select.ts";
 export type { SystemOneOptions, TypeSafeProviderOptions } from "./typesafe/client.ts";
 export {
   createSystemOneProvider,
