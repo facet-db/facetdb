@@ -479,10 +479,32 @@ const configSourceSchema = z.object({
 });
 export type ConfigSource = z.infer<typeof configSourceSchema>;
 
-/** `GET /v1/config`: the project JSON, and each source's question-set versions by name. */
+/**
+ * A source whose loop does not run the file as last loaded: written to facetdb.config.ts, and
+ * waiting for `facetdb migrate` and a restart of the worker.
+ */
+const pendingSourceSchema = z.object({
+  source: z.string(),
+  outcome: z.enum(["kept", "not-started"]),
+  /** The reload's own words: why it is not running yet. */
+  message: z.string(),
+  /** False for a source that answers through POST /v1/check: it has no install to migrate. */
+  migrate: z.boolean(),
+  /** Questions the file holds that the loop does not run. */
+  added: z.array(z.string()),
+  /** Questions the loop runs that the file no longer holds. */
+  removed: z.array(z.string()),
+});
+export type PendingSource = z.infer<typeof pendingSourceSchema>;
+
+/**
+ * `GET /v1/config`: the project JSON, each source's question-set versions by name, and the sources
+ * that do not run the file yet (empty when every loop runs it).
+ */
 const projectConfigSchema = z.object({
   model: z.string(),
   sources: z.array(configSourceSchema),
+  pending: z.array(pendingSourceSchema),
   versions: z.record(
     z.string(),
     z.object({

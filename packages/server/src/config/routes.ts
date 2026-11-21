@@ -84,13 +84,18 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
 
   // The project JSON as the loader exports it, and beside its sources (never inside one, so a
   // source sent back as a draft carries no key the loader does not know) each source's version
-  // history by name: number, when it was made, what changed in words.
+  // history by name: number, when it was made, what changed in words; and `pending`, the sources
+  // whose loop does not run the file as last loaded, with the reload's words.
   route.get("/config", async (c) => {
     const outcome = await service.json(c.get("projectId"));
     if (outcome.kind === "unknown_project") {
       throw unknownProject();
     }
-    return c.json({ ...(outcome.value.project as object), versions: outcome.value.versions });
+    return c.json({
+      ...(outcome.value.project as object),
+      versions: outcome.value.versions,
+      pending: outcome.value.pending,
+    });
   });
 
   // A draft that breaks a rule is still a 200: the issues are the answer the editor shows.

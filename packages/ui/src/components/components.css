@@ -145,6 +145,19 @@
   display: flex;
   width: 100%;
 }
+/* The rail's project switcher (the mockups' .menu.project): ruled above and below, no sides, the
+   name flush with the rail's edge and semi-bold; in the phone's top bar it carries no rule */
+.fdb-listbox[data-variant="rule"],
+.fdb-listbox[data-variant="bare"] {
+  border-left: 0;
+  border-right: 0;
+  padding-left: 0;
+  font-weight: 600;
+}
+.fdb-listbox[data-variant="bare"] {
+  border-top: 0;
+  border-bottom: 0;
+}
 .fdb-listbox:hover {
   border-color: var(--text-3);
 }
@@ -185,6 +198,11 @@
   border: 1px solid var(--hairline);
   color: var(--text-2);
 }
+/* A list with a hint keeps the mockups' narrow column (220 px, or the trigger's width when that
+   is wider), so the hint wraps under the options instead of stretching the list to its sentence */
+.fdb-listbox-content[data-hint] {
+  width: max(220px, var(--radix-select-trigger-width));
+}
 .fdb-listbox-item {
   display: flex;
   align-items: center;
@@ -194,8 +212,8 @@
   color: var(--text-2);
   outline: 2px solid transparent;
 }
-/* The chosen option is told apart by more than color: its text is semi-bold and its square is
-   filled and outlined in the text color, where the others carry none */
+/* The chosen option is told apart by more than color: its text is semi-bold and it alone carries
+   a square (the mockups' plain facet square) */
 .fdb-listbox-item::before {
   content: "";
   width: 6px;
@@ -209,9 +227,6 @@
 }
 .fdb-listbox-item[data-state="checked"]::before {
   background: var(--facet);
-  box-sizing: content-box;
-  border: 1px solid var(--text);
-  margin: -1px;
 }
 .fdb-listbox-item[data-highlighted] {
   background: var(--surface-2);
@@ -411,6 +426,29 @@
   outline: 2px solid transparent;
 }
 .fdb-table-frame:has(> .fdb-table-wrap:focus-visible)::after {
+  opacity: 1;
+}
+/* The frame may be narrower than its table: without this a grid or flex parent grows to the
+   table's full width and the page scrolls sideways instead of the table */
+.fdb-table-frame {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Scroll region: any region that scrolls and takes the focus (a record's fields, a diff, a
+   script). Its frame draws the brackets: on the scroller itself they would overhang its edge by
+   their 5 px and give it scrollbars it does not need */
+.fdb-scroll-frame {
+  min-width: 0;
+  max-width: 100%;
+}
+.fdb-scroll {
+  overflow: auto;
+}
+.fdb-scroll:focus-visible {
+  outline: 2px solid transparent;
+}
+.fdb-scroll-frame:has(> .fdb-scroll:focus-visible)::after {
   opacity: 1;
 }
 .fdb-table {

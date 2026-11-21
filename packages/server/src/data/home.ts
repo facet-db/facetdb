@@ -10,7 +10,7 @@ import {
 } from "@facetdb/core";
 import { Hono } from "hono";
 import type { AppEnv } from "../auth/middleware.ts";
-import type { Doctors, Verdict } from "./doctor.ts";
+import { type Doctors, INSTALL_CHECK, type Verdict } from "./doctor.ts";
 import type { DashboardDoor } from "./door.ts";
 import { counted, dollarsOf, duration, grouped, money, percent } from "./figures.ts";
 import { sourceIds, unknownProject } from "./project.ts";
@@ -181,17 +181,58 @@ function modelCheck(failing: Awaited<ReturnType<DashboardReads["modelFailing"]>>
       };
 }
 
-function sourcesCheck(sources: Health["sources"]): HealthCheck {
+/** A source's doctor verdict, and which of its checks failed (not part of the page's source rows). */
+type SourceState = Health["sources"][number] & { readonly failedCheck: string | null };
+
+/**
+ * The title for a source whose database is reachable but lacks what facetdb.config.ts asks for (a
+ * question added and not migrated yet). It is no alert kind: nothing was lost, the install is behind.
+ */
+export const INSTALL_BEHIND_TITLE = "The install is behind facetdb.config.ts";
+
+/** Doctor words often begin with the source's name already; the sentence names it once. */
+function withoutName(source: SourceState): string {
+  const prefix = `${source.name}: `;
+  const words = source.words.startsWith(prefix) ? source.words.slice(prefix.length) : source.words;
+  return words.replace(/\.$/, "");
+}
+
+const behind = (source: SourceState) =>
+  source.verdict === "failing" && source.failedCheck === INSTALL_CHECK;
+const lost = (source: SourceState) => source.verdict === "failing" && !behind(source);
+
+/**
+ * A failing source reads as a lost connector unless its failing check is the install one: then the
+ * database answers and the install is what is missing, which `facetdb migrate` fixes.
+ */
+function failingWords(sources: readonly SourceState[]): string {
+  const lostAccess = sources.filter(lost);
+  const notInstalled = sources.filter(behind);
+  return [
+    ...(lostAccess.length === 0
+      ? []
+      : [
+          `${ALERT_TITLES.connector_lost_access}. ${lostAccess.map((source) => `${source.name}: ${source.words}`).join(" ")}`,
+        ]),
+    ...(notInstalled.length === 0
+      ? []
+      : [
+          `${INSTALL_BEHIND_TITLE}. ${notInstalled
+            .map(
+              (source) =>
+                `${source.name}: ${withoutName(source)}. Run facetdb migrate --source ${source.name}, then restart facetdb worker.`,
+            )
+            .join(" ")}`,
+        ]),
+  ].join(" ");
+}
+
+function sourcesCheck(sources: readonly SourceState[]): HealthCheck {
   if (sources.length === 0) {
     return { name: "sources", status: "ok", words: "No source is installed yet" };
   }
-  const failing = sources.filter((source) => source.verdict === "failing");
-  if (failing.length > 0) {
-    return {
-      name: "sources",
-      status: "fail",
-      words: `${ALERT_TITLES.connector_lost_access}. ${failing.map((source) => `${source.name}: ${source.words}`).join(" ")}`,
-    };
+  if (sources.some((source) => source.verdict === "failing")) {
+    return { name: "sources", status: "fail", words: failingWords(sources) };
   }
   const all =
     sources.length === 1
@@ -208,11 +249,17 @@ function sourcesCheck(sources: Health["sources"]): HealthCheck {
 }
 
 /** The first failed check names the state, in the words of the alert it would raise. */
-const ATTENTION: Readonly<Record<HealthCheck["name"], string>> = {
-  worker: ALERT_TITLES.worker_not_running,
-  model: ALERT_TITLES.model_failing,
-  sources: ALERT_TITLES.connector_lost_access,
-};
+function attentionOf(failed: HealthCheck, sources: readonly SourceState[]): string {
+  switch (failed.name) {
+    case "worker":
+      return ALERT_TITLES.worker_not_running;
+    case "model":
+      return ALERT_TITLES.model_failing;
+    case "sources":
+      // Lost access wins over a missing install when a project has both.
+      return sources.some(lost) ? ALERT_TITLES.connector_lost_access : INSTALL_BEHIND_TITLE;
+  }
+}
 
 function answeredOf(today: number, yesterday: number): Answered {
   return {
@@ -356,8 +403,8 @@ export function createHomeService(deps: HomeDeps): HomeService {
         reads.modelFailing(projectId),
         Promise.all(
           door.sources.map(async (source) => {
-            const { verdict, words } = await doctors.verdict(source);
-            return { name: source.name, verdict, words };
+            const { verdict, words, failedCheck } = await doctors.verdict(source);
+            return { name: source.name, verdict, words, failedCheck };
           }),
         ),
         reads.answered(ids, today),
@@ -374,10 +421,10 @@ export function createHomeService(deps: HomeDeps): HomeService {
         home: {
           health: {
             status: failed === undefined ? "running" : "attention",
-            words: failed === undefined ? "Running" : ATTENTION[failed.name],
+            words: failed === undefined ? "Running" : attentionOf(failed, sources),
             heartbeatAgeMs: last === undefined ? null : now - last,
             checks,
-            sources,
+            sources: sources.map(({ name, verdict, words }) => ({ name, verdict, words })),
           },
           answered: answeredOf(answeredToday, answeredYesterday),
           queue: queueOf(queue.waiting, queue.oldestSince, decided, now),

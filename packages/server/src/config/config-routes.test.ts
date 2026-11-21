@@ -139,6 +139,7 @@ const category: Question = {
 const door: ProjectConfigDoor = {
   projectId: PROJECT,
   json: () => PROJECT_JSON,
+  pending: () => [],
   history: {
     sources: () => [{ name: "listings", inForce: 2 }],
     read: (source, limit) =>
@@ -273,6 +274,8 @@ async function rig(
     readonly studioProject?: string;
     /** The store's side of the version history, in place of the door's own. */
     readonly history?: ProjectConfigDoor["history"];
+    /** The sources whose loop does not run the file, in place of the door's none. */
+    readonly pending?: ProjectConfigDoor["pending"];
   } = {},
 ) {
   const database = new FakeDatabase({
@@ -341,7 +344,11 @@ async function rig(
     keys,
     check: NO_CHECK,
     config: createConfigService({
-      config: options.history === undefined ? door : { ...door, history: options.history },
+      config: {
+        ...door,
+        ...(options.history === undefined ? {} : { history: options.history }),
+        ...(options.pending === undefined ? {} : { pending: options.pending }),
+      },
       preview: (source) => (source === "listings" ? running : undefined),
       log: (line) => {
         logged.push(line);
@@ -421,6 +428,7 @@ describe("the config routes", () => {
     expect(response.status).toBe(200);
     expect(response.json).toEqual({
       ...PROJECT_JSON,
+      pending: [],
       versions: {
         listings: {
           inForce: 2,
@@ -454,6 +462,7 @@ describe("the config routes", () => {
     expect(response.status).toBe(200);
     expect(response.json).toEqual({
       ...PROJECT_JSON,
+      pending: [],
       versions: {
         listings: {
           inForce: 2,
@@ -505,6 +514,24 @@ describe("the config routes", () => {
         note: "Version 2 is kept in a form this worker cannot read, so it is left out.",
       },
     });
+  });
+
+  it("GET /v1/config lists the sources whose loop does not run the file, asked of the worker on every read", async () => {
+    let pending: ReturnType<ProjectConfigDoor["pending"]> = [
+      {
+        source: "listings",
+        outcome: "kept",
+        message: "it keeps answering with version 2 until you run facetdb migrate and restart.",
+        migrate: true,
+        added: ["is_vehicle"],
+        removed: [],
+      },
+    ];
+    const t = await rig({ pending: () => pending });
+
+    expect((await t.call("GET", "/v1/config")).json["pending"]).toEqual(pending);
+    pending = [];
+    expect((await t.call("GET", "/v1/config")).json["pending"]).toEqual([]);
   });
 
   it("answers a studio wired to another project than the configuration's with nothing of the project", async () => {

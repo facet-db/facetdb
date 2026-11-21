@@ -1,4 +1,4 @@
-import { focusBrackets, type JsonValue, Kv } from "@facetdb/ui";
+import { type JsonValue, Kv, ScrollRegion } from "@facetdb/ui";
 import type { ReviewCard } from "../../api/index.ts";
 
 /**
@@ -72,13 +72,8 @@ export function RecordState({ state }: { readonly state: ReviewCard["state"] }) 
     Object.entries(state).map(([name, text]) => [name, fieldValue(text)]),
   );
   return (
-    <section
-      aria-label="The record"
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: a region that scrolls must be reachable by keyboard to be read
-      tabIndex={0}
-      className={`${focusBrackets} mt-5.5 max-h-[32rem] overflow-y-auto`}
-    >
+    <ScrollRegion aria-label="The record" frameClassName="mt-5.5" className="max-h-[32rem]">
       <Kv value={fields} />
-    </section>
+    </ScrollRegion>
   );
 }

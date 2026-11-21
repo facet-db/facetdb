@@ -297,6 +297,7 @@ function rig(behaviour: Behaviour = {}) {
         validate: () => {
           throw new Error("the setup judges through its own door");
         },
+        pending: () => [],
         history: {
           sources: () => [],
           read: () => Promise.reject(new Error("no history")),

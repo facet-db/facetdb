@@ -15,6 +15,7 @@ import type {
   ConfigFileDoor,
   FileApply,
   FileDiff,
+  PendingSource,
   ReloadSummary,
   SourceReload,
 } from "@facetdb/server";
@@ -100,6 +101,11 @@ export type FleetDeps = {
 export type Fleet = {
   /** The config as the file now loads: what `GET /v1/config` shows and drafts are judged in. */
   config(): ProjectConfig;
+  /**
+   * The sources that do not run the file as last loaded: each `kept` or `not-started` source of the
+   * reload's own plan, judged now, so it is empty once the worker runs the file.
+   */
+  pending(): readonly PendingSource[];
   /** Every source that runs, in the config's order. */
   loops(): readonly SourceLoop[];
   loop(name: string): SourceLoop | undefined;
@@ -228,6 +234,17 @@ function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
     : [
         `The project's ${fields.join(", ")} changed in facetdb.config.ts; the worker keeps what it started with until you restart facetdb worker.`,
       ];
+}
+
+/** What a reload says of a source that is new in the file: the Apply dialog and the pending list use it. */
+const NOT_STARTED_MESSAGE =
+  "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.";
+
+/** What a reload says of a source it keeps on what it runs, and why. */
+function keptMessage(migrate: boolean, version: number | null): string {
+  return migrate
+    ? `the change reaches what facetdb migrate installed (a question added or removed, a type, options or levels, read, where, the table, storage or capture), so it keeps answering with version ${version} until you run facetdb migrate and restart facetdb worker.`
+    : `the fields it reads changed, so it keeps answering with version ${version} until you restart facetdb worker.`;
 }
 
 function messageOf(error: unknown): string {
@@ -453,8 +470,7 @@ export function createFleet(deps: FleetDeps): Fleet {
             source: step.name,
             outcome: "not-started",
             version: null,
-            message:
-              "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+            message: NOT_STARTED_MESSAGE,
           });
           break;
         case "keep":
@@ -462,9 +478,7 @@ export function createFleet(deps: FleetDeps): Fleet {
             source: step.name,
             outcome: "kept",
             version,
-            message: step.migrate
-              ? `the change reaches what facetdb migrate installed (a question added or removed, a type, options or levels, read, where, the table, storage or capture), so it keeps answering with version ${version} until you run facetdb migrate and restart facetdb worker.`
-              : `the fields it reads changed, so it keeps answering with version ${version} until you restart facetdb worker.`,
+            message: keptMessage(step.migrate, version),
           });
           break;
         case "remove":
@@ -524,6 +538,42 @@ export function createFleet(deps: FleetDeps): Fleet {
       .sort((a, b) => at(a.source.name) - at(b.source.name));
   }
 
+  /** The reload's plan against the file as last loaded, read again whenever it is asked. */
+  function pendingNow(): PendingSource[] {
+    if (current === undefined) {
+      return [];
+    }
+    const file = current;
+    const steps = planReload(new Map([...slots].map(([name, slot]) => [name, slot.loop])), file);
+    const pending: PendingSource[] = [];
+    for (const step of steps) {
+      const wanted = file.sources.find((source) => source.name === step.name);
+      if (step.kind === "add" && wanted !== undefined) {
+        pending.push({
+          source: step.name,
+          outcome: "not-started",
+          message: NOT_STARTED_MESSAGE,
+          migrate: !wanted.api,
+          added: [],
+          removed: [],
+        });
+      } else if (step.kind === "keep" && wanted !== undefined) {
+        const running = slots.get(step.name)?.loop;
+        const ran = new Set(running?.questionSet.questions.map((question) => question.name));
+        const held = new Set(wanted.questions.map((question) => question.name));
+        pending.push({
+          source: step.name,
+          outcome: "kept",
+          message: keptMessage(step.migrate, running?.version ?? null),
+          migrate: step.migrate,
+          added: [...held].filter((name) => !ran.has(name)),
+          removed: [...ran].filter((name) => !held.has(name)),
+        });
+      }
+    }
+    return pending;
+  }
+
   return {
     config() {
       if (current === undefined) {
@@ -531,6 +581,7 @@ export function createFleet(deps: FleetDeps): Fleet {
       }
       return current;
     },
+    pending: pendingNow,
     loops: loopsInOrder,
     loop: (name) => slots.get(name)?.loop,
     connector: routed,

@@ -48,8 +48,12 @@ export function Brand() {
   );
 }
 
-/** The project listbox: the one project of an open-source studio, and how another opens. */
-export function ProjectPicker() {
+/**
+ * The project listbox: the one project of an open-source studio, and how another opens. In the
+ * rail it is ruled above and below with no sides (the mockups' switcher); in the phone's top bar it
+ * carries no rule at all.
+ */
+export function ProjectPicker({ bare = false }: { readonly bare?: boolean }) {
   const api = useApi();
   const project = useQuery(projectQuery(api)).data?.project;
   if (project === undefined) {
@@ -63,6 +67,7 @@ export function ProjectPicker() {
       value={project}
       hint={PROJECT_HINT}
       width="full"
+      variant={bare ? "bare" : "rule"}
     />
   );
 }
@@ -233,19 +238,25 @@ export function ThemeSwitch() {
   );
 }
 
-/** The rail of a screen wider than a phone's. */
+/**
+ * The rail of a screen wider than a phone's. It is as tall as the window and scrolls on its own
+ * when its parts do not fit (a zoomed page, a short window), so the spending line and the theme
+ * switch at its foot can always be reached. It never draws a scrollbar: at the usual size
+ * everything fits in one view, and a bar down the rail's edge reads as a second page beside the
+ * first; the wheel, a swipe and the Tab key still move it.
+ */
 export function Rail() {
   return (
     <aside
       aria-label="Navigation"
-      className="sticky top-0 flex h-screen flex-col border-r border-hairline px-5 pt-5.5 pb-5"
+      className="sticky top-0 flex h-screen flex-col overflow-y-auto border-r border-hairline px-5 pt-5.5 pb-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       <Brand />
       <div className="mt-2.5">
         <ProjectPicker />
       </div>
       <PageLinks size="rail" />
-      <div className="mt-auto grid gap-4">
+      <div className="mt-auto grid flex-none gap-4">
         <Instrument />
         <div>
           <ThemeSwitch />

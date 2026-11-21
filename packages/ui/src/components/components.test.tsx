@@ -19,6 +19,7 @@ import {
   Kv,
   Listbox,
   type Schedule,
+  ScrollRegion,
   SelfFillingTable,
   type StatusKind,
   StatusWord,
@@ -242,6 +243,45 @@ describe("<Listbox>", () => {
     expect(document.activeElement).toBe(document.body);
     await user.click(screen.getByRole("combobox", { name: "Status" }));
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("is a box unless asked for the rail's ruled switcher, and marks a list that carries a hint", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<Listbox label="Status" options={options} defaultValue="done" />);
+    expect(screen.getByRole("combobox", { name: "Status" }).dataset["variant"]).toBe("box");
+    unmount();
+    render(
+      <Listbox
+        label="Project"
+        options={[{ value: "marketplace", label: "marketplace" }]}
+        value="marketplace"
+        hint="This studio serves one project."
+        variant="rule"
+      />,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Project" });
+    expect(trigger.dataset["variant"]).toBe("rule");
+    await user.tab();
+    await user.keyboard("{ArrowDown}");
+    // The stylesheet keeps such a list narrow, so the hint wraps under the options.
+    expect(screen.getByRole("listbox").closest("[data-hint]")).not.toBeNull();
+  });
+});
+
+describe("<ScrollRegion>", () => {
+  it("is a named region the keyboard reaches, whose frame and not the scroller wears the brackets", () => {
+    render(
+      <ScrollRegion aria-label="The record" className="max-h-40" frameClassName="mt-4">
+        <p>Charged twice</p>
+      </ScrollRegion>,
+    );
+    const region = screen.getByRole("region", { name: "The record" });
+    expect(region.tabIndex).toBe(0);
+    expect(region.className).toBe("fdb-scroll max-h-40");
+    // On the scroller the brackets overhang its edge and it shows scrollbars over text that fits.
+    expect(region.classList.contains("fdb-brackets")).toBe(false);
+    expect(region.parentElement?.className).toBe("fdb-scroll-frame fdb-brackets mt-4");
+    expect(within(region).getByText("Charged twice")).toBeTruthy();
   });
 });
 

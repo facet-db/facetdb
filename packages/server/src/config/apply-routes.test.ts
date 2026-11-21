@@ -112,6 +112,7 @@ function rig(file: ConfigFileDoor | undefined) {
         validate: () => {
           throw new Error("Apply judges through its own door");
         },
+        pending: () => [],
         history: {
           sources: () => {
             throw new Error("Apply reads no version history");

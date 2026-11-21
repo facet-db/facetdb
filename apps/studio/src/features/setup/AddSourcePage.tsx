@@ -1,4 +1,4 @@
-import { Button, buttonClasses, focusBrackets, Listbox, StatusWord } from "@facetdb/ui";
+import { Button, buttonClasses, Listbox, ScrollRegion, StatusWord } from "@facetdb/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useBlocker } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
@@ -1126,6 +1126,9 @@ function TableStep({
 }) {
   const tableId = useId();
   const problem = choices === null ? undefined : tableProblem(choices);
+  // A connection that may read no table has nothing to choose: the list is shut and says so, rather
+  // than opening on nothing ("clicking choose table doesn't do anything").
+  const none = connection.tables.length === 0;
   return (
     <div className="grid gap-5">
       <div className="grid max-w-[420px] gap-1.5">
@@ -1136,17 +1139,22 @@ function TableStep({
           id={tableId}
           label="Table"
           width="full"
-          placeholder="Choose a table"
+          placeholder={none ? "No table to choose" : "Choose a table"}
           options={connection.tables.map((table) => ({ value: table, label: table }))}
           value={picked}
-          disabled={picking}
+          disabled={picking || none}
           onValueChange={onPick}
         />
-        {connection.tables.length === 0 ? (
-          <p className="text-[13px] text-text-2">
-            This connection may read no table. Use the connection string of a role that owns the
-            table.
-          </p>
+        {none ? (
+          <div role="status" className="grid gap-1">
+            <StatusWord status="warning" size="small" label="This connection can read no table" />
+            <p className="text-[13px] text-text-2">
+              The connection works, but its role may not read a whole table in that database, so
+              there is nothing to choose. The worker's own login (the one in DATABASE_URL) is such a
+              role: it reads only the columns it was granted. Use another connection string above:
+              the admin one you would give facetdb migrate, for the database that holds your table.
+            </p>
+          </div>
         ) : null}
       </div>
       {picking ? (
@@ -1313,16 +1321,14 @@ function Scroll({
   readonly children: string;
 }) {
   return (
-    <section
+    <ScrollRegion
       aria-labelledby={labelledBy}
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: a region that scrolls is reached by Tab, or a keyboard cannot scroll it
-      tabIndex={0}
-      className={`${focusBrackets} relative ${tall ? "max-h-[420px]" : "max-h-[320px]"} overflow-auto border border-hairline focus-visible:outline-2 focus-visible:outline-transparent`}
+      className={`${tall ? "max-h-[420px]" : "max-h-[320px]"} border border-hairline`}
     >
       <pre className="m-0 p-4 font-mono text-[12.5px] leading-relaxed whitespace-pre">
         {children}
       </pre>
-    </section>
+    </ScrollRegion>
   );
 }
 

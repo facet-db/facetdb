@@ -146,6 +146,7 @@ async function rig() {
       validate: () => {
         throw new Error("the SDK validates no draft");
       },
+      pending: () => [],
       history: {
         sources: () => {
           throw new Error("the SDK reads no version history");

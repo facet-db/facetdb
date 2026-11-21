@@ -74,7 +74,13 @@ export function PreviewPanel({
               <span className="text-text-2">{`${line.key}: ${skipWords(reason.reason)}`}</span>
             ) : null;
           }
-          return <span className="block max-w-[30ch] truncate">{line.state[field] ?? ""}</span>;
+          // A long field is cut to one line; the whole text shows when the pointer rests on it.
+          const text = line.state[field] ?? "";
+          return (
+            <span className="block max-w-[30ch] truncate" title={text === "" ? undefined : text}>
+              {text}
+            </span>
+          );
         },
       }),
     ),

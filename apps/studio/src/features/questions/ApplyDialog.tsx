@@ -1,10 +1,19 @@
-import { Button, Dialog, DialogClose, focusBrackets, Tag, type TagTone } from "@facetdb/ui";
+import {
+  Button,
+  Dialog,
+  DialogClose,
+  focusBrackets,
+  ScrollRegion,
+  Tag,
+  type TagTone,
+} from "@facetdb/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { ApiError, type ApplyDiff, type ApplyReload, type SourceDraft } from "../../api/index.ts";
 import { useApi } from "../../deps.tsx";
 import { Problem } from "../decisions/index.ts";
 import { sameDraft } from "./draft.ts";
+import { NotRunning } from "./NotRunning.tsx";
 import { CONFIG_KEY, projectConfigQuery } from "./queries.ts";
 
 /**
@@ -46,11 +55,10 @@ function foundWords(found: "reading" | "written" | "not-written" | "unreachable"
 function DiffText({ diff }: { readonly diff: ApplyDiff }) {
   const lines = diff.diff.split("\n");
   return (
-    <section
+    // A wide diff scrolls, and the keyboard reaches its far columns through the region.
+    <ScrollRegion
       aria-label={`The changes to ${diff.path}`}
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: a wide diff scrolls, and the keyboard reaches its far columns through the region
-      tabIndex={0}
-      className={`${focusBrackets} max-h-[50vh] overflow-auto border border-hairline`}
+      className="max-h-[50vh] border border-hairline"
     >
       <pre className="m-0 px-3.5 py-3 font-mono text-[12.5px] leading-relaxed">
         {lines.map((line, index) => {
@@ -67,8 +75,74 @@ function DiffText({ diff }: { readonly diff: ApplyDiff }) {
           );
         })}
       </pre>
-    </section>
+    </ScrollRegion>
   );
+}
+
+/**
+ * What the written file leaves to do: a source the reload kept on what it ran, or did not start,
+ * gets the block of commands above the list. The worker's own list of sources not running the file
+ * says which questions to answer again; it is read again after the write, so until that read lands
+ * nothing is shown, and where it cannot be read the reload's words stand alone with the install and
+ * restart steps. Once it has landed the block stays through every later read (the window focused
+ * again, back from the terminal) and follows what each one says: a command is not taken from under
+ * the pointer while the list is asked for anew. A read that fails after one that landed changes
+ * nothing: the list as last read stands, and a source it no longer named is not said to be waiting
+ * again.
+ */
+function NotRunningFromReload({
+  sources,
+}: {
+  readonly sources: Extract<ApplyReload, { loaded: true }>["sources"];
+}) {
+  const api = useApi();
+  const config = useQuery(projectConfigQuery(api));
+  // The write's own read is under way when this first renders (Apply asks for it before it shows
+  // the outcome), so the list held until it settles is from before the write: `waiting`. Then the
+  // list was `read` since the write, or it is still `unread` because every read since has failed.
+  const [list, setList] = useState<"waiting" | "read" | "unread">("waiting");
+  if (!config.isFetching) {
+    const now = config.isError && list !== "read" ? "unread" : "read";
+    if (now !== list) {
+      setList(now);
+    }
+  }
+  if (list === "waiting") {
+    return null;
+  }
+  const waiting = sources.filter(
+    (source) => source.outcome === "kept" || source.outcome === "not-started",
+  );
+  return waiting.map((source) => {
+    const entry =
+      list === "read"
+        ? config.data?.pending.find((candidate) => candidate.source === source.source)
+        : undefined;
+    if (entry !== undefined) {
+      return (
+        <NotRunning
+          key={source.source}
+          source={entry.source}
+          outcome={entry.outcome}
+          why={entry.message}
+          migrate={entry.migrate}
+          added={entry.added}
+        />
+      );
+    }
+    // The list was read and no longer names it: the worker runs the file now. Never read since the
+    // write: say what the reload said, with the steps every such source takes.
+    return list === "unread" ? (
+      <NotRunning
+        key={source.source}
+        source={source.source}
+        outcome={source.outcome === "kept" ? "kept" : "not-started"}
+        why={source.message ?? "the worker does not run the change yet."}
+        migrate
+        added={[]}
+      />
+    ) : null;
+  });
 }
 
 function Reloaded({ reload }: { readonly reload: ApplyReload }) {
@@ -81,7 +155,8 @@ function Reloaded({ reload }: { readonly reload: ApplyReload }) {
     );
   }
   return (
-    <div className="grid gap-2">
+    <div className="grid gap-4">
+      <NotRunningFromReload sources={reload.sources} />
       <ul className="m-0 grid list-none gap-2 p-0">
         {reload.sources.map((source) => {
           const outcome = OUTCOMES[source.outcome];

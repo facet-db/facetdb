@@ -11,9 +11,6 @@ import { modelSays, percent, pickWords, typeWords } from "./words.ts";
  * weigh the same; nothing but the words names the model's pick.
  */
 
-/** Where the focus lands when a card opens: the first answer of the first open question. */
-export const AUTOFOCUS = { "data-autofocus": "" } as const;
-
 function Probabilities({ question }: { readonly question: ReviewOpenQuestion }) {
   return (
     <ul
@@ -48,17 +45,20 @@ function Probabilities({ question }: { readonly question: ReviewOpenQuestion }) 
 export function OpenQuestion({
   question,
   reached,
-  first,
   locked,
+  pressed,
   onAnswer,
 }: {
   readonly question: ReviewOpenQuestion;
   /** The answers the keys reach on this card: a button shows the hint of its own key. */
   readonly reached: readonly KeyedAnswer[];
-  /** The card's first open question holds the focus when the card opens. */
-  readonly first: boolean;
   /** The hold is lost: the answers wait for a new card. */
   readonly locked: boolean;
+  /**
+   * The answer of this question being sent now, by a key or a click: its button shows as pressed
+   * (the mockups' answer to a key) until the worker has answered.
+   */
+  readonly pressed?: boolean | string;
   readonly onAnswer: (question: string, value: boolean | string) => void;
 }) {
   const heading = useId();
@@ -95,16 +95,19 @@ export function OpenQuestion({
         <legend className="sr-only">
           {pickWords(question.type)}: {question.instructions}
         </legend>
-        {answers.map((answer, index) => {
+        {answers.map((answer) => {
           const hint = hintFor(reached, question.name, answer.value);
           const description = described.get(String(answer.value));
           return (
             <Button
               key={answer.label}
               disabled={locked}
-              {...(first && index === 0 && !locked ? AUTOFOCUS : {})}
               {...(hint === undefined ? {} : { keyHint: hint })}
               {...(description === undefined ? {} : { title: description })}
+              {...(pressed === answer.value ? { "aria-pressed": true } : {})}
+              // Marks the answers for the page's focus rule (review-page.tsx): a reviewer who
+              // answers from a focused button finds the focus on the next question's first answer.
+              data-answer=""
               onClick={() => {
                 onAnswer(question.name, answer.value);
               }}

@@ -13,10 +13,18 @@ export const DOCTOR_FRESH_MS = 60_000;
 /** A source's doctor in one word: `failing` is the "Connector lost access" alert. */
 export type Verdict = "healthy" | "warning" | "failing";
 
+/** The name every engine's doctor gives the check of the install in the database. */
+export const INSTALL_CHECK = "install";
+
 export type SourceVerdict = {
   readonly verdict: Verdict;
   /** What doctor found, in its own words: the first failure, else the first warning. */
   readonly words: string;
+  /**
+   * The name of the check whose failure `words` is, so a page can tell a missing install (the
+   * `install` check) from a lost login or connection; null unless the verdict is `failing`.
+   */
+  readonly failedCheck: string | null;
   /** The checks it ran; empty for an API source, which has no database to check. */
   readonly checks: readonly DoctorCheck[];
 };
@@ -54,6 +62,7 @@ export function createDoctors(clock: Clock, freshMs: number = DOCTOR_FRESH_MS): 
         return {
           verdict: "healthy",
           words: "answered through POST /v1/check, with no database to check",
+          failedCheck: null,
           checks: [],
         };
       }
@@ -62,12 +71,12 @@ export function createDoctors(clock: Clock, freshMs: number = DOCTOR_FRESH_MS): 
       const counted = checks.filter((check) => check.name !== "worker" && check.status !== "skip");
       const failed = counted.find((check) => check.status === "fail");
       if (failed !== undefined) {
-        return { verdict: "failing", words: failed.detail, checks };
+        return { verdict: "failing", words: failed.detail, failedCheck: failed.name, checks };
       }
       const warned = counted.find((check) => check.status === "warn");
       return warned === undefined
-        ? { verdict: "healthy", words: "as installed", checks }
-        : { verdict: "warning", words: warned.detail, checks };
+        ? { verdict: "healthy", words: "as installed", failedCheck: null, checks }
+        : { verdict: "warning", words: warned.detail, failedCheck: null, checks };
     },
   };
 }

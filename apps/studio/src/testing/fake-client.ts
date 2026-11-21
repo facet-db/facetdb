@@ -397,6 +397,8 @@ export const SAMPLE_SPENDING_CONFIG: SpendingConfig = { tokens: 25_000_000, onCa
 
 export const SAMPLE_PROJECT_CONFIG: ProjectConfig = {
   model: "jev-1.14.0",
+  // Every loop runs the file; a test that needs a source waiting for migrate sets this list.
+  pending: [],
   sources: [
     {
       name: "listings",

@@ -8,6 +8,7 @@ import { Problem, StaleNote } from "../decisions/index.ts";
 import { ApplyDialog } from "./ApplyDialog.tsx";
 import { type Draft, draftOf, formOf, reconcile, rewordedQuestions } from "./draft.ts";
 import { SourceTabs } from "./fields.tsx";
+import { NotRunning } from "./NotRunning.tsx";
 import { projectConfigQuery } from "./queries.ts";
 import { SourceEditor } from "./SourceEditor.tsx";
 import { TestDialog } from "./TestDialog.tsx";
@@ -170,6 +171,8 @@ export function QuestionsPage({
       </div>
       {data.sources.map((candidate) => {
         const held = drafts.get(candidate.name);
+        // The worker's own list: the block goes when the list no longer names the source.
+        const waiting = data.pending.find((entry) => entry.source === candidate.name);
         return (
           <div
             key={candidate.name}
@@ -178,6 +181,17 @@ export function QuestionsPage({
             aria-labelledby={tabId(candidate.name)}
             hidden={candidate.name !== chosen}
           >
+            {waiting === undefined ? null : (
+              <div className="mb-6">
+                <NotRunning
+                  source={waiting.source}
+                  outcome={waiting.outcome}
+                  why={waiting.message}
+                  migrate={waiting.migrate}
+                  added={waiting.added}
+                />
+              </div>
+            )}
             {held === undefined ? null : (
               <SourceEditor
                 source={candidate}

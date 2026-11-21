@@ -65,6 +65,8 @@ export type ProjectConfigDoor = {
    * page's version history). Best effort: a read that fails is said, never a 500.
    */
   readonly history: HistoryDoor;
+  /** The sources that do not run the file as last loaded; empty when every loop runs it. */
+  pending(): readonly PendingSource[];
   /**
    * Apply: the diff a draft makes to `facetdb.config.ts`, and the write and the worker's reload.
    * Absent where nothing may write the file: `facetdb dev` and `facetdb worker --once`.
@@ -89,6 +91,24 @@ export type SourceReload = {
   readonly version: number | null;
   /** What happened and what to do, in plain words; null when there is nothing to say. */
   readonly message: string | null;
+};
+
+/**
+ * A source whose loop does not run facetdb.config.ts as last loaded: the reload's `kept` and
+ * `not-started` outcomes, asked for whenever a page needs them, not only in the reply to the Apply
+ * that caused them. It goes from the list once the worker runs the file.
+ */
+export type PendingSource = {
+  readonly source: string;
+  readonly outcome: "kept" | "not-started";
+  /** The reload's own words: why it is not running yet and what to do. */
+  readonly message: string;
+  /** False for a source that answers through POST /v1/check, which has no install to migrate. */
+  readonly migrate: boolean;
+  /** Questions the file holds that the loop does not run; empty for a source that is not started. */
+  readonly added: readonly string[];
+  /** Questions the loop runs that the file no longer holds. */
+  readonly removed: readonly string[];
 };
 
 /** The worker's reload of the written file: per source, or the reason the file did not load. */
@@ -211,10 +231,14 @@ export type TestOutcome =
   | { readonly kind: "fields_differ"; readonly source: string }
   | Extract<PreviewOutcome, { readonly kind: "capped" | "model_failed" }>;
 
-/** `GET /v1/config`: the project JSON, and each source's version history beside it. */
+/**
+ * `GET /v1/config`: the project JSON, each source's version history beside it and the sources that
+ * do not run the file yet.
+ */
 export type ProjectWithHistory = {
   readonly project: unknown;
   readonly versions: Readonly<Record<string, VersionHistory>>;
+  readonly pending: readonly PendingSource[];
 };
 
 export type ConfigService = {
@@ -304,7 +328,10 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
           }
         }),
       );
-      return { kind: "ok", value: { project, versions: Object.fromEntries(versions) } };
+      return {
+        kind: "ok",
+        value: { project, versions: Object.fromEntries(versions), pending: config.pending() },
+      };
     },
 
     validate(projectId, draft) {

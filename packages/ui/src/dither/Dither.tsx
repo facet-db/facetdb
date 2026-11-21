@@ -56,7 +56,8 @@ export type DitherGradientProps = CanvasOptions & { width: number; rows?: number
 const lightScheme = "(prefers-color-scheme: light)";
 
 // The theme the canvas was painted under: the OS preference and the rail's switch (data-theme
-// on the root). `currentcolor` is resolved when the canvas is painted, so a theme switch repaints.
+// on the root). The ink is read from the page when the canvas is painted, so a theme switch
+// repaints.
 function subscribeToTheme(onChange: () => void): () => void {
   const scheme = window.matchMedia(lightScheme);
   const root = new MutationObserver(onChange);
@@ -71,6 +72,13 @@ function subscribeToTheme(onChange: () => void): () => void {
 function themeSnapshot(): string {
   const chosen = document.documentElement.getAttribute("data-theme") ?? "auto";
   return `${chosen} ${String(window.matchMedia(lightScheme).matches)}`;
+}
+
+// The ink a canvas paints in: its own `color` as the browser computed it (the token's value under
+// the theme on the page now). A DOM that computes no color falls back to the keyword.
+function inkOf(canvas: HTMLCanvasElement): string {
+  const computed = window.getComputedStyle(canvas).color;
+  return computed === "" ? "currentcolor" : computed;
 }
 
 function prefersReducedMotion(): boolean {
@@ -136,7 +144,7 @@ function DitherCanvas({
   const theme = useSyncExternalStore(subscribeToTheme, themeSnapshot);
   const { columns, rows, cellDevicePx } = ditherGrid(widthCssPx, heightCssPx, ratio);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: theme is read by the paint itself (currentcolor), so a switch repaints
+  // biome-ignore lint/correctness/useExhaustiveDependencies: theme is read by the paint itself (the canvas's computed color), so a switch repaints
   useLayoutEffect(() => {
     const canvas = ref.current;
     if (canvas === null) return;
@@ -144,8 +152,8 @@ function DitherCanvas({
     // A DOM without a canvas backend has no context: the label still carries the value.
     if (drawing === null) return;
     const levelAt = level === "ramp" ? rampLevelAt(columns) : () => level;
-    paintDither(drawing, { columns, rows, cellDevicePx }, levelAt);
-  }, [columns, rows, cellDevicePx, level, context, theme]);
+    paintDither(drawing, { columns, rows, cellDevicePx }, levelAt, inkOf(canvas));
+  }, [columns, rows, cellDevicePx, level, context, theme, ink]);
 
   // The CSS box stays the size asked for; the backing store is whole cells of whole device pixels.
   // At a ratio like 2.625 the two differ by a pixel or two, and `pixelated` keeps every edge hard

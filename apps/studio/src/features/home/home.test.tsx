@@ -81,7 +81,7 @@ describe("the Home page", () => {
     }
   });
 
-  it("draws no strip for a share the worker does not give, and says why in words", async () => {
+  it("draws a strip in every figure's column but an uncapped spending's, and says each in words", async () => {
     renderStudio({
       api: homeWith((home) => ({
         ...home,
@@ -106,12 +106,20 @@ describe("the Home page", () => {
     });
     const answered = await column("Answered today");
     expect(answered.getByText("None were answered yesterday.")).toBeInTheDocument();
-    expect(answered.queryByRole("img")).toBeNull();
+    // The worker gives no share of a yesterday with none: the page draws the strip all the same
+    // (the design has one in this column), with the sentence as its words.
+    expect(
+      answered.getByRole("img", { name: "None were answered yesterday." }),
+    ).toBeInTheDocument();
     const spending = await column("Spending");
     expect(spending.getByText("No monthly cap is set, so the project never pauses.")).toBeVisible();
     expect(spending.queryByRole("img")).toBeNull();
-    // The queue has no share to draw either.
-    expect((await column("Waiting for a person")).queryByRole("img")).toBeNull();
+    // The queue's strip is the share of today's review work still waiting, in the column's words.
+    expect(
+      (await column("Waiting for a person")).getByRole("img", {
+        name: "Oldest 14 minutes. Three reviewers decided 212 today.",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("leads to Review from the queue column's link, the only amber text on the page", async () => {
@@ -337,10 +345,31 @@ describe("the Home page", () => {
     const answered = await column("Answered today");
     expect(answered.getByText("62% of yesterday's 20,100.")).toHaveAttribute("aria-hidden", "true");
     expect(answered.getByRole("img", { name: "62% of yesterday's 20,100." })).toBeInTheDocument();
-    // Without a strip the printed sentence is the only copy, and stays announced.
     const queue = await column("Waiting for a person");
     expect(
       queue.getByText("Oldest 14 minutes. Three reviewers decided 212 today."),
+    ).toHaveAttribute("aria-hidden", "true");
+    expect(
+      queue.getByRole("img", { name: "Oldest 14 minutes. Three reviewers decided 212 today." }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a sentence announced where no strip carries it", async () => {
+    renderStudio({
+      api: homeWith((home) => ({
+        ...home,
+        spending: {
+          ...home.spending,
+          status: "uncapped",
+          cap: null,
+          fraction: null,
+          words: { figure: "$3.20", sub: "No monthly cap is set, so the project never pauses." },
+        },
+      })),
+    });
+    const spending = await column("Spending");
+    expect(
+      spending.getByText("No monthly cap is set, so the project never pauses."),
     ).not.toHaveAttribute("aria-hidden");
   });
 

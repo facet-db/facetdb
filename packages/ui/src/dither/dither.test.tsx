@@ -46,6 +46,7 @@ afterEach(() => {
   cleanup();
   device.prefersReducedMotion = "no-preference";
   document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("style");
   vi.useRealTimers();
 });
 
@@ -137,14 +138,19 @@ describe("<Dither>", () => {
     expect(above.squares).toHaveLength(144);
   });
 
-  it("paints in currentcolor on a canvas whose color is the dither-ink token", () => {
+  // Chromium reads `currentcolor` from the text of the canvas's inline style, where a var() is not
+  // a color, and paints black: the dithers vanished on the dark canvas and the brand mark was not
+  // amber. The paint is given the color the page computed for the token instead.
+  it("paints in the color the page computes for the dither-ink token, never the keyword", () => {
+    document.documentElement.style.setProperty("--dither-ink", "white");
     const canvas = fakeCanvas();
     render(<Dither value={0.5} label="Half" ratio={1} context={canvas.factory} />);
-    expect(canvas.styles).toEqual(["currentcolor"]);
+    expect(canvas.styles).toEqual(["white"]);
     expect(screen.getByRole("img", { name: "Half" }).style.color).toBe(tokenVar("dither-ink"));
   });
 
   it("paints the brand mark in the facet token, and nothing else unless asked", () => {
+    document.documentElement.style.setProperty("--facet", "orange");
     const mark = fakeCanvas();
     render(
       <Dither
@@ -157,7 +163,7 @@ describe("<Dither>", () => {
       />,
     );
     expect(screen.getByRole("img", { name: "FacetDB" }).style.color).toBe(tokenVar("facet"));
-    expect(mark.styles).toEqual(["currentcolor"]);
+    expect(mark.styles).toEqual(["orange"]);
     render(<DitherStrip value={0.5} width={16} label="Strip" ratio={1} context={mark.factory} />);
     expect(screen.getByRole("img", { name: "Strip" }).style.color).toBe(tokenVar("dither-ink"));
   });

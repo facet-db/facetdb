@@ -50,6 +50,8 @@ export type ReviewState = {
   readonly filter: ReviewFilter;
   /** A request is in flight. */
   readonly busy: boolean;
+  /** The answer being sent, while its request is in flight: its button shows as pressed. */
+  readonly answering: { readonly question: string; readonly value: boolean | string } | null;
   /** This page made a decision that `u` can take back. */
   readonly canUndo: boolean;
   readonly note: string;
@@ -92,6 +94,7 @@ const FIRST_STATE: ReviewState = {
   notice: null,
   filter: {},
   busy: false,
+  answering: null,
   canUndo: false,
   note: "",
 };
@@ -211,7 +214,7 @@ export function createReviewController(deps: () => ReviewDeps) {
       }
       if (life === mine) {
         busy = false;
-        set({ busy: false });
+        set({ busy: false, answering: null });
       }
     }
   }
@@ -473,6 +476,7 @@ export function createReviewController(deps: () => ReviewDeps) {
         return;
       }
       const note = state.note.trim();
+      set({ answering: { question, value } });
       let result: ReviewDecided;
       try {
         result = await deps().calls.decide(idOf(card), {

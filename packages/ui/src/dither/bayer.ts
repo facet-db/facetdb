@@ -48,18 +48,21 @@ export function ditherGrid(widthCssPx: number, heightCssPx: number, ratio: numbe
 // The part of a canvas 2D context the dither uses; tests pass a handwritten fake.
 export type DitherContext = Pick<CanvasRenderingContext2D, "clearRect" | "fillRect" | "fillStyle">;
 
-// Paints the grid: each lit cell one square of whole device pixels in the canvas's own `color`
-// (`currentcolor` resolves against the canvas element when it is set, per the HTML canvas spec;
-// the components set that color to the dither-ink token). `levelAt` gives the level of a column:
-// constant for a meter, rising for the slider's track.
+// Paints the grid: each lit cell one square of whole device pixels in `ink`, a color the browser
+// has already computed (the components read the canvas's own `color`, which they set to the
+// dither-ink token). Never `currentcolor`: Chromium resolves that from the text of the canvas's
+// inline style, where `var(--dither-ink)` is not a color, and paints black, which is invisible on
+// the dark canvas. `levelAt` gives the level of a column: constant for a meter, rising for the
+// slider's track.
 export function paintDither(
   context: DitherContext,
   grid: DitherGrid,
   levelAt: (column: number) => number,
+  ink: string,
 ): void {
   const { columns, rows, cellDevicePx } = grid;
   context.clearRect(0, 0, columns * cellDevicePx, rows * cellDevicePx);
-  context.fillStyle = "currentcolor";
+  context.fillStyle = ink;
   for (let x = 0; x < columns; x++) {
     const level = levelAt(x);
     for (let y = 0; y < rows; y++) {

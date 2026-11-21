@@ -26,6 +26,9 @@ export type ListboxProps = {
   name?: string;
   // `fit` is as wide as the chosen option; `full` fills its container.
   width?: "fit" | "full";
+  // `box` is the hairline rectangle; `rule` is the rail's project switcher (ruled above and below,
+  // no sides, the name semi-bold); `bare` is the same without a rule, for the phone's top bar.
+  variant?: "box" | "rule" | "bare";
 };
 
 // Radix Select with the brief's skin: a hairline rectangle with a drawn chevron, the options in a
@@ -46,6 +49,7 @@ export function Listbox({
   id,
   name,
   width = "fit",
+  variant = "box",
 }: ListboxProps) {
   const hintId = useId();
   const root = {
@@ -65,18 +69,27 @@ export function Listbox({
       <Select.Trigger
         className={`fdb-listbox ${focusBrackets}`}
         data-width={width}
+        data-variant={variant}
         aria-label={label}
         {...trigger}
       >
         <Select.Value {...(placeholder === undefined ? {} : { placeholder })} />
         <Select.Icon asChild>
-          <ChevronDown className="fdb-listbox-chevron" size={12} strokeWidth={1.6} aria-hidden />
+          {/* The mockups' chevron: a 1.6 px stroke at 12 px, whatever the icon's own grid */}
+          <ChevronDown
+            className="fdb-listbox-chevron"
+            size={12}
+            strokeWidth={1.6}
+            absoluteStrokeWidth
+            aria-hidden
+          />
         </Select.Icon>
       </Select.Trigger>
       {hint === undefined ? null : <VisuallyHidden id={hintId}>{hint}</VisuallyHidden>}
       <Select.Portal>
         <Select.Content
           className="fdb-listbox-content"
+          {...(hint === undefined ? {} : { "data-hint": "" })}
           position="popper"
           sideOffset={4}
           align="start"

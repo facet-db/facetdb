@@ -606,6 +606,8 @@ export async function runWorkers(
           projectId: project.id,
           json: () => toProjectJson(fleet.config()),
           validate: (draft) => judgeDraftSource(fleet.config(), draft, deps.env),
+          // The sources whose loop does not run the file as last loaded.
+          pending: () => fleet.pending(),
           // The Questions page's version history: what the store keeps of each source, and the
           // version its loop answers under now.
           history: {

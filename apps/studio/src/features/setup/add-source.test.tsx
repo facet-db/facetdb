@@ -222,6 +222,25 @@ describe("Add a source", () => {
     ).toHaveValue("sellers");
   });
 
+  // Seen in a real run: the list opened on nothing, and "clicking choose table doesn't do
+  // anything".
+  it("shuts the table list and says what to do when the connection can read no table", async () => {
+    const api = fakeApi({
+      setupInspect: () => Promise.resolve({ database: "Postgres", tables: [], table: null }),
+    });
+    const studio = await opened(api);
+    await studio.user.type(screen.getByRole("textbox", { name: "Connection string" }), ADMIN);
+    await studio.user.click(screen.getByRole("button", { name: "Connect" }));
+    await screen.findByText("Connected: Postgres, 0 tables");
+    const list = within(step(STEPS[1] ?? "")).getByRole("combobox", { name: "Table" });
+    expect(list).toBeDisabled();
+    expect(list).toHaveTextContent("No table to choose");
+    expect(screen.getByText("This connection can read no table")).toBeVisible();
+    expect(screen.getByText(/Use another connection string above/)).toBeVisible();
+    await studio.user.click(list);
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("says why a table the engine refuses cannot be set up, and goes no further", async () => {
     const api = fakeApi({
       setupInspect: (_admin, table) =>
@@ -1010,6 +1029,7 @@ describe("the Sources page", () => {
           { name: "support_tickets", read: ["body"], questions: {}, thresholds: {} },
           { name: "sellers", read: ["bio"], questions: {}, thresholds: {} },
         ],
+        pending: [],
         versions: {},
       }),
     });

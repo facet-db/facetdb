@@ -9,6 +9,7 @@ import {
   SAMPLE_QUEUE,
   signInRequired,
 } from "../../testing/index.ts";
+import { NOTICE_MS } from "./index.ts";
 
 /**
  * The Review page on happy-dom with the fake API client and the fake scheduler: the card as the
@@ -115,6 +116,16 @@ async function openReview(
 
 const button = (name: string) => screen.getByRole("button", { name });
 
+/** The review card: where the focus rests when a card opens and after each decision. */
+const card = () => screen.getByRole("article");
+
+/** Puts the focus on an answer, as a reviewer who works with Tab and Enter has. */
+function focusOn(name: string): void {
+  act(() => {
+    button(name).focus();
+  });
+}
+
 describe("the card", () => {
   it("lays the record out for reading, with each question's answer in words, its dither and its probabilities", async () => {
     await openReview();
@@ -191,10 +202,32 @@ describe("the card", () => {
     expect(within(record).getByText("no value")).toBeInTheDocument();
   });
 
-  it("puts the focus on the first answer of the first open question", async () => {
+  // Seen in a real run: the focus brackets on "Yes" of a card just opened read as an answer given.
+  it("puts the focus on the card when it opens, and on none of its answers", async () => {
     await openReview();
     await waitFor(() => {
-      expect(button("low")).toHaveFocus();
+      expect(card()).toHaveFocus();
+    });
+    expect(screen.getAllByRole("button").some((one) => one === document.activeElement)).toBe(false);
+  });
+
+  it("keeps the answered card in place, untouchable, until the next one has opened", async () => {
+    const next = Promise.withResolvers<{ card: ReviewCard | null }>();
+    const opens = [() => Promise.resolve({ card: NEXT_CARD }), () => next.promise];
+    const { user } = await openReview({
+      reviewOpen: () => (opens.shift() ?? (() => Promise.resolve({ card: null })))(),
+      reviewDecide: () => Promise.resolve(DONE),
+    });
+    await user.keyboard("n");
+    await screen.findByText(/wants_refund: no\./);
+    // The stage does not blink empty: the card answered is still there, and nothing on it acts.
+    expect(screen.getByText("Where is my order")).toBeInTheDocument();
+    expect(card().parentElement).toHaveAttribute("inert");
+    next.resolve({ card: SAMPLE_CARD });
+    expect(await screen.findByText("Charged twice")).toBeInTheDocument();
+    expect(card().parentElement).not.toHaveAttribute("inert");
+    await waitFor(() => {
+      expect(card()).toHaveFocus();
     });
   });
 
@@ -262,7 +295,7 @@ describe("the keys", () => {
     expect(urgency?.querySelector("button")).toBeNull();
     expect(screen.getByText(/1 question is left on this card\./)).toBeInTheDocument();
     await waitFor(() => {
-      expect(button("Yes")).toHaveFocus();
+      expect(card()).toHaveFocus();
     });
 
     await user.keyboard("n");
@@ -347,7 +380,7 @@ describe("the keys", () => {
     expect(note).toHaveValue("ysnu1q");
     expect(api.calls.filter((call) => /^review(Decide|Skip|Undo|Release)/.test(call))).toEqual([]);
     await user.keyboard("{Escape}");
-    expect(button("low")).toHaveFocus();
+    expect(card()).toHaveFocus();
     await user.keyboard("s");
     await waitFor(() => {
       expect(calls(api, "reviewSkip")).toHaveLength(1);
@@ -396,6 +429,33 @@ describe("the keys", () => {
     expect(await screen.findByText("Where is my order")).toBeInTheDocument();
     // The next card was not touched by the presses made while the first request was out.
     expect(calls(api, "reviewDecide")).toHaveLength(1);
+  });
+
+  it("shows the answer being sent as pressed until the worker has answered", async () => {
+    const pending = Promise.withResolvers<ReviewDecided>();
+    const { user } = await openReview({ reviewDecide: () => pending.promise });
+    expect(button("low")).not.toHaveAttribute("aria-pressed");
+    await user.keyboard("1");
+    await waitFor(() => {
+      expect(button("low")).toHaveAttribute("aria-pressed", "true");
+    });
+    expect(button("medium")).not.toHaveAttribute("aria-pressed");
+    pending.resolve(STILL_OPEN);
+    await screen.findByText(/urgency: low\. Written to the record/);
+    expect(screen.queryByRole("button", { pressed: true })).toBeNull();
+  });
+
+  it("says what a key did at the foot of the window, and the words leave after a moment", async () => {
+    const { schedule, user } = await openReview();
+    await user.keyboard("s");
+    const said = await screen.findByText(/Skipped\. The card goes behind the rest for you/);
+    expect(said.closest('[role="status"]')).not.toBeNull();
+    await act(async () => {
+      schedule.advance(NOTICE_MS);
+    });
+    expect(screen.queryByText(/Skipped\./)).toBeNull();
+    // The card sits right under the bar: a notice takes no room while there is none.
+    expect(screen.getByRole("alert")).toBeEmptyDOMElement();
   });
 
   it("does not decide or skip a card whose hold is lost", async () => {
@@ -456,12 +516,13 @@ describe("the lock", () => {
     expect(schedule.running()).toBe(3);
     await user.keyboard("1");
     await screen.findByText("Nothing to review");
-    // Only the top bar's refresh is left.
-    expect(schedule.running()).toBe(1);
+    // The top bar's refresh is left, and the confirmation at the foot of the window until it leaves.
+    expect(schedule.running()).toBe(2);
     await act(async () => {
       schedule.advance(180_000);
     });
     expect(calls(api, "reviewRenew")).toEqual([]);
+    expect(schedule.running()).toBe(1);
   });
 
   it("is given back when the reviewer leaves the page, and renewed no more", async () => {
@@ -1087,11 +1148,13 @@ describe("a key held down", () => {
       reviewDecide: () => Promise.resolve(STILL_OPEN),
       reviewOpen: scripted(SAMPLE_CARD, NEXT_CARD),
     });
+    focusOn("low");
     await user.keyboard("{Enter>}");
     await waitFor(() => {
       expect(calls(api, "reviewDecide")).toEqual(["reviewDecide 5521 urgency=low"]);
     });
-    // The focus has moved to the next question's first answer, with the key still down.
+    // The focus has moved to the next question's first answer, with the key still down: this
+    // reviewer answers from a focused button, and carries on from there.
     await waitFor(() => {
       expect(button("Yes")).toHaveFocus();
     });
@@ -1113,6 +1176,7 @@ describe("a key held down", () => {
       reviewDecide: () => Promise.resolve(DONE),
       reviewOpen: scripted(NEXT_CARD, THIRD_CARD),
     });
+    focusOn("Yes");
     await user.keyboard("{Enter>}");
     await screen.findByRole("article");
     await waitFor(() => {
@@ -1137,6 +1201,7 @@ describe("a key held down", () => {
   it("does nothing for a Space released on an answer the press did not begin on", async () => {
     const { api, user } = await openReview({ reviewDecide: () => Promise.resolve(STILL_OPEN) });
     // Space goes down on "low"; the focus moves to "Yes" while it is down; it comes up there.
+    focusOn("low");
     await user.keyboard("[Space>]");
     act(() => {
       button("Yes").focus();
@@ -1200,6 +1265,7 @@ describe("a key held down", () => {
 
   it("decides once when Space is repeated while held, and a click of the pointer is left alone", async () => {
     const { api, user } = await openReview({ reviewDecide: () => Promise.resolve(STILL_OPEN) });
+    focusOn("low");
     await user.keyboard("[Space>3/]");
     await waitFor(() => {
       expect(calls(api, "reviewDecide")).toHaveLength(1);

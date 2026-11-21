@@ -257,25 +257,56 @@ function focusKey(screen: Screen): string {
   return `card ${card.source} ${card.key} ${card.stateHash} ${names} ${screen.lost === null ? "held" : "lost"}`;
 }
 
+/** How long a confirmation stays at the foot of the window before it leaves. */
+export const NOTICE_MS = 5000;
+
 /**
  * The page speaks in two places that stay in the page from the start, so a change is announced:
  * a polite status for confirmations and an alert for what needs reading. A decision is said once.
+ *
+ * A confirmation (an answer written, a skip, an undo) is the mockups' toast: a ruled box at the
+ * foot of the window that leaves after a moment, so every key shows what it did and the card sits
+ * right under the bar. A warning needs reading, so it stays over the card until the next notice,
+ * and takes no room while there is none.
  */
 function Notices({ notice }: { readonly notice: Notice | null }) {
+  const schedule = useSchedule();
+  const confirmation = notice?.tone === "information" ? notice : null;
+  const warning = notice?.tone === "warning" ? notice : null;
+  const [left, setLeft] = useState<number | null>(null);
+  const shownId = confirmation?.id ?? null;
+  useEffect(() => {
+    if (shownId === null) {
+      return undefined;
+    }
+    return schedule.after(NOTICE_MS, () => {
+      setLeft(shownId);
+    });
+  }, [shownId, schedule]);
+  const toast = confirmation !== null && confirmation.id !== left ? confirmation : null;
   return (
-    <div className="mb-4 min-h-6">
-      <p role="status" className="m-0">
-        {notice?.tone === "information" ? <span key={notice.id}>{notice.text}</span> : null}
-      </p>
-      <p role="alert" className="m-0">
-        {notice?.tone === "warning" ? (
-          <span key={notice.id} className="inline-flex flex-wrap items-baseline gap-x-2.5">
+    <>
+      <p role="alert" className={warning === null ? "m-0" : "m-0 mb-4"}>
+        {warning === null ? null : (
+          <span key={warning.id} className="inline-flex flex-wrap items-baseline gap-x-2.5">
             <StatusWord status="warning" size="small" />
-            <span>{notice.text}</span>
+            <span>{warning.text}</span>
           </span>
-        ) : null}
+        )}
       </p>
-    </div>
+      <div className="pointer-events-none fixed bottom-[max(24px,env(safe-area-inset-bottom,0px))] left-1/2 z-[8] w-[min(520px,calc(100%-32px))] -translate-x-1/2">
+        <p role="status" className="m-0">
+          {toast === null ? null : (
+            <span
+              key={toast.id}
+              className="pointer-events-auto block border border-hairline bg-canvas px-4 py-3 font-medium text-text"
+            >
+              {toast.text}
+            </span>
+          )}
+        </p>
+      </div>
+    </>
   );
 }
 
@@ -316,16 +347,25 @@ function Stage({
   readonly state: ReviewState;
 }) {
   const { screen, filter } = state;
-  switch (screen.kind) {
-    case "opening":
-      return <p className="m-0 py-10 text-center text-text-2">Opening the next card.</p>;
-    case "card":
-      return (
+  // While the next card is on its way, the one just answered stays where it is, untouchable, with
+  // the answer that was pressed still marked: the stage does not blink empty between two cards.
+  const last = useRef<Extract<Screen, { kind: "card" }> | null>(null);
+  if (screen.kind === "card") {
+    last.current = screen;
+  } else if (screen.kind !== "opening") {
+    last.current = null;
+  }
+  const shown = screen.kind === "card" ? screen : screen.kind === "opening" ? last.current : null;
+  if (shown !== null) {
+    const waiting = screen.kind !== "card";
+    return (
+      <div inert={waiting} aria-busy={waiting}>
         <ReviewCardView
-          card={screen.card}
-          lost={screen.lost}
+          card={shown.card}
+          lost={shown.lost}
           note={state.note}
           canUndo={state.canUndo}
+          answering={state.answering}
           onNote={controller.setNote}
           onAnswer={controller.decide}
           onSkip={controller.skip}
@@ -333,7 +373,13 @@ function Stage({
           onLeave={controller.leave}
           onMoveOn={controller.moveOn}
         />
-      );
+      </div>
+    );
+  }
+  switch (screen.kind) {
+    case "opening":
+    case "card":
+      return <p className="m-0 py-10 text-center text-text-2">Opening the next card.</p>;
     case "empty":
       return (
         <EmptyState
@@ -386,9 +432,37 @@ export function ReviewPage() {
     document.title = "Review · FacetDB";
   }, []);
 
-  // The focus lands on the first answer of the first open question when a card opens, and moves
-  // to the next question after a decision, unless the reviewer is typing in the note.
+  // Where the focus goes when a card opens and after each decision, unless the reviewer is typing
+  // in the note:
+  // - on the card (or the way-on button of a lost hold or an empty stage) for a reviewer who
+  //   answers with the letter keys. Never on an answer then: brackets on "Yes" of a card nobody
+  //   has read look like an answer given, and Enter would give it.
+  // - on the first answer of the next open question for a reviewer who answers from a focused
+  //   button with Enter or Space: they carry on from where the last answer left them.
+  // Which one is known from how the last answer was given: a click that came from a key (detail
+  // 0) on an answer says the second, a letter key or a pointer's click says the first.
   const stage = useRef<HTMLDivElement>(null);
+  const fromAnswer = useRef(false);
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      const answer =
+        event.target instanceof Element ? event.target.closest("button[data-answer]") : null;
+      if (answer !== null && stage.current?.contains(answer) === true) {
+        fromAnswer.current = event.detail === 0;
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (pressedKey(event) !== undefined) {
+        fromAnswer.current = false;
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, []);
   const focusOn = focusKey(state.screen);
   useHeldKeyGuard(stage, focusOn);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the key is what asks for the move
@@ -397,7 +471,10 @@ export function ReviewPage() {
     if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
       return;
     }
-    stage.current?.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    const next = fromAnswer.current
+      ? stage.current?.querySelector<HTMLElement>("button[data-answer]:not(:disabled)")
+      : null;
+    (next ?? stage.current?.querySelector<HTMLElement>("[data-autofocus]"))?.focus();
   }, [focusOn]);
 
   return (

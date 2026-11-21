@@ -17,8 +17,10 @@ import { alertTime, followable, ledeOf, splitCheck, unreachableLede } from "./wo
 /**
  * The Home page: four ruled columns, over the recent alerts. Health as three checks in words, the
  * records answered today, the review queue with the page's one action, and spending against the
- * cap, each figure in the measured face with its words and, where the endpoint carries a share, its
- * dither strip. Everything shown is what `GET /v1/home` says; the page computes no number.
+ * cap, each figure in the measured face with its words and its dither strip. Every figure and
+ * sentence is what `GET /v1/home` says; the page works out only two strips the endpoint has no
+ * share for, from counts the endpoint gives (the queue's, and answered today when yesterday had
+ * none).
  */
 
 /** How often the page asks the worker again while it is visible (the rail's own poll is slower). */
@@ -132,26 +134,23 @@ function AnsweredColumn({
   readonly answered: Home["answered"];
   readonly lastKnown: string | null;
 }) {
+  // The endpoint gives no share when nothing was answered yesterday. Today's count is then past
+  // all of yesterday's as soon as one record is answered, so the strip is full, or empty at none.
+  const share = answered.fraction ?? (answered.today > 0 ? 1 : 0);
   return (
     <Column title="Answered today">
       <Figure>{answered.words.figure}</Figure>
       <LastKnown at={lastKnown} />
-      {answered.fraction === null ? null : (
-        <DitherStrip
-          value={answered.fraction}
-          width={STRIP_WIDTH}
-          rows={4}
-          label={answered.words.sub}
-        />
-      )}
-      <Sub spokenByStrip={answered.fraction !== null}>{answered.words.sub}</Sub>
+      <DitherStrip value={share} width={STRIP_WIDTH} rows={4} label={answered.words.sub} />
+      <Sub spokenByStrip>{answered.words.sub}</Sub>
     </Column>
   );
 }
 
 /**
  * The page's one action: the link to Review, in the review amber as text, and only when a card
- * waits. The endpoint gives the queue no share, so the figure has no strip (a share of what?).
+ * waits. The strip is the share of today's review work still waiting: the cards waiting, out of
+ * those and the ones a person decided today (both figures are in the words beside it).
  */
 function QueueColumn({
   queue,
@@ -160,11 +159,14 @@ function QueueColumn({
   readonly queue: Home["queue"];
   readonly lastKnown: string | null;
 }) {
+  const work = queue.waiting + queue.decidedToday;
+  const share = work === 0 ? 0 : queue.waiting / work;
   return (
     <Column title="Waiting for a person">
       <Figure>{queue.words.figure}</Figure>
       <LastKnown at={lastKnown} />
-      <Sub>{queue.words.sub}</Sub>
+      <DitherStrip value={share} width={STRIP_WIDTH} rows={4} label={queue.words.sub} />
+      <Sub spokenByStrip>{queue.words.sub}</Sub>
       {queue.waiting === 0 ? null : (
         <Link
           to="/review"

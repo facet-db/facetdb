@@ -139,7 +139,9 @@ export function SourceTabs({
     <div
       role="tablist"
       aria-label="Source"
-      className="inline-flex max-w-full gap-5.5 overflow-x-auto border-b border-hairline"
+      // Many sources wrap onto a second line. The list is not a scroller: a scroller counts the
+      // tabs' focus brackets as content and shows scrollbars around a single name.
+      className="inline-flex max-w-full flex-wrap gap-x-5.5 border-b border-hairline"
     >
       {names.map((name, index) => {
         const selected = name === chosen;

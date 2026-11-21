@@ -42,6 +42,7 @@ export type {
   DraftWarning,
   FileApply,
   FileDiff,
+  PendingSource,
   PreviewSource,
   ProjectConfigDoor,
   ReloadSummary,

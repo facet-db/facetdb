@@ -21,6 +21,14 @@
     min-height: 100vh;
     background: var(--canvas);
   }
+  /* An open listbox or dialog locks the page's scroll (Radix): its lock hides the page's scrollbar
+     and pads the body by the bar's width. The scrollbar stays instead, and nothing shifts; the
+     wheel and the keys are still held by the open list. Important declarations in a layer win
+     over the lock's own unlayered ones. */
+  body[data-scroll-locked] {
+    overflow: visible !important;
+    margin-right: 0 !important;
+  }
   a {
     color: var(--facet-text);
   }

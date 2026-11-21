@@ -34,7 +34,7 @@ export function Drawer() {
     <header className="sticky top-0 z-[9] flex flex-wrap items-center gap-3 border-b border-hairline bg-canvas px-4 py-2.5">
       <Brand />
       <div className="min-w-0 flex-1">
-        <ProjectPicker />
+        <ProjectPicker bare />
       </div>
       <button
         ref={button}

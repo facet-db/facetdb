@@ -14,6 +14,8 @@ export type { JsonValue, KvProps } from "./Kv.tsx";
 export { Kv } from "./Kv.tsx";
 export type { ListboxOption, ListboxProps } from "./Listbox.tsx";
 export { Listbox } from "./Listbox.tsx";
+export type { ScrollRegionProps } from "./ScrollRegion.tsx";
+export { ScrollRegion } from "./ScrollRegion.tsx";
 export type {
   Schedule,
   SelfFillingTableProps,

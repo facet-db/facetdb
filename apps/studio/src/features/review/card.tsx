@@ -63,6 +63,8 @@ export type ReviewCardProps = {
   readonly lost: string | null;
   readonly note: string;
   readonly canUndo: boolean;
+  /** The answer being sent now, if any: its button shows as pressed until the worker has answered. */
+  readonly answering: { readonly question: string; readonly value: boolean | string } | null;
   readonly onNote: (note: string) => void;
   /** The card the answer was drawn on goes with it: a card that was replaced since is not decided. */
   readonly onAnswer: (card: ReviewCardId, question: string, value: boolean | string) => void;
@@ -90,7 +92,16 @@ export function ReviewCardView(props: ReviewCardProps) {
   const reached = keyedAnswers(card.open);
   const locked = lost !== null;
   return (
-    <article aria-labelledby={header} className="min-w-0 border border-hairline p-7 max-sm:p-5">
+    <article
+      aria-labelledby={header}
+      // The card itself takes the focus when it opens for a reviewer who answers with the keys,
+      // not one of its answers: brackets around "Yes" on a card nobody has read yet look like an
+      // answer already given, and Enter would give it. The keys answer from here; Tab goes on to
+      // the record and the buttons (the page's focus rule: review-page.tsx).
+      tabIndex={-1}
+      {...(locked ? {} : { "data-autofocus": "" })}
+      className="min-w-0 border border-hairline p-7 outline-hidden max-sm:p-5"
+    >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
         <span id={header} className="min-w-0 text-[13px] break-words text-text-2">
           <span className="sr-only">Review card: </span>
@@ -116,13 +127,15 @@ export function ReviewCardView(props: ReviewCardProps) {
 
       <RecordState state={card.state} />
 
-      {card.open.map((question, index) => (
+      {card.open.map((question) => (
         <OpenQuestion
           key={question.name}
           question={question}
           reached={reached}
-          first={index === 0}
           locked={locked}
+          {...(props.answering?.question === question.name
+            ? { pressed: props.answering.value }
+            : {})}
           onAnswer={(question, value) => {
             props.onAnswer(
               { source: card.source, key: card.key, stateHash: card.stateHash },
