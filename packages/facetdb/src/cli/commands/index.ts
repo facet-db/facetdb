@@ -1,4 +1,5 @@
 import type { RegisteredCommand } from "../program.ts";
+import { addCommand } from "./add.ts";
 import { backfillCommand } from "./backfill.ts";
 import { devCommand } from "./dev.ts";
 import { doctorCommand } from "./doctor.ts";
@@ -32,8 +33,10 @@ export const COMMANDS: readonly RegisteredCommand[] = [
   usersCommand,
   reviewCommand,
   studioCommand,
+  addCommand,
 ];
 
+export { addCommand } from "./add.ts";
 export { backfillCommand } from "./backfill.ts";
 export { devCommand } from "./dev.ts";
 export { doctorCommand } from "./doctor.ts";

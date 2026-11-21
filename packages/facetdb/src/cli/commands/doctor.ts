@@ -6,6 +6,7 @@ import {
   pluginProviderOf,
   type SourceConfig,
 } from "../../config/index.ts";
+import { VERSION } from "../../index.ts";
 import {
   checkPluginProvider,
   type PluginHost,
@@ -120,6 +121,9 @@ const CONFIG_CHECK = {
   looksAt: "loads the config file and judges it with the schema",
 } as const;
 
+/** Present only when the config names a plugin, so `planned` (no config read) never lists it. */
+const PLUGINS_CHECK = { id: "plugins", label: "plugins" } as const;
+
 const MODEL_KEY = {
   id: "model-key",
   label: "model key",
@@ -213,12 +217,34 @@ function fromCheck(check: DoctorCheck, scrub: (text: string) => string, group?: 
   );
 }
 
+/**
+ * The `plugins` check's result, from the host the config's plugins were loaded into: each plugin by
+ * its package, its version and the range of FacetDB it supports. The host refused any whose range
+ * does not hold, so every one listed holds for this FacetDB. Strings here are the manifest's own,
+ * which the loader checked to be a name, a semver version and a semver range.
+ */
+function pluginsHold(host: PluginHost): CheckResult | undefined {
+  const hosted = host.all();
+  if (hosted.length === 0) {
+    return undefined;
+  }
+  const each = hosted.map(
+    ({ packageName, plugin }) =>
+      `${packageName} ${plugin.manifest.version} (FacetDB ${plugin.manifest.coreVersions})`,
+  );
+  return ok(
+    `${each.join(", ")}: each loads, supports this FacetDB (${VERSION}) and has settings its schema accepts`,
+  );
+}
+
 /** 1. The config file loads and passes the schema; the first check, run on its own before the others. */
 async function configLoads(environment: DoctorEnvironment): Promise<{
   readonly result: CheckResult;
   readonly config?: ProjectConfig;
   /** The plugin host, when the plugins the config names loaded: a plugin's provider needs it. */
   readonly plugins?: PluginHost;
+  /** The `plugins` check, when the config names a plugin. */
+  readonly pluginsCheck?: CheckResult;
 }> {
   const path = environment.options.config;
   try {
@@ -232,24 +258,30 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
       if (error instanceof PluginHostError) {
         // A check is one line: the schema's listed reasons follow the heading, joined.
         const [heading, ...reasons] = error.message.split(/\n\s*- /);
-        const words = reasons.length === 0 ? heading : `${heading} ${reasons.join("; ")}`;
-        return { result: fail(`${path} loads, but ${words}`, error.fix), config };
+        const words = reasons.length === 0 ? `${heading}` : `${heading} ${reasons.join("; ")}`;
+        return {
+          result: fail(`${path} loads, but ${words}`, error.fix),
+          config,
+          pluginsCheck: fail(words, error.fix),
+        };
       }
       // The host words every refusal itself; anything else came from a plugin's own code, and
       // its text is not printed, since it could quote a value the plugin was handed.
+      const fix =
+        "run facetdb worker --dry-run to see which plugin stops it, then reinstall that plugin or report it to its author";
       return {
-        result: fail(
-          `${path} loads, but loading the plugins it names failed unexpectedly`,
-          "run facetdb worker --dry-run to see which plugin stops it, then reinstall that plugin or report it to its author",
-        ),
+        result: fail(`${path} loads, but loading the plugins it names failed unexpectedly`, fix),
         config,
+        pluginsCheck: fail("loading the plugins the config names failed unexpectedly", fix),
       };
     }
     const sources = config.sources.length;
+    const pluginsCheck = pluginsHold(plugins);
     return {
       result: ok(`${path} loads, with ${sources} ${sources === 1 ? "source" : "sources"}`),
       config,
       plugins,
+      ...(pluginsCheck === undefined ? {} : { pluginsCheck }),
     };
   } catch (error) {
     if (error instanceof ConfigError) {
@@ -614,6 +646,10 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
     // The one check that needs no config: it reads the environment alone, so it always runs.
     lines.push(line(SECRET, secretCheck(deps.env)));
     return lines;
+  }
+  // Present only when the config names a plugin; the other checks are as they were.
+  if (loaded.pluginsCheck !== undefined) {
+    lines.push(line(PLUGINS_CHECK, loaded.pluginsCheck));
   }
   // What an engine says is scrubbed of the CLI's own secrets, which no engine is given.
   const scrub = (text: string) =>

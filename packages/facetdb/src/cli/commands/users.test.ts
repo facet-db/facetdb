@@ -147,6 +147,8 @@ describe("facetdb users add", () => {
       openBrowser: unused,
       setEnv: unused,
       pluginHost: unused,
+      runCommand: unused,
+      importPlugin: unused,
     };
     expect(await runProgram(["users", "add", "maya"], deps, COMMANDS)).toBe(0);
     expect(asked).toEqual([

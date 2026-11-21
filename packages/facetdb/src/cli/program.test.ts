@@ -169,6 +169,8 @@ describe("the facetdb program", () => {
           throw new Error("unused");
         },
         pluginHost: () => Promise.reject(new Error("unused")),
+        runCommand: () => Promise.reject(new Error("unused")),
+        importPlugin: () => Promise.reject(new Error("unused")),
       },
       COMMANDS,
       { code: 0 },
@@ -190,6 +192,7 @@ describe("the facetdb program", () => {
       "users",
       "review",
       "studio",
+      "add",
     ]);
     for (const command of program.commands) {
       const flags = command.options.map((option) => option.long);

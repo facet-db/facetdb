@@ -154,6 +154,8 @@ type Setup = {
   readonly registry?: string;
   readonly clock?: FakeClock;
   readonly abortAfter?: (ms: number) => AbortSignal;
+  /** Files of the project's directory, by path: a registry that is a file is read from here. */
+  readonly files?: Readonly<Record<string, string>>;
 };
 
 async function doorWith(net: ReturnType<typeof network>, setup: Setup = {}) {
@@ -172,6 +174,17 @@ async function doorWith(net: ReturnType<typeof network>, setup: Setup = {}) {
         timeouts.push(ms);
         return new AbortController().signal;
       }),
+    workspace: {
+      peek: (path) =>
+        Promise.resolve(
+          setup.files !== undefined && path in setup.files
+            ? { kind: "file", firstLine: "{" }
+            : { kind: "none" },
+        ),
+      lines: async function* (path) {
+        yield* (setup.files?.[path] ?? "").split("\n");
+      },
+    },
     clock,
   });
   return { door, clock, environment, timeouts };
@@ -421,8 +434,18 @@ describe("the gallery", () => {
       "ftp://registry.example.com/index.json?token=abc123",
       "file:///etc/hunter2-registry.json",
       "javascript:alert('hunter2')",
-      "not a url hunter2",
-      "/var/lib/hunter2/index.json",
+      // Plain http is read on this machine only.
+      "http://registry.example.com/hunter2/index.json?token=abc123",
+      // A mistyped web address is not a file's path, whatever the studio's reader would then be shown.
+      "https//ops:hunter2@registry.example.com/index.json",
+      "http//ops:hunter2@registry.example.com/index.json",
+      "https:/ops:hunter2@registry.example.com/index.json",
+      "//ops:hunter2@registry.example.com/x",
+      "registry.example.com/index.json?token=hunter2",
+      "registry.example.com/index.json#hunter2",
+      // A network share (UNC), with a credential and without.
+      "\\\\ops:hunter2@registry.example.com\\share\\index.json",
+      "\\\\registry.example.com\\hunter2\\index.json",
       "",
     ];
 
@@ -444,6 +467,38 @@ describe("the gallery", () => {
       expect(net.asked).toEqual([]);
       expect(JSON.stringify(answer)).not.toMatch(/hunter2|alice|abc123|registry\.example\.com/);
     }
+  });
+
+  it("reads a registry that is the path of a file, as `facetdb add` does, and fetches nothing", async () => {
+    // These two were refused as "not an http or https address" when the door alone read the
+    // registry; `facetdb add --registry <file>` reads them, so the gallery does too. A value with a
+    // space and no path shape ("not a url hunter2.json") is a file's name, and the page is never
+    // shown a file's path: its `address` is fixed words.
+    for (const path of ["registry/index.json", "not a url hunter2.json"]) {
+      const net = network(() => {
+        throw new Error("a file is never fetched");
+      });
+      const { door } = await doorWith(net, {
+        registry: path,
+        files: { [path]: INDEX },
+      });
+      const answer = await door.gallery("github");
+      expect(answer).toMatchObject({
+        reachable: true,
+        address: "a file in the project directory",
+        plugins: [{ name: "github" }],
+      });
+      expect(JSON.stringify(answer)).not.toMatch(/hunter2|registry\/index/);
+      expect(net.asked).toEqual([]);
+    }
+    const { door } = await doorWith(NO_NETWORK, { registry: "missing/hunter2/index.json" });
+    const missing = await door.gallery(undefined);
+    expect(missing).toMatchObject({
+      reachable: false,
+      address: "a file in the project directory",
+      why: "the registry file does not exist",
+    });
+    expect(JSON.stringify(missing)).not.toContain("hunter2");
   });
 
   it("says why when the registry cannot be read, in fixed words, with the address tried and nothing a failure quotes", async () => {

@@ -54,6 +54,7 @@ import {
   type Workspace,
 } from "./program.ts";
 import { modelProviderOf } from "./provider-door.ts";
+import { spawnProgram } from "./run-command.ts";
 import { serveHttp } from "./serve.ts";
 import { requireStoreSecret, requireStoreUrl, storeSharedFor } from "./store-door.ts";
 import { diskStudioFiles } from "./studio-files.ts";
@@ -259,6 +260,7 @@ export function diskWorkspace(
           return {
             kind: "file",
             firstLine: head.toString("utf8", 0, bytesRead).split("\n")[0] ?? "",
+            bytes: (await handle.stat()).size,
           };
         } finally {
           await handle.close();
@@ -437,6 +439,10 @@ export function processDeps(
         importModule: importFromProject(resolve(projectDir, path)),
         builtins: BUILTIN_PLUGINS,
       }),
+    // `facetdb add`: the project's package manager as a program with an argument list, and the
+    // plugin it installed imported from the project's directory as the host does.
+    runCommand: spawnProgram(spawn),
+    importPlugin: importFromProject(resolve(projectDir, PROJECT_CONFIG)),
     // Each engine is made on first use for a source of its key only, so a driver no source needs is
     // never imported (later engines load their package here with `import()`). Never the default
     // `postgresEngine`: without PGHOST a hostless URL with a remote PGHOST would pass the TLS

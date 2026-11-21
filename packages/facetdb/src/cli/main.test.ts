@@ -192,6 +192,8 @@ describe("what is at a path (Workspace.peek)", () => {
     expect(await workspace.peek("facetdb.types.d.ts")).toEqual({
       kind: "file",
       firstLine: "// first line",
+      // The size in bytes, for a reader that refuses a file past its cap before reading it.
+      bytes: "// first line\nexport type A = {};\n".length,
     });
     expect(await workspace.peek("missing.d.ts")).toEqual({ kind: "none" });
   });

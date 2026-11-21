@@ -10,7 +10,7 @@
  * `source`, `action`, ... annotate the first parameter: `(ctx: PluginContext<Infer<typeof config>>)`.
  */
 export type { Plugin, PluginDefinition, PluginIssue } from "./define.ts";
-export { definePlugin, isPlugin, PluginError } from "./define.ts";
+export { definePlugin, isPlugin, PluginError, packageNames, shortName } from "./define.ts";
 export type {
   HostedPlugin,
   HostedVariable,

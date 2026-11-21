@@ -142,7 +142,12 @@ export type Workspace = {
 /** What `Workspace.peek` finds at a path. */
 export type PathFound =
   | { readonly kind: "none" }
-  | { readonly kind: "file"; readonly firstLine: string }
+  | {
+      readonly kind: "file";
+      readonly firstLine: string;
+      /** The file's size in bytes, when the workspace knows it (the disk does): read before the file is. */
+      readonly bytes?: number;
+    }
   | { readonly kind: "other" };
 
 /** Everything a command may touch, wired once by the composition root (`main.ts`). */
@@ -183,6 +188,22 @@ export type CliDeps = {
    * naming the problem and its fix; never prints.
    */
   readonly pluginHost: (config: ProjectConfig, path: string) => Promise<PluginHost>;
+  /**
+   * Runs a program with an argument list and no shell, in a directory, and resolves with its exit
+   * code (`facetdb add` runs the project's package manager): `node:child_process` in the process,
+   * a recording fake in a test. Rejects when the program could not be started.
+   */
+  readonly runCommand: (
+    command: string,
+    args: readonly string[],
+    options: { readonly cwd: string },
+  ) => Promise<number>;
+  /**
+   * Imports a package from the project's directory, as the plugin host does (`facetdb add` loads
+   * the plugin it just installed): `importFromProject` in the process. A package that is not there
+   * rejects with Node's `MODULE_NOT_FOUND`.
+   */
+  readonly importPlugin: (specifier: string) => Promise<unknown>;
   /**
    * The database engines a source's connection string picks from by its scheme (`cli/engines.ts`),
    * each loaded on first use only, so a driver no source needs is never imported: the composition
@@ -247,7 +268,10 @@ export type CliDeps = {
    * A GET of an address on the network (the plugin registry's index): `fetch` in the process, a
    * handwritten fake in a test, which reaches no network. Aborts with `signal`.
    */
-  readonly fetch: (url: string, init: { readonly signal: AbortSignal }) => Promise<Response>;
+  readonly fetch: (
+    url: string,
+    init: { readonly signal: AbortSignal; readonly redirect: "error" },
+  ) => Promise<Response>;
   /**
    * A signal that aborts `ms` milliseconds from now, bounding one webhook send or give-up alert:
    * the platform's timeout signal in the process, a fake on the test's clock in a test.
@@ -547,7 +571,9 @@ type OptionalInTests =
   | "studio"
   | "openBrowser"
   | "setEnv"
-  | "pluginHost";
+  | "pluginHost"
+  | "runCommand"
+  | "importPlugin";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -670,6 +696,9 @@ export async function runInProcess(
             ),
           builtins: BUILTIN_PLUGINS,
         }),
+      runCommand: () =>
+        Promise.reject(new Error("this test gave the command no way to run a program")),
+      importPlugin: () => Promise.reject(new Error("this test gave the command no plugin import")),
       ...rest,
       io,
     },

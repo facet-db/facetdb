@@ -163,6 +163,8 @@ async function runSeeingPrompts(
         throw new Error("this test gave the command no environment to set");
       },
       pluginHost: () => Promise.reject(new Error("this test gave the command no plugin host")),
+      runCommand: () => Promise.reject(new Error("this test gave the command no program to run")),
+      importPlugin: () => Promise.reject(new Error("this test gave the command no plugin import")),
     },
     COMMANDS,
   );

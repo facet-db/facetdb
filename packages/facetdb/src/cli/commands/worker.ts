@@ -782,6 +782,7 @@ export async function runWorkers(
                 registry: registryAddress(deps.env),
                 fetch: deps.fetch,
                 abortAfter: deps.abortAfter,
+                workspace: deps.workspace,
                 clock,
               }),
             }),
