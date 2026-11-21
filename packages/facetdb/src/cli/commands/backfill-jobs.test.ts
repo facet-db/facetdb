@@ -10,12 +10,14 @@ import type {
   ScanPage,
   SpendingGate,
 } from "@facetdb/core";
+import { reviewsOf } from "@facetdb/core";
 import {
   FakeClock,
   FakeConnector,
   FakeDatabase,
   FakeDecisionLog,
   FakeOpenConnector,
+  FakeReviewQueue,
   FakeRunLog,
 } from "@facetdb/core/testing";
 import type { BackfillJobState, BackfillJobStatus } from "@facetdb/server";
@@ -348,6 +350,7 @@ function rig(
     cursors,
     log: () => log,
     runs: (name) => ({ log: runs, source: `${PROJECT_ID}:${name}` }),
+    reviews: (name) => reviewsOf(new FakeReviewQueue(), `${PROJECT_ID}:${name}`),
     alerts: signals,
     expireAfter: (ms) => {
       const timer = new AbortController();

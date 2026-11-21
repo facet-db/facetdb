@@ -1,3 +1,4 @@
+export { followReview } from "./follow.ts";
 export type {
   LockResult,
   QueueCount,

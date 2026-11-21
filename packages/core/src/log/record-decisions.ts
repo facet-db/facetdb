@@ -38,3 +38,20 @@ export function statusOf(decisions: Readonly<Record<string, Decision>>): RecordS
     ? "done"
     : "needs_review";
 }
+
+/**
+ * The questions of the set that `entry` has an answer for, in set order: the set a card is judged
+ * on when its answer predates a question added since (the added question has no answer until its
+ * backfill). `decideRecord` over this set decides every question the answer carries and never
+ * returns undefined; for a complete answer it is the whole set, so nothing changes for it. A
+ * question the answer has and the set no longer has is left out, since a removed question is not
+ * asked.
+ */
+export function answeredSet(questionSet: QuestionSet, entry: AnswerEntry): QuestionSet {
+  return {
+    ...questionSet,
+    questions: questionSet.questions.filter(
+      (question) => entry.answers[question.name] !== undefined,
+    ),
+  };
+}

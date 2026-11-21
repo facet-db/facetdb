@@ -1,4 +1,10 @@
-import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeConnector,
+  FakeDatabase,
+  FakeDecisionLog,
+  FakeReviewQueue,
+} from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type {
   ProviderRequest,
@@ -8,6 +14,7 @@ import type {
   ScanPage,
 } from "../contracts/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
+import { reviewsOf } from "../review/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
 import {
   type BackfillDeps,
@@ -132,6 +139,7 @@ async function rig(rows = 30): Promise<Rig> {
       clock,
       cursorStore: cursors,
       log,
+      reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version: 1,
       spending: UNLIMITED,

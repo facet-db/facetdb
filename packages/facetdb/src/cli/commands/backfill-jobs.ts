@@ -12,6 +12,7 @@ import {
   type ModelProvider,
   type OpenConnector,
   type RunRecorder,
+  type SourceReviews,
   type SpendingGate,
 } from "@facetdb/core";
 import type {
@@ -95,6 +96,8 @@ export type BackfillJobsDeps = {
   readonly log: (name: string) => DecisionLog;
   /** The run log's rows of a source's backfill pages. */
   readonly runs: (name: string) => RunRecorder;
+  /** A source's review queue, which an added question's write follows as the loop's own does. */
+  readonly reviews: (name: string) => SourceReviews;
   /** The backfill finished or failed alerts of a source. */
   readonly alerts: (name: string) => AlertSignals;
   /**
@@ -461,6 +464,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
         alerts: deps.alerts(job.source),
         spending: deps.spending,
         runs: deps.runs(job.source),
+        reviews: deps.reviews(job.source),
       });
       const report = await backfill.run({
         pace: DEFAULT_BACKFILL_PACE,

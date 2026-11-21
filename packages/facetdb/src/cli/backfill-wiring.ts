@@ -6,6 +6,7 @@ import {
   createAlerts,
   createSpending,
   type ModelProvider,
+  reviewsOf,
   type SpendingCap,
   type SpendingGate,
   spendingGate,
@@ -74,6 +75,11 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
       page: () => Promise.resolve({ entries: [], next: undefined }),
       count: () => Promise.resolve(0),
     },
+    reviews: {
+      upsert: () => neverDoes("follows the review queue"),
+      remove: () => neverDoes("follows the review queue"),
+      withdraw: () => neverDoes("follows the review queue"),
+    },
     questionSet: questionSetOf(config, source),
     version: 1,
     ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
@@ -119,6 +125,8 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
     spending: projectSpending(config, store, alerts, clock, project.id),
     // Each page that queued or asked a record leaves a row, named as a backfill page.
     runs: { log: store.runs, source: sourceId },
+    // An added question's write follows the review queue as the loop's does.
+    reviews: reviewsOf(store.reviews, sourceId),
   };
 }
 

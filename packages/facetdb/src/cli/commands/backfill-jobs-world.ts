@@ -9,7 +9,8 @@ import type {
   RecordKey,
   SpendingGate,
 } from "@facetdb/core";
-import { FakeClock, FakeDecisionLog, FakeRunLog } from "@facetdb/core/testing";
+import { reviewsOf } from "@facetdb/core";
+import { FakeClock, FakeDecisionLog, FakeReviewQueue, FakeRunLog } from "@facetdb/core/testing";
 import type { BackfillJobState, BackfillJobStatus } from "@facetdb/server";
 import { expect } from "vitest";
 import { facetdb, noul } from "../../config/index.ts";
@@ -136,6 +137,7 @@ function jobsOver(world: EngineWorld) {
     cursors,
     log: () => log,
     runs: () => ({ log: new FakeRunLog(), source: `proj_market:${SOURCE}` }),
+    reviews: () => reviewsOf(new FakeReviewQueue(), `proj_market:${SOURCE}`),
     alerts: () => QUIET,
     expireAfter: () => new AbortController().signal,
     newToken: () => "token-1",

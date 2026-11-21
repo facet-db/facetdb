@@ -10,6 +10,7 @@ import type {
 } from "../contracts/index.ts";
 import {
   type AnswerEntry,
+  answeredSet,
   applyHumanDecision,
   type DecisionWriter,
   decideRecord,
@@ -23,12 +24,13 @@ import type { Question, QuestionSet } from "../questions/index.ts";
 import type { RecordStatus, StateValue } from "../records/index.ts";
 import type { Answer, Decision } from "../thresholds/index.ts";
 import type { ActionStep } from "../worker/index.ts";
+import { followReview } from "./follow.ts";
 import {
   answerFigure,
   type LockResult,
   type ReviewFilter,
   type ReviewQueue,
-  reviewEntryOf,
+  reviewsOf,
 } from "./queue.ts";
 
 /** A source's question set and the version in force: every human entry carries the version. */
@@ -181,6 +183,11 @@ type Loaded = {
   readonly status: RecordStatus;
   readonly answer: AnswerEntry;
   readonly history: readonly LogEntry[];
+  /**
+   * The questions the card is judged on, in question-set order: those of the set in force that the
+   * latest answer has (all of them unless a question was added after the answer was logged).
+   */
+  readonly questions: readonly Question[];
   /** The thresholds' decisions alone, what the people's standing decisions are laid over. */
   readonly byThresholds: Readonly<Record<string, Decision>>;
   /** The decisions with the people's standing decisions laid over them. */
@@ -263,12 +270,28 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (answer === undefined || answer.stateHash !== card.stateHash) {
       return { stale: REASKED };
     }
-    const byThresholds = decideRecord(questionSet, questionSet.thresholds, answer, []);
-    const decisions = decideRecord(questionSet, questionSet.thresholds, answer, history);
-    if (byThresholds === undefined || decisions === undefined) {
+    // An answer that predates a question added since has no word on it: that is no staleness (the
+    // backfill of the added question answers it, and the card follows). The card is judged on the
+    // questions the answer has, and a question the set no longer has is not among them. Only an
+    // answer with none of the set's questions leaves the card with nothing to judge.
+    const answered = answeredSet(questionSet, answer);
+    if (answered.questions.length === 0) {
       return { stale: REASKED };
     }
-    return { row, status: current.status, answer, history, byThresholds, decisions };
+    const byThresholds = decideRecord(answered, answered.thresholds, answer, []);
+    const decisions = decideRecord(answered, answered.thresholds, answer, history);
+    if (byThresholds === undefined || decisions === undefined) {
+      throw new Error(`the answer for "${card.key}" lacks a question it was narrowed to`);
+    }
+    return {
+      row,
+      status: current.status,
+      answer,
+      history,
+      questions: answered.questions,
+      byThresholds,
+      decisions,
+    };
   }
 
   /** The history's last model call: what `DecisionLog.latestAnswer` reads, without the read. */
@@ -277,15 +300,14 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
   }
 
   function cardOf(
-    source: Source,
     card: CardRef,
-    loaded: Pick<Loaded, "row" | "answer">,
+    loaded: Pick<Loaded, "row" | "answer" | "questions">,
     decisions: Readonly<Record<string, Decision>>,
     lockedUntil: Date,
   ): OpenedCard {
     const open: OpenQuestion[] = [];
     const decided: DecidedQuestion[] = [];
-    for (const question of source.questions.questionSet.questions) {
+    for (const question of loaded.questions) {
       const decision = decisions[question.name];
       const answer = loaded.answer.answers[question.name];
       if (decision === undefined || answer === undefined) {
@@ -310,28 +332,12 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
   }
 
   /**
-   * The queue follows the write that landed. A record still in review has its card refreshed with
-   * what is open (its `since` and the viewer's lease kept); any other status takes the card out.
+   * The queue follows the write that landed, through the one `followReview` the worker and the
+   * backfill share. A record still in review has its card refreshed with what is open (its `since`
+   * and the viewer's lease kept); any other status takes the card out.
    */
-  async function followQueue(
-    card: CardRef,
-    written: RecordDecision,
-    answer: AnswerEntry,
-  ): Promise<void> {
-    if (written.status !== "needs_review") {
-      await queue.remove(card.source, card.key);
-      return;
-    }
-    await queue.upsert({
-      source: card.source,
-      ...reviewEntryOf({
-        key: card.key,
-        stateHash: card.stateHash,
-        decisions: written.decisions,
-        answers: answer.answers,
-        since: answer.at,
-      }),
-    });
+  function followQueue(card: CardRef, written: RecordDecision, answer: AnswerEntry): Promise<void> {
+    return followReview(reviewsOf(queue, card.source), card, written, answer);
   }
 
   /** The actions run again after a person's decision. */
@@ -375,7 +381,8 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
         key: entry.key,
         hash: loaded.row.hash,
         status: loaded.status,
-        questions: source.questions.questionSet.questions,
+        // The questions the answer has: a decision on a card never speaks for one that has no answer yet.
+        questions: loaded.questions,
         decisions: loaded.byThresholds,
         answers: loaded.answer.answers,
       },
@@ -404,7 +411,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       await queue.withdraw(card.source, card.key, card.stateHash);
       return undefined;
     }
-    return cardOf(source, card, loaded, loaded.decisions, lockedUntil);
+    return cardOf(card, loaded, loaded.decisions, lockedUntil);
   }
 
   /**
@@ -539,7 +546,14 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       await queue.withdraw(card.source, card.key, card.stateHash);
       return { kind: "stale", reason: loaded.stale };
     }
-    if (loaded.decisions[question]?.kind !== "needs_review") {
+    const standing = loaded.decisions[question];
+    if (standing === undefined) {
+      return {
+        kind: "refused",
+        reason: `"${question}" has no answer from the model on this card yet`,
+      };
+    }
+    if (standing.kind !== "needs_review") {
       return { kind: "refused", reason: `"${question}" is already decided on this card` };
     }
     const entry: HumanEntry = {
@@ -627,7 +641,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (written.status === "needs_review") {
       const lock = await queue.lock(card.source, card.key, viewer, clock.now());
       if (lock.kind === "locked") {
-        reopened = cardOf(source, card, loaded, written.decisions, lock.until);
+        reopened = cardOf(card, loaded, written.decisions, lock.until);
       }
     }
     const failures = await runActions(

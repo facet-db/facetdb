@@ -22,7 +22,7 @@ import {
 import type { QuestionSet } from "../questions/index.ts";
 import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
 import { checkStateSize, estimateRequestTokens, estimateTokens } from "../requests/index.ts";
-import { reviewEntryOf, type SourceReviews } from "../review/index.ts";
+import { followReview, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import type { ActionStep } from "./action-pipeline.ts";
 import {
@@ -279,29 +279,11 @@ export function createWorker(deps: WorkerDeps): Worker {
 
   /**
    * The review queue follows every write that lands, before the actions run (a failure here
-   * releases the record, and the next pass writes it again and follows again). A needs_review
-   * record's card is added or refreshed with its open questions and the model's figures from
-   * `answer`, the logged answer it was decided from, waiting since that answer; any other status
-   * takes the card out.
+   * releases the record, and the next pass writes it again and follows again), through the one
+   * `followReview` the backfill and the review service share.
    */
-  async function followReview(
-    row: ReadRow,
-    decision: RecordDecision,
-    answer: AnswerEntry,
-  ): Promise<void> {
-    if (decision.status !== "needs_review") {
-      await leaveReview(row.key);
-      return;
-    }
-    await reviews.upsert(
-      reviewEntryOf({
-        key: row.key,
-        stateHash: row.hash,
-        decisions: decision.decisions,
-        answers: answer.answers,
-        since: answer.at,
-      }),
-    );
+  function follow(row: ReadRow, decision: RecordDecision, answer: AnswerEntry): Promise<void> {
+    return followReview(reviews, { key: row.key, stateHash: row.hash }, decision, answer);
   }
 
   /**
@@ -506,7 +488,7 @@ export function createWorker(deps: WorkerDeps): Worker {
           report.discarded.push(row.key);
           return "release";
         }
-        await followReview(row, decision, answer);
+        await follow(row, decision, answer);
         report.alreadyAnswered.push(row.key);
         // The actions follow every write that lands. After a lost ack they run again, at least
         // once, as they did when the record was asked again, and report the logged decision's time,
@@ -611,7 +593,7 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.discarded.push(row.key);
         return "release";
       }
-      await followReview(row, written, entry);
+      await follow(row, written, entry);
       report.written.push(row.key);
       if (written.status === "needs_review") {
         report.toReview.push(row.key);

@@ -36,4 +36,4 @@ export type {
 export { isHumanDecision, isWithdrawal, WITHDRAWN } from "./model.ts";
 export type { ReapplyReport } from "./reapply.ts";
 export { reapplyThresholds } from "./reapply.ts";
-export { decideRecord, statusOf } from "./record-decisions.ts";
+export { answeredSet, decideRecord, statusOf } from "./record-decisions.ts";

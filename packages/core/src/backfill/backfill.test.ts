@@ -1,4 +1,10 @@
-import { FakeClock, FakeConnector, FakeDatabase, FakeDecisionLog } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeConnector,
+  FakeDatabase,
+  FakeDecisionLog,
+  FakeReviewQueue,
+} from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type { AlertSignals } from "../alerts/index.ts";
 import type {
@@ -11,6 +17,7 @@ import type {
 import { type AnswerEntry, recordAnswer } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import { buildRequest } from "../requests/index.ts";
+import { reviewsOf } from "../review/index.ts";
 import type { SpendingGate } from "../spending/index.ts";
 import {
   BACKFILL_RUN_PREFIX,
@@ -273,6 +280,7 @@ async function rig(rows: number, pageSize = 10): Promise<Rig> {
       clock,
       cursorStore: cursors,
       log,
+      reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version,
       spending: UNLIMITED,
@@ -477,6 +485,7 @@ describe("backfill pacing", () => {
       clock,
       cursorStore: new FakeCursorStore(),
       log: new FakeDecisionLog([]),
+      reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet: SCAM_ONLY,
       version: 1,
       spending: UNLIMITED,

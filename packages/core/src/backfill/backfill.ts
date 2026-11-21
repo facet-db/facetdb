@@ -19,6 +19,7 @@ import {
   checkStateSize,
   estimateRequestTokens,
 } from "../requests/index.ts";
+import { followReview, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import { DEFAULT_MAX_IN_FLIGHT, errorCount, type RunRecorder } from "../worker/index.ts";
 
@@ -90,6 +91,13 @@ export type BackfillDeps = {
    * of the source. Optional so a dry run, which opens no store, writes none.
    */
   readonly runs?: RunRecorder;
+  /**
+   * The source's review queue. An added question's write follows it as the worker's does
+   * (`followReview`): a record left needs_review gets or refreshes its card with the added
+   * question and the model's numbers, any other status takes the card out. A dry run, which writes
+   * nothing, passes a queue that refuses every call.
+   */
+  readonly reviews: SourceReviews;
 };
 
 /** The states `estimate` reads, and how many records they stand for. */
@@ -471,6 +479,8 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     /** Asks the added questions alone for a record this run holds, then acks or releases its job. */
     async function askAdded(row: ReadRow, prior: AnswerEntry | undefined): Promise<void> {
       let written = false;
+      // How the claim ends: settled by what was written, unless the queue's follow fails.
+      let endClaim = (): Promise<void> => settleClaim(row, written);
       try {
         const request: ProviderRequest = {
           model: questionSet.model,
@@ -518,11 +528,30 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         });
         written = result.written;
         (written ? report.answered : report.discarded).push(row.key);
-        if (written && writes[0]?.status === "needs_review") {
+        const [decision] = writes;
+        if (written && decision?.status === "needs_review") {
           pageToReview += 1;
         }
+        // The write has landed: the queue follows it as the loop's write does, a card at the
+        // record's state. A follow that fails leaves the claim released, not acked (as the worker's
+        // does): the answer is logged and current, so no later backfill follows it, and only the
+        // worker's next pass over the queued job re-writes the decision and follows, without
+        // asking the model again.
+        if (written && decision !== undefined) {
+          try {
+            await followReview(
+              deps.reviews,
+              { key: row.key, stateHash: row.hash },
+              decision,
+              entry,
+            );
+          } catch (error) {
+            endClaim = () => connector.release([row.key]);
+            throw error;
+          }
+        }
       } finally {
-        await settleClaim(row, written);
+        await endClaim();
       }
     }
 

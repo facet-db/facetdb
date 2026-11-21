@@ -628,6 +628,7 @@ export async function runWorkers(
         cursors: store.cursors,
         log: (name) => store.log(storeSourceId(project.id, name)),
         runs: (name) => ({ log: store.runs, source: storeSourceId(project.id, name) }),
+        reviews: (name) => reviewsOf(store.reviews, storeSourceId(project.id, name)),
         alerts: (name) =>
           alerts.signals({
             project: project.id,

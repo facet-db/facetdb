@@ -281,6 +281,7 @@ describe("a backfill's run log", () => {
       clock,
       cursorStore: new MemoryCursors(),
       log,
+      reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version: 1,
       spending: UNLIMITED,
