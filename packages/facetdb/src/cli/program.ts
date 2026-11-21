@@ -5,6 +5,7 @@ import type { Peer, StudioFiles, WebhookFetch } from "@facetdb/server";
 import { Command, CommanderError } from "commander";
 import type { ConfigFiles, ProjectConfig, SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
+import { BUILTIN_PLUGINS, createPluginHost, type PluginHost } from "../plugin/index.ts";
 import { NO_TERMINAL, type ReviewTerminal } from "./terminal.ts";
 
 /**
@@ -175,6 +176,13 @@ export type CliDeps = {
    * `git` command in the process, a fake in a test.
    */
   readonly configFiles: ConfigFiles;
+  /**
+   * The plugin host of a loaded config: every plugin the config names, imported from the project's
+   * directory beside the config file at `path` (relative to the project directory), its settings
+   * checked by its schema and its variables read from `env`. Rejects with a `PluginHostError`
+   * naming the problem and its fix; never prints.
+   */
+  readonly pluginHost: (config: ProjectConfig, path: string) => Promise<PluginHost>;
   /**
    * The database engines a source's connection string picks from by its scheme (`cli/engines.ts`),
    * each loaded on first use only, so a driver no source needs is never imported: the composition
@@ -523,7 +531,8 @@ type OptionalInTests =
   | "configFiles"
   | "studio"
   | "openBrowser"
-  | "setEnv";
+  | "setEnv"
+  | "pluginHost";
 
 /**
  * The test helper: runs the program in this process with the given dependencies and captures the
@@ -628,6 +637,23 @@ export async function runInProcess(
       setEnv: () => {
         throw new Error("this test gave the command no environment to set");
       },
+      // The host the process builds, over a project with no package installed: a config that
+      // names no plugin loads as it always did, and one that names a plugin is refused unless the
+      // test hands in its own host.
+      pluginHost: (config) =>
+        createPluginHost({
+          config,
+          env: rest.env,
+          projectDir: rest.projectDir,
+          coreVersion: VERSION,
+          importModule: (specifier) =>
+            Promise.reject(
+              Object.assign(new Error(`this test installed no package ${specifier}`), {
+                code: "ERR_MODULE_NOT_FOUND",
+              }),
+            ),
+          builtins: BUILTIN_PLUGINS,
+        }),
       ...rest,
       io,
     },

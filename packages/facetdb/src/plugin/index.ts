@@ -12,6 +12,19 @@
 export type { Plugin, PluginDefinition, PluginIssue } from "./define.ts";
 export { definePlugin, isPlugin, PluginError } from "./define.ts";
 export type {
+  HostedPlugin,
+  HostedVariable,
+  PluginHost,
+  PluginHostOptions,
+  PluginRefusal,
+} from "./host.ts";
+export {
+  BUILTIN_PLUGINS,
+  createPluginHost,
+  importFromProject,
+  PluginHostError,
+} from "./host.ts";
+export type {
   ActionDefinition,
   ActionSpec,
   ChannelDefinition,
@@ -27,8 +40,8 @@ export type {
   SourceSpec,
 } from "./kinds.ts";
 export { action, channel, pack, provider, source } from "./kinds.ts";
-export type { LoadPluginOptions } from "./load.ts";
-export { loadPlugin } from "./load.ts";
+export type { FoundPlugin, LoadPluginOptions } from "./load.ts";
+export { findPlugin, loadPlugin, PluginNotInstalledError } from "./load.ts";
 // The reader's side of the registry; the generator's functions stay in registry.ts for
 // registry-build.ts and the tests.
 export type { RegistryIndex, RegistryListing } from "./registry.ts";

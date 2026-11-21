@@ -26,12 +26,53 @@ const NOT_FOUND = new Set([
   "ERR_PACKAGE_PATH_NOT_EXPORTED",
 ]);
 
+/** No package of the name is installed: the plugin host says so apart from a broken plugin. */
+export class PluginNotInstalledError extends PluginError {
+  /** The short name, for `facetdb add <short>`. */
+  readonly short: string;
+
+  constructor(short: string, subject: string, issues: readonly PluginIssue[]) {
+    super(subject, issues);
+    this.name = "PluginNotInstalledError";
+    this.short = short;
+  }
+}
+
+/** A plugin as the loader found it: the package it came from and the plugin it exports. */
+export type FoundPlugin = {
+  /** The package imported: `@facetdb/github` or `facetdb-plugin-github`. */
+  readonly specifier: string;
+  readonly plugin: Plugin;
+};
+
 /**
  * Finds a plugin by its short name (`github`) or package name and checks it against core. A short
  * name tries `@facetdb/<name>` first, then `facetdb-plugin-<name>`. A plugin whose `facetdb` range
  * excludes `coreVersion` is refused with the field named.
  */
 export async function loadPlugin(spec: string, options: LoadPluginOptions): Promise<Plugin> {
+  const { specifier, plugin } = await findPlugin(spec, options.importModule);
+  const { manifest } = plugin;
+  if (!satisfies(options.coreVersion, manifest.coreVersions)) {
+    throw new PluginError(`The plugin "${specifier}" ${manifest.version}`, [
+      {
+        field: "facetdb",
+        message: `supports FacetDB ${manifest.coreVersions}, but this is FacetDB ${options.coreVersion}; install a version of the plugin that supports it, or upgrade or downgrade facetdb`,
+      },
+    ]);
+  }
+  return plugin;
+}
+
+/**
+ * `loadPlugin` short of the core range: the package a name resolves to and the plugin it exports,
+ * checked as `definePlugin` checks one. Throws `PluginNotInstalledError` when no package of the
+ * name is installed, and `PluginError` for one that is not a usable plugin.
+ */
+export async function findPlugin(
+  spec: string,
+  importModule: LoadPluginOptions["importModule"],
+): Promise<FoundPlugin> {
   const short = shortName(spec);
   if (short === undefined) {
     throw new PluginError(`The plugin "${spec}"`, [
@@ -47,7 +88,7 @@ export async function loadPlugin(spec: string, options: LoadPluginOptions): Prom
   let loaded: { readonly specifier: string; readonly module: unknown } | undefined;
   for (const specifier of candidates) {
     try {
-      loaded = { specifier, module: await options.importModule(specifier) };
+      loaded = { specifier, module: await importModule(specifier) };
       break;
     } catch (error) {
       // Only "this package is not installed" moves on; a plugin that throws while loading is broken.
@@ -57,7 +98,7 @@ export async function loadPlugin(spec: string, options: LoadPluginOptions): Prom
     }
   }
   if (loaded === undefined) {
-    throw new PluginError(`The plugin "${spec}"`, [
+    throw new PluginNotInstalledError(short, `The plugin "${spec}"`, [
       {
         field: "name",
         message: `no package ${candidates.map((c) => `\`${c}\``).join(" or ")} is installed; run \`facetdb add ${short}\``,
@@ -95,15 +136,7 @@ export async function loadPlugin(spec: string, options: LoadPluginOptions): Prom
       },
     ]);
   }
-  if (!satisfies(options.coreVersion, exported.manifest.coreVersions)) {
-    throw new PluginError(`The plugin "${loaded.specifier}" ${exported.manifest.version}`, [
-      {
-        field: "facetdb",
-        message: `supports FacetDB ${exported.manifest.coreVersions}, but this is FacetDB ${options.coreVersion}; install a version of the plugin that supports it, or upgrade or downgrade facetdb`,
-      },
-    ]);
-  }
-  return exported;
+  return { specifier: loaded.specifier, plugin: exported };
 }
 
 /** Everything wrong with the manifest of an imported plugin, by field; empty when it can be used. */

@@ -1,5 +1,6 @@
 import type { DatabaseEngine, DoctorCheck, Question } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { PluginHostError } from "../../plugin/index.ts";
 import { DATABASES_PAGE, databaseOf, engineFor } from "../engines.ts";
 import {
   type CliDeps,
@@ -208,6 +209,27 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
   const path = environment.options.config;
   try {
     const config = await environment.deps.loadConfig(path);
+    // The plugins the config names are loaded and their settings checked as the worker does at its
+    // start. The file itself loaded, so the checks after this one still run.
+    try {
+      await environment.deps.pluginHost(config, path);
+    } catch (error) {
+      if (error instanceof PluginHostError) {
+        // A check is one line: the schema's listed reasons follow the heading, joined.
+        const [heading, ...reasons] = error.message.split(/\n\s*- /);
+        const words = reasons.length === 0 ? heading : `${heading} ${reasons.join("; ")}`;
+        return { result: fail(`${path} loads, but ${words}`, error.fix), config };
+      }
+      // The host words every refusal itself; anything else came from a plugin's own code, and
+      // its text is not printed, since it could quote a value the plugin was handed.
+      return {
+        result: fail(
+          `${path} loads, but loading the plugins it names failed unexpectedly`,
+          "run facetdb worker --dry-run to see which plugin stops it, then reinstall that plugin or report it to its author",
+        ),
+        config,
+      };
+    }
     const sources = config.sources.length;
     return {
       result: ok(`${path} loads, with ${sources} ${sources === 1 ? "source" : "sources"}`),

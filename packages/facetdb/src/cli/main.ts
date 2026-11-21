@@ -28,6 +28,8 @@ import {
   createStore,
 } from "@facetdb/postgres";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
+import { VERSION } from "../index.ts";
+import { BUILTIN_PLUGINS, createPluginHost, importFromProject } from "../plugin/index.ts";
 import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
 import { systemBrowser } from "./browser.ts";
 import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
@@ -402,6 +404,17 @@ export function processDeps(
     // Apply's door to facetdb.config.ts: read without following a link, replaced aside and renamed
     // into place, judged by the git on this PATH.
     configFiles: diskConfigFiles(projectDir, workspace, gitCommand(env)),
+    // A plugin is the project's dependency: resolved beside the config file, never from this
+    // package's own node_modules; a built-in from facetdb itself.
+    pluginHost: (config, path) =>
+      createPluginHost({
+        config,
+        env,
+        projectDir,
+        coreVersion: VERSION,
+        importModule: importFromProject(resolve(projectDir, path)),
+        builtins: BUILTIN_PLUGINS,
+      }),
     // Each engine is made on first use for a source of its key only, so a driver no source needs is
     // never imported (later engines load their package here with `import()`). Never the default
     // `postgresEngine`: without PGHOST a hostless URL with a remote PGHOST would pass the TLS

@@ -1,12 +1,15 @@
 import type { Question, ThresholdOverride } from "@facetdb/core";
-import type {
-  ActionCall,
-  CaptureMode,
-  ConnectorChoice,
-  OnCapReached,
-  ProjectConfig,
-  SourceConfig,
-  StorageMode,
+import {
+  type ActionCall,
+  type CaptureMode,
+  type ConnectorChoice,
+  isEnvReference,
+  type JsonValue,
+  type OnCapReached,
+  type PluginSettings,
+  type ProjectConfig,
+  type SourceConfig,
+  type StorageMode,
 } from "./dsl.ts";
 import { ConfigError, type ConfigIssue, parseProjectConfig } from "./schema.ts";
 
@@ -45,6 +48,8 @@ export type ProjectJson = {
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
+  /** Each plugin's settings as the file writes them, a variable as `{ "env": "NAME" }`, never its value. */
+  readonly plugins?: { readonly [name: string]: PluginSettings };
   readonly sources: readonly SourceJson[];
 };
 
@@ -89,6 +94,7 @@ export function toProjectJson(config: ProjectConfig): ProjectJson {
     ...(config.alerts === undefined ? {} : { alerts: config.alerts }),
     ...(config.spendingCap === undefined ? {} : { spendingCap: config.spendingCap }),
     onCapReached: config.onCapReached,
+    ...(config.plugins === undefined ? {} : { plugins: config.plugins }),
     sources: config.sources.map(sourceJson),
   };
 }
@@ -234,13 +240,53 @@ function sourceSource(source: SourceConfig): string {
   return `{\n${fields.map((field) => `  ${indent(field, 2)},`).join("\n")}\n}`;
 }
 
+/** A plugin setting as the file writes it: `env("NAME")` for a variable, JSON for the rest. */
+function settingSource(value: JsonValue): string {
+  if (isEnvReference(value)) {
+    return `env(${text(value.env)})`;
+  }
+  if (Array.isArray(value)) {
+    return `[${(value as readonly JsonValue[]).map(settingSource).join(", ")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const fields = Object.entries(value as { readonly [key: string]: JsonValue });
+    return fields.length === 0
+      ? "{}"
+      : `{ ${fields.map(([key, item]) => `${text(key)}: ${settingSource(item)}`).join(", ")} }`;
+  }
+  return text(value);
+}
+
+/** Whether a setting names a variable anywhere inside it, so the file imports `env`. */
+function readsVariable(value: JsonValue): boolean {
+  if (isEnvReference(value)) {
+    return true;
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.values(value).some(readsVariable);
+  }
+  return false;
+}
+
+/** The `plugins` key: one line per plugin, in the file's order. */
+function pluginsSource(plugins: { readonly [name: string]: PluginSettings }): string {
+  const lines = Object.entries(plugins).map(
+    ([name, settings]) => `  ${text(name)}: ${settingSource(settings)},`,
+  );
+  return lines.length === 0 ? "plugins: {}" : `plugins: {\n${lines.join("\n")}\n}`;
+}
+
 /**
  * Writes the config file that loads to this project: what "export as a config file" hands a
  * developer. Actions come out as `actionCall("<plugin>", "<action>", {...})`, which needs no plugin
- * package to be installed to load.
+ * package to be installed to load; a plugin's settings come out as written, each variable as
+ * `env("NAME")`.
  */
 export function configFileSource(config: ProjectConfig): string {
   const used = new Set<string>(["facetdb"]);
+  if (config.plugins !== undefined && Object.values(config.plugins).some(readsVariable)) {
+    used.add("env");
+  }
   for (const source of config.sources) {
     // A table source names its variable with `env(...)`; the name, never the string, is in the file.
     if (!source.api) used.add("env");
@@ -252,6 +298,7 @@ export function configFileSource(config: ProjectConfig): string {
   if (config.alerts !== undefined) head.push(`alerts: ${text(config.alerts)}`);
   if (config.spendingCap !== undefined) head.push(`spendingCap: ${config.spendingCap}`);
   if (config.onCapReached !== "pause") head.push(`onCapReached: ${text(config.onCapReached)}`);
+  if (config.plugins !== undefined) head.push(pluginsSource(config.plugins));
   const sources = config.sources.map((source) => `${indent(sourceSource(source), 2)},`);
   head.push(`sources: [\n${sources.map((source) => `  ${source}`).join("\n")}\n]`);
   return [

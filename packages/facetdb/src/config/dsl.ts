@@ -146,6 +146,28 @@ export function env(name: string): EnvVariable {
   return Object.freeze({ env: name });
 }
 
+/**
+ * Whether a setting is `env("NAME")`: an object whose one key is `env`, holding text. The same
+ * shape in the file and in the JSON (`{ "env": "NAME" }`), so one test reads both.
+ */
+export function isEnvReference(value: unknown): value is EnvVariable {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 1 &&
+    typeof (value as { env?: unknown }).env === "string"
+  );
+}
+
+/**
+ * One plugin's settings as the file writes them: the fields its manifest's schema takes, any of
+ * them `env("NAME")` at any depth, and every secret always that. The value of a variable is never
+ * here: the plugin host reads it where the worker runs, so this object, its JSON export and the
+ * dashboard carry the name alone, as a source's `database` does.
+ */
+export type PluginSettings = { readonly [key: string]: JsonValue };
+
 export type SourceInput = {
   readonly name: string;
   /**
@@ -188,6 +210,12 @@ export type ProjectInput = {
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached?: OnCapReached;
+  /**
+   * Each plugin's settings, under its short name (`github`) or its package name (`@facetdb/github`,
+   * `facetdb-plugin-github`), as the plugin loader finds it: `{ github: { repo: "acme/web", token:
+   * env("GITHUB_TOKEN") } }`.
+   */
+  readonly plugins?: { readonly [name: string]: PluginSettings };
   readonly sources: readonly SourceInput[];
 };
 
@@ -230,6 +258,8 @@ export type ProjectConfig = {
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
+  /** Each plugin's settings as written, `env("NAME")` kept as `{ env: "NAME" }`; absent when the file has none. */
+  readonly plugins?: { readonly [name: string]: PluginSettings };
   readonly sources: readonly SourceConfig[];
 };
 
@@ -305,6 +335,7 @@ export function facetdb(project: ProjectInput): ProjectConfig {
     alerts: project.alerts,
     spendingCap: project.spendingCap,
     onCapReached: project.onCapReached ?? "pause",
+    plugins: project.plugins,
     sources: project.sources.map(sourceConfig),
   });
 }

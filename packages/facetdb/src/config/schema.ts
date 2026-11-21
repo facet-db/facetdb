@@ -1,6 +1,6 @@
 import { type QuestionSet, questionSetSchema } from "@facetdb/core";
 import { z } from "zod";
-import type { ActionCall, ProjectConfig, SourceConfig } from "./dsl.ts";
+import { type ActionCall, isEnvReference, type ProjectConfig, type SourceConfig } from "./dsl.ts";
 
 /**
  * The config boundary: the one schema that judges a project, whether it came from
@@ -208,6 +208,128 @@ const pluginName = z
     'a plugin is named "@facetdb/<name>" or "facetdb-plugin-<name>"',
   );
 
+/**
+ * A key of `plugins`, by the plugin loader's rule (`shortName` in plugin/define.ts): a short name
+ * (`github`, which the loader finds as `@facetdb/github`, then `facetdb-plugin-github`) or one of
+ * the two package names.
+ */
+const PLUGIN_KEY_RULE =
+  'a plugin is named by its short name ("github") or its package name ("@facetdb/github" or "facetdb-plugin-github")';
+const pluginKey = z
+  .string()
+  .regex(/^(?:@facetdb\/|facetdb-plugin-)?[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/, PLUGIN_KEY_RULE);
+
+type PluginSecretKind = SecretKind | "env-name";
+
+type PluginSecretProblem = {
+  readonly path: readonly (string | number)[];
+  readonly kind: PluginSecretKind;
+};
+
+/**
+ * A plugin setting's key that names a secret by a word of its own: `token`, `apiKey`,
+ * `webhookSecret`, `password`, `auth`. "Key" alone is not one (`primaryKey`, `labelKeys`): plugin
+ * settings name ordinary keys, and the plugin's own `z.secret()` fields are the real guard, judged
+ * by the host once the plugin is loaded.
+ */
+const PLUGIN_SECRET_WORDS =
+  /secret|password|passwd|token|credential|bearer|(?:api|access|private|signing|client|master|encryption)_?key/i;
+const isPluginSecretKey = (key: string): boolean =>
+  PLUGIN_SECRET_WORDS.test(key) || /^key$/i.test(key) || AUTH_KEY.test(key);
+
+/**
+ * Inside a plugin's settings, every value that would put a secret in this file or its JSON export:
+ * text sitting directly under a key that names a secret (a number, a boolean, a list or an object
+ * there is judged by its own contents, never by its parent's key), any text that is a URL carrying
+ * a credential or a bearer webhook, a key ending in "Env" whose text is no variable's name, and an
+ * `env(...)` whose name is not one. `env("NAME")` is the one way a secret is written, at any depth.
+ *
+ * Not the action config's walk (`secretProblems`) with an option: that one refuses any value under
+ * a secret-looking key and has no `env(...)`; changing it would change what an action accepts.
+ */
+function pluginSecretProblems(
+  value: unknown,
+  path: readonly (string | number)[],
+  secretKey: boolean,
+): PluginSecretProblem[] {
+  if (isEnvReference(value)) {
+    return ENV_NAME.test(value.env) ? [] : [{ path, kind: "env-name" }];
+  }
+  if (typeof value === "string") {
+    if (secretKey) {
+      return [{ path, kind: "secret" }];
+    }
+    const kind = stringSecretKind(value);
+    return kind === undefined ? [] : [{ path, kind }];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => pluginSecretProblems(item, [...path, index], false));
+  }
+  if (typeof value !== "object" || value === null) {
+    return [];
+  }
+  return Object.entries(value).flatMap(([key, item]): PluginSecretProblem[] => {
+    const here = [...path, key];
+    if (key.endsWith("Env") && typeof item === "string") {
+      return ENV_NAME.test(item) ? [] : [{ path: here, kind: "env-literal" }];
+    }
+    return pluginSecretProblems(item, here, isPluginSecretKey(key));
+  });
+}
+
+/** `GITHUB_TOKEN` for the `token` of `github`: the variable a refusal suggests. */
+export function suggestedVariable(plugin: string, key: string): string {
+  const short = plugin.replace(/^@facetdb\/|^facetdb-plugin-/, "");
+  return `${short}_${key}`
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .toUpperCase();
+}
+
+function pluginSecretMessage(plugin: string, key: string, kind: PluginSecretKind): string {
+  const named = `${key}: env("${suggestedVariable(plugin, key)}")`;
+  switch (kind) {
+    case "secret":
+      return `"${key}" looks like a secret, and secrets never go in this file or its JSON export. Put the secret in an environment variable and name the variable here: ${named}.`;
+    case "url-credential":
+      return `"${key}" is a URL with a username or password in it, and this file and its JSON export carry no credential. Put the URL in an environment variable and name the variable here: ${named}.`;
+    case "bearer-url":
+      return `"${key}" is an incoming-webhook URL that acts as a secret by itself, and this file and its JSON export carry no secret. Put the URL in an environment variable and name the variable here: ${named}.`;
+    case "env-literal":
+      return `"${key}" ${ENV_NAME_RULE}.`;
+    case "env-name":
+      return `env(...) ${ENV_NAME_RULE}.`;
+  }
+}
+
+/** The setting a path ends at, for the words: the last key, not an array's position. */
+function keyOf(plugin: string, path: readonly (string | number)[]): string {
+  const key = [...path].reverse().find((step): step is string => typeof step === "string");
+  return key ?? plugin;
+}
+
+// A plugin's settings live in the file, every secret a variable's name.
+const pluginsSchema = z
+  .record(
+    pluginKey,
+    z.record(z.string(), z.json(), {
+      error:
+        'a plugin\'s settings are an object of its fields, such as github: { repo: "acme/web", token: env("GITHUB_TOKEN") }',
+    }),
+    { error: (issue) => (issue.code === "invalid_key" ? PLUGIN_KEY_RULE : undefined) },
+  )
+  .superRefine((plugins, context) => {
+    for (const [name, settings] of Object.entries(plugins)) {
+      for (const { path, kind } of pluginSecretProblems(settings, [], false)) {
+        context.addIssue({
+          code: "custom",
+          path: [name, ...path],
+          message: pluginSecretMessage(name, keyOf(name, path), kind),
+        });
+      }
+    }
+  });
+
 const actionSchema = strict({
   plugin: pluginName,
   action: z.string().regex(/^[a-z][A-Za-z0-9]*$/, "an action name is camelCase, such as notify"),
@@ -363,6 +485,7 @@ const projectSchema = strict({
   onCapReached: z
     .enum(["pause", "continue"], { error: 'onCapReached must be "pause" or "continue"' })
     .default("pause"),
+  plugins: pluginsSchema.exactOptional(),
   sources: z.array(sourceSchema).min(1, "a project needs at least one source"),
 });
 
@@ -645,6 +768,9 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
       ...(project.alerts === undefined ? {} : { alerts: project.alerts }),
       ...(project.spendingCap === undefined ? {} : { spendingCap: project.spendingCap }),
       onCapReached: project.onCapReached,
+      ...(project.plugins === undefined
+        ? {}
+        : { plugins: project.plugins as NonNullable<ProjectConfig["plugins"]> }),
       sources,
     },
   };

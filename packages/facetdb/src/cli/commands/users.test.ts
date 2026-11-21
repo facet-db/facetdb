@@ -145,6 +145,7 @@ describe("facetdb users add", () => {
       studio: { defaultDir: undefined, files: unused },
       openBrowser: unused,
       setEnv: unused,
+      pluginHost: unused,
     };
     expect(await runProgram(["users", "add", "maya"], deps, COMMANDS)).toBe(0);
     expect(asked).toEqual([

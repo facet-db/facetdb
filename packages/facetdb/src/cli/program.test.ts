@@ -167,6 +167,7 @@ describe("the facetdb program", () => {
         setEnv: () => {
           throw new Error("unused");
         },
+        pluginHost: () => Promise.reject(new Error("unused")),
       },
       COMMANDS,
       { code: 0 },

@@ -6,6 +6,7 @@ import {
   type QuestionSet,
 } from "@facetdb/core";
 import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { type PluginHost, PluginHostError } from "../../plugin/index.ts";
 import { databaseOf, engineFor, schemeOf } from "../engines.ts";
 import { type CliDeps, CliError, EXIT_USAGE } from "../program.ts";
 
@@ -43,6 +44,39 @@ export async function loadProjectConfig(deps: CliDeps, path: string): Promise<Pr
     }
     throw error;
   }
+}
+
+/**
+ * The plugin host of a loaded config, built when the config loads, so a plugin that is not
+ * installed, a setting its schema refuses or a variable that is not set stops the command in the
+ * host's words with their fix. The words name variables, never their values.
+ */
+export async function loadPluginHost(
+  deps: CliDeps,
+  config: ProjectConfig,
+  path: string,
+): Promise<PluginHost> {
+  try {
+    return await deps.pluginHost(config, path);
+  } catch (error) {
+    if (error instanceof PluginHostError) {
+      throw new CliError(error.code, error.message, error.fix);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The config a running worker starts from, and its plugin host: what `facetdb worker`, `facetdb
+ * studio` and `facetdb dev` each load first, a dry run included, so the three refuse a bad plugin
+ * setting alike before anything starts. Nothing runs a plugin yet.
+ */
+export async function loadWorkerConfig(
+  deps: CliDeps,
+  path: string,
+): Promise<{ readonly config: ProjectConfig; readonly plugins: PluginHost }> {
+  const config = await loadProjectConfig(deps, path);
+  return { config, plugins: await loadPluginHost(deps, config, path) };
 }
 
 /** `schema.table` names a schema; a bare name is in `public`. */

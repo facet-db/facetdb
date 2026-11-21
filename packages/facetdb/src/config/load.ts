@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { QuestionSet } from "@facetdb/core";
-import type { ProjectConfig } from "./dsl.ts";
+import { isEnvReference, type ProjectConfig } from "./dsl.ts";
 import {
   ConfigError,
   type ConfigIssue,
@@ -142,6 +142,46 @@ function recordVariables(
     issues.push(...duplicateTableIssues(sources));
   }
   return { config: { ...config, sources }, issues };
+}
+
+/** One variable a plugin's settings read: the plugin's key in `plugins`, where it is written, its name. */
+export type PluginVariable = {
+  readonly plugin: string;
+  /** The keys and positions inside the plugin's settings: `["token"]`, `["hooks", 0, "secret"]`. */
+  readonly path: readonly (string | number)[];
+  readonly variable: string;
+};
+
+function variablesIn(
+  plugin: string,
+  value: unknown,
+  path: readonly (string | number)[],
+): PluginVariable[] {
+  if (isEnvReference(value)) {
+    return [{ plugin, path, variable: value.env }];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => variablesIn(plugin, item, [...path, index]));
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).flatMap(([key, item]) =>
+      variablesIn(plugin, item, [...path, key]),
+    );
+  }
+  return [];
+}
+
+/**
+ * Which variables the plugin settings read, as `databaseEnv` records a source's: every
+ * `env("NAME")` in each plugin's settings, by the plugin and the path it is written at, in the
+ * file's order. Only the names: the plugin host reads the values where the worker runs and refuses
+ * one that is not set, so a command that runs no plugin (preview, migrate) needs no plugin's token,
+ * and the loader never holds a plugin's secret.
+ */
+export function pluginVariables(config: ProjectConfig): readonly PluginVariable[] {
+  return Object.entries(config.plugins ?? {}).flatMap(([plugin, settings]) =>
+    variablesIn(plugin, settings, []),
+  );
 }
 
 export async function loadConfig(path: string, options: LoadOptions): Promise<LoadedConfig> {

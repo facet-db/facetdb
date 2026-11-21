@@ -77,7 +77,7 @@ import { tableFacts } from "./dashboard-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
   engineTarget,
-  loadProjectConfig,
+  loadWorkerConfig,
   type ProjectRef,
   projectRef,
   questionSetOf,
@@ -1340,7 +1340,8 @@ export const workerCommand = defineCommand<WorkerOptions>("worker", {
   options: [...OPTIONS, CONNECTIONS_OPTION, HOST_OPTION, ALLOW_INSECURE_OPTION],
   run: async (context) => {
     const { options, deps, print } = context;
-    const config = await loadProjectConfig(deps, options.config);
+    // Every plugin the config names is loaded and its settings checked here, a dry run included.
+    const { config } = await loadWorkerConfig(deps, options.config);
     requireModel(config, deps.env);
     parsePort(options.port);
     parseHost(options.host);

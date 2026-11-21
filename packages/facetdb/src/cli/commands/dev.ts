@@ -7,7 +7,7 @@ import { stoppedError } from "../engines.ts";
 import { CliError, defineCommand, EXIT_USAGE } from "../program.ts";
 import { STORE_VARIABLE } from "../store-door.ts";
 import { tableFacts } from "./dashboard-door.ts";
-import { engineTarget, loadProjectConfig, projectRef, splitTable } from "./database.ts";
+import { engineTarget, loadWorkerConfig, projectRef, splitTable } from "./database.ts";
 import { readSeed, runSeed, type Seed, statementWords } from "./dev-seed.ts";
 import type { DoorDatabases } from "./setup-door.ts";
 import {
@@ -178,7 +178,8 @@ export const devCommand = defineCommand<DevOptions>("dev", {
     print(
       `${STORE_VARIABLE} holds ${DEV_URL} for this run${had === undefined || had === "" ? "" : ", in place of the value the shell had"}, so facetdb.config.ts reads the embedded database.`,
     );
-    const config = await loadProjectConfig(deps, options.config);
+    // The worker's own start: the plugins the config names are loaded and checked, as it does.
+    const { config } = await loadWorkerConfig(deps, options.config);
     const marker = markerOf(options.unsure);
     const seed: Seed | undefined =
       options.seed === undefined ? undefined : await readSeed(deps.workspace, options.seed);
