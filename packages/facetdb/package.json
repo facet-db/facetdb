@@ -13,6 +13,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "test:db": "vitest run --config vitest.db.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {

@@ -1,5 +1,18 @@
 // The setup flow's door: the CLI's door it calls, the service and its routes, how an install's
-// failure says whether anything ran, and how the admin string is hidden.
+// failure says whether anything ran, and how the admin string is hidden. The backfill jobs' door
+// and routes.
+export type {
+  BackfillEstimateOutcome,
+  BackfillJobCounts,
+  BackfillJobState,
+  BackfillJobStatus,
+  BackfillJobsDoor,
+  BackfillStartOutcome,
+  BackfillStatusOutcome,
+  BackfillStopOutcome,
+} from "./backfill-door.ts";
+export { NO_BACKFILL_JOBS } from "./backfill-door.ts";
+export { backfillRoutes } from "./backfill-routes.ts";
 export type {
   InspectOutcome,
   SetupDoor,

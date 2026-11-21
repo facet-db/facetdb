@@ -27,6 +27,7 @@ import {
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
+import type { BackfillJobsDoor } from "./sources/backfill-door.ts";
 import type { SetupDoor } from "./sources/door.ts";
 import { createSetupService } from "./sources/service.ts";
 import type { StudioBuild } from "./studio/build.ts";
@@ -101,6 +102,11 @@ export type ServerDeps = {
    * has them. Absent, the studio says a source cannot be added here.
    */
   readonly setup?: SetupDoor;
+  /**
+   * The worker's backfill jobs: estimate, start, stop and status per source, run inside the worker
+   * as only the CLI can build them. Absent, the studio is told this worker runs none.
+   */
+  readonly backfill?: BackfillJobsDoor;
 };
 
 /**
@@ -142,6 +148,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
     ...(deps.setup === undefined
       ? {}
       : { setup: createSetupService({ door: deps.setup, clock: deps.clock, log: deps.log }) }),
+    ...(deps.backfill === undefined ? {} : { backfill: deps.backfill }),
     studio: {
       sessions: createSessions({
         secret: deps.sessionSecret,

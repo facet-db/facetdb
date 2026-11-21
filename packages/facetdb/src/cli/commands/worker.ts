@@ -65,6 +65,7 @@ import {
   storeSharedFor,
   storeSourceId,
 } from "../store-door.ts";
+import { createBackfillJobs } from "./backfill-jobs.ts";
 import {
   configFileDoor,
   createFleet,
@@ -484,6 +485,41 @@ export async function runWorkers(
     onPass: tally,
     failure: (source, error) => installMissing(source, options.config, error),
   });
+  // The studio's backfills: jobs inside this worker under the loop in force, asking through the
+  // loops' provider and spending gate, over a connector of their own on the source's pool and under
+  // a worker id of their own, as facetdb backfill's is: never this worker's, by which a queue in
+  // the database would take a job's claims for the loop's. A whole set's records go to the loop's
+  // own queue. None under --once, which exits once the queue is answered.
+  const jobs = options.once
+    ? undefined
+    : createBackfillJobs({
+        projectId: project.id,
+        loop: (name) => fleet.loop(name),
+        open: (loop, backfillId) =>
+          parts.openTable(
+            loop.source,
+            { workerId: backfillId, maxConnections: WORKER_CONNECTIONS },
+            // The loop's own question set: the file's model may have moved on since it opened.
+            { ...fleet.config(), model: loop.questionSet.model },
+          ),
+        newWorkerId: () => `backfill-${randomUUID()}`,
+        queue: (name) => (fleet.loop(name) === undefined ? undefined : fleet.connector(name)),
+        provider,
+        spending,
+        clock,
+        cursors: store.cursors,
+        log: (name) => store.log(storeSourceId(project.id, name)),
+        runs: (name) => ({ log: store.runs, source: storeSourceId(project.id, name) }),
+        alerts: (name) =>
+          alerts.signals({
+            project: project.id,
+            source: name,
+            link: "https://docs.facetdb.dev/fix/backfill",
+          }),
+        expireAfter: deps.abortAfter,
+        newToken: randomUUID,
+        print,
+      });
   // Apply writes the file only for a worker that runs until stopped and reads the file as it is.
   const configFile = options.once ? undefined : parts.configFile;
   // Apply and the setup flow write the one file, one write at a time.
@@ -598,6 +634,7 @@ export async function runWorkers(
         },
         // The built studio, served after the API; without it the API alone.
         ...(parts.studio === undefined ? {} : { studioApp: parts.studio }),
+        ...(jobs === undefined ? {} : { backfill: jobs }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
@@ -758,6 +795,8 @@ export async function runWorkers(
           throw error;
         }),
         deliverUntil(signal, () => outbox.deliverDue(clock.now()), clock, print),
+        // A backfill job stops after its page in hand when the worker does.
+        ...(jobs === undefined ? [] : [jobs.until(signal)]),
       ]);
       const failed = loops.find((loop) => loop.status === "rejected");
       if (failed !== undefined) {
@@ -772,6 +811,8 @@ export async function runWorkers(
     }
   } finally {
     await listener?.close();
+    // Before the connectors and the store close: every job's page in hand settled and saved.
+    await jobs?.close();
     await fleet.close();
   }
   return {

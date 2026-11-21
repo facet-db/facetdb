@@ -11,6 +11,8 @@ import { type DataServices, dataRoutes } from "./data/routes.ts";
 import { ApiError } from "./errors.ts";
 import { reviewRoutes } from "./review/routes.ts";
 import type { ReviewEndpointService } from "./review/service.ts";
+import { type BackfillJobsDoor, NO_BACKFILL_JOBS } from "./sources/backfill-door.ts";
+import { backfillRoutes } from "./sources/backfill-routes.ts";
 import { setupRoutes } from "./sources/routes.ts";
 import { NO_SETUP, type SetupService } from "./sources/service.ts";
 import type { StudioBuild } from "./studio/build.ts";
@@ -41,6 +43,8 @@ export type AppDeps = {
    * string, the operator's on this machine alone. Absent, the page is told it cannot be done here.
    */
   readonly setup?: SetupService;
+  /** The worker's backfill jobs; absent, every backfill route says this worker runs none. */
+  readonly backfill?: BackfillJobsDoor;
   readonly studio: StudioAccess;
   /**
    * The studio's built app, served after every `/v1` route; absent, no file is served (a worker
@@ -86,6 +90,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   studio.route("/", dataRoutes(deps.data));
   // The setup flow; its writing routes add the operator-only check of their own.
   studio.route("/", setupRoutes(deps.setup ?? NO_SETUP));
+  // The backfill jobs; their POSTs add Apply's check of their own.
+  studio.route("/", backfillRoutes(deps.backfill ?? NO_BACKFILL_JOBS));
   studio.route("/", reviewRoutes(deps.review));
   studio.route("/reviewers", reviewersRoutes(deps.studio.reviewers));
   studio.route("/", projectRoutes());

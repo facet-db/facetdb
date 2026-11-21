@@ -96,6 +96,17 @@ export type {
 } from "./review/service.ts";
 export { createReviewEndpointService } from "./review/service.ts";
 export type {
+  BackfillEstimateOutcome,
+  BackfillJobCounts,
+  BackfillJobState,
+  BackfillJobStatus,
+  BackfillJobsDoor,
+  BackfillStartOutcome,
+  BackfillStatusOutcome,
+  BackfillStopOutcome,
+} from "./sources/backfill-door.ts";
+export { NO_BACKFILL_JOBS } from "./sources/backfill-door.ts";
+export type {
   InspectOutcome,
   SetupDoor,
   SetupInstallOutcome,

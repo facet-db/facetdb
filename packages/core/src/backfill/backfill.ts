@@ -124,12 +124,24 @@ export type BackfillOptions = {
   readonly onPage?: (page: PageProgress) => void;
   /** Model calls in flight at once; the worker's default of 8 when absent. */
   readonly maxInFlight?: number;
+  /**
+   * Stops the run from outside (the studio's stop, a reload that restarts the source, the worker
+   * stopping). Aborted while a page is in hand, the page is settled and its cursor saved, and the
+   * run reports `aborted`; aborted before the estimate is shown (the survey stops between its
+   * pages) or before the first page, nothing is asked or queued and the cursor is left as it was.
+   */
+  readonly signal?: AbortSignal;
 };
 
 export type PageProgress = {
   readonly records: number;
   /** The saved cursor, or null after the last page. */
   readonly cursor: ScanCursor | null;
+  /** The run's counts so far, this page included (the report's lists, counted). */
+  readonly queued: number;
+  readonly answered: number;
+  readonly alreadyAnswered: number;
+  readonly deferred: number;
 };
 
 /** Why a record was left for the worker's normal path instead of being asked by an added-question run. */
@@ -151,8 +163,10 @@ export type BackfillReport = {
    * `stopped`: a page had failures; the cursor stays at the start of that page, so the next run
    * resumes there and asks only what is still unanswered. `paused`: the spending cap was reached, so
    * the run made no further call; the cursor stays at the start of that page, as with `stopped`.
+   * `aborted`: `options.signal` stopped it; the cursor is saved after the last settled page, so the
+   * next run resumes after it (before the first page, nothing was asked or queued).
    */
-  readonly status: "completed" | "declined" | "stopped" | "paused";
+  readonly status: "completed" | "declined" | "stopped" | "paused" | "aborted";
   readonly estimate: BackfillEstimate;
   /** A whole-set run: records put in the worker's queue, which asks, skips or refuses each one. */
   readonly enqueued: readonly RecordKey[];
@@ -218,16 +232,21 @@ export function estimateBackfill(
 
 /**
  * Walks the pages of `scan` from `from` to the end, counting records and keeping the first 100
- * states. No model call, and nothing is written.
+ * states. No model call, and nothing is written. An aborted `signal` stops it between pages, with
+ * what it counted so far.
  */
 export async function surveyBackfill(
   connector: Pick<Connector, "scan">,
   from: ScanCursor | null,
+  signal?: AbortSignal,
 ): Promise<BackfillSample> {
   const states: State[] = [];
   let records = 0;
   let cursor = from;
   do {
+    if (signal?.aborted === true) {
+      break;
+    }
     const page = await connector.scan(cursor);
     // A record the source's filter excludes is never asked, so it costs nothing.
     const included = page.rows.filter((row) => !row.excluded);
@@ -245,9 +264,11 @@ export async function surveyBackfill(
 export function createBackfill(deps: BackfillDeps): Backfill {
   const { connector, worker, clock, cursorStore, log, questionSet, version, spending } = deps;
   const estimate = estimateBackfill;
-  const survey = (from: ScanCursor | null) => surveyBackfill(connector, from);
+  const survey = (from: ScanCursor | null, signal: AbortSignal | undefined) =>
+    surveyBackfill(connector, from, signal);
 
   async function run(options: BackfillOptions): Promise<BackfillReport> {
+    const aborted = (): boolean => options.signal?.aborted === true;
     const pace = options.pace ?? DEFAULT_BACKFILL_PACE;
     if (!Number.isFinite(pace) || pace <= 0) {
       throw new Error(`a backfill pace is a positive number of records per second, not ${pace}`);
@@ -266,10 +287,22 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     const saved = await cursorStore.load(runKey);
     const start = saved === undefined || saved.done ? null : saved.cursor;
 
-    const report = newReport(estimate(questionSet, await survey(start), options.onlyQuestions));
+    const report = newReport(
+      estimate(questionSet, await survey(start, options.signal), options.onlyQuestions),
+    );
+    // Stopped while counting: the estimate covers only what was read, so it is never shown.
+    if (aborted()) {
+      report.status = "aborted";
+      return report;
+    }
     // The cost is shown before a single record is asked; a refusal leaves everything as it was.
     if (!(await options.onEstimate(report.estimate))) {
       report.status = "declined";
+      return report;
+    }
+    // Stopped while the estimate was shown: a yes that arrives after the stop asks nothing.
+    if (aborted()) {
+      report.status = "aborted";
       return report;
     }
 
@@ -627,8 +660,21 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       }
       await cursorStore.save(runKey, { cursor: page.next, done: page.next === null });
       report.cursor = page.next;
-      options.onPage?.({ records: page.rows.length, cursor: page.next });
+      options.onPage?.({
+        records: page.rows.length,
+        cursor: page.next,
+        queued: report.enqueued.length,
+        answered: report.answered.length,
+        alreadyAnswered: report.alreadyAnswered.length,
+        deferred: report.deferred.length,
+      });
       cursor = page.next;
+      // The page in hand is settled and saved: a stop takes effect here, never inside a page, so
+      // every claim of it is acked or released and the next run resumes after it.
+      if (cursor !== null && aborted()) {
+        report.status = "aborted";
+        return report;
+      }
     } while (cursor !== null);
 
     report.status = "completed";
