@@ -384,6 +384,92 @@ $$`,
 )`,
     ],
   },
+  {
+    version: 9,
+    statements: [
+      // Every plugin action goes through the outbox, so a row is a webhook (an endpoint) or a
+      // plugin's action on one record (the plugin, the action, its place in the record's pipeline
+      // and the batch it joins), never neither. The table keeps its name: its grants and
+      // uninstall's reads name it. No column holds a record's state: the payload is what is
+      // delivered. Each statement is looked up first (sql/ddl.ts, or the catalog below), so the
+      // install's rerun beside a live application takes no lock on the outbox.
+      `do $$
+begin
+  if exists (select 1 from pg_catalog.pg_attribute
+              where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'endpoint'
+                and attnum > 0 and not attisdropped and attnotnull) then
+    alter table facetdb.webhook_outbox alter column endpoint drop not null;
+  end if;
+end $$`,
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "source_id",
+        `alter table facetdb.webhook_outbox add column source_id text`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "record_key",
+        `alter table facetdb.webhook_outbox add column record_key text`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "plugin",
+        `alter table facetdb.webhook_outbox add column plugin text`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "action",
+        `alter table facetdb.webhook_outbox add column action text`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "position",
+        `alter table facetdb.webhook_outbox add column position integer`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "batch_key",
+        `alter table facetdb.webhook_outbox add column batch_key text`,
+      ),
+      unlessColumn(
+        "facetdb.webhook_outbox",
+        "superseded_at",
+        `alter table facetdb.webhook_outbox add column superseded_at bigint`,
+      ),
+      unlessConstraint(
+        "facetdb.webhook_outbox",
+        "webhook_outbox_endpoint_or_plugin",
+        `alter table facetdb.webhook_outbox add constraint webhook_outbox_endpoint_or_plugin check (endpoint is not null or plugin is not null)`,
+      ),
+      // A record's actions in pipeline order, found by the record. Partial: a webhook row has no
+      // plugin and stays out of it. A plain `create index` inside the migration's transaction, as
+      // migration 2's `webhook_outbox_due`: it holds off appends to the outbox while it builds,
+      // once, during `facetdb migrate`.
+      unlessRelation(
+        "facetdb.webhook_outbox_action",
+        `create index webhook_outbox_action on facetdb.webhook_outbox (project_id, source_id, record_key, plugin, action, position, id)
+  where plugin is not null`,
+      ),
+      // One row per running worker, so a worker notices another's death. The project's own
+      // `heartbeats` row (one per project, the alerts' timer) stays as it is.
+      unlessRelation(
+        "facetdb.worker_heartbeats",
+        `create table facetdb.worker_heartbeats (
+  project text not null,
+  worker text not null,
+  at bigint not null,
+  primary key (project, worker)
+)`,
+      ),
+      // A plugin source (the decomposition's note): its own kind, since 'plugin' already names a
+      // table source. Migration 1 wrote the check inline, so Postgres named it `sources_kind_check`.
+      unlessConstraint(
+        "facetdb.sources",
+        "sources_kind_allowed",
+        `alter table facetdb.sources drop constraint sources_kind_check, add constraint sources_kind_allowed check (kind in ('plugin', 'plugin-source', 'api'))`,
+      ),
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */
@@ -442,6 +528,7 @@ export const STORE_TABLES: readonly string[] = [
   "alerts",
   "alert_history",
   "heartbeats",
+  "worker_heartbeats",
   "cursors",
   "install",
   "webhook_outbox",

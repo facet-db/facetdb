@@ -60,6 +60,7 @@ const STORE_ONLY = [
   "alerts",
   "alert_history",
   "heartbeats",
+  "worker_heartbeats",
   "cursors",
   "webhook_outbox",
   "reviews",

@@ -343,6 +343,116 @@ create table if not exists facetdb.question_sets_in_force (
 
 insert into facetdb.store_migrations (version) values (8) on conflict (version) do nothing;
 
+do $$
+begin
+  if exists (select 1 from pg_catalog.pg_attribute
+              where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'endpoint'
+                and attnum > 0 and not attisdropped and attnotnull) then
+    alter table facetdb.webhook_outbox alter column endpoint drop not null;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'source_id'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column source_id text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'record_key'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column record_key text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'plugin'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column plugin text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'action'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column action text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'position'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column position integer;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'batch_key'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column batch_key text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.webhook_outbox') and attname = 'superseded_at'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.webhook_outbox add column superseded_at bigint;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = to_regclass('facetdb.webhook_outbox') and conname = 'webhook_outbox_endpoint_or_plugin') then
+    alter table facetdb.webhook_outbox add constraint webhook_outbox_endpoint_or_plugin check (endpoint is not null or plugin is not null);
+  end if;
+end $$;
+
+do $$
+begin
+  if to_regclass('facetdb.webhook_outbox_action') is null then
+    create index webhook_outbox_action on facetdb.webhook_outbox (project_id, source_id, record_key, plugin, action, position, id)
+  where plugin is not null;
+  end if;
+end $$;
+
+do $$
+begin
+  if to_regclass('facetdb.worker_heartbeats') is null then
+    create table facetdb.worker_heartbeats (
+  project text not null,
+  worker text not null,
+  at bigint not null,
+  primary key (project, worker)
+);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = to_regclass('facetdb.sources') and conname = 'sources_kind_allowed') then
+    alter table facetdb.sources drop constraint sources_kind_check, add constraint sources_kind_allowed check (kind in ('plugin', 'plugin-source', 'api'));
+  end if;
+end $$;
+
+insert into facetdb.store_migrations (version) values (9) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -527,6 +637,8 @@ grant select, insert, update, delete on "facetdb"."alerts" to "facetdb_worker";
 grant select, insert, update, delete on "facetdb"."alert_history" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."heartbeats" to "facetdb_worker";
+
+grant select, insert, update, delete on "facetdb"."worker_heartbeats" to "facetdb_worker";
 
 grant select, insert, update, delete on "facetdb"."cursors" to "facetdb_worker";
 

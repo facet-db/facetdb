@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { pgliteClient, type SqlClient } from "../sql/index.ts";
 import { migrateStore, SCHEMA_VERSION, storeInstallStatements, storeVersion } from "./schema.ts";
-import { newDb, useStoreWorld } from "./store-world.ts";
+import { newDb, takeBackMigration9, useStoreWorld } from "./store-world.ts";
 
 /**
  * Store migration 8: `facetdb.question_sets_in_force`, one row per source holding the whole set the
@@ -17,8 +17,10 @@ useStoreWorld();
 async function version7Store(): Promise<SqlClient> {
   const client = pgliteClient(await newDb());
   await migrateStore(client);
+  // Migration 9 taken back first (store-migration-9.test.ts proves it on its own).
+  await takeBackMigration9(client);
   await client.query(`drop table facetdb.question_sets_in_force`);
-  await client.query(`delete from facetdb.store_migrations where version = 8`);
+  await client.query(`delete from facetdb.store_migrations where version in (8, 9)`);
   return client;
 }
 
@@ -51,8 +53,12 @@ describe("store migration 8", () => {
 
     expect(await migrateStore(client)).toEqual([]);
 
-    expect(SCHEMA_VERSION).toBe(8);
-    expect(await storeVersion(client.query)).toEqual({ kind: "found", newest: 8, current: true });
+    // The migrations after 8 run too: the version-7 store lands current, whatever the newest is.
+    expect(await storeVersion(client.query)).toEqual({
+      kind: "found",
+      newest: SCHEMA_VERSION,
+      current: true,
+    });
     const fresh = pgliteClient(await newDb());
     await migrateStore(fresh);
     const shape = await inForceShape(client);

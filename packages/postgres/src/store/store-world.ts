@@ -1,6 +1,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll } from "vitest";
+import type { SqlClient } from "../sql/index.ts";
 import { freshPglite, resetPglite } from "../testing/index.ts";
 import { createStore, type Store } from "./store.ts";
 
@@ -62,6 +63,26 @@ export async function newStore(
   const store = await createStore({ pglite, secret, clock });
   closeAfterTest(store);
   return { store, db: pglite, clock };
+}
+
+/**
+ * Takes migration 9's objects back off a migrated store (the outbox's action columns, check and
+ * index, `worker_heartbeats`, the `'plugin-source'` kind), for a test building an older store;
+ * store-migration-9.test.ts proves the migration on its own. The caller deletes the version rows.
+ */
+export async function takeBackMigration9(client: SqlClient): Promise<void> {
+  await client.query(`drop table facetdb.worker_heartbeats`);
+  await client.query(`drop index facetdb.webhook_outbox_action`);
+  await client.query(
+    `alter table facetdb.webhook_outbox drop constraint webhook_outbox_endpoint_or_plugin,
+       drop column source_id, drop column record_key, drop column plugin, drop column action,
+       drop column position, drop column batch_key, drop column superseded_at,
+       alter column endpoint set not null`,
+  );
+  await client.query(
+    `alter table facetdb.sources drop constraint sources_kind_allowed,
+       add constraint sources_kind_check check (kind in ('plugin', 'api'))`,
+  );
 }
 
 export async function scalar(db: PGlite, sql: string): Promise<unknown> {

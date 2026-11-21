@@ -282,6 +282,7 @@ describe("the log-only purge, after a plain uninstall", () => {
         "alerts",
         "alert_history",
         "heartbeats",
+        "worker_heartbeats",
         "cursors",
         "install",
         "webhook_outbox",
