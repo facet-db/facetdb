@@ -53,6 +53,7 @@ import { VERSION } from "../../index.ts";
 import { checkPluginProvider, type PluginHost, PluginProviderError } from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
+import { alertScope, createLinks, hostInUrl, servedStudioUrl } from "../links.ts";
 import {
   type CliDeps,
   CliError,
@@ -397,12 +398,19 @@ export async function runWorkers(
    * reload's notes say so.
    */
   let projectInForce: ProjectSpendingSettings = config;
+  /**
+   * The address this process serves the studio on, set once the surface listens and only when a
+   * studio build is served; every link an alert carries is built by `links`.
+   */
+  let servedStudio: string | undefined;
+  const links = createLinks({ configured: config.studioUrl, served: () => servedStudio });
   const spending: SpendingGate = spendingUnder(
     () => capOf(projectInForce),
     store,
     alerts,
     clock,
     project.id,
+    links.spendingCap,
   );
 
   /**
@@ -441,11 +449,7 @@ export async function runWorkers(
       version,
       ...(outage !== undefined
         ? {
-            alerts: alerts.signals({
-              project: project.id,
-              source: source.name,
-              link: "https://docs.facetdb.dev/fix/worker",
-            }),
+            alerts: alerts.signals(alertScope(project.id, source.name, links.model)),
             outage,
             // The loop's passes fill the run log; a check call's one record is not a pass.
             runs: { log: store.runs, source: idOf(source) },
@@ -606,10 +610,7 @@ export async function runWorkers(
       }
       return parts.configFile.load();
     },
-    beat: (source) =>
-      alerts
-        .signals({ project: project.id, source, link: "https://docs.facetdb.dev/fix/worker" })
-        .beat(),
+    beat: (source) => alerts.signals(alertScope(project.id, source, links.worker)).beat(),
     clock,
     print,
     onPass: tally,
@@ -642,12 +643,7 @@ export async function runWorkers(
         log: (name) => store.log(storeSourceId(project.id, name)),
         runs: (name) => ({ log: store.runs, source: storeSourceId(project.id, name) }),
         reviews: (name) => reviewsOf(store.reviews, storeSourceId(project.id, name)),
-        alerts: (name) =>
-          alerts.signals({
-            project: project.id,
-            source: name,
-            link: "https://docs.facetdb.dev/fix/backfill",
-          }),
+        alerts: (name) => alerts.signals(alertScope(project.id, name, links.backfill)),
         expireAfter: deps.abortAfter,
         newToken: randomUUID,
         print,
@@ -684,7 +680,7 @@ export async function runWorkers(
       // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
       // worker's other alerts are; one that cannot be raised is the outbox's to retry.
       onGiveUp: async (event, _signal, lastError) => {
-        await alerts.raise(gaveUpAlert(event, lastError));
+        await alerts.raise(gaveUpAlert(event, lastError, links.gaveUp));
       },
     });
 
@@ -923,6 +919,11 @@ export async function runWorkers(
       });
       listener = await deps.serve((request, peer) => app.fetch(request, peer), port, options.host);
       const address = `http://${hostInUrl(options.host)}:${listener.port}`;
+      // Only a served studio is a place to link to; the API alone has no page for an alert's link.
+      // A bind to every interface has no address a reader can open, so those alerts keep the docs.
+      if (parts.studio !== undefined) {
+        servedStudio = servedStudioUrl(options.host, listener.port);
+      }
       print(
         parts.studio === undefined
           ? `Serving the check API and the studio's endpoints on ${address}.`
@@ -1159,11 +1160,6 @@ export function requireModel(
       "set TYPESAFE_API_KEY to your TypeSafe API key (or set modelUrl in facetdb.config.ts for a compatible server), then run facetdb worker again; facetdb dev answers offline without one",
     );
   }
-}
-
-/** A host as an address writes it: an IPv6 one in brackets. */
-export function hostInUrl(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 /** A studio build to serve, and the directory it was found in (for the words). */

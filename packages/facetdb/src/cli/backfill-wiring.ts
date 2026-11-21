@@ -14,6 +14,7 @@ import {
 import { type ProjectRef, type Store, sourceIdOf } from "@facetdb/postgres";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import { questionSetOf } from "./commands/database.ts";
+import { alertScope, createLinks, type Links } from "./links.ts";
 
 /**
  * Wires the backfill engine's dependencies for one source from the pieces the composition root
@@ -117,11 +118,7 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
     questionSet,
     version: version.version,
     ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
-    alerts: alerts.signals({
-      project: project.id,
-      source: source.name,
-      link: "https://docs.facetdb.dev/fix/backfill",
-    }),
+    alerts: alerts.signals(alertScope(project.id, source.name, noServedStudio(config).backfill)),
     spending: projectSpending(config, store, alerts, clock, project.id),
     // Each page that queued or asked a record leaves a row, named as a backfill page.
     runs: { log: store.runs, source: sourceId },
@@ -152,12 +149,13 @@ export function spendingUnder(
   alerts: Alerts,
   clock: Clock,
   projectId: string,
+  capLink: () => string,
 ): SpendingGate {
   const spending = createSpending({
     usageStore: store.usage,
     clock,
     alerts,
-    capLink: () => "https://docs.facetdb.dev/fix/spending-cap",
+    capLink,
   });
   return spendingGate(spending, projectId, () => Promise.resolve(readCap()));
 }
@@ -171,5 +169,20 @@ export function projectSpending(
   projectId: string,
 ): SpendingGate {
   const cap = capOf(config);
-  return spendingUnder(() => cap, store, alerts, clock, projectId);
+  return spendingUnder(
+    () => cap,
+    store,
+    alerts,
+    clock,
+    projectId,
+    noServedStudio(config).spendingCap,
+  );
+}
+
+/**
+ * The links of a command that serves no studio (`facetdb backfill`, `facetdb test`): the config's
+ * `studioUrl` when it names one, else each alert's docs fix page.
+ */
+function noServedStudio(config: Pick<ProjectConfig, "studioUrl">): Links {
+  return createLinks({ configured: config.studioUrl, served: () => undefined });
 }

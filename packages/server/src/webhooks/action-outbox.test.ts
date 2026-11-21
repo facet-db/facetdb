@@ -3,7 +3,7 @@ import { FakeClock } from "@facetdb/core/testing";
 import { migrateStore, pgliteClient, sourceIdOf } from "@facetdb/postgres";
 import { freshPglite, type PGlite, resetPglite } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ACTION_GAVE_UP_LINK, GAVE_UP_DID, gaveUpAlert, WEBHOOK_GAVE_UP_LINK } from "./gave-up.ts";
+import { GAVE_UP_DID, gaveUpAlert } from "./gave-up.ts";
 import {
   ACTION_ERROR_NOT_KEPT,
   type ActionClose,
@@ -439,6 +439,9 @@ describe("an endpoint row beside action rows", () => {
   });
 });
 
+/** The page the worker would name for each kind: the alert carries what it is given, never its own. */
+const linkOf = (kind: "action" | "webhook"): string => `studio:${kind}`;
+
 describe("the Action gave up alert", () => {
   it("names the source, the action, the attempts and the last error, and what FacetDB did", () => {
     const event = gaveUpAlert(
@@ -452,6 +455,7 @@ describe("the Action gave up alert", () => {
         queuedAt: START,
       },
       "GitHub answered 502",
+      linkOf,
     );
     expect(event).toEqual({
       kind: "action_gave_up",
@@ -460,12 +464,12 @@ describe("the Action gave up alert", () => {
       source: SOURCE,
       question: null,
       did: GAVE_UP_DID,
-      link: ACTION_GAVE_UP_LINK,
+      link: "studio:action",
     });
     expect(GAVE_UP_DID).toBe("stopped trying after 24 hours; the decision is in the log");
     expect(ALERT_TITLES.action_gave_up).toBe("Action gave up");
     expect(ALERT_SEVERITY.action_gave_up).toBe("warning");
-    expect(alertMessage(event)).toMatchObject({ severity: "warning", link: ACTION_GAVE_UP_LINK });
+    expect(alertMessage(event)).toMatchObject({ severity: "warning", link: "studio:action" });
   });
 
   it("names a webhook by its host alone, for the whole project", () => {
@@ -478,12 +482,13 @@ describe("the Action gave up alert", () => {
         queuedAt: START,
       },
       "the receiver answered 500",
+      linkOf,
     );
     expect(event).toMatchObject({
       kind: "action_gave_up",
       what: "The webhook to hooks.example.com did not succeed after 1 attempt in 24 hours (delivery 8); the last error: the receiver answered 500.",
       source: "all sources",
-      link: WEBHOOK_GAVE_UP_LINK,
+      link: "studio:webhook",
     });
     expect(JSON.stringify(event)).not.toContain("/facetdb");
   });

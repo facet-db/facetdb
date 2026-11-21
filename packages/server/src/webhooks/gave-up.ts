@@ -5,9 +5,11 @@ import type { WebhookGaveUp } from "./outbox.ts";
 /** What FacetDB did about a row it stopped trying. */
 export const GAVE_UP_DID = "stopped trying after 24 hours; the decision is in the log";
 
-/** The page that fixes an action that gave up, and the one for a webhook. */
-export const ACTION_GAVE_UP_LINK = "https://docs.facetdb.dev/fix/actions";
-export const WEBHOOK_GAVE_UP_LINK = "https://docs.facetdb.dev/fix/webhooks";
+/**
+ * The page of a given-up alert, by what gave up. The worker supplies it: every link FacetDB sends
+ * is built in the CLI's `links.ts`, which this package cannot import.
+ */
+export type GaveUpLink = (kind: "action" | "webhook") => string;
 
 /** A webhook has no source in its row: its give-up concerns the whole project, as the spending cap does. */
 const EVERY_SOURCE = "all sources";
@@ -30,12 +32,12 @@ export function gaveUpSubject(event: WebhookGaveUp): string {
  * webhook's host, the attempts and the last error, which the outbox keeps in words that carry no
  * secret. Never the URL's path (it may be a secret) or the record's state.
  */
-export function gaveUpAlert(event: WebhookGaveUp, lastError: string): AlertEvent {
+export function gaveUpAlert(event: WebhookGaveUp, lastError: string, link: GaveUpLink): AlertEvent {
   const attempts = `${event.attempts} attempt${event.attempts === 1 ? "" : "s"}`;
   const where =
     "host" in event
-      ? { source: EVERY_SOURCE, link: WEBHOOK_GAVE_UP_LINK }
-      : { source: sourceName(event), link: ACTION_GAVE_UP_LINK };
+      ? { source: EVERY_SOURCE, link: link("webhook") }
+      : { source: sourceName(event), link: link("action") };
   return {
     kind: "action_gave_up",
     what: `The ${gaveUpSubject(event)} did not succeed after ${attempts} in 24 hours (delivery ${event.deliveryId}); the last error: ${lastError.replace(/\.$/, "")}.`,

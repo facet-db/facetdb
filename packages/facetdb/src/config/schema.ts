@@ -73,6 +73,33 @@ function hasUrlCredential(text: string): boolean {
 }
 
 /**
+ * Why `studioUrl` is refused, or undefined when it holds: an http or https address a browser opens,
+ * with no credential, query, fragment or path. The words never carry the value, which may hold a
+ * password.
+ */
+function studioUrlProblem(text: string): string | undefined {
+  if (!/^https?:\/\//.test(text)) {
+    return "studioUrl must be an address a browser opens, starting with http:// or https://, such as https://facetdb.example.com or http://127.0.0.1:4040";
+  }
+  // A backslash, a space, a control character and an invisible or direction-changing one are read
+  // differently by a browser and by other parsers (`https://a.example\@b.example` is a.example to
+  // one and b.example to another), and this address is sent to people in alerts.
+  if (/[\\\s\p{Cc}\p{Cf}]/u.test(text) || !URL.canParse(text)) {
+    return "studioUrl must be plain text a browser opens as written: remove any backslash, space, control or invisible character, and write it as https://host or https://host:port";
+  }
+  if (hasUrlCredential(text)) {
+    return "studioUrl never carries a username or password: this file and its JSON export carry no credential; remove it from the address";
+  }
+  if (/[?#]/.test(text)) {
+    return "studioUrl is the studio's address alone: remove everything from the ? or # on, because every link adds its own path";
+  }
+  if (new URL(text).pathname !== "/") {
+    return "studioUrl is the address the studio is served at the root of, with no path: the studio loads its pages and files from /, so write https://host or https://host:port and put the studio at the root of that address";
+  }
+  return undefined;
+}
+
+/**
  * Incoming-webhook URLs that are bearer secrets by themselves (no username or password, so only
  * the host tells). The list is the known services; any other bearer URL cannot be told from a
  * plain URL by shape, and the `…Env` convention is the defence there.
@@ -475,6 +502,18 @@ const projectSchema = strict({
       "modelUrl never carries a username or password: this file and its JSON export carry no credential; a gateway key is read from the environment",
     )
     .exactOptional(),
+  studioUrl: z
+    .string({
+      error:
+        'studioUrl is text: the address people open the studio at, such as "https://facetdb.example.com"',
+    })
+    .superRefine((url, context) => {
+      const problem = studioUrlProblem(url);
+      if (problem !== undefined) {
+        context.addIssue({ code: "custom", message: problem });
+      }
+    })
+    .exactOptional(),
   provider: z
     .string({ error: 'provider is text: a preset such as "openrouter", or "<plugin>/<entry>"' })
     .exactOptional(),
@@ -774,6 +813,7 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
       model: projectModel,
       ...(project.modelUrl === undefined ? {} : { modelUrl: project.modelUrl }),
       ...(project.provider === undefined ? {} : { provider: project.provider }),
+      ...(project.studioUrl === undefined ? {} : { studioUrl: project.studioUrl }),
       ...(project.alerts === undefined ? {} : { alerts: project.alerts }),
       ...(project.spendingCap === undefined ? {} : { spendingCap: project.spendingCap }),
       onCapReached: project.onCapReached,

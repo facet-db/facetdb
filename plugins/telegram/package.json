@@ -1,0 +1,18 @@
+{
+  "name": "@facetdb/telegram",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB's Telegram plugin: system alerts and record notifications to a Telegram chat.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "facetdb": "workspace:*"
+  }
+}

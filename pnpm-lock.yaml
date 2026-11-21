@@ -282,6 +282,43 @@ importers:
         specifier: 21.0.4
         version: 21.0.4
 
+  plugins/email:
+    dependencies:
+      facetdb:
+        specifier: workspace:*
+        version: link:../../packages/facetdb
+      nodemailer:
+        specifier: 10.5.0
+        version: 10.5.0
+
+  plugins/github:
+    dependencies:
+      facetdb:
+        specifier: workspace:*
+        version: link:../../packages/facetdb
+    devDependencies:
+      '@facetdb/slack':
+        specifier: workspace:*
+        version: link:../slack
+
+  plugins/packs:
+    dependencies:
+      facetdb:
+        specifier: workspace:*
+        version: link:../../packages/facetdb
+
+  plugins/slack:
+    dependencies:
+      facetdb:
+        specifier: workspace:*
+        version: link:../../packages/facetdb
+
+  plugins/telegram:
+    dependencies:
+      facetdb:
+        specifier: workspace:*
+        version: link:../../packages/facetdb
+
 packages:
 
   '@adobe/css-tools@4.5.0':
@@ -2297,6 +2334,10 @@ packages:
   node-releases@2.0.63:
     resolution: {integrity: sha512-6li2QanLsAXpIH2R6j77MzRyvOyrvdTqlKtO4CgBdHGNvN99ZZfyxszHc5o5+IZBWD5u6Hzwg83JoGXmqZNG9Q==}
     engines: {node: '>=18'}
+
+  nodemailer@10.5.0:
+    resolution: {integrity: sha512-L/w/HH5MqpzMDuZD7fQdt/+KqymuvrpaApaIjAH2XA3ILePwlcvXCVVvP75xVrXCEt2ggK2marrrHHFB5Qu0kA==}
+    engines: {node: '>=20.0.0'}
 
   obug@3.0.0:
     resolution: {integrity: sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==}
@@ -4595,6 +4636,8 @@ snapshots:
   natural-compare@1.4.0: {}
 
   node-releases@2.0.63: {}
+
+  nodemailer@10.5.0: {}
 
   obug@3.0.0: {}
 

@@ -214,6 +214,13 @@ export type ProjectInput = {
    * a preset replaces its address. Absent: TypeSafe direct, or the server at `modelUrl`.
    */
   readonly provider?: string;
+  /**
+   * The address people open the studio at (`https://facetdb.example.com`): the base of every link
+   * an alert or a notification carries. No username or password, no path, query or fragment: the studio
+   * is served at the root of its address. Absent, the
+   * address the worker serves the studio on; with no studio an alert keeps its docs fix page.
+   */
+  readonly studioUrl?: string;
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached?: OnCapReached;
@@ -264,6 +271,8 @@ export type ProjectConfig = {
   readonly modelUrl?: string;
   /** A built-in preset's name, or `<plugin>/<entry>`; absent when the file names none. */
   readonly provider?: string;
+  /** The studio's address as the file writes it; absent when the file names none. */
+  readonly studioUrl?: string;
   readonly alerts?: { readonly channels: readonly string[] };
   readonly spendingCap?: number;
   readonly onCapReached: OnCapReached;
@@ -342,6 +351,7 @@ export function facetdb(project: ProjectInput): ProjectConfig {
     model: project.model,
     modelUrl: project.modelUrl,
     provider: project.provider,
+    studioUrl: project.studioUrl,
     alerts: project.alerts,
     spendingCap: project.spendingCap,
     onCapReached: project.onCapReached ?? "pause",

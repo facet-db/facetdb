@@ -4,6 +4,7 @@ import type { StudioFiles } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { browserCommand } from "../browser.ts";
+import { studioUrl } from "../links.ts";
 import type { HttpHandler, StudioInstall } from "../program.ts";
 import { runInProcess } from "../program.ts";
 import { hashPassword } from "../store-door.ts";
@@ -16,7 +17,6 @@ import {
   TEST_SECRET,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
-import { studioUrl } from "./studio.ts";
 import { DEFAULT_HOST, DEFAULT_PORT, parseHost, WORKER_CONNECTIONS } from "./worker.ts";
 
 /**

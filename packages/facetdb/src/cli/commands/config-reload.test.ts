@@ -663,6 +663,19 @@ describe("the worker reloads facetdb.config.ts after Apply", () => {
     ]);
     await t.fleet.close();
   });
+
+  it("the studio's address takes a restart too: every link keeps the one the worker started with", async () => {
+    const t = rig();
+    await t.fleet.open(PROJECT);
+    t.state.file = { ...PROJECT, studioUrl: "https://facetdb.example.com" };
+
+    const summary = await t.fleet.reload();
+
+    expect(summary.loaded && summary.notes).toEqual([
+      "The project's studioUrl changed in facetdb.config.ts; the worker keeps what it started with until you restart facetdb worker.",
+    ]);
+    await t.fleet.close();
+  });
 });
 
 describe("planReload", () => {

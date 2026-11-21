@@ -62,5 +62,9 @@ names the flag to pass.
 | `packages/sql-polling` | `@facetdb/sql-polling` | the polling connector for any SQL database behind a dialect: CockroachDB over `postgres`, Oracle over `oracledb` in thin mode |
 | `packages/server` | `@facetdb/server` | the check API, webhooks, review endpoints |
 | `packages/facetdb` | `facetdb` | the config DSL, the CLI, the SDK, `facetdb/plugin` |
-| `plugins/*` | `@facetdb/<name>` | first-party plugins, installed with `facetdb add <name>`; the default registry is not hosted yet, so pass `--registry registry/index.json` (or set `FACETDB_REGISTRY`) for now |
+| `plugins/github`, `slack`, `email`, `telegram`, `packs` | `@facetdb/<name>` | first-party plugins: five workspace packages that depend on `facetdb` for `facetdb/plugin`, installed with `facetdb add <name>`; the default registry is not hosted yet, so pass `--registry registry/index.json` (or set `FACETDB_REGISTRY`) for now |
 | `apps/studio` | | the dashboard |
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).

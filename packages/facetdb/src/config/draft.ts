@@ -200,8 +200,8 @@ const PROJECT_DRAFT_KEYS: ReadonlySet<string> = new Set(["spendingCap", "onCapRe
 
 /**
  * Why a project key stays out of a project draft, said where a draft names it. `modelUrl` decides
- * where every record's state is sent and `alerts` where alerts post: the operator's, edited by hand
- * as `where` and actions are. `model` and `sources` are each source's own draft's, or the file's.
+ * where every record's state is sent, `studioUrl` where every link points and `alerts` where alerts
+ * post: the operator's, edited by hand as `where` and actions are. `model` and `sources` are each source's own draft's, or the file's.
  */
 const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
   model:
@@ -210,6 +210,8 @@ const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
     "a draft cannot change modelUrl: it decides where every record's state is sent; edit modelUrl in facetdb.config.ts by hand",
   provider:
     "a draft cannot change provider: it decides where every record's state is sent and which key goes with it; edit provider in facetdb.config.ts by hand",
+  studioUrl:
+    "a draft cannot change studioUrl: it is the address every alert and notification link opens; edit studioUrl in facetdb.config.ts by hand",
   alerts:
     "a draft cannot change alerts: they decide where the worker posts its alerts; edit alerts in facetdb.config.ts by hand",
   sources:

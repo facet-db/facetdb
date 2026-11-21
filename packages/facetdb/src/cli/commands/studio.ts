@@ -1,10 +1,10 @@
+import { studioUrl } from "../links.ts";
 import { defineCommand } from "../program.ts";
 import { ALLOW_INSECURE_OPTION, loadWorkerConfig } from "./database.ts";
 import {
   CONNECTIONS_OPTION,
   DEFAULT_PORT,
   HOST_OPTION,
-  hostInUrl,
   parseHost,
   parsePort,
   requiredStudio,
@@ -26,16 +26,6 @@ type StudioOptions = Omit<WorkerOptions, "http" | "once"> & {
   /** False under `--no-open`: the address is printed and nothing else is started. */
   readonly open: boolean;
 };
-
-/**
- * The address a browser on this machine opens: the bound host, except an address that means
- * "every interface", which no browser can open; its loopback stands for it.
- */
-export function studioUrl(host: string, port: number): string {
-  const browsable =
-    host === "0.0.0.0" ? "127.0.0.1" : host === "::" || host === "[::]" ? "::1" : host;
-  return `http://${hostInUrl(browsable)}:${port}`;
-}
 
 export const studioCommand = defineCommand<StudioOptions>("studio", {
   description:

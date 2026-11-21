@@ -1,0 +1,19 @@
+{
+  "name": "@facetdb/email",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "FacetDB's email plugin: system alerts and record notifications by email, over nodemailer.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "facetdb": "workspace:*",
+    "nodemailer": "10.5.0"
+  }
+}
