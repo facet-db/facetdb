@@ -218,12 +218,21 @@ function noUrlError(source: SourceConfig, what: string): CliError {
   );
 }
 
+/**
+ * Whether the source's connection string was set where the loader read it: the variable
+ * `variableOf` names, in the environment the process started with.
+ */
+export function hasUrl(source: Pick<SourceConfig, "database">): boolean {
+  return source.database !== undefined && source.database !== "";
+}
+
 /** The source's connection string, or the fix when the config left it unset. */
 export function sourceUrlOf(source: SourceConfig, what: string): string {
-  if (source.database === undefined || source.database === "") {
+  const url = source.database;
+  if (url === undefined || url === "") {
     throw noUrlError(source, what);
   }
-  return source.database;
+  return url;
 }
 
 /** The engine and connection string of a table source, or the fix when the string is unset. */

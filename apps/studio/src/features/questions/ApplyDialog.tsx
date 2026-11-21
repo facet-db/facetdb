@@ -32,6 +32,7 @@ const OUTCOMES: Record<
   { readonly words: string; readonly tone: TagTone }
 > = {
   restarted: { words: "restarted with the new question set", tone: "yes" },
+  started: { words: "started", tone: "yes" },
   unchanged: { words: "unchanged", tone: "neutral" },
   kept: { words: "kept running what it ran", tone: "review" },
   "not-started": { words: "not started", tone: "review" },

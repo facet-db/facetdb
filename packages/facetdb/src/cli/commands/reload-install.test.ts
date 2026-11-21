@@ -177,6 +177,7 @@ async function until(done: () => boolean): Promise<void> {
 const MISSING: InstallCheck = {
   kind: "missing",
   missing: "listings: public.listings lacks the answer columns is_vehicle",
+  rightsRead: true,
 };
 
 function rig(initial: ProjectConfig = PROJECT) {
@@ -361,7 +362,7 @@ describe("a reload when the only install change is questions added", () => {
     const old = t.fleet.loop("listings");
 
     t.state.file = ADDED;
-    t.state.check = () => Promise.resolve({ kind: "holds" });
+    t.state.check = () => Promise.resolve({ kind: "holds", rightsRead: true });
     const summary = await t.fleet.reload();
 
     expect(summary.loaded && summary.sources[0]).toEqual({
@@ -423,7 +424,7 @@ describe("a reload when the only install change is questions added", () => {
   it("makes a question added together with another reworded one switch", async () => {
     const t = rig();
     await t.fleet.open(PROJECT);
-    t.state.check = () => Promise.resolve({ kind: "holds" });
+    t.state.check = () => Promise.resolve({ kind: "holds", rightsRead: true });
     t.state.file = project({
       questions: { is_scam: noul("Is this listing a scam or a fake?"), is_vehicle: VEHICLE },
     });
@@ -488,7 +489,7 @@ describe("a reload when the only install change is questions added", () => {
     expect(first.loaded && first.sources[0]?.outcome).toBe("kept");
 
     // facetdb migrate ran by hand; Check again asks for the reload.
-    t.state.check = () => Promise.resolve({ kind: "holds" });
+    t.state.check = () => Promise.resolve({ kind: "holds", rightsRead: true });
     const second = await t.fleet.reload();
     await t.fleet.settled();
 
@@ -539,7 +540,7 @@ describe("every other change to the install stays kept, and the check is never a
     const t = rig(project({ questions: BASE }));
     await t.fleet.open(t.state.file);
     const listings = t.fleet.loop("listings");
-    t.state.check = () => Promise.resolve({ kind: "holds" });
+    t.state.check = () => Promise.resolve({ kind: "holds", rightsRead: true });
     t.state.file = project({ questions: BASE, ...change });
 
     const summary = await t.fleet.reload();
@@ -567,17 +568,19 @@ describe("which doctor checks stand for the install of the new set", () => {
   it("holds on MySQL, SQL Server, MongoDB and SQLite when the install and the rights pass", () => {
     expect(
       installVerdict("MySQL", [ok("database"), ok("version"), ok("install"), ok("grants")]),
-    ).toEqual({ kind: "holds" });
+    ).toEqual({ kind: "holds", rightsRead: true });
     expect(installVerdict("MongoDB", [ok("database"), ok("login"), ok("install")])).toEqual({
       kind: "holds",
+      rightsRead: true,
     });
     expect(installVerdict("SQLite", [ok("file"), ok("wal"), ok("install"), ok("marks")])).toEqual({
       kind: "holds",
+      rightsRead: true,
     });
     // A warning is worth knowing, never a failure.
     expect(
       installVerdict("MySQL", [ok("install"), { name: "grants", status: "warn", detail: "slow" }]),
-    ).toEqual({ kind: "holds" });
+    ).toEqual({ kind: "holds", rightsRead: true });
   });
 
   it("names what is missing when the columns or the rights fail", () => {
@@ -586,20 +589,24 @@ describe("which doctor checks stand for the install of the new set", () => {
         ok("install"),
         fail("grants", "facetdb_worker may not update is_vehicle"),
       ]),
-    ).toEqual({ kind: "missing", missing: "facetdb_worker may not update is_vehicle" });
+    ).toEqual({
+      kind: "missing",
+      rightsRead: true,
+      missing: "facetdb_worker may not update is_vehicle",
+    });
     expect(
       installVerdict("SQLite", [
         ok("file"),
         ok("install"),
         fail("marks", "listings has no column is_vehicle"),
       ]),
-    ).toEqual({ kind: "missing", missing: "listings has no column is_vehicle" });
+    ).toEqual({ kind: "missing", rightsRead: true, missing: "listings has no column is_vehicle" });
     expect(
       installVerdict("MongoDB", [
         ok("login"),
         { name: "install", status: "skip", detail: "not checked: the login failed" },
       ]),
-    ).toEqual({ kind: "missing", missing: "not checked: the login failed" });
+    ).toEqual({ kind: "missing", rightsRead: true, missing: "not checked: the login failed" });
   });
 
   it("cannot tell where the doctor has no check of the worker login's rights", () => {

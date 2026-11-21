@@ -1,6 +1,8 @@
+import { DEFAULT_WORKER_LIMITS } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { SqlConnect } from "@facetdb/postgres";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ConfigFiles,
   configFileSource,
@@ -10,7 +12,7 @@ import {
   planApply,
 } from "../../config/index.ts";
 import { sharePools } from "../pools.ts";
-import { runInProcess } from "../program.ts";
+import { type HttpHandler, runInProcess } from "../program.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -18,6 +20,7 @@ import {
   type PgliteWorld,
   postgresEngines,
   resetPgliteWorld,
+  SteppedClock,
   type Store,
   TEST_SECRET,
 } from "../testing.ts";
@@ -28,9 +31,9 @@ import { STORE_CURRENT } from "./migrate.ts";
 /**
  * Adding a source through `facetdb worker`'s own wiring, the Postgres engine on PGlite: the
  * studio's setup routes inspect the tables and a table's rows, preview the draft, plan the install
- * and run it as shown, write facetdb.config.ts and reload the worker, which leaves the new source
- * to a restart. The admin connection string's marked parts appear in no answer, no line the worker
- * printed and no file it wrote.
+ * and run it as shown, write facetdb.config.ts and reload the worker, whose own check of the
+ * database under the worker login finds the install and starts the new source. The admin connection
+ * string's marked parts appear in no answer, no line the worker printed and no file it wrote.
  */
 
 const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
@@ -62,6 +65,31 @@ const INITIAL: ProjectConfig = {
   ...declared,
   sources: declared.sources.map((source) => ({ ...source, databaseEnv: "LISTINGS_URL" })),
 };
+
+/**
+ * PGlite is one superuser connection, and the worker's doctor asks to be logged in as the worker
+ * login (its first check): a query on the worker login's URL runs as `facetdb_worker`, as the
+ * engine's own doctor test does; the admin's URL and the store stay the superuser's. The role is
+ * set inside one transaction with the query (PGlite runs a transaction whole, other callers of the
+ * connection waiting), so no statement of another caller runs as the worker login by landing
+ * between the switch and the query.
+ */
+function asWorkerLogin(connect: SqlConnect): SqlConnect {
+  return (url, options) => {
+    const client = connect(url, options);
+    if (!url.startsWith("postgres://facetdb_worker:")) {
+      return client;
+    }
+    return {
+      ...client,
+      query: (text, params) =>
+        client.transaction(async (query) => {
+          await query("set local role facetdb_worker");
+          return query(text, params);
+        }),
+    };
+  };
+}
 
 const DRAFT = {
   name: "sellers",
@@ -121,7 +149,7 @@ afterEach(async () => {
 });
 
 describe("adding a source on a running facetdb worker", () => {
-  it("inspects, previews, plans and installs through migrate's plan, writes the file, and leaves the source to a restart", async () => {
+  it("inspects, previews, plans and installs through migrate's plan, writes the file, and the reload starts the source", async () => {
     const file = { text: configFileSource(INITIAL), writes: 0 };
     const applied = planApply(
       { path: "facetdb.config.ts", text: file.text, config: INITIAL },
@@ -168,7 +196,12 @@ describe("adding a source on a running facetdb worker", () => {
     const answers: Record<string, { status: number; body: Record<string, unknown> }> = {};
     const texts: string[] = [];
     const connect = sharePools(world.connect);
-    const result = await runInProcess(
+    // The loops run on a clock the test steps: a poll per step, nothing spinning meanwhile.
+    const clock = new SteppedClock(1_700_000_000_000);
+    // The surface's handler, once the worker serves: the requests are made from here while the
+    // worker runs its loops, as a browser would, so the started source is seen answering.
+    let handle: HttpHandler | undefined;
+    const run = runInProcess(
       ["worker"],
       {
         projectDir: PROJECT_DIR,
@@ -176,49 +209,73 @@ describe("adding a source on a running facetdb worker", () => {
         osUser: () => "alex",
         loadConfig,
         configFiles: files,
-        engines: postgresEngines(connect),
+        engines: postgresEngines(asWorkerLogin(connect)),
         connect,
         store: () => Promise.resolve({ ...store, close: () => Promise.resolve() }),
         provider: () => provider,
-        clock: new FakeClock(1_700_000_000_000),
+        clock,
         random: () => 0.5,
         stopSignal: () => stop.signal,
         webhookFetch: () => Promise.reject(new Error("no webhook is queued in these tests")),
-        serve: async (handler, port) => {
-          const ask = async (name: string, path: string, body?: unknown) => {
-            const response = await handler(
-              new Request(`http://127.0.0.1:4040/v1/sources/${path}`, {
-                method: body === undefined ? "GET" : "POST",
-                headers: { "content-type": "application/json" },
-                ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-              }),
-              THIS_MACHINE,
-            );
-            const text = await response.text();
-            texts.push(text);
-            answers[name] = {
-              status: response.status,
-              body: JSON.parse(text) as Record<string, unknown>,
-            };
-            return answers[name];
-          };
-          await ask("access", "setup");
-          await ask("tables", "inspect", { admin: ADMIN });
-          await ask("table", "inspect", { admin: ADMIN, table: "sellers" });
-          await ask("preview", "preview", { admin: ADMIN, source: DRAFT });
-          const plan = await ask("plan", "plan", { admin: ADMIN, source: DRAFT });
-          answers["writesAfterPlan"] = { status: file.writes, body: {} };
-          await ask("install", "install", {
-            admin: ADMIN,
-            source: DRAFT,
-            token: plan.body["token"],
-          });
-          stop.abort();
-          return { port, close: () => Promise.resolve() };
+        serve: (handler, port) => {
+          handle = handler;
+          return Promise.resolve({ port, close: () => Promise.resolve() });
         },
       },
       COMMANDS,
     );
+    const ask = async (name: string, path: string, body?: unknown) => {
+      if (handle === undefined) {
+        throw new Error("the worker does not serve yet");
+      }
+      const response = await handle(
+        new Request(`http://127.0.0.1:4040/v1/${path}`, {
+          method: body === undefined ? "GET" : "POST",
+          headers: { "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+        THIS_MACHINE,
+      );
+      const text = await response.text();
+      texts.push(text);
+      answers[name] = {
+        status: response.status,
+        body: JSON.parse(text) as Record<string, unknown>,
+      };
+      return answers[name];
+    };
+    await vi.waitFor(() => expect(handle).toBeDefined(), { timeout: 10_000 });
+    await ask("access", "sources/setup");
+    await ask("tables", "sources/inspect", { admin: ADMIN });
+    await ask("table", "sources/inspect", { admin: ADMIN, table: "sellers" });
+    await ask("preview", "sources/preview", { admin: ADMIN, source: DRAFT });
+    const plan = await ask("plan", "sources/plan", { admin: ADMIN, source: DRAFT });
+    answers["writesAfterPlan"] = { status: file.writes, body: {} };
+    await ask("reviewBefore", "review/queue?source=sellers");
+    await ask("install", "sources/install", {
+      admin: ADMIN,
+      source: DRAFT,
+      token: plan.body["token"],
+    });
+    // The Review page opens a card of the new source without a restart.
+    await ask("reviewAfter", "review/queue?source=sellers");
+    // The started source answers a change at once, with no restart.
+    const asked = provider.callCount;
+    await world.client.query("insert into public.sellers (bio) values ('Gift cards only, DM me')");
+    await vi.waitFor(
+      async () => {
+        // A poll per look, so the answer does not hang on NOTIFY reaching the loop's LISTEN.
+        clock.advance(DEFAULT_WORKER_LIMITS.pollIntervalMs);
+        const rows = await world.client.query(
+          "select facetdb_status::text as status from public.sellers where bio = 'Gift cards only, DM me'",
+        );
+        expect(rows[0]?.["status"]).toBe("done");
+      },
+      { timeout: 10_000 },
+    );
+    expect(provider.callCount).toBe(asked + 1);
+    stop.abort();
+    const result = await run;
 
     expect(result.code, result.stderr).toBe(0);
     expect(answers["access"]).toEqual({ status: 200, body: { open: true } });
@@ -269,7 +326,7 @@ describe("adding a source on a running facetdb worker", () => {
     ]);
     expect(sql).toContain('"is_fake"');
     // Nothing was written by the plan; the install wrote the file once, then ran the script.
-    expect(answers["writesAfterPlan"]?.status).toBe(0);
+    expect(answers["writesAfterPlan"].status).toBe(0);
     expect(answers["install"]).toMatchObject({
       status: 200,
       body: {
@@ -280,14 +337,22 @@ describe("adding a source on a running facetdb worker", () => {
           sources: expect.arrayContaining([
             {
               source: "sellers",
-              outcome: "not-started",
-              version: null,
+              outcome: "started",
+              version: 1,
               message: expect.any(String),
             },
           ]),
         },
       },
     });
+    expect(result.stdout).toContain(
+      "sellers: its install is in its database and the worker login may write its columns, so it started: it answers every change from now on with version 1.",
+    );
+    // Unknown to the review endpoints before the install, a source of theirs right after.
+    expect(answers["reviewBefore"]).toMatchObject({
+      body: { error: { code: "unknown_source" } },
+    });
+    expect(answers["reviewAfter"]).toMatchObject({ status: 200, body: { count: 0, cards: [] } });
     expect(file.writes).toBe(1);
     expect(file.text).toBe(configFileSource(applied.plan.config));
     expect(file.text).toContain("process.env.LISTINGS_URL");

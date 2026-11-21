@@ -100,6 +100,8 @@ type Rig = {
   readonly files: ConfigFiles & { text: string; git: GitState; readonly writes: string[] };
   readonly printed: string[];
   readonly reloads: number[];
+  /** Every install the door said it ran to its end: the source, and whether the config named it. */
+  readonly ran: { readonly source: string; readonly inFile: boolean }[];
   readonly reloadFails: { failing: boolean };
   readonly door: ReturnType<typeof createSetupDoor>;
   readonly installs: { target: EngineTarget; options: InstallOptions }[];
@@ -184,6 +186,7 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
   };
   const printed: string[] = [];
   const reloads: number[] = [];
+  const ran: { readonly source: string; readonly inFile: boolean }[] = [];
   const reloadFails = { failing: false };
   const provider: ModelProvider = {
     ask: (request) =>
@@ -228,6 +231,12 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
       connect: noConnection,
     },
     project: { id: "listings-app", name: "listings-app" },
+    ran: (source, config) => {
+      ran.push({
+        source: source.name,
+        inFile: config.sources.some((candidate) => candidate.name === source.name),
+      });
+    },
     allowInsecureStore: false,
     path: PATH,
     files,
@@ -251,6 +260,7 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
     files,
     printed,
     reloads,
+    ran,
     reloadFails,
     door,
     installs,
@@ -438,6 +448,9 @@ describe("the setup door's install", () => {
     expect(t.engine.runs).toHaveLength(1);
     expect(t.engine.runs[0]?.workerPassword).toBe(true);
     expect(t.reloads).toEqual([1]);
+    // The run it finished is said before the reload, for the source as the written file holds it
+    // (the reload's check may count it as the worker login's rights).
+    expect(t.ran).toEqual([{ source: "listings", inFile: true }]);
     for (const text of [...t.files.writes, ...t.printed, JSON.stringify(outcome)]) {
       expectNoAdmin(text);
     }
@@ -498,6 +511,9 @@ describe("the setup door's install", () => {
     });
     expect(t.files.text).toBe(TEXT);
     expect(t.reloads).toEqual([]);
+    // A run that stopped is never said to have run to its end: the reload's rights stand-in depends
+    // on it.
+    expect(t.ran).toEqual([]);
   });
 
   it("keeps the source in the file when statements stay, so facetdb migrate can finish them", async () => {
@@ -508,6 +524,7 @@ describe("the setup door's install", () => {
     const outcome = await t.door.install(ADMIN, DRAFT, shown);
     expect(outcome).toMatchObject({ kind: "stopped", kept: 1, file: "kept" });
     expect(t.files.text).not.toBe(TEXT);
+    expect(t.ran).toEqual([]);
   });
 
   it("keeps the source in the file when the run throws: whether it committed is not known", async () => {
@@ -526,6 +543,8 @@ describe("the setup door's install", () => {
       file: "kept",
     });
     expect(t.files.text).not.toBe(TEXT);
+    // Whether it committed is not known, so it is not said to have run to its end either.
+    expect(t.ran).toEqual([]);
   });
 
   it("never puts the file back over an edit made while the install ran", async () => {

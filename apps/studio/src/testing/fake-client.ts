@@ -744,6 +744,11 @@ export const SAMPLE_SETUP_PLAN: SetupPlan = {
   storeElsewhere: false,
 };
 
+/** The reload's why for a source it did not start: its database could not be read for the check. */
+const SELLERS_NOT_STARTED =
+  "new in facetdb.config.ts and not answered yet: its database could not be read to check its install (connect ECONNREFUSED 10.0.0.5:5432). Check again once the database answers; facetdb doctor says what is wrong.";
+
+/** An install whose reload did not start the source: the why and the restart. */
 export const SAMPLE_INSTALLED: SetupInstalled = {
   installed: true,
   table: "public.sellers",
@@ -751,20 +756,42 @@ export const SAMPLE_INSTALLED: SetupInstalled = {
   reload: {
     loaded: true,
     sources: [
+      { source: "sellers", outcome: "not-started", version: null, message: SELLERS_NOT_STARTED },
+    ],
+    notes: [],
+  },
+  worker: {
+    running: false,
+    why: SELLERS_NOT_STARTED,
+    restart:
+      "Until then the worker that is running does not answer sellers. To restart it, stop facetdb worker (Ctrl+C) and start it again: it reads facetdb.config.ts as it is and answers every change to public.sellers from then on.",
+  },
+  backfill:
+    "Then answer the records already in public.sellers: facetdb backfill --source sellers shows its estimate before it asks anything.",
+};
+
+/** The same install, whose reload started the source: running, its backfill offered. */
+export const SAMPLE_INSTALLED_RUNNING: SetupInstalled = {
+  ...SAMPLE_INSTALLED,
+  reload: {
+    loaded: true,
+    sources: [
       {
         source: "sellers",
-        outcome: "not-started",
-        version: null,
+        outcome: "started",
+        version: 1,
         message:
-          "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+          "its install is in its database and the worker login may write its columns, so it started: it answers every change from now on with version 1. The records already in the table are answered by a backfill, which shows its cost first.",
       },
     ],
     notes: [],
   },
-  restart:
-    "The worker that is running does not answer sellers yet: stop facetdb worker (Ctrl+C) and start it again, and it answers every change from then on.",
-  backfill:
-    "Then answer the records already in public.sellers: facetdb backfill --source sellers shows its estimate before it asks anything.",
+  worker: {
+    running: true,
+    version: 1,
+    words:
+      "sellers is running with version 1: it answers every change to public.sellers from now on.",
+  },
 };
 
 /** An added question's install for listings, as `facetdb migrate --dry-run` prints it. */

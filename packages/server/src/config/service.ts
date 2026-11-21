@@ -82,11 +82,20 @@ export type SourceReload = {
   readonly source: string;
   /**
    * `unchanged` keeps running; `restarted` runs the new question set from its next batch; `stopped`
-   * was removed from the file; `not-started` is new and needs `facetdb migrate` and a restart;
-   * `kept` changed in a way that needs `facetdb migrate` or a restart, and runs what it ran;
-   * `failed` could not be opened anew and runs what it ran.
+   * was removed from the file; `started` is new in the file and runs from now on, the worker's own
+   * check of its database having found its install; `not-started` is new and does not run yet, the
+   * message saying why and what to do (`facetdb migrate`, Check again, a variable to set, or a
+   * restart); `kept` changed in a way that needs `facetdb migrate` or a restart, and runs what it
+   * ran; `failed` could not be opened anew and runs what it ran.
    */
-  readonly outcome: "unchanged" | "restarted" | "stopped" | "not-started" | "kept" | "failed";
+  readonly outcome:
+    | "unchanged"
+    | "restarted"
+    | "stopped"
+    | "started"
+    | "not-started"
+    | "kept"
+    | "failed";
   /** The question-set version it answers under now; null when it does not run. */
   readonly version: number | null;
   /** What happened and what to do, in plain words; null when there is nothing to say. */

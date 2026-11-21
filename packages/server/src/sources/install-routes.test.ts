@@ -521,7 +521,12 @@ describe("POST /v1/sources/install", () => {
       status: 200,
       json: { installed: true, table: "public.listings", path: "facetdb.config.ts" },
     });
-    expect(String(installed.json["restart"])).toContain("start it again");
+    // The rig's reload says nothing of the source: not running, with the words to restart.
+    expect(installed.json["worker"]).toEqual({
+      running: false,
+      why: "the worker read facetdb.config.ts again and did not say what it did with listings.",
+      restart: expect.stringContaining("stop facetdb worker (Ctrl+C) and start it again"),
+    });
     expect(t.engine.runs).toHaveLength(1);
     expect(
       await t.call("install", { admin: ADMIN, source: DRAFT, token: "token-2" }),

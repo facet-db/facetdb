@@ -89,7 +89,8 @@ export type ServerDeps = {
   /**
    * What the review endpoints decide with: the store's queue, and per source, keyed by its store
    * id, the decision log, the connector, the actions and the question set in force; the source
-   * names are the config's. The project is `config.projectId`.
+   * names are the config's, those the worker runs now, read on every call. The project is
+   * `config.projectId`.
    */
   readonly review: Omit<ReviewEndpointDeps, "projectId">;
   /**

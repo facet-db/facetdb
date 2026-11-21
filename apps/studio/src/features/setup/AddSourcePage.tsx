@@ -31,7 +31,7 @@ import {
   TextField,
   usePreview,
 } from "../questions/index.ts";
-import { sourcesQuery } from "../sources/index.ts";
+import { BackfillControls, sourcesQuery } from "../sources/index.ts";
 import {
   durationWords,
   firstRead,
@@ -65,6 +65,14 @@ import { type InstallFailure, installFailure } from "./outcome.ts";
 /** A draft as one string: the plan on screen is the plan of this draft, or it is not shown. */
 const keyOf = (draft: SetupDraft | undefined): string =>
   draft === undefined ? "" : JSON.stringify(draft);
+
+/**
+ * The worker's words, which follow "source: ", as a sentence of their own: the first letter up,
+ * unless the first word is a file name or an identifier (facetdb.config.ts, SELLERS_URL), which
+ * keeps its case.
+ */
+const sentence = (text: string): string =>
+  /^[a-z]+(\s|$)/.test(text) ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 
 /** The first form: one yes or no question, named so it can be renamed. */
 function firstForm(name: string): SourceForm {
@@ -454,7 +462,8 @@ function SetupFlow({
   const label = choices === null ? "" : choices.table.name;
 
   if (installed !== null) {
-    const { done } = installed;
+    const { done, name } = installed;
+    const { worker } = done;
     return (
       <section aria-labelledby={doneId} className="grid max-w-[72ch] gap-4">
         <h2 id={doneId} className="text-[19px] font-bold tracking-tight">
@@ -463,13 +472,29 @@ function SetupFlow({
         <p role="status">
           <StatusWord
             status="done"
-            label={`The install ran, and ${installed.name} is in ${done.path}.`}
+            label={`The install ran, and ${name} is in ${done.path}.`}
             wrap
           />
         </p>
-        <p>{done.restart}</p>
-        <p>{done.backfill}</p>
-        <p className="text-text-2">{backfillWords(installed.plan)}</p>
+        {worker.running ? (
+          // The last step: the worker's reload started the source, so the backfill of the records
+          // already there is offered here, with its cost shown first.
+          <>
+            <p>{worker.words}</p>
+            <p className="text-text-2">
+              {`The records already in ${done.table} have no answer yet: answering them shows the estimate first, and nothing is asked until you press Start.`}
+            </p>
+            <BackfillControls source={name} />
+          </>
+        ) : (
+          // Not started: the reload's own why, with what is missing and the command, then the restart.
+          <>
+            <p>{sentence(worker.why)}</p>
+            <p>{worker.restart}</p>
+            <p>{done.backfill}</p>
+            <p className="text-text-2">{backfillWords(installed.plan)}</p>
+          </>
+        )}
         <div>
           <Link
             to="/sources"
@@ -1368,8 +1393,10 @@ function PlanShown({
       <dl className="m-0 grid max-w-[72ch] grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-2.5">
         <dt className="text-[13px] text-text-2">Then</dt>
         <dd className="m-0">
-          The worker that is running does not answer the new source until it restarts: stop facetdb
-          worker and start it again.
+          The worker that is running reads facetdb.config.ts again, checks the install under its own
+          login and starts the source, with no restart. If it cannot (its database could not be
+          read, or the install is not where the worker reads, say), this page says why and what to
+          run.
         </dd>
         <dt className="text-[13px] text-text-2">Backfill</dt>
         <dd className="m-0">{backfillWords(plan)}</dd>

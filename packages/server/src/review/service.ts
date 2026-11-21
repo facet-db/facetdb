@@ -21,7 +21,12 @@ import { sourceIdOf } from "@facetdb/postgres";
  */
 export type ReviewEndpointDeps = ReviewServiceDeps & {
   readonly projectId: string;
-  readonly sources: readonly string[];
+  /**
+   * The sources the worker runs now, by the config's names, read on every call: a source a reload
+   * started opens its cards at once, and one it stopped is unknown from then on. The maps beside it
+   * are read the same way.
+   */
+  readonly sources: () => readonly string[];
 };
 
 /** One model option with the probability it was given: yes and no for a noul. */
@@ -189,17 +194,22 @@ const iso = (at: Date) => at.toISOString();
 export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEndpointService {
   const { clock } = deps;
   const core = createReviewService(deps);
-  const idOf = new Map(deps.sources.map((name) => [name, sourceIdOf(deps.projectId, name)]));
-  const nameOf = new Map([...idOf].map(([name, id]) => [id, name]));
+  /** The store id of a source the worker runs now, or undefined for a name it does not. */
+  const idOf = (name: string): string | undefined =>
+    deps.sources().includes(name) ? sourceIdOf(deps.projectId, name) : undefined;
+  const ownPrefix = `${deps.projectId}:`;
 
+  /**
+   * The config's name of a card's source, read off its store id (`<project>:<name>`, the inverse
+   * of `sourceIdOf`): a card of a source the worker no longer runs still says which it was.
+   */
   function sourceName(id: string): string {
-    const name = nameOf.get(id);
-    if (name === undefined) {
+    if (!id.startsWith(ownPrefix)) {
       throw new Error(
         `the review queue holds a card of "${id}", which is not a source of this project`,
       );
     }
-    return name;
+    return id.slice(ownPrefix.length);
   }
 
   function questionNames(sourceId: string): readonly string[] {
@@ -212,13 +222,17 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
   function resolve(filter: QueueFilter): { readonly source: string | undefined } | Unknown {
     let source: string | undefined;
     if (filter.source !== undefined) {
-      source = idOf.get(filter.source);
+      source = idOf(filter.source);
       if (source === undefined) {
-        return { kind: "unknown_source", source: filter.source, known: deps.sources };
+        return { kind: "unknown_source", source: filter.source, known: deps.sources() };
       }
     }
     if (filter.question !== undefined) {
-      const known = (source === undefined ? [...idOf.values()] : [source]).flatMap(questionNames);
+      const known = (
+        source === undefined
+          ? deps.sources().map((name) => sourceIdOf(deps.projectId, name))
+          : [source]
+      ).flatMap(questionNames);
       if (!known.includes(filter.question)) {
         return {
           kind: "unknown_question",
@@ -331,9 +345,9 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
 
   /** The source of a card a request names, resolved, or what is wrong with it. */
   function target(card: CardTarget): { readonly source: string } | UnknownSource {
-    const source = idOf.get(card.source);
+    const source = idOf(card.source);
     return source === undefined
-      ? { kind: "unknown_source", source: card.source, known: deps.sources }
+      ? { kind: "unknown_source", source: card.source, known: deps.sources() }
       : { source };
   }
 

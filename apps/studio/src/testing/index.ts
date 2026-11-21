@@ -12,6 +12,7 @@ export {
   SAMPLE_DECISIONS,
   SAMPLE_HOME,
   SAMPLE_INSTALLED,
+  SAMPLE_INSTALLED_RUNNING,
   SAMPLE_MIGRATE_PLAN,
   SAMPLE_MIGRATED,
   SAMPLE_PREVIEW,
@@ -39,3 +40,16 @@ export type { FakeScheduler } from "./fake-scheduler.ts";
 export { FAKE_START, fakeScheduler } from "./fake-scheduler.ts";
 export type { RenderStudioOptions } from "./render.tsx";
 export { fakeMedia, memoryStorage, renderStudio, STUDIO_NOW, STUDIO_ORIGIN } from "./render.tsx";
+export {
+  ADMIN,
+  connected,
+  installed,
+  MARK,
+  opened,
+  pick,
+  SELLERS_PREVIEW,
+  type SetupStudio,
+  STEPS,
+  step,
+  written,
+} from "./setup-flow.ts";

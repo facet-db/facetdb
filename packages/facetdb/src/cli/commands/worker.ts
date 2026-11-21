@@ -84,7 +84,7 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
-import { installRuns, installVerdict } from "./install-check.ts";
+import { installRuns, installVerdict, unreadCheck } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
 import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
 
@@ -98,7 +98,9 @@ import { createSetupDoor, UNAVAILABLE_SETUP_DOOR } from "./setup-door.ts";
  * SIGINT stops it after the pass in hand, so every claim is acked or released before it exits;
  * `--once` answers what is queued and exits. The sources run as a fleet (config-reload.ts): when
  * the studio's Apply has written facetdb.config.ts, the worker reloads it, a changed source
- * restarting after its batch in hand under its new question-set version.
+ * restarting after its batch in hand under its new question-set version, and a table source the
+ * setup flow installed starting once the worker's own check of its database holds, its connection,
+ * engine and key text made then with the checks the start makes.
  */
 
 /**
@@ -184,9 +186,17 @@ export type WorkerParts = {
   /**
    * A table source as the dashboard's Home and Sources endpoints show it: its engine's words, its
    * login's reach and its doctor. Nothing connects until the doctor runs. `config` is the project
-   * the source is read from, so its doctor checks that question set.
+   * the source is read from, so its doctor checks that question set. For a source the start did not
+   * have, `worker` makes its connection, engine and URL check here first, with the checks the start
+   * makes, and a refusal is this call's error.
    */
-  readonly tableFacts: (source: SourceConfig, config: ProjectConfig) => TableFacts;
+  readonly tableFacts: (source: SourceConfig, config: ProjectConfig) => Promise<TableFacts>;
+  /**
+   * A source removed from the file, its loop closed: what the start made for its table (its
+   * connection, engine and key text) is dropped, so a source added again under the name is made
+   * anew. Absent in `dev`, whose sources never change.
+   */
+  readonly forgetTable?: (source: SourceConfig) => void;
   /** The model, before the backoff and the in-flight limit are put around it. */
   readonly provider: ModelProvider;
   /** `FACETDB_SECRET`: it signs the reviewers' session cookie. `worker` refuses to start without it. */
@@ -398,6 +408,10 @@ export async function runWorkers(
         close: () => Promise.resolve(),
       };
     }
+    // Its facts for the dashboard, made once per loop (its doctor's cache with them) from the
+    // source and project the loop is opened with, so Home checks the question set in force; before
+    // the connector opens, since nothing connects for them and a refusal leaves nothing to close.
+    const table = await parts.tableFacts(source, from);
     const connector = await parts.openTable(
       source,
       { workerId, maxConnections: WORKER_CONNECTIONS },
@@ -414,6 +428,7 @@ export async function runWorkers(
         worker: workerFor(source, questionSet, version, connector, outage),
         connector,
         keyText: await parts.keyTextOf?.(source),
+        table,
         outage,
         close: () => connector.close(),
       };
@@ -422,9 +437,6 @@ export async function runWorkers(
       throw error;
     }
   }
-
-  /** The project each loop was opened from: the start's config, or a reload's. */
-  const openedFrom = new WeakMap<SourceLoop, ProjectConfig>();
 
   /** What each source answered over the run, by name, across its restarts. */
   const tallies = new Map<string, Tally>();
@@ -464,37 +476,29 @@ export async function runWorkers(
     }
   };
 
-  /**
-   * A table source's facts for the dashboard, made once per loop (its doctor's cache with them)
-   * from the source and project that loop was opened with: a loop a reload restarts gets its own,
-   * so Home checks the question set in force.
-   */
-  const facts = new WeakMap<SourceLoop, TableFacts>();
-  const factsOf = (loop: SourceLoop): TableFacts => {
-    const known = facts.get(loop) ?? parts.tableFacts(loop.source, openedFrom.get(loop) ?? config);
-    facts.set(loop, known);
-    return known;
-  };
-
   // The installs the studio ran to their end, until the reload after each reads them.
   const studioInstalls = installRuns();
   // The sources as one fleet: every loop under its own stop, so a reload after Apply restarts the
   // changed ones and leaves the others running.
   const fleet = createFleet({
-    open: async (source, from) => {
-      const loop = await openLoop(source, from);
-      openedFrom.set(loop, from);
-      return loop;
-    },
+    open: openLoop,
     // The engine's doctor for the new source and set, under the worker login over the source's own
     // connection string, never the page's word; read by `installVerdict`. An install this worker
     // just ran to its end for this very source stands in for the rights check an engine's doctor
-    // lacks (PostgreSQL's); the columns are still the doctor's to find.
+    // lacks (PostgreSQL's); the columns are still the doctor's to find. For a source the start did
+    // not have, the facts are made here first.
     installed: async (source, from) => {
-      const table = parts.tableFacts(source, from);
+      const table = await parts.tableFacts(source, from);
       const checks = await table.doctor();
+      // A database that did not answer tells nothing: the read failed, in the doctor's words, and
+      // the finished install run is kept for the next reading.
+      const unread = unreadCheck(checks);
+      if (unread !== undefined) {
+        throw new Error(unread);
+      }
       return installVerdict(table.database, checks, studioInstalls.took(source, from));
     },
+    removed: (source) => parts.forgetTable?.(source),
     load: () => {
       if (parts.configFile === undefined) {
         return Promise.reject(new Error("this worker has no config file to reload"));
@@ -634,7 +638,7 @@ export async function runWorkers(
               read: loop.source.read,
               questions: loop.questionSet.questions.length,
               version: loop.version,
-              table: loop.source.api ? undefined : factsOf(loop),
+              table: loop.table,
             }));
           },
         },
@@ -644,12 +648,12 @@ export async function runWorkers(
         host: options.host,
         alertChannels: () => config.alerts?.channels ?? [],
         fileAlertChannels: () => fleet.config().alerts?.channels ?? [],
-        // The review endpoints: the store's queue, and per source the log, the connector, the
-        // actions and the question set and version of the loop in force, read on every call
-        // (config-reload.ts, `reviewLookups`).
+        // The review endpoints: the store's queue, the sources the fleet runs now, and per source
+        // the log, the connector, the actions and the question set and version of the loop in
+        // force, all read on every call (config-reload.ts, `reviewLookups`).
         review: {
           queue: store.reviews,
-          sources: config.sources.map((source) => source.name),
+          sources: () => fleet.loops().map((loop) => loop.source.name),
           ...reviewLookups(fleet, {
             idOf: (name) => storeSourceId(project.id, name),
             log: (name) => store.log(storeSourceId(project.id, name)),
@@ -696,7 +700,9 @@ export async function runWorkers(
         },
         // The studio's setup flow: a new source added with the admin connection string the operator
         // pastes on this machine, through migrate's plan and Apply's write; only a worker that
-        // writes its config file offers it.
+        // writes its config file offers it. The reload after its install starts the source once the
+        // worker's own check holds, the run it finished counted as the rights check where the
+        // engine's doctor has none.
         setup:
           configFile === undefined
             ? UNAVAILABLE_SETUP_DOOR
@@ -707,6 +713,9 @@ export async function runWorkers(
                 path: configFile.path,
                 files: configFile.files,
                 load: () => configFile.load({ quiet: true }),
+                ran: (source, from) => {
+                  studioInstalls.ran(source, from);
+                },
                 reload: () => fleet.reload(),
                 serial: writes,
                 provider,
@@ -1072,44 +1081,56 @@ export async function runWorkerProcess(
   if (storeUrl !== "") {
     requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
   }
-  const tables = new Map<
-    string,
-    {
-      /** Under the source's question set in `from`: a reload opens it anew with the new one. */
-      readonly open: (
-        source: SourceConfig,
-        from: ProjectConfig,
-        workerId: string,
-        maxConnections: number,
-      ) => Promise<OpenConnector>;
-      readonly keyText: () => Promise<KeyText | undefined>;
-      /** Its facts and doctor for the source and question set of `from`. */
-      readonly facts: (opened: SourceConfig, from: ProjectConfig) => TableFacts;
+  /**
+   * What the start makes of a table source, once: its connection string from its variable, its
+   * engine by the string's scheme, the string's check (no password in the clear to another machine)
+   * and whether it shares the store's pool. A reload makes the same for a source the start did not
+   * have, with the same checks, and drops it when the source goes; a source whose connection,
+   * engine choice or table differ from the entry's is made anew.
+   */
+  type TableEntry = {
+    /** The fields the entry was made from. */
+    readonly madeOf: string;
+    /** Under the source's question set in `from`: a reload opens it anew with the new one. */
+    readonly open: (
+      source: SourceConfig,
+      from: ProjectConfig,
+      workerId: string,
+      maxConnections: number,
+    ) => Promise<OpenConnector>;
+    readonly keyText: () => Promise<KeyText | undefined>;
+    /** Its facts and doctor for the source and question set of `from`. */
+    readonly facts: (opened: SourceConfig, from: ProjectConfig) => TableFacts;
+  };
+  const madeOf = (source: SourceConfig): string =>
+    JSON.stringify([source.database, source.databaseEnv, source.connector, source.table]);
+  const tables = new Map<string, TableEntry>();
+  async function tableOf(source: SourceConfig): Promise<TableEntry> {
+    const known = tables.get(source.name);
+    if (known !== undefined && known.madeOf === madeOf(source)) {
+      return known;
     }
-  >();
-  for (const source of config.sources) {
-    if (source.table === undefined) {
-      continue;
+    const table = source.table;
+    if (table === undefined) {
+      throw new Error(`the source ${source.name} reads no table`);
     }
     const url = sourceUrlOf(
       source,
       "the worker login's connection string (postgres://facetdb_worker:…@host/db)",
     );
     const engine = await engineFor(deps.engines, url, source.connector);
-    const target = engineTarget(config, { source, ...splitTable(source.table) }, project);
+    // The target of the string's check: its question set does not bear on it.
+    const target = engineTarget(config, { source, ...splitTable(table) }, project);
     requireUsableUrl(engine, target, url, allowInsecure);
     const storeShared = storeSharedFor(deps.env, source);
-    tables.set(source.name, {
+    const made: TableEntry = {
+      madeOf: madeOf(source),
       // The type its database records for its keys, read once the table opened.
       keyText: () => tableKeyText(engine, target, url, allowInsecure),
       facts: (opened, from) =>
         tableFacts({
           engine,
-          target: engineTarget(
-            from,
-            { source: opened, ...splitTable(source.table ?? "") },
-            project,
-          ),
+          target: engineTarget(from, { source: opened, ...splitTable(table) }, project),
           url,
           source: opened,
           deps: { clock: deps.clock, allowInsecure, storeShared },
@@ -1119,11 +1140,19 @@ export async function runWorkerProcess(
       open: (opened, from, workerId, maxConnections) =>
         openConnector(
           engine,
-          engineTarget(from, { source: opened, ...splitTable(source.table ?? "") }, project),
+          engineTarget(from, { source: opened, ...splitTable(table) }, project),
           url,
           { clock: deps.clock, allowInsecure, storeShared, workerId, maxConnections },
         ),
-    });
+    };
+    tables.set(source.name, made);
+    return made;
+  }
+  // Every table source of the start, checked before the store opens or anything connects.
+  for (const source of config.sources) {
+    if (source.table !== undefined) {
+      await tableOf(source);
+    }
   }
   // One pool for the store, the outbox, and every table source on the store's own database (the
   // usual single DATABASE_URL): see WORKER_CONNECTIONS for the count. The composition root's
@@ -1147,26 +1176,18 @@ export async function runWorkerProcess(
         project,
         store,
         storeClient,
-        openTable: (source, open, from) => {
-          const table = tables.get(source.name);
-          if (table === undefined) {
-            throw new Error(`the source ${source.name} reads no table`);
-          }
-          return table.open(source, from, open.workerId, open.maxConnections);
-        },
+        openTable: async (source, open, from) =>
+          (await tableOf(source)).open(source, from, open.workerId, open.maxConnections),
         // Apply writes the file this worker loaded, and the worker reloads it.
         configFile: {
           path: options.config,
           load: (load) => deps.loadConfig(options.config, load),
           files: deps.configFiles,
         },
-        keyTextOf: async (source) => tables.get(source.name)?.keyText(),
-        tableFacts: (source, from) => {
-          const table = tables.get(source.name);
-          if (table === undefined) {
-            throw new Error(`the source ${source.name} reads no table`);
-          }
-          return table.facts(source, from);
+        keyTextOf: async (source) => (await tableOf(source)).keyText(),
+        tableFacts: async (source, from) => (await tableOf(source)).facts(source, from),
+        forgetTable: (source) => {
+          tables.delete(source.name);
         },
         provider: deps.provider(config),
         sessionSecret,

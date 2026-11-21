@@ -147,17 +147,18 @@ export const devCommand = defineCommand<DevOptions>("dev", {
             store,
             storeClient: client,
             // The embedded database is a directory of files with one user: its login is the file's.
-            tableFacts: (source) => ({
-              ...tableFacts({
-                engine,
-                target: targetOf({ source, ...splitTable(source.table ?? "") }),
-                url: DEV_URL,
-                source,
-                deps: engineDeps,
+            tableFacts: (source) =>
+              Promise.resolve({
+                ...tableFacts({
+                  engine,
+                  target: targetOf({ source, ...splitTable(source.table ?? "") }),
+                  url: DEV_URL,
+                  source,
+                  deps: engineDeps,
+                }),
+                database: "PGlite",
+                login: { kind: "file" },
               }),
-              database: "PGlite",
-              login: { kind: "file" },
-            }),
             openTable: (source, open) =>
               engine.open(targetOf({ source, ...splitTable(source.table ?? "") }), DEV_URL, {
                 ...engineDeps,

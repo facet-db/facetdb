@@ -15,9 +15,9 @@ import { SOURCES_REFRESH_MS, sourcesQuery } from "./queries.ts";
  * worker and when it last saw one, where its answers live, its backfill as a strip with its words,
  * and the worker login's reach in words, all as `GET /v1/sources` says them; the page computes
  * nothing. A table source's backfill line is also where one is estimated, started, stopped and
- * resumed (BackfillControls). A source the config names that the worker does not run yet (added by
- * the setup flow, before the restart) is a row of its own that says so. "Add a source" is the
- * page's one primary action.
+ * resumed (BackfillControls). A source the config names that the worker does not run yet (added to
+ * the file and not started) is a row of its own that says so. "Add a source" is the page's one
+ * primary action.
  */
 
 /** The install line under the worker login, as a status word and its square. */

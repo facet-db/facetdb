@@ -73,8 +73,9 @@ import { installPrintout, passwordOf, planInstall } from "./migrate.ts";
  * back as it was, and when statements stay (an engine without transactional DDL) the file keeps the
  * source, so `facetdb migrate` finishes it and `facetdb uninstall` takes it out. Nothing is
  * installed that the file does not name, except while a run is in flight. The worker is reloaded
- * only after a finished install; the fleet does not start an added source, so the operator is told
- * to restart the worker.
+ * only after a finished install, and the reload starts the source once the worker's own check of
+ * its database holds; a run this worker finished stands in for the rights check an engine's doctor
+ * lacks (`ran`, as the migrate door's), the columns still being the doctor's to find.
  */
 
 export type SetupDoorDeps = InstallDeps & {
@@ -82,6 +83,11 @@ export type SetupDoorDeps = InstallDeps & {
   readonly path: string;
   readonly files: ConfigFiles;
   readonly load: () => Promise<ProjectConfig>;
+  /**
+   * This worker ran the install of `source`, as `config` holds it, to its end: the reload that
+   * follows may take that run as the worker login's rights on its columns (install-check.ts).
+   */
+  readonly ran: (source: SourceConfig, config: ProjectConfig) => void;
   /** The worker's reload of the written file (the fleet's). */
   readonly reload: () => Promise<ReloadSummary>;
   /** One file write at a time, shared with Apply's door. */
@@ -717,6 +723,8 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
               : { kind: "error" as const, error: hidingValue(draft)(result.stopped.error) };
           return stopped(result.stopped.at, why, kept, file);
         }
+        // Ran to its end, for the source as the file now holds it: the reload's check may take it.
+        deps.ran(targetOf(applyPlan.config, draft.name).source, applyPlan.config);
         return {
           kind: "installed",
           table: install.label,

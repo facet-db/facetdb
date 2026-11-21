@@ -176,7 +176,7 @@ async function rig() {
     fileAlertChannels: () => [],
     // Nor does it review: no source is open to a reviewer here.
     review: {
-      sources: [],
+      sources: () => [],
       queue: new FakeReviewQueue(),
       log: new Map(),
       connectors: new Map(),

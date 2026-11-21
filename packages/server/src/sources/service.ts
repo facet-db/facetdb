@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Clock } from "@facetdb/core";
-import type { DraftIssue, SourceDraft, Words } from "../config/service.ts";
+import type { DraftIssue, ReloadSummary, SourceDraft, Words } from "../config/service.ts";
 import type {
   MigrateDoor,
   MigrateRunOutcome,
@@ -55,6 +55,42 @@ export type SetupAnswer<Body> =
 export type SetupAccess =
   | { readonly open: true }
   | { readonly open: false; readonly code: string; readonly message: string; readonly fix: string };
+
+/**
+ * Whether the worker answers the source the setup installed: the reload after the install started
+ * it, with the version it answers under; or it did not, with the reload's own why (what is missing
+ * and the command) and how to restart the worker.
+ */
+export type SetupWorker =
+  | { readonly running: true; readonly version: number; readonly words: string }
+  | { readonly running: false; readonly why: string; readonly restart: string };
+
+/** What the reload after an install says of the new source, as the page's last step shows it. */
+export function workerAfterInstall(
+  reload: ReloadSummary,
+  name: string,
+  table: string,
+): SetupWorker {
+  const restart = `Until then the worker that is running does not answer ${name}. To restart it, stop facetdb worker (Ctrl+C) and start it again: it reads facetdb.config.ts as it is and answers every change to ${table} from then on.`;
+  if (!reload.loaded) {
+    return { running: false, why: `${reload.message} ${reload.fix}`, restart };
+  }
+  const entry = reload.sources.find((source) => source.source === name);
+  if (entry?.outcome === "started" && entry.version !== null) {
+    return {
+      running: true,
+      version: entry.version,
+      words: `${name} is running with version ${entry.version}: it answers every change to ${table} from now on.`,
+    };
+  }
+  return {
+    running: false,
+    why:
+      entry?.message ??
+      `the worker read facetdb.config.ts again and did not say what it did with ${name}.`,
+    restart,
+  };
+}
 
 export type SetupService = {
   /** `operator`: the request is this machine's operator (loopback, no session cookie). */
@@ -564,7 +600,8 @@ export function createSetupService(deps: SetupServiceDeps): SetupService {
                 table: outcome.table,
                 path: outcome.path,
                 reload: outcome.reload,
-                restart: `The worker that is running does not answer ${draft.name} yet: stop facetdb worker (Ctrl+C) and start it again, and it answers every change from then on.`,
+                // Started by the reload, or why not and the restart.
+                worker: workerAfterInstall(outcome.reload, draft.name, outcome.table),
                 backfill: `Then answer the records already in ${outcome.table}: facetdb backfill --source ${draft.name} shows its estimate before it asks anything.`,
               },
             };

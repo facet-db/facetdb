@@ -41,11 +41,37 @@ export function installVerdict(
       why: `the worker's checks of ${database} cannot tell whether the worker login may write them`,
     };
   }
+  // Whether the doctor read the rights itself: where it did not, `granted` stood in, and this
+  // reading used it up, so a reading asked for again cannot hold.
+  const rightsRead = rights.length > 0;
   const failed = [...columns, ...rights].filter((check) => !passed(check));
   if (failed.length > 0) {
-    return { kind: "missing", missing: failed.map((check) => check.detail).join("; ") };
+    return { kind: "missing", missing: failed.map((check) => check.detail).join("; "), rightsRead };
   }
-  return { kind: "holds" };
+  return { kind: "holds", rightsRead };
+}
+
+/**
+ * The checks that reach the database at all (`database` on the SQL engines and MongoDB, `server`
+ * on libSQL, `file` on SQLite): when one of them failed and the install check was left unmade for
+ * it, the reading told nothing of the install.
+ */
+const REACH_CHECKS: readonly string[] = ["database", "server", "file"];
+
+/**
+ * The words of a reading that could not be made because the database did not answer: the install
+ * check skipped behind a failed reach check. The caller throws them, so the fleet says the read
+ * failed and asks again later, and a finished install run is kept for the next reading rather than
+ * used up by one that could not tell. Undefined for every other reading, whose verdict is
+ * `installVerdict`'s.
+ */
+export function unreadCheck(checks: readonly DoctorCheck[]): string | undefined {
+  const install = checks.find((check) => check.name === "install");
+  if (install === undefined || install.status !== "skip") {
+    return undefined;
+  }
+  return checks.find((check) => REACH_CHECKS.includes(check.name) && check.status === "fail")
+    ?.detail;
 }
 
 /**

@@ -144,7 +144,7 @@ function setup() {
   const notify = new FakeAction<Notify>();
   const review: ReviewEndpointService = createReviewEndpointService({
     projectId: PROJECT,
-    sources: [SOURCE],
+    sources: () => [SOURCE],
     queue,
     log: new Map([[SOURCE_ID, log]]),
     connectors: new Map([[SOURCE_ID, connector]]),

@@ -18,6 +18,7 @@ import type {
   PendingSource,
   ReloadSummary,
   SourceReload,
+  TableFacts,
 } from "@facetdb/server";
 import {
   type ApplyPlan,
@@ -31,6 +32,8 @@ import {
   toProjectJson,
   uncommittedWords,
 } from "../../config/index.ts";
+import { CliError } from "../program.ts";
+import { hasUrl, variableOf } from "./database.ts";
 
 /**
  * The worker's sources as a fleet that can take a new config while it runs. Each source has its own
@@ -48,7 +51,14 @@ import {
  *    and the worker says what is missing and what to do; a reload asked for again checks again;
  *  - any other change that reaches the database's install (a question removed, a type, options or
  *    levels, read, where, the table, storage, capture) needs `facetdb migrate` and a restart: the
- *    source keeps running what it ran, and the worker says so; so does a new source;
+ *    source keeps running what it ran, and the worker says so;
+ *  - a table source new in the file is started once the same check
+ *    of its database holds: its loop is opened, put in place and launched beside the others, which
+ *    are never touched; until then, or when the check cannot be made, it is not started and the
+ *    worker says what is missing and what to do. Its connection string is the one the loader read
+ *    when the worker started: a variable set since is not seen, and the worker says to set it where
+ *    it runs and restart. An API source new in the file still takes a restart (the check API's
+ *    sources are set at start);
  *  - a source removed from the file stops after the pass in hand;
  *  - a file that does not load leaves every source as it was, and the worker says what to fix.
  * While a stopping source finishes its pass the fleet beats the heartbeat itself, so the heartbeat
@@ -74,6 +84,11 @@ export type SourceLoop = {
   readonly connector: Connector;
   readonly keyText: KeyText | undefined;
   /**
+   * Its table as the dashboard's Home and Sources show it, with its doctor for the question set in
+   * force, made when the loop opened; absent for an API source.
+   */
+  readonly table?: TableFacts;
+  /**
    * The records its outage policy holds (error or unchecked, waiting for their next retry), and how
    * a policy takes such records: a restart hands the old loop's to the new one, so a reload never
    * drops a record held during a model outage. Absent for a loop without a policy.
@@ -88,9 +103,16 @@ export type SourceLoop = {
  * checks cannot tell. A check that could not be made at all throws.
  */
 export type InstallCheck =
-  | { readonly kind: "holds" }
-  | { readonly kind: "missing"; readonly missing: string }
+  | { readonly kind: "holds"; readonly rightsRead: boolean }
+  | { readonly kind: "missing"; readonly missing: string; readonly rightsRead: boolean }
   | { readonly kind: "cannot-tell"; readonly why: string };
+
+/**
+ * `rightsRead`: the doctor read the worker login's rights itself, so a reading asked for again can
+ * hold on its own. False where only this worker's finished install stood in for them (PostgreSQL's
+ * doctor has no rights check): that reading used the run up, so the next can only say it cannot
+ * tell, and the words offer a restart rather than Check again.
+ */
 
 export type FleetDeps = {
   /**
@@ -100,10 +122,17 @@ export type FleetDeps = {
   readonly open: (source: SourceConfig, config: ProjectConfig) => Promise<SourceLoop>;
   /**
    * Whether the source's database holds the install of `source`'s question set, as the worker reads
-   * it under its own login. Asked only for a source whose one change to the install is questions
-   * added; never taken from the page's word.
+   * it under its own login. Asked for a source whose one change to the install is questions added,
+   * and for a table source new in the file whose connection string is set; never taken from the
+   * page's word.
    */
   readonly installed: (source: SourceConfig, config: ProjectConfig) => Promise<InstallCheck>;
+  /**
+   * A source removed from the file, once its loop has stopped and closed: the composition root
+   * drops what it made for it (a table source's connection, engine and key text are kept per name,
+   * and a source added again under that name is made anew).
+   */
+  readonly removed?: (source: SourceConfig) => void;
   /** Reads facetdb.config.ts again through the loader; a `ConfigError` when it does not load. */
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
@@ -163,7 +192,8 @@ export type ReloadStep =
       readonly questions: readonly string[];
     }
   | { readonly kind: "remove"; readonly name: string }
-  | { readonly kind: "add"; readonly name: string }
+  /** New in the file: started once `installed` holds, else not started and said why. */
+  | { readonly kind: "add"; readonly name: string; readonly source: SourceConfig }
   /** The change reaches the install (`facetdb migrate`) or the check API's fields (a restart). */
   | { readonly kind: "keep"; readonly name: string; readonly migrate: boolean };
 
@@ -269,7 +299,7 @@ export function planReload(
   for (const source of next.sources) {
     const loop = running.get(source.name);
     if (loop === undefined) {
-      steps.push({ kind: "add", name: source.name });
+      steps.push({ kind: "add", name: source.name, source });
       continue;
     }
     const same =
@@ -310,9 +340,81 @@ function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
       ];
 }
 
-/** What a reload says of a source that is new in the file: the Apply dialog and the pending list use it. */
-const NOT_STARTED_MESSAGE =
-  "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.";
+/** Why a source with questions added was not switched: the check's finding, or the read that failed. */
+type Unswitched =
+  | Exclude<InstallCheck, { readonly kind: "holds" }>
+  | { readonly kind: "unread"; readonly why: string };
+
+/**
+ * Why a source new in the file was not started: a fact of the file (an API source, a connection
+ * variable the worker started without), or the last reading of its database.
+ */
+type NotStarted =
+  /** It answers through POST /v1/check, whose sources are set when the worker starts. */
+  | { readonly kind: "api" }
+  /** The loader found no connection string: the variable was not set when the worker started. */
+  | { readonly kind: "no-url"; readonly variable: string }
+  /** Not read for the file as it is now: the next reload reads it. */
+  | { readonly kind: "unchecked" }
+  /** The reload came while the worker was stopping, which starts nothing. */
+  | { readonly kind: "stopping" }
+  /**
+   * The start's own checks refused the source before anything connected (its connection string,
+   * its engine, the store's variable): a problem in the file or the environment, with the fix.
+   */
+  | { readonly kind: "refused"; readonly message: string; readonly fix: string }
+  /** The check held, and the source could not be opened. */
+  | { readonly kind: "failed"; readonly why: string; readonly rightsRead: boolean }
+  | Unswitched;
+
+/** Whether a reload asked for again can start it: the reasons a reading of the database may change. */
+function checkAgainStarts(reason: NotStarted): boolean {
+  switch (reason.kind) {
+    case "unchecked":
+    case "unread":
+      return true;
+    case "missing":
+    case "failed":
+      return reason.rightsRead;
+    case "api":
+    case "no-url":
+    case "stopping":
+    case "refused":
+    case "cannot-tell":
+      return false;
+  }
+}
+
+const NEW_AND_NOT_ANSWERED = "new in facetdb.config.ts and not answered yet";
+
+/** What a reload says of a source new in the file that it did not start, and what to do. */
+function notStartedMessage(name: string, reason: NotStarted): string {
+  switch (reason.kind) {
+    case "api":
+      return `${NEW_AND_NOT_ANSWERED}: it answers through POST /v1/check, whose sources are set when the worker starts, so restart facetdb worker.`;
+    case "no-url":
+      return `${NEW_AND_NOT_ANSWERED}: its connection string is read from ${reason.variable}, which was not set when facetdb worker started. Set ${reason.variable} where the worker runs, then restart facetdb worker.`;
+    case "unchecked":
+      return `${NEW_AND_NOT_ANSWERED}: its install was not checked since the file changed. Check again: the worker reads its database and starts the source once the install is there.`;
+    case "stopping":
+      return "new in facetdb.config.ts and not started: the worker is stopping, which starts nothing; it answers once facetdb worker runs again.";
+    case "refused":
+      return `${NEW_AND_NOT_ANSWERED}: ${reason.message}; ${reason.fix}. Then restart facetdb worker.`;
+    case "failed":
+      return `${NEW_AND_NOT_ANSWERED}: its install is in its database, and it could not be started (${reason.why}). Check it with facetdb doctor, then ${reason.rightsRead ? "Check again or restart facetdb worker" : "restart facetdb worker"}.`;
+    case "missing":
+      return `${NEW_AND_NOT_ANSWERED}: its database does not hold its install (${reason.missing}). Run facetdb migrate --source ${name} on this machine, then ${reason.rightsRead ? "Check again" : "restart facetdb worker"}.`;
+    case "unread":
+      return `${NEW_AND_NOT_ANSWERED}: its database could not be read to check its install (${reason.why}). Check again once the database answers; facetdb doctor says what is wrong.`;
+    case "cannot-tell":
+      return `${NEW_AND_NOT_ANSWERED}: its install cannot be checked from here (${reason.why}), so it waits for a restart. Run facetdb migrate --source ${name} if the install did not finish, then restart facetdb worker.`;
+  }
+}
+
+/** What a reload says of a source new in the file that it started. */
+function startedMessage(version: number): string {
+  return `its install is in its database and the worker login may write its columns, so it started: it answers every change from now on with version ${version}. The records already in the table are answered by a backfill, which shows its cost first.`;
+}
 
 /** What a reload says of a source it keeps on what it runs, and why. */
 function keptMessage(migrate: boolean, version: number | null): string {
@@ -332,11 +434,6 @@ function namesOf(questions: readonly string[]): string {
 function switchedMessage(questions: readonly string[], version: number): string {
   return `the columns of ${namesOf(questions)} are in its database and the worker login may write them: it finishes the batch in hand, then answers with version ${version}; nothing already answered is asked again.`;
 }
-
-/** Why a source with questions added was not switched: the check's finding, or the read that failed. */
-type Unswitched =
-  | Exclude<InstallCheck, { readonly kind: "holds" }>
-  | { readonly kind: "unread"; readonly why: string };
 
 /** What a reload says of a source whose added questions it does not switch to, and what to do. */
 function addedMessage(
@@ -359,6 +456,11 @@ function addedMessage(
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** An error in words, with its fix when the CLI's own check refused (the start's checks). */
+function wordsOf(error: unknown): string {
+  return error instanceof CliError ? `${error.message}; ${error.fix}` : messageOf(error);
 }
 
 type Slot = {
@@ -389,6 +491,11 @@ export function createFleet(deps: FleetDeps): Fleet {
    * source as it was then: `pending()` says the same until a reload reads the database again.
    */
   const unswitched = new Map<string, { readonly file: string; readonly check: Unswitched }>();
+  /**
+   * The last reading of each source new in the file that was not started, for the file's source as
+   * it was then: `pending()` says the same until a reload reads the database again.
+   */
+  const unstarted = new Map<string, { readonly file: string; readonly reason: NotStarted }>();
 
   const slotOf = (loop: SourceLoop): Slot => ({
     loop,
@@ -519,6 +626,7 @@ export function createFleet(deps: FleetDeps): Fleet {
         await stop(slot);
         slots.delete(slot.loop.source.name);
         await retire(slot);
+        deps.removed?.(slot.loop.source);
       }),
     ]);
     const scope = (restarts[0]?.slot ?? removals[0])?.loop.source.name ?? "worker";
@@ -600,6 +708,92 @@ export function createFleet(deps: FleetDeps): Fleet {
         message: words(fresh.version),
       });
     };
+    /**
+     * Starts a source new in the file: its loop opened and launched beside the others once the
+     * worker's own reading of its database holds, never on the page's word; otherwise it is not
+     * started, and the reason is kept for `pending()`. Nothing stops, so the other loops beat on as
+     * always and the fleet has nothing to beat for.
+     */
+    const startAdded = async (source: SourceConfig): Promise<void> => {
+      const notStarted = (reason: NotStarted) => {
+        unstarted.set(source.name, { file: sourceKey(next, source), reason });
+        say({
+          source: source.name,
+          outcome: "not-started",
+          version: null,
+          message: notStartedMessage(source.name, reason),
+        });
+      };
+      if (source.api) {
+        notStarted({ kind: "api" });
+        return;
+      }
+      if (!hasUrl(source)) {
+        notStarted({ kind: "no-url", variable: variableOf(source) });
+        return;
+      }
+      /** Read afresh at each step: the stop may fire during the check or the open. */
+      const stopping = () => ending?.aborted === true;
+      // A worker that is stopping starts nothing, and reads nothing for it: `run` waits for this
+      // plan, then closes what runs.
+      if (stopping()) {
+        notStarted({ kind: "stopping" });
+        return;
+      }
+      let check: InstallCheck | NotStarted;
+      try {
+        check = await deps.installed(source, next);
+      } catch (error) {
+        // The start's own checks refusing (the string, its engine, the store's variable) is a
+        // problem in the file or the environment, said with its fix; anything else is a read that
+        // failed on the database, which a reading asked for again may make.
+        check =
+          error instanceof CliError
+            ? { kind: "refused", message: error.message, fix: error.fix }
+            : { kind: "unread", why: messageOf(error) };
+      }
+      if (check.kind !== "holds") {
+        notStarted(check);
+        return;
+      }
+      // A stop that came during the check: nothing opens on the customer's database for a source
+      // that will never run, and no version is recorded.
+      if (stopping()) {
+        notStarted({ kind: "stopping" });
+        return;
+      }
+      let fresh: SourceLoop;
+      try {
+        fresh = await deps.open(source, next);
+      } catch (error) {
+        notStarted({ kind: "failed", why: wordsOf(error), rightsRead: check.rightsRead });
+        return;
+      }
+      // A stop that came during the open: the connection is closed again and the loop never put
+      // in place nor launched.
+      if (stopping()) {
+        try {
+          await fresh.close();
+        } catch (error) {
+          deps.print(`${source.name}: closing its connection failed: ${messageOf(error)}`);
+        }
+        notStarted({ kind: "stopping" });
+        return;
+      }
+      unstarted.delete(source.name);
+      const slot = slotOf(fresh);
+      slots.set(source.name, slot);
+      // Launched now under the run's stop; before `run`, it is launched with the rest.
+      if (ending !== undefined) {
+        launch(slot, ending);
+      }
+      say({
+        source: source.name,
+        outcome: "started",
+        version: fresh.version,
+        message: startedMessage(fresh.version),
+      });
+    };
     for (const step of steps) {
       const slot = slots.get(step.name);
       const version = slot?.loop.version ?? null;
@@ -608,12 +802,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           say({ source: step.name, outcome: "unchanged", version, message: null });
           break;
         case "add":
-          say({
-            source: step.name,
-            outcome: "not-started",
-            version: null,
-            message: NOT_STARTED_MESSAGE,
-          });
+          await startAdded(step.source);
           break;
         case "keep":
           say({
@@ -676,6 +865,12 @@ export function createFleet(deps: FleetDeps): Fleet {
     for (const note of notes) {
       deps.print(note);
     }
+    // A source taken out of the file before it was ever started is nothing to say more of.
+    for (const name of [...unstarted.keys()]) {
+      if (!next.sources.some((source) => source.name === name)) {
+        unstarted.delete(name);
+      }
+    }
     const swapped = restarts.length + removals.length === 0 ? done : swap(restarts, removals);
     return { summary: { loaded: true, sources, notes }, swapped };
   }
@@ -702,14 +897,24 @@ export function createFleet(deps: FleetDeps): Fleet {
     for (const step of steps) {
       const wanted = file.sources.find((source) => source.name === step.name);
       if (step.kind === "add" && wanted !== undefined) {
+        // What the file says of it, else the last reading of its database for the file as it is
+        // now, else not read since the file changed: a reload reads it again.
+        const read = unstarted.get(step.name);
+        const reason: NotStarted = wanted.api
+          ? { kind: "api" }
+          : !hasUrl(wanted)
+            ? { kind: "no-url", variable: variableOf(wanted) }
+            : read !== undefined && read.file === sourceKey(file, wanted)
+              ? read.reason
+              : { kind: "unchecked" };
         pending.push({
           source: step.name,
           outcome: "not-started",
-          message: NOT_STARTED_MESSAGE,
+          message: notStartedMessage(step.name, reason),
           migrate: !wanted.api,
           added: [],
           removed: [],
-          checkAgain: false,
+          checkAgain: checkAgainStarts(reason),
         });
       } else if (step.kind === "added" && wanted !== undefined) {
         const version = slots.get(step.name)?.loop.version ?? null;
@@ -718,7 +923,7 @@ export function createFleet(deps: FleetDeps): Fleet {
         const check: Unswitched =
           read !== undefined && read.file === sourceKey(file, wanted)
             ? read.check
-            : { kind: "missing", missing: "not checked since the file changed" };
+            : { kind: "missing", missing: "not checked since the file changed", rightsRead: true };
         pending.push({
           source: step.name,
           outcome: "kept",

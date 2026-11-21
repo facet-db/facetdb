@@ -307,7 +307,7 @@ describe("GET /v1/sources/:name/backfill", () => {
         error: {
           code: "unknown_source",
           message: 'This worker runs no source called "orders", so it has nothing to backfill.',
-          fix: "Backfill a source listed by GET /v1/sources; a source added to facetdb.config.ts runs once facetdb worker restarts.",
+          fix: "Backfill a source listed by GET /v1/sources; a source added to facetdb.config.ts is listed once the worker has started it (the setup flow installs and starts it) or after a restart.",
         },
       },
     });

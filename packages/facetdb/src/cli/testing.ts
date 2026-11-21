@@ -1,3 +1,4 @@
+import type { Clock } from "@facetdb/core";
 import { createPostgresEngine, postgresDialect, type SqlConnect } from "@facetdb/postgres";
 import { pollingEngine } from "@facetdb/sql-polling";
 import type { ProjectConfig } from "../config/index.ts";
@@ -37,6 +38,35 @@ export {
   resetPgliteWorld,
   TEST_SECRET,
 } from "@facetdb/postgres/testing";
+
+/**
+ * A clock whose sleeps end only when the test moves time past them: one step, one poll, so a
+ * worker's loops wait between passes instead of spinning (core's `FakeClock` resolves a sleep at
+ * once). For a test that runs loops on PGlite's one connection, or proves a heartbeat gap.
+ */
+export class SteppedClock implements Clock {
+  #time: number;
+  #sleepers: { readonly due: number; readonly wake: () => void }[] = [];
+  constructor(start: number) {
+    this.#time = start;
+  }
+  now(): number {
+    return this.#time;
+  }
+  sleep(ms: number): Promise<void> {
+    return new Promise((wake) => {
+      this.#sleepers.push({ due: this.#time + ms, wake });
+    });
+  }
+  advance(ms: number): void {
+    this.#time += ms;
+    const due = this.#sleepers.filter((sleeper) => sleeper.due <= this.#time);
+    this.#sleepers = this.#sleepers.filter((sleeper) => sleeper.due > this.#time);
+    for (const sleeper of due) {
+      sleeper.wake();
+    }
+  }
+}
 
 /**
  * What the loader makes of `database: process.env.DATABASE_URL` (config/load.ts records the

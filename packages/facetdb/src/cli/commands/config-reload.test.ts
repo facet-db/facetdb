@@ -317,7 +317,11 @@ function rig(initial: ProjectConfig = PROJECT) {
     },
     // Questions added are checked in reload-install.test.ts: here the check never holds.
     installed: () =>
-      Promise.resolve({ kind: "missing", missing: "listings lacks the answer column sold_out" }),
+      Promise.resolve({
+        kind: "missing",
+        missing: "listings lacks the answer column sold_out",
+        rightsRead: true,
+      }),
     load: () =>
       state.fails === undefined ? Promise.resolve(state.file) : Promise.reject(state.fails),
     beat: (source) => {
@@ -503,7 +507,7 @@ describe("the worker reloads facetdb.config.ts after Apply", () => {
         outcome: "not-started",
         version: null,
         message:
-          "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+          "new in facetdb.config.ts and not answered yet: its database does not hold its install (listings lacks the answer column sold_out). Run facetdb migrate --source refunds on this machine, then Check again.",
       },
       {
         source: "orders",
@@ -516,7 +520,7 @@ describe("the worker reloads facetdb.config.ts after Apply", () => {
     expect(t.fleet.loops().map((loop) => loop.source.name)).toEqual(["listings"]);
     expect(t.closed).toEqual(["orders"]);
     expect(t.lines).toContain(
-      "refunds: new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+      "refunds: new in facetdb.config.ts and not answered yet: its database does not hold its install (listings lacks the answer column sold_out). Run facetdb migrate --source refunds on this machine, then Check again.",
     );
     // A change to the removed source's table is no longer answered.
     const asked = t.provider.requests.length;

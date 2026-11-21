@@ -3,20 +3,28 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   ApiError,
-  type DraftPreview,
   type Inspection,
   type SetupDraft,
   type SetupInstalled,
 } from "../../api/index.ts";
 import {
+  ADMIN,
+  connected,
   type FakeApi,
   fakeApi,
+  MARK,
+  opened,
+  pick,
   renderStudio,
   SAMPLE_INSTALLED,
   SAMPLE_PROJECT_CONFIG,
   SAMPLE_SELLERS,
   SAMPLE_SETUP_PLAN,
   SAMPLE_SOURCES,
+  SELLERS_PREVIEW,
+  STEPS,
+  step,
+  written,
 } from "../../testing/index.ts";
 import { PREVIEW_SETTLE_MS } from "../questions/index.ts";
 import { ConnectionField } from "./fields.tsx";
@@ -30,42 +38,6 @@ import { ConnectionField } from "./fields.tsx";
  * word before step one when this browser may not add a source.
  */
 
-const MARK = "pw-MARK-9a7";
-const ADMIN = `postgres://admin:${MARK}@db.example.com:5432/shop?sslmode=require`;
-
-const STEPS = [
-  "Connect",
-  "Pick the table and the columns to read",
-  "Write the questions",
-  "Set the thresholds",
-  "Choose storage, actions and alerts",
-  "Turn it on",
-];
-
-/** A preview of the sellers table for the question `is_fake`: one row decided, one to review. */
-const SELLERS_PREVIEW: DraftPreview = {
-  rows: [
-    {
-      key: "203",
-      kind: "answered",
-      state: { bio: "New here, cash only, <b>today</b>", country: "BE" },
-      model: "jev-1.14.0",
-      answers: { is_fake: { type: "noul", probability: 0.62 } },
-    },
-    {
-      key: "202",
-      kind: "answered",
-      state: { bio: "Selling my old bikes", country: "NL" },
-      model: "jev-1.14.0",
-      answers: { is_fake: { type: "noul", probability: 0.04 } },
-    },
-  ],
-  decided: 1,
-  review: 1,
-  cost: { inputTokens: 240, dollars: 0.000_01 },
-  warnings: [],
-};
-
 function sent(api: FakeApi, method: string): SetupDraft[] {
   return api.calls
     .filter((call) => call.startsWith(`${method} `))
@@ -76,58 +48,6 @@ function advance(studio: { schedule: { advance: (ms: number) => void } }, ms: nu
   act(() => {
     studio.schedule.advance(ms);
   });
-}
-
-const step = (title: string) => {
-  const heading = screen.getByRole("heading", { level: 2, name: title });
-  const section = heading.closest("section");
-  if (section === null) {
-    throw new Error(`the step ${title} is not a section`);
-  }
-  return section;
-};
-
-async function opened(
-  api: FakeApi = fakeApi({ setupPreview: () => Promise.resolve(SELLERS_PREVIEW) }),
-) {
-  const studio = renderStudio({ path: "/sources/new", api });
-  await screen.findByRole("textbox", { name: "Connection string" });
-  return { ...studio, api };
-}
-
-async function connected(studio: Awaited<ReturnType<typeof opened>>) {
-  await studio.user.type(screen.getByRole("textbox", { name: "Connection string" }), ADMIN);
-  await studio.user.click(screen.getByRole("button", { name: "Connect" }));
-  await screen.findByText("Connected: Postgres, 3 tables");
-}
-
-/** Chooses a table in step two's listbox by its place in the list. */
-async function pick(studio: Awaited<ReturnType<typeof opened>>, downs: number) {
-  act(() => {
-    within(step(STEPS[1] ?? ""))
-      .getByRole("combobox", { name: "Table" })
-      .focus();
-  });
-  await studio.user.keyboard("{ArrowDown}");
-  for (let n = 0; n < downs; n += 1) {
-    await studio.user.keyboard("{ArrowDown}");
-  }
-  await studio.user.keyboard("{Enter}");
-}
-
-/** Connected, the sellers table picked, its question named is_fake and written. */
-async function written(studio: Awaited<ReturnType<typeof opened>>) {
-  await connected(studio);
-  await pick(studio, 1);
-  await screen.findByRole("checkbox", { name: /bio/ });
-  const questions = step("Write the questions");
-  const name = within(questions).getByRole("textbox", { name: "Name, the column's name" });
-  await studio.user.clear(name);
-  await studio.user.type(name, "is_fake");
-  await studio.user.type(
-    within(questions).getByRole("textbox", { name: "Question" }),
-    "Is this seller a fake account?",
-  );
 }
 
 describe("Add a source", () => {

@@ -199,7 +199,7 @@ describe("the sources that do not run the file as last loaded", () => {
         source: "refunds",
         outcome: "not-started",
         message:
-          "new in facetdb.config.ts and not answered yet: run facetdb migrate to install it, then restart facetdb worker.",
+          "new in facetdb.config.ts and not answered yet: its install cannot be checked from here (the worker's checks of PostgreSQL cannot tell whether the worker login may write them), so it waits for a restart. Run facetdb migrate --source refunds if the install did not finish, then restart facetdb worker.",
         migrate: true,
         added: [],
         removed: [],

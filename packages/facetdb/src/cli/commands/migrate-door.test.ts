@@ -556,6 +556,8 @@ describe("the reload after the door's run", () => {
     expect(installVerdict("Postgres", missing, true)).toEqual({
       kind: "missing",
       missing: "public.listings lacks the column is_vehicle",
+      // The run stood in for the rights, and this reading used it up.
+      rightsRead: false,
     });
     expect(installVerdict("Postgres", [], true)).toMatchObject({ kind: "cannot-tell" });
   });

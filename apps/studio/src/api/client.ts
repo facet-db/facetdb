@@ -671,7 +671,15 @@ const reloadSchema = z.discriminatedUnion("loaded", [
     sources: z.array(
       z.object({
         source: z.string(),
-        outcome: z.enum(["unchanged", "restarted", "stopped", "not-started", "kept", "failed"]),
+        outcome: z.enum([
+          "unchanged",
+          "restarted",
+          "stopped",
+          "started",
+          "not-started",
+          "kept",
+          "failed",
+        ]),
         version: z.number().int().nullable(),
         message: z.string().nullable(),
       }),
@@ -780,13 +788,23 @@ const setupPlanSchema = z.object({
 });
 export type SetupPlan = z.infer<typeof setupPlanSchema>;
 
-/** `POST /v1/sources/install`: installed, the file written, and what the operator runs next. */
+/**
+ * Whether the worker answers the new source now: the reload after the install started it, under
+ * this version; or it did not, with the reload's own why and how to restart the worker.
+ */
+const setupWorkerSchema = z.discriminatedUnion("running", [
+  z.object({ running: z.literal(true), version: z.number().int(), words: z.string() }),
+  z.object({ running: z.literal(false), why: z.string(), restart: z.string() }),
+]);
+export type SetupWorker = z.infer<typeof setupWorkerSchema>;
+
+/** `POST /v1/sources/install`: installed, the file written, whether it runs, and the backfill. */
 const setupInstalledSchema = z.object({
   installed: z.literal(true),
   table: z.string(),
   path: z.string(),
   reload: reloadSchema,
-  restart: z.string(),
+  worker: setupWorkerSchema,
   backfill: z.string(),
 });
 export type SetupInstalled = z.infer<typeof setupInstalledSchema>;

@@ -79,7 +79,7 @@ const unknownSource = (name: string) =>
     404,
     "unknown_source",
     `This worker runs no source called "${name}", so it has nothing to backfill.`,
-    "Backfill a source listed by GET /v1/sources; a source added to facetdb.config.ts runs once facetdb worker restarts.",
+    "Backfill a source listed by GET /v1/sources; a source added to facetdb.config.ts is listed once the worker has started it (the setup flow installs and starts it) or after a restart.",
   );
 
 const quoted = (names: readonly string[]) => names.map((name) => `"${name}"`).join(", ");
