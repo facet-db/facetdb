@@ -8,6 +8,7 @@ import {
   type Plugin,
   PluginError,
   type PluginIssue,
+  packageNames,
   shortName,
 } from "./define.ts";
 import { satisfies } from "./semver.ts";
@@ -41,7 +42,7 @@ export async function loadPlugin(spec: string, options: LoadPluginOptions): Prom
       },
     ]);
   }
-  const candidates = spec === short ? [`@facetdb/${short}`, `facetdb-plugin-${short}`] : [spec];
+  const candidates = spec === short ? packageNames(short) : [spec];
 
   let loaded: { readonly specifier: string; readonly module: unknown } | undefined;
   for (const specifier of candidates) {

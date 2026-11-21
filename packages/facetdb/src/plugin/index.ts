@@ -29,6 +29,10 @@ export type {
 export { action, channel, pack, provider, source } from "./kinds.ts";
 export type { LoadPluginOptions } from "./load.ts";
 export { loadPlugin } from "./load.ts";
+// The reader's side of the registry; the generator's functions stay in registry.ts for
+// registry-build.ts and the tests.
+export type { RegistryIndex, RegistryListing } from "./registry.ts";
+export { RegistryError, readRegistryIndex } from "./registry.ts";
 export { satisfies } from "./semver.ts";
 export type { Infer } from "./zod.ts";
 export { z } from "./zod.ts";

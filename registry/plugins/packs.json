@@ -1,0 +1,8 @@
+{
+  "name": "packs",
+  "package": "@facetdb/packs",
+  "description": "The marketplace trust and safety question pack: scams, banned items, payment outside the platform and counterfeits.",
+  "kinds": ["pack"],
+  "facetdb": ">=0.0.0 <1.0.0",
+  "verified": true
+}

@@ -1,0 +1,8 @@
+{
+  "name": "email",
+  "package": "@facetdb/email",
+  "description": "Send system alerts and record notifications by email.",
+  "kinds": ["channel"],
+  "facetdb": ">=0.0.0 <1.0.0",
+  "verified": true
+}

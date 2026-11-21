@@ -1,0 +1,51 @@
+{
+  "format": 1,
+  "generatedAt": "2026-11-13T07:21:16.151Z",
+  "plugins": [
+    {
+      "name": "email",
+      "package": "@facetdb/email",
+      "description": "Send system alerts and record notifications by email.",
+      "kinds": ["channel"],
+      "facetdb": ">=0.0.0 <1.0.0",
+      "verified": true,
+      "downloads": 0
+    },
+    {
+      "name": "github",
+      "package": "@facetdb/github",
+      "description": "Read GitHub issues and pull requests as records, then label, comment or assign from the decisions. Includes the issue triage pack.",
+      "kinds": ["action", "pack", "source"],
+      "facetdb": ">=0.0.0 <1.0.0",
+      "verified": true,
+      "downloads": 0
+    },
+    {
+      "name": "packs",
+      "package": "@facetdb/packs",
+      "description": "The marketplace trust and safety question pack: scams, banned items, payment outside the platform and counterfeits.",
+      "kinds": ["pack"],
+      "facetdb": ">=0.0.0 <1.0.0",
+      "verified": true,
+      "downloads": 0
+    },
+    {
+      "name": "slack",
+      "package": "@facetdb/slack",
+      "description": "Send system alerts and record notifications to a Slack channel.",
+      "kinds": ["channel"],
+      "facetdb": ">=0.0.0 <1.0.0",
+      "verified": true,
+      "downloads": 0
+    },
+    {
+      "name": "telegram",
+      "package": "@facetdb/telegram",
+      "description": "Send system alerts and record notifications to a Telegram chat.",
+      "kinds": ["channel"],
+      "facetdb": ">=0.0.0 <1.0.0",
+      "verified": true,
+      "downloads": 0
+    }
+  ]
+}

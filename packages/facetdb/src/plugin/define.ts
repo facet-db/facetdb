@@ -69,6 +69,11 @@ const SHORT_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const ENTRY_NAME = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
 const PACKAGE_PREFIXES = ["@facetdb/", "facetdb-plugin-"] as const;
 
+/** The packages a short name may live in, in the order the loader tries them: `@facetdb/github`, then `facetdb-plugin-github`. */
+export function packageNames(short: string): readonly string[] {
+  return PACKAGE_PREFIXES.map((prefix) => `${prefix}${short}`);
+}
+
 /** `@facetdb/github` and `facetdb-plugin-github` are both `github`; a bare `github` is itself. */
 export function shortName(name: string): string | undefined {
   const prefix = PACKAGE_PREFIXES.find((p) => name.startsWith(p));

@@ -12,6 +12,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "registry:build": "node --disable-warning=ExperimentalWarning src/plugin/registry-build.ts",
     "test": "vitest run",
     "test:db": "vitest run --config vitest.db.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts"

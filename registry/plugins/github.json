@@ -1,0 +1,8 @@
+{
+  "name": "github",
+  "package": "@facetdb/github",
+  "description": "Read GitHub issues and pull requests as records, then label, comment or assign from the decisions. Includes the issue triage pack.",
+  "kinds": ["source", "action", "pack"],
+  "facetdb": ">=0.0.0 <1.0.0",
+  "verified": true
+}
