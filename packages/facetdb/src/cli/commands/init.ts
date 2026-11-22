@@ -7,7 +7,7 @@ import {
   readsUrl,
   schemeOf,
 } from "../engines.ts";
-import { EXAMPLE_ENGINES, EXAMPLES } from "../examples.ts";
+import { EXAMPLE_ENGINES, EXAMPLES, PLUGIN_EXAMPLES, type PluginExample } from "../examples.ts";
 import {
   type CliDeps,
   CliError,
@@ -34,8 +34,9 @@ import {
  * source's is `DATABASE_URL`, the store's too; any other source's has a variable of its own, and
  * init asks for the store's Postgres, saying why. Its scheme names the engine, which init says, and
  * then it asks what that engine needs, one question each (`init-engines.ts`). `--example listings
- * --engine <name>` copies the listings example for that engine instead. `--dry-run` prints the file
- * and writes nothing.
+ * --engine <name>` copies the listings example for that engine instead; `--example github-triage`,
+ * the GitHub triage, which has no engine to pick, and names the plugins its config imports.
+ * `--dry-run` prints the file and writes nothing.
  */
 
 type InitOptions = {
@@ -317,9 +318,145 @@ function storageFor(
   };
 }
 
-/** `--example listings --engine <name>`: the example's files, copied into the project. */
+type ExampleOptions = InitOptions & { readonly dryRun: boolean };
+
+/** The flags a finished project would ignore: refused, as each would change nothing. */
+function refuseTableFlags(options: ExampleOptions, rerun: string): void {
+  const asked = [
+    options.databaseUrl === undefined ? undefined : "--database-url",
+    options.storeUrl === undefined ? undefined : "--store-url",
+    options.table === undefined ? undefined : "--table",
+    options.triggers === undefined ? undefined : "--triggers",
+  ].filter((flag) => flag !== undefined);
+  if (asked.length > 0) {
+    throw new CliError(
+      "init-example",
+      `--example copies a finished project, so ${asked.join(", ")} would change nothing`,
+      `run ${rerun} alone, or leave out --example to write a config for your own table`,
+      EXIT_USAGE,
+    );
+  }
+}
+
+/** Paths as a sentence names them: "a", "a and b", "a, b and c". */
+function spoken(paths: readonly string[]): string {
+  return paths.length <= 1
+    ? (paths[0] ?? "")
+    : `${paths.slice(0, -1).join(", ")} and ${paths.at(-1) as string}`;
+}
+
+/**
+ * The files of the example in `directory` as they land in the project: the config where --config
+ * says and first, every other file beside it under its own name. When any is there already and
+ * --force is not given, refused naming every one of them, so --force never replaces a file the
+ * refusal did not name; with --force, the run says which it replaced. With `--dry-run` printed
+ * under `heading`, else written.
+ */
+async function placeExample(
+  directory: string,
+  heading: string,
+  rerun: string,
+  options: ExampleOptions,
+  deps: CliDeps,
+  print: (text: string) => void,
+): Promise<readonly string[]> {
+  const files = await deps.examples.read(directory);
+  const config = files.find((file) => file.path === "facetdb.config.ts");
+  if (config === undefined) {
+    throw new CliError(
+      "init-example",
+      `the facetdb package has no ${directory} example here`,
+      "reinstall facetdb with its examples (npm install facetdb), then run facetdb init --example again",
+    );
+  }
+  const copies = [config, ...files.filter((file) => file !== config)].map((file) => ({
+    path: file === config ? options.config : file.path,
+    text: file.text,
+  }));
+  const there: string[] = [];
+  for (const copy of copies) {
+    if (await deps.workspace.exists(copy.path)) {
+      there.push(copy.path);
+    }
+  }
+  const replaced = spoken(there);
+  if (there.length > 0 && !options.force) {
+    throw new CliError(
+      "init-config-exists",
+      `${replaced} already ${there.length === 1 ? "exists" : "exist"}, and init does not replace a file you may have edited`,
+      `move ${there.length === 1 ? "it" : "them"} away, or run ${rerun} --force to replace ${replaced} with the example's`,
+    );
+  }
+  const listed = copies.map((copy) => copy.path).join(", ");
+  if (options.dryRun) {
+    const replacing = there.length === 0 ? "" : `; --force would replace ${replaced}`;
+    print(`-- ${heading} (dry run: nothing is written${replacing}): ${listed}`);
+    print(config.text);
+  } else {
+    for (const copy of copies) {
+      await deps.workspace.write(copy.path, copy.text, { overwrite: options.force });
+    }
+    print(`Copied ${heading}: ${listed}.`);
+    if (there.length > 0) {
+      print(`Replaced ${replaced} with the example's (--force).`);
+    }
+  }
+  return copies.map((copy) => copy.path);
+}
+
+/**
+ * `--example github-triage`: an example with no engine variant, whose records are a plugin source's
+ * in the store; copied whole, then the plugins its config imports are named, since the file loads
+ * only once they are added.
+ */
+async function copyPluginExample(
+  example: PluginExample,
+  options: ExampleOptions,
+  deps: CliDeps,
+  print: (text: string) => void,
+): Promise<unknown> {
+  const rerun = `facetdb init --example ${example.name}`;
+  if (options.engine !== undefined) {
+    throw new CliError(
+      "init-engine",
+      `the ${example.name} example has no database to pick: its records are read by a plugin and kept in the FacetDB store`,
+      `run ${rerun} without --engine`,
+      EXIT_USAGE,
+    );
+  }
+  refuseTableFlags(options, rerun);
+  const files = await placeExample(
+    example.name,
+    `the ${example.name} example`,
+    rerun,
+    options,
+    deps,
+    print,
+  );
+  const packages = example.plugins.map((plugin) => plugin.package);
+  if (!options.dryRun) {
+    const add = example.plugins.map((plugin) => `facetdb add ${plugin.name}`);
+    print(
+      [
+        "Next:",
+        `  1. Add the plugins its config imports: ${add.join(" and ")} (the packages ${packages.join(" and ")}).`,
+        `  2. Follow ${example.steps} from its step 2: your repository in the config, the variables it names, then the worker and its webhook.`,
+      ].join("\n"),
+    );
+  }
+  return {
+    ok: true,
+    dryRun: options.dryRun,
+    example: example.name,
+    created: !options.dryRun,
+    files,
+    packages,
+  };
+}
+
+/** `--example listings --engine <name>`, or an example with no engine: its files, copied into the project. */
 async function copyExample(
-  options: InitOptions & { readonly dryRun: boolean },
+  options: ExampleOptions,
   deps: CliDeps,
   print: (text: string) => void,
 ): Promise<unknown> {
@@ -332,6 +469,10 @@ async function copyExample(
       EXIT_USAGE,
     );
   }
+  const plugged = PLUGIN_EXAMPLES.find((one) => one.name === example);
+  if (plugged !== undefined) {
+    return copyPluginExample(plugged, options, deps, print);
+  }
   const wanted = (options.engine ?? "postgres").trim().toLowerCase();
   const engine = EXAMPLE_ENGINES.find((one) => one.name === wanted);
   const names = EXAMPLE_ENGINES.map((one) => one.name).join(", ");
@@ -343,60 +484,23 @@ async function copyExample(
       EXIT_USAGE,
     );
   }
-  const asked = [
-    options.databaseUrl === undefined ? undefined : "--database-url",
-    options.storeUrl === undefined ? undefined : "--store-url",
-    options.table === undefined ? undefined : "--table",
-    options.triggers === undefined ? undefined : "--triggers",
-  ].filter((flag) => flag !== undefined);
-  if (asked.length > 0) {
-    throw new CliError(
-      "init-example",
-      `--example copies a finished project, so ${asked.join(", ")} would change nothing`,
-      `run facetdb init --example ${example} --engine ${engine.name} alone, or leave out --example to write a config for your own table`,
-      EXIT_USAGE,
-    );
-  }
-  const directory = `${example}-${engine.name}`;
-  const files = await deps.examples.read(directory);
-  const config = files.find((file) => file.path === "facetdb.config.ts");
-  if (config === undefined) {
-    throw new CliError(
-      "init-example",
-      `the facetdb package has no ${directory} example here`,
-      "reinstall facetdb with its examples (npm install facetdb), then run facetdb init --example again",
-    );
-  }
+  const rerun = `facetdb init --example ${example} --engine ${engine.name}`;
+  refuseTableFlags(options, rerun);
   // The config goes where --config says; the seeds beside it, under their own names.
-  const copies = files.map((file) => ({
-    path: file === config ? options.config : file.path,
-    text: file.text,
-  }));
-  if (!options.force) {
-    for (const copy of copies) {
-      if (await deps.workspace.exists(copy.path)) {
-        throw new CliError(
-          "init-config-exists",
-          `${copy.path} already exists, and init does not replace a file you may have edited`,
-          `move ${copy.path} away, or run facetdb init --example ${example} --engine ${engine.name} --force to replace it with the example's`,
-        );
-      }
-    }
-  }
-  const listed = copies.map((copy) => copy.path).join(", ");
-  if (options.dryRun) {
-    print(`-- the ${example} example for ${engine.label} (dry run: nothing is written): ${listed}`);
-    print(config.text);
-  } else {
-    for (const copy of copies) {
-      await deps.workspace.write(copy.path, copy.text, { overwrite: options.force });
-    }
-    print(`Copied the ${example} example for ${engine.label}: ${listed}.`);
-    const seed = copies.find((copy) => copy.path.startsWith("seed.")) ?? { path: "seed.sql" };
+  const files = await placeExample(
+    `${example}-${engine.name}`,
+    `the ${example} example for ${engine.label}`,
+    rerun,
+    options,
+    deps,
+    print,
+  );
+  if (!options.dryRun) {
+    const seed = files.find((path) => path.startsWith("seed.")) ?? "seed.sql";
     print(
       [
         "Next:",
-        `  1. Make the table and its 2,000 sample rows (seed-quick has 100) with the admin login: ${engine.seed.replace("seed.sql", seed.path)}`,
+        `  1. Make the table and its 2,000 sample rows (seed-quick has 100) with the admin login: ${engine.seed.replace("seed.sql", seed)}`,
         engine.variable === STORE_VARIABLE
           ? `  2. Set DATABASE_URL to ${engine.workerUrl}; facetdb migrate creates that login with that password.`
           : `  2. Set ${engine.variable} to ${engine.workerUrl}, and DATABASE_URL to the store's Postgres: ${STORE_WHY}`,
@@ -411,7 +515,7 @@ async function copyExample(
     example,
     engine: engine.name,
     created: !options.dryRun,
-    files: copies.map((copy) => copy.path),
+    files,
     variable: engine.variable,
   };
 }
@@ -446,13 +550,17 @@ export const initCommand = defineCommand<InitOptions>("init", {
     },
     {
       flags: "--example <name>",
-      description: "copy an example project instead of writing a config: listings",
+      description: `copy an example project instead of writing a config: ${EXAMPLES.join(" or ")}`,
     },
     {
       flags: "--engine <name>",
-      description: `with --example, the database the example is for: ${EXAMPLE_ENGINES.map((one) => one.name).join(", ")}`,
+      description: `with --example listings, the database the example is for: ${EXAMPLE_ENGINES.map((one) => one.name).join(", ")}`,
     },
-    { flags: "--force", description: "replace the config file when it already exists" },
+    {
+      flags: "--force",
+      description:
+        "replace the config file when it already exists; with --example, every file the example writes that is already there (without --force, init refuses and names each one)",
+    },
   ],
   run: async ({ options, deps, print }) => {
     if (!insideProject(options.config)) {

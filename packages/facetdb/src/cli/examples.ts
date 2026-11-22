@@ -7,7 +7,8 @@ import type { ExampleFile, ExampleShelf } from "./program.ts";
  * listings with its two questions, one directory per engine under
  * `packages/facetdb/examples/listings-<engine>/`, each a config, a seed of 2,000 rows and a quick
  * seed of 100 in the engine's own language. `listings-market` is the Supabase example and stays as
- * it is.
+ * it is. `facetdb init --example github-triage` copies the GitHub triage, which has no engine
+ * variant: `examples/github-triage/`.
  */
 
 /** An engine the listings example exists for, and the words init prints after copying it. */
@@ -101,8 +102,43 @@ export const EXAMPLE_ENGINES: readonly ExampleEngine[] = [
   },
 ];
 
+/** A plugin an example's config imports: the name `facetdb add` takes, and its package. */
+export type ExamplePlugin = { readonly name: string; readonly package: string };
+
+/**
+ * An example with no engine variant: its records are a plugin source's, kept in the store, so there
+ * is no database to pick; one directory, `examples/<name>/`, a config and the steps to run it. Its
+ * config imports plugins the project must add.
+ */
+export type PluginExample = {
+  /** What `--example` takes, and the directory's name. */
+  readonly name: string;
+  /**
+   * The file of the steps, copied beside the config under this name: `facetdb-<name>.md`, never a
+   * README.md, since the example is run inside a repository that has its own.
+   */
+  readonly steps: string;
+  /** The plugins its config imports, in the order init names them. */
+  readonly plugins: readonly ExamplePlugin[];
+};
+
+/** The examples with no engine variant: the GitHub triage. */
+export const PLUGIN_EXAMPLES: readonly PluginExample[] = [
+  {
+    name: "github-triage",
+    steps: "facetdb-github-triage.md",
+    plugins: [
+      { name: "github", package: "@facetdb/github" },
+      { name: "slack", package: "@facetdb/slack" },
+    ],
+  },
+];
+
 /** The examples the package ships: what `--example` takes. */
-export const EXAMPLES: readonly string[] = ["listings"];
+export const EXAMPLES: readonly string[] = [
+  "listings",
+  ...PLUGIN_EXAMPLES.map((example) => example.name),
+];
 
 /** The package's own `examples/` directory, next to `src/`. */
 const EXAMPLES_DIR = fileURLToPath(new URL("../../examples/", import.meta.url));
