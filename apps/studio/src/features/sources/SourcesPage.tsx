@@ -15,11 +15,12 @@ import { aboutRows } from "./rows.ts";
  * The Sources page: a ruled row per source, its connector as the tag, how a change reaches the
  * worker and when it last saw one, where its answers live, its backfill as a strip with its words,
  * and the worker login's reach in words, all as `GET /v1/sources` says them; the page computes
- * nothing. A table source's backfill line is also where one is estimated, started, stopped and
- * resumed (BackfillControls). A source the config names that the worker does not run yet (added to
- * the file and not started) is a row of its own that says why in the reload's own words, with the
- * steps: the Questions page's block, so the two pages never disagree. "Add a source" is the page's
- * one primary action.
+ * nothing. A table or plugin source's backfill line is also where one is estimated, started,
+ * stopped and resumed (BackfillControls); an API source's says in words that its records arrive one
+ * by one. A source the config names that the worker does not run yet (added to the file and not
+ * started) is a row of its own that says why in the reload's own words, with the steps: the
+ * Questions page's block, so the two pages never disagree. "Add a source" is the page's one primary
+ * action.
  */
 
 /** The install line under the worker login, as a status word and its square. */
@@ -62,12 +63,14 @@ function Row({ source }: { readonly source: SourceRow }) {
           )}
         </Line>
         <Line label="Backfill">
-          {source.kind !== "table" ? (
-            // Records arrive one by one through the check API, and a plugin source's backfill is
-            // not offered here yet: the words say where it stands.
+          {source.kind === "api" ? (
+            // Records arrive one by one through the check API: nothing to page through, and the
+            // words say so.
             <span className="text-text-2">{backfill.words}</span>
           ) : (
-            <BackfillControls source={source.name} known={backfill} />
+            // A table pages through its rows, a plugin source through its plugin's scan: the same
+            // controls over the same endpoints.
+            <BackfillControls source={source.name} pages={source.kind} known={backfill} />
           )}
         </Line>
         {source.login === null ? null : (
@@ -157,7 +160,7 @@ export function SourcesPage() {
   const head = (
     <PageHead
       title="Sources"
-      lede="Each table FacetDB watches, how it notices a change, and what its login may touch."
+      lede="Each source FacetDB answers questions about, how its records arrive, and what a table's login may touch."
     >
       <Link to="/sources/new" className={buttonClasses()} data-variant="primary" data-size="medium">
         Add a source
@@ -199,7 +202,8 @@ export function SourcesPage() {
             </Link>
           }
         >
-          A source is a table FacetDB answers questions about: add one, and the rows fill in.
+          A source is the records FacetDB answers questions about, from a table, a plugin or your
+          own code: add one, and the answers fill in.
         </EmptyState>
       </>
     );

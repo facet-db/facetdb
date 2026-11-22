@@ -16,17 +16,19 @@ import { countWords, dollarWords, plural } from "../questions/index.ts";
 import { BACKFILL_REFRESH_MS, type BackfillRead, backfillKey, backfillQuery } from "./queries.ts";
 
 /**
- * A table source's backfill from the page: a job inside the worker, driven from the source's row on
- * the Sources page and from an added question's install. The state in words, then the two steps:
- * "Answer existing records" asks the worker to count and price the records (nothing is asked of the
- * model), and Start, enabled only once that estimate is on the page, sends the token the estimate
- * gave, so no backfill starts from a page that has not shown its cost. While it runs the progress
- * is a strip with its words and Stop ends it after the page in hand; stopped, paused at the
- * spending cap or failed, the worker's why stands with what to do, and Resume asks for a new
- * estimate from the last finished page. While a job lives the state is asked again on the studio's
- * scheduler; a refresh that fails leaves what is shown, said as the last known with the time of the
- * last read that landed, and the next tick asks again all the same; a first read that fails is said
- * in words with what to do and asked again too.
+ * A source's backfill from the page: a job inside the worker, driven from the source's row on the
+ * Sources page and from an added question's install. A table source pages through its rows; a
+ * plugin source through its plugin's scan, through the same endpoints and in the same steps, its
+ * estimate saying it paged the plugin. The state in words, then the two steps: "Answer existing
+ * records" asks the worker to count and price the records (nothing is asked of the model), and
+ * Start, enabled only once that estimate is on the page, sends the token the estimate gave, so no
+ * backfill starts from a page that has not shown its cost. While it runs the progress is a strip
+ * with its words and Stop ends it after the page in hand; stopped, paused at the spending cap or
+ * failed, the worker's why stands with what to do, and Resume asks for a new estimate from the last
+ * finished page. While a job lives the state is asked again on the studio's scheduler; a refresh
+ * that fails leaves what is shown, said as the last known with the time of the last read that
+ * landed, and the next tick asks again all the same; a first read that fails is said in words with
+ * what to do and asked again too.
  *
  * The space is reserved: the strip's box, the words' lines, the actions and the status line are
  * there in every state, so the row does not jump as the state changes.
@@ -69,10 +71,24 @@ function durationWords(records: number, pace: number): string {
   return `about ${plural(hours < 10 ? Math.round(hours * 2) / 2 : Math.round(hours), "hour", "hours")}`;
 }
 
+/** What a backfill pages through: the source's table, or a plugin source's own scan. */
+type BackfillPages = "table" | "plugin";
+
+/**
+ * How a plugin source's estimate was counted, after its figures: the count paged once through the
+ * plugin's scan and the run pages through it again, so the plugin's API is called twice for every
+ * page, which a large source feels; said before Start, as facetdb backfill says it before its yes.
+ * Said at no records too: core's backfill runs at zero all the same, and a source whose records are
+ * all left out (answered, or outside a filter) can still be many pages.
+ */
+const PLUGIN_PAGED =
+  "Counted by paging through the plugin. Start pages through it again, so the plugin's API is called twice for every page: once for this count, once for the run.";
+
 /** The estimate in the page's words: how many records, what it costs, at what pace, how long. */
 function estimateWords(
   status: BackfillStatus,
   spending: Home["spending"] | undefined,
+  pages: BackfillPages,
 ): string | null {
   const { estimate, pace, questions } = status;
   if (estimate === null) {
@@ -80,7 +96,10 @@ function estimateWords(
   }
   const what = questions === null ? "" : ` for ${listWords(questions)}`;
   if (estimate.records === 0) {
-    return `Estimated${what}: no records to answer from here, so starting it asks nothing.`;
+    // A table's run reads rows and asks no one; a plugin's asks the model nothing, and its API again.
+    return pages === "plugin"
+      ? `Estimated${what}: no records to answer from here, so starting it asks the model nothing. ${PLUGIN_PAGED}`
+      : `Estimated${what}: no records to answer from here, so starting it asks nothing.`;
   }
   const time =
     pace === null
@@ -99,7 +118,9 @@ function estimateWords(
     cap !== null && left !== null && estimate.tokens > left
       ? ` That is more than what is left this month under the cap the worker runs with (${compactTokens(left)} input tokens), so ${cap.onCapReached === "pause" ? "the answering pauses at the cap, part way" : "it goes past the cap, as the worker was started to do"}.`
       : "";
-  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${compactTokens(estimate.tokens)} input tokens)${time}.${beyond}`;
+  // After the cap's sentence, whose "That" is the estimate's figures.
+  const plugin = pages === "plugin" ? ` ${PLUGIN_PAGED}` : "";
+  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${compactTokens(estimate.tokens)} input tokens)${time}.${beyond}${plugin}`;
 }
 
 /** How far the job got, for the strip: the pages settled over the records estimated. */
@@ -189,10 +210,13 @@ function refusalWords(error: unknown): string {
 
 export function BackfillControls({
   source,
+  pages = "table",
   questions,
   known,
 }: {
   readonly source: string;
+  /** What the backfill pages through: a plugin source's scan, whose estimate says so; absent, a table. */
+  readonly pages?: BackfillPages;
   /** The added questions to ask alone (an install's offer); absent, the whole question set. */
   readonly questions?: readonly string[];
   /** What GET /v1/sources says of the source's backfill from its cursor: the words while no job lives. */
@@ -282,7 +306,7 @@ export function BackfillControls({
       : job.state === "idle"
         ? (known?.words ?? job.words)
         : job.state === "waiting"
-          ? (estimateWords(job, home.data?.spending) ?? job.words)
+          ? (estimateWords(job, home.data?.spending, pages) ?? job.words)
           : job.words;
   // A job of some questions asks the model itself and pauses on its own, so the note is the
   // whole set's alone, on the row and in the job it shows.

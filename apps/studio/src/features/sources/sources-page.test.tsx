@@ -98,6 +98,33 @@ describe("a source the file names that the worker does not run", () => {
   });
 });
 
+describe("the page's words", () => {
+  it("names any source in its subtitle, not only a table", async () => {
+    renderStudio({ path: "/sources" });
+
+    expect(
+      await screen.findByText(
+        "Each source FacetDB answers questions about, how its records arrive, and what a table's login may touch.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("says what a source is in the empty state, whatever its records come from", async () => {
+    const api = fakeApi({
+      sources: () => Promise.resolve([]),
+      projectConfig: () => Promise.resolve({ ...SAMPLE_PROJECT_CONFIG, sources: [], pending: [] }),
+    });
+    renderStudio({ path: "/sources", api });
+
+    expect(await screen.findByRole("heading", { name: "No source yet" })).toBeVisible();
+    expect(
+      screen.getByText(
+        "A source is the records FacetDB answers questions about, from a table, a plugin or your own code: add one, and the answers fill in.",
+      ),
+    ).toBeVisible();
+  });
+});
+
 describe("a source's size", () => {
   it("is the database's estimate beside its answers, rounded, and nothing where there is none", async () => {
     renderStudio({ path: "/sources" });
