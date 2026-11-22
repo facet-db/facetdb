@@ -26,6 +26,7 @@ import { pack } from "facetdb/plugin";
 export const marketplace = pack({
   description:
     "Marketplace trust and safety: four yes-or-no questions on a listing's text, read from `title` and `description` (no images). They ask whether the listing is a scam, written to take a buyer's money or details without a real sale, whether it offers something of a kind general marketplaces commonly ban, whether it asks buyers to contact or pay the seller outside the marketplace, and whether the seller calls the item a counterfeit or replica of a branded product. The banned list is written into the banned_item question's criteria, and it is the first thing a project edits to match its own rules. Each question's thresholds follow from its stakes and the pack sets none of its own: high stakes decide yes at 0.90 or above and no at 0.10 or below, low stakes at 0.70 and 0.30, and everything between goes to review. An answer that hides a listing is high stakes: the scam, banned_item and counterfeit questions keep the high-stakes review band, a fixed rule (a blocked-word list, a price floor) belongs beside the model, and a project that hides listings on the off_platform answer sets its stakes to high.",
+  reads: ["title", "description"],
   questions: {
     scam: noul(
       "Is the listing in `title` and `description` written to take a buyer's money or personal details without a real sale behind it?",

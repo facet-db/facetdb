@@ -49,6 +49,7 @@ const github = definePlugin({
   packs: {
     triage: pack({
       description: "Sort new issues into bugs and requests.",
+      reads: ["title", "body"],
       questions: {
         is_bug: noul("Does the issue report a bug?", {
           stakes: "high",
@@ -290,7 +291,7 @@ describe("the installed plugins", () => {
 });
 
 describe("the packs", () => {
-  it("lists each pack of each hosted plugin, its questions keyed by name and its thresholds apart", async () => {
+  it("lists each pack of each hosted plugin, its questions keyed by name, its thresholds apart and the fields it reads", async () => {
     const { door } = await doorWith(NO_NETWORK);
 
     expect(door.packs()).toEqual([
@@ -299,6 +300,7 @@ describe("the packs", () => {
         package: "@facetdb/github",
         name: "triage",
         description: "Sort new issues into bugs and requests.",
+        reads: ["title", "body"],
         questions: {
           is_bug: { type: "noul", instructions: "Does the issue report a bug?", stakes: "high" },
           is_request: {
@@ -314,6 +316,8 @@ describe("the packs", () => {
         package: "@facetdb/github",
         name: "plain",
         description: null,
+        // A pack that does not say what it reads: null, never a guess.
+        reads: null,
         questions: { is_spam: { type: "noul", instructions: "Is it spam?", stakes: "low" } },
         thresholds: {},
       },

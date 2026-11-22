@@ -15,6 +15,14 @@ export function projectConfigQuery(api: ApiClient) {
   return queryOptions({ queryKey: CONFIG_KEY, queryFn: () => api.projectConfig() });
 }
 
+/**
+ * The packs of the plugins the worker hosts: read when "Start from a pack" opens, and again at each
+ * opening, the last list shown meanwhile. Reading them is free and writes nothing.
+ */
+export function packsQuery(api: ApiClient) {
+  return queryOptions({ queryKey: ["packs"], queryFn: () => api.packs() });
+}
+
 /** `draft` is undefined while a name or a pair of cut lines cannot be sent: nothing is asked then. */
 export function validationQuery(api: ApiClient, key: string, draft: SourceDraft | undefined) {
   return queryOptions({

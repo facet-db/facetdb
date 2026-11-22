@@ -11,6 +11,7 @@ import {
   definePlugin,
   type Infer,
   loadPlugin,
+  type PackDefinition,
   type Plugin,
   type PluginContext,
   PluginError,
@@ -456,6 +457,39 @@ describe("definePlugin", () => {
     expect(issues).toEqual([
       { field: "packs.support", message: expect.stringContaining("facetdb_x") },
     ]);
+  });
+
+  it("keeps the fields a pack says it reads, and refuses a list that is not one of names, each once", () => {
+    const question = { urgent: noul("Is it urgent?") };
+    const plugin = (reads: unknown) =>
+      definePlugin({
+        name: "triage",
+        version: "1.0.0",
+        facetdb: "^0.0.0",
+        config: z.object({}),
+        // The boundary is what is checked, so a pack is forged past its types here.
+        packs: { support: { ...pack({ questions: question }), reads } as PackDefinition },
+      });
+
+    expect(pack({ reads: ["subject", "body"], questions: question }).reads).toEqual([
+      "subject",
+      "body",
+    ]);
+    expect(pack({ questions: question })).not.toHaveProperty("reads");
+    expect(plugin(["subject", "body"]).packs["support"]?.reads).toEqual(["subject", "body"]);
+    expect(plugin(undefined).packs["support"]?.reads).toBeUndefined();
+
+    for (const [reads, words] of [
+      ["subject", /must list the state fields the questions read by name/],
+      [["subject", 3], /must list the state fields the questions read by name/],
+      [["subject", " "], /must list the state fields the questions read by name/],
+      [[], /names no field/],
+      [["body", "subject", "body"], /names "body" more than once/],
+    ] as const) {
+      expect(catchIssues(() => plugin(reads))).toEqual([
+        { field: "packs.support.reads", message: expect.stringMatching(words) },
+      ]);
+    }
   });
 });
 

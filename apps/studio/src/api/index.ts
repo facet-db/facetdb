@@ -37,6 +37,7 @@ export type {
   Project,
   ProjectConfig,
   QuestionJson,
+  QuestionPack,
   ReviewCard,
   ReviewCardId,
   ReviewDecided,

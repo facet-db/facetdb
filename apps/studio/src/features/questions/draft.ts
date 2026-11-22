@@ -86,6 +86,18 @@ function questionForm(
   }
 }
 
+/**
+ * A question written elsewhere and added to the draft (a pack's): an ordinary new question from
+ * then on, its name and kind the page's until Apply writes it, nothing of where it came from.
+ */
+export function addedQuestion(
+  name: string,
+  question: QuestionJson,
+  thresholds: ThresholdOverride,
+): QuestionForm {
+  return { ...questionForm(name, question, thresholds), existing: false };
+}
+
 /** The form of a source as the config holds it. */
 export function formOf(source: ConfigSource): SourceForm {
   return {

@@ -102,6 +102,7 @@ const PACK: PackView = {
   package: "@facetdb/github",
   name: "issue-triage",
   description: "Sort new issues into bugs, questions and requests.",
+  reads: ["title", "body"],
   questions: {
     is_bug: { type: "noul", instructions: "Does the issue report a bug?", stakes: "low" },
   },
@@ -317,13 +318,15 @@ describe("GET /v1/plugins/gallery", () => {
 });
 
 describe("GET /v1/packs", () => {
-  it("answers each pack of the hosted plugins with its questions and thresholds as a draft takes them", async () => {
-    const t = pluginsDoor();
+  it("answers each pack of the hosted plugins with its questions and thresholds as a draft takes them, and the fields it reads", async () => {
+    const silent: PackView = { ...PACK, name: "plain", reads: null };
+    const t = pluginsDoor({ packs: [PACK, silent] });
 
-    expect(await rig(t.door).get("/v1/packs")).toMatchObject({
-      status: 200,
-      json: { packs: [PACK] },
-    });
+    const answer = await rig(t.door).get("/v1/packs");
+
+    expect(answer.status).toBe(200);
+    // Exactly as the door gives them: a pack that does not say what it reads stays null.
+    expect(answer.json).toEqual({ packs: [PACK, silent] });
     expect(t.calls).toEqual([["packs"]]);
   });
 });

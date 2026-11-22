@@ -265,6 +265,7 @@ describe("the triage pack's questions", () => {
   it("read the four fields the issues source returns, as the description says", () => {
     const description = triage.description ?? "";
     expect([...new Set(contentNames(description))]).toEqual([...FIELDS]);
+    expect(triage.reads).toEqual([...FIELDS]);
     expect(description).toContain("low stakes");
     expect(description).toContain("nothing irreversible");
     const named = new Set<string>();

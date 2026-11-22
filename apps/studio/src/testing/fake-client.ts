@@ -15,6 +15,7 @@ import {
   type MigratePlan,
   type Project,
   type ProjectConfig,
+  type QuestionPack,
   type ReviewCard,
   type ReviewCardId,
   type ReviewerAccounts,
@@ -549,6 +550,137 @@ export const SAMPLE_PROJECT_CONFIG: ProjectConfig = {
   },
 };
 
+/**
+ * `GET /v1/packs` with both first-party packs installed: the marketplace pack of `@facetdb/packs`
+ * and GitHub's triage pack, their questions and criteria as the packs write them
+ * (plugins/packs/src/marketplace.ts, plugins/github/src/packs/triage.ts), each description cut to
+ * its first two sentences.
+ */
+export const SAMPLE_PACKS: readonly QuestionPack[] = [
+  {
+    plugin: "packs",
+    package: "@facetdb/packs",
+    name: "marketplace",
+    description:
+      "Marketplace trust and safety: four yes-or-no questions on a listing's text, read from `title` and `description` (no images). They ask whether the listing is a scam, written to take a buyer's money or details without a real sale, whether it offers something of a kind general marketplaces commonly ban, whether it asks buyers to contact or pay the seller outside the marketplace, and whether the seller calls the item a counterfeit or replica of a branded product.",
+    reads: ["title", "description"],
+    questions: {
+      scam: {
+        type: "noul",
+        instructions:
+          "Is the listing in `title` and `description` written to take a buyer's money or personal details without a real sale behind it?",
+        criteria: {
+          true: "The listing asks for money or personal details in a way that leaves the buyer unable to check the item first: payment in gift cards or crypto, an item held by an agent or a courier, or a place to rent that nobody can visit, while the seller is far away, pressure to pay a deposit at once, a request for the buyer's bank or identity details, or a price far below the item's worth explained by a story. A money transfer ahead of any viewing is a sign of a scam only together with one of these.",
+          false:
+            "The listing describes a real sale of an item the seller has: the buyer can view or collect the item and pay at that moment, or pays through the marketplace's checkout for an item described plainly at a believable price. A listing that breaks the marketplace's rules in another way, with an item that may be fake, banned or of unclear origin, is still a real sale when the buyer can check the item before paying.",
+        },
+        stakes: "high",
+      },
+      banned_item: {
+        type: "noul",
+        instructions:
+          "Does the listing in `title` and `description` offer an item or a service of a kind that general marketplaces commonly ban?",
+        criteria: {
+          true: "The listing offers something of these kinds: weapons made to injure, including firearms, air guns, crossbows, their parts and ammunition, and self-defence weapons such as stun guns and irritant sprays; explosives and fireworks; illegal drugs and the equipment for taking them; prescription medicines; alcohol; tobacco and vaping products; live animals; human remains or body parts; stolen goods; counterfeit money; passports, identity documents and official badges; hazardous chemicals; recalled products; sexual services or adult content.",
+          false:
+            "The listing offers an ordinary product or service of another kind, such as tools, kitchen knives, ordinary sports gear like a bat, a ball, a racket or a bow for target archery, toys, furniture, containers or pet supplies sold on their own, including one whose name uses a word from these kinds in an everyday sense. Being a copy or a fake of a branded product does not by itself make an item one of these kinds, and a copy of an item of these kinds, such as a fake branded vape or medicine, is still that kind.",
+        },
+        stakes: "high",
+      },
+      off_platform: {
+        type: "noul",
+        instructions:
+          "Does the listing in `title` and `description` ask buyers to take the deal off this marketplace, to contact the seller elsewhere or to pay outside the marketplace?",
+        criteria: {
+          true: "The listing gives buyers a way to reach the seller outside the marketplace, such as a phone number, an email address, a messaging app or a website, or asks for money sent to the seller by a route other than the marketplace's checkout, such as a bank transfer, a payment app, gift cards or crypto, or offers better terms, such as a lower price, for settling the deal outside the marketplace.",
+          false:
+            "The listing keeps the conversation in the marketplace's messages, and the money goes through the marketplace's checkout, on its website or in its own app, or changes hands in person at collection.",
+        },
+        stakes: "low",
+      },
+      counterfeit: {
+        type: "noul",
+        instructions:
+          "Does the listing in `title` and `description` say, in the seller's own words, that the item is a counterfeit, a replica or a copy of a branded product?",
+        criteria: {
+          true: "The seller says the item imitates a brand's product: it is called a fake, a replica, a copy or an imitation of that brand's goods, or it carries a brand's name or logo that the brand did not put there. A copy of a brand's product that the brand did not make or license is a counterfeit whatever it is sold as, including decoration or display.",
+          false:
+            "The seller presents the item as the brand's own product or as goods the brand licensed: an official replica kit, the licensed fan version of a team's shirt, and a licensed model, toy or piece of merchandise of a branded product are genuine. The item can also be a generic product with no brand at all, or a reproduction of a historical object, an unbranded film prop or a scale model of a building.",
+        },
+        stakes: "high",
+      },
+    },
+    thresholds: {},
+  },
+  {
+    plugin: "github",
+    package: "@facetdb/github",
+    name: "triage",
+    description:
+      "GitHub issue triage for any repository: three questions about an issue or a pull request. They read the four fields the GitHub source returns: `title`, `body`, `labels` and `changed_files`, which is empty for an issue and lists a pull request's changed files.",
+    reads: ["title", "body", "labels", "changed_files"],
+    questions: {
+      kind: {
+        type: "choice",
+        instructions:
+          "What kind of issue do `title` and `body` describe? A pull request, which lists the files it changes in `changed_files`, takes the kind of the change it makes. A label in `labels` is a hint that can be wrong.",
+        options: [
+          {
+            name: "bug_report",
+            description:
+              "A bug report: someone says the software fails or gives a wrong result, such as a crash, an error message, wrong output, lost data, a failed install or something that broke in an upgrade.",
+          },
+          {
+            name: "feature_request",
+            description:
+              "A feature request: a wish for new behaviour, or for a change to behaviour that works as designed, including support for a platform, a format or an integration the project has never had.",
+          },
+          {
+            name: "usage_question",
+            description:
+              "A usage question: someone asks how to install, configure or use the software for their own case, and makes no claim that it is broken.",
+          },
+          {
+            name: "documentation_problem",
+            description:
+              "A documentation problem: the README, the guides, the reference or the examples leave something out, state something wrong, read unclearly or are out of date, and the fix belongs in that text rather than in the code.",
+          },
+          {
+            name: "something_else",
+            description:
+              "Something else about the project: upkeep such as a dependency update, a build or test pipeline change or a refactor that keeps behaviour the same; a question about releases; a discussion of the roadmap or of how the project is run; thanks or an announcement; or text that asks for nothing, such as spam or a test post.",
+          },
+        ],
+        stakes: "low",
+        storeProbabilities: false,
+      },
+      missing_reproduction: {
+        type: "noul",
+        instructions:
+          "Does the issue in `title` and `body` report a bug while leaving out what a maintainer needs to make the bug happen on their own machine?",
+        criteria: {
+          true: "The issue says something is broken but gives only the symptom: it leaves out the steps, the command, the code or the input that cause it, so a maintainer would have to ask the reporter how to see it happen.",
+          false:
+            "The issue gives the steps, the command, the code or the input that cause the bug, with the error output or the version where it helps; naming the setting or the action that causes the bug is enough. The item can also report a wish, a question, a documentation problem or project upkeep instead of a bug, or be a pull request, which lists the files it changes in `changed_files`.",
+        },
+        stakes: "low",
+      },
+      not_priority: {
+        type: "noul",
+        instructions:
+          "Would the maintainers treat the issue or pull request in `title` and `body` as low priority?",
+        criteria: {
+          true: "It is cosmetic: something looks or reads slightly off while it still works, such as a typo, a spacing or a colour; it asks for a feature, a format or a platform with no concrete use case behind it; it asks a basic question of the kind a getting-started guide covers, such as how to install the software, what it needs to run or how to change a common setting; it happens only on a setup the project does not support, such as an end-of-life runtime or a modified build; or it asks nothing of the project's software or documentation, such as a test post, spam, thanks or a question about release plans.",
+          false:
+            "It reports a fault on a supported setup that crashes, loses or corrupts data, gives wrong results, breaks a feature or blocks people from their work; it reports a security weakness; it reports or fixes documentation that would lead people to a wrong result or leaves out what they need to use a feature; it plans or tracks the maintainers' work for a coming release; it asks for a feature and names the concrete use case it serves; or a label in `labels` already marks it as urgent, a regression or a security issue.",
+        },
+        stakes: "low",
+      },
+    },
+    thresholds: { not_priority: { yesAbove: 0.8, noBelow: 0.2 } },
+  },
+];
+
 export const SAMPLE_VALIDATION: DraftValidation = { valid: true, issues: [], warnings: [] };
 
 /** A category's probabilities, its top option first in the mockup's option order. */
@@ -1070,6 +1202,7 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     spendingConfig: () => Promise.resolve(SAMPLE_SPENDING_CONFIG),
     // The Questions page's.
     projectConfig: () => Promise.resolve(SAMPLE_PROJECT_CONFIG),
+    packs: () => Promise.resolve(SAMPLE_PACKS),
     validateDraft: () => Promise.resolve(SAMPLE_VALIDATION),
     previewDraft: () => Promise.resolve(SAMPLE_PREVIEW),
     testEstimate: () => Promise.resolve(SAMPLE_TEST_ESTIMATE),
@@ -1258,6 +1391,10 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     projectConfig: () => {
       calls.push("projectConfig");
       return answer.projectConfig();
+    },
+    packs: () => {
+      calls.push("packs");
+      return answer.packs();
     },
     validateDraft: (draft) => {
       calls.push(`validateDraft ${JSON.stringify(draft)}`);

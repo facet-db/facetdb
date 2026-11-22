@@ -240,6 +240,12 @@ export function provider<Config = unknown, Settings extends ZodType = ZodType>(
 
 export type PackSpec = {
   readonly description?: string;
+  /**
+   * The state fields the questions read, by name (`["title", "body"]`): the studio's "Start from a
+   * pack" shows them beside the source's own and says which the source lacks. Optional: a pack that
+   * leaves it out is offered without that comparison.
+   */
+  readonly reads?: readonly string[];
   /** Questions by name, written with `noul`, `choice` and `score` like in a config file. */
   readonly questions: { readonly [name: string]: QuestionDraft };
 };
@@ -248,6 +254,7 @@ export type PackSpec = {
 export type PackDefinition = {
   readonly kind: "pack";
   readonly description?: string;
+  readonly reads?: readonly string[];
   readonly questions: readonly Question[];
   readonly thresholds: { readonly [question: string]: ThresholdOverride };
 };
@@ -265,6 +272,7 @@ export function pack(spec: PackSpec): PackDefinition {
   return {
     kind: "pack",
     ...(spec.description === undefined ? {} : { description: spec.description }),
+    ...(spec.reads === undefined ? {} : { reads: spec.reads }),
     questions,
     thresholds,
   };

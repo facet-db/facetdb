@@ -115,6 +115,7 @@ function packsOf(hosted: HostedPlugin): PackView[] {
     package: hosted.packageName,
     name,
     description: pack.description ?? null,
+    reads: pack.reads === undefined ? null : [...pack.reads],
     questions: Object.fromEntries(
       pack.questions.map(({ name: question, ...rest }) => [question, rest]),
     ),

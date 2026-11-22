@@ -145,6 +145,7 @@ describe("the marketplace pack's questions", () => {
   it("read the content the description names, and each question names what it reads", () => {
     const description = marketplace.description ?? "";
     expect([...new Set(contentNames(description))]).toEqual(["title", "description"]);
+    expect(marketplace.reads).toEqual(["title", "description"]);
     expect(description).toContain("banned list");
     expect(description).toContain("first thing a project edits");
     expect(description).toContain("high stakes");

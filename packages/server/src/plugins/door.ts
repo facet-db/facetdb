@@ -87,6 +87,8 @@ export type PackView = {
   readonly package: string;
   readonly name: string;
   readonly description: string | null;
+  /** The state fields its questions read, as the pack declares them; null when it does not say. */
+  readonly reads: readonly string[] | null;
   /** By question name, as `POST /v1/config/validate`'s source draft writes them. */
   readonly questions: { readonly [name: string]: Omit<Question, "name"> };
   readonly thresholds: { readonly [question: string]: ThresholdOverride };

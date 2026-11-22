@@ -377,5 +377,45 @@ function checkEntry(kind: PluginKind, name: string, value: unknown, issues: Plug
         issues.push({ field, message: error });
       }
     }
+    checkReads(`${field}.reads`, definition["reads"], issues);
   }
+}
+
+/**
+ * A pack's `reads`, which the studio shows beside a source's fields: left out, or a list of state
+ * field names, each written once.
+ */
+function checkReads(field: string, reads: unknown, issues: PluginIssue[]): void {
+  if (reads === undefined) {
+    return;
+  }
+  if (!isFieldList(reads)) {
+    issues.push({
+      field,
+      message:
+        'must list the state fields the questions read by name (["title", "body"]), or be left out',
+    });
+    return;
+  }
+  if (reads.length === 0) {
+    issues.push({
+      field,
+      message: "names no field: list the fields the questions read, or leave it out",
+    });
+    return;
+  }
+  const twice = new Set(reads.filter((name, index) => reads.indexOf(name) !== index));
+  if (twice.size > 0) {
+    issues.push({
+      field,
+      message: `names ${[...twice].map((name) => `"${name}"`).join(", ")} more than once: list each field once`,
+    });
+  }
+}
+
+function isFieldList(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((name: unknown) => typeof name === "string" && name.trim() !== "")
+  );
 }

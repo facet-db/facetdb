@@ -610,6 +610,26 @@ const projectConfigSchema = z.object({
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type SourceVersions = ProjectConfig["versions"][string];
 
+/**
+ * `GET /v1/packs`: the question packs of the plugins the worker hosts, each in the shape a source
+ * draft takes, for "Start from a pack". `reads` is null when the pack does not say which state
+ * fields its questions read.
+ */
+const packsSchema = z.object({
+  packs: z.array(
+    z.object({
+      plugin: z.string().min(1),
+      package: z.string().min(1),
+      name: z.string().min(1),
+      description: z.string().nullable(),
+      reads: z.array(z.string()).nullable(),
+      questions: z.record(z.string(), questionJsonSchema),
+      thresholds: z.record(z.string(), thresholdOverrideSchema),
+    }),
+  ),
+});
+export type QuestionPack = z.infer<typeof packsSchema>["packs"][number];
+
 /** What the page sends: one source by name, its questions and thresholds, merged over the file's. */
 export type SourceDraft = {
   readonly name: string;
@@ -1044,6 +1064,8 @@ export type ApiClient = {
   // The Questions page: one method per endpoint.
   /** The project JSON from the worker's memory, and each source's version history. */
   readonly projectConfig: () => Promise<ProjectConfig>;
+  /** The question packs of the hosted plugins, for "Start from a pack". */
+  readonly packs: () => Promise<readonly QuestionPack[]>;
   /** The loader's judgement of a draft: its problems by field path, or its wording warnings. */
   readonly validateDraft: (draft: SourceDraft) => Promise<DraftValidation>;
   /** The draft asked of the 20 newest rows: one model call per row, under the spending cap. */
@@ -1244,6 +1266,7 @@ export function createApiClient(fetch: Fetch): ApiClient {
       return { tokens: config.spendingCap ?? null, onCapReached: config.onCapReached };
     },
     projectConfig: () => call(projectConfigSchema, "GET", "/config"),
+    packs: async () => (await call(packsSchema, "GET", "/packs")).packs,
     validateDraft: (draft) =>
       call(draftValidationSchema, "POST", "/config/validate", { source: draft }),
     previewDraft: (draft) => call(draftPreviewSchema, "POST", "/preview", { source: draft }),

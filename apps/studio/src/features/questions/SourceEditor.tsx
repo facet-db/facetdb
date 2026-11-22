@@ -20,6 +20,7 @@ import { PreviewPanel } from "./PreviewPanel.tsx";
 import { PREVIEW_SETTLE_MS, usePreview } from "./preview.ts";
 import { QuestionEditor } from "./QuestionEditor.tsx";
 import { validationQuery } from "./queries.ts";
+import { StartFromAPack } from "./StartFromAPack.tsx";
 import { Versions } from "./Versions.tsx";
 import { Wording } from "./Wording.tsx";
 
@@ -73,6 +74,15 @@ export function SourceEditor({
   // preview again (preview.ts). A cut line moved or the stakes chosen is not one, even when the
   // config changed the wording under a draft nobody edited.
   const [edits, setEdits] = useState(0);
+  // The pack's questions just added, said until the draft changes again.
+  const [fromPack, setFromPack] = useState<{
+    readonly names: readonly string[];
+    readonly key: string;
+  } | null>(null);
+  const addedWords =
+    fromPack !== null && fromPack.key === draftKey(form)
+      ? `Added to the draft: ${fromPack.names.join(", ")}.`
+      : "";
   const edit = (next: SourceForm) => {
     if (previewKey(next) !== previewKey(form)) {
       setEdits((count) => count + 1);
@@ -151,19 +161,33 @@ export function SourceEditor({
               />
             </div>
           ))}
-          <div className="flex flex-wrap gap-2 border-t border-hairline pt-5.5">
-            <Button
-              onClick={() => {
-                edit({ ...form, questions: [...form.questions, newQuestion(form)] });
-              }}
-            >
-              Add a question
-            </Button>
-            {edited(draft) ? (
-              <Button variant="quiet" onClick={onDiscard}>
-                Discard my edits
+          <div className="border-t border-hairline pt-5.5">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => {
+                  edit({ ...form, questions: [...form.questions, newQuestion(form)] });
+                }}
+              >
+                Add a question
               </Button>
-            ) : null}
+              <StartFromAPack
+                source={source}
+                form={form}
+                onAdd={(next) => {
+                  edit(next.form);
+                  setFromPack({ names: next.added, key: draftKey(next.form) });
+                }}
+              />
+              {edited(draft) ? (
+                <Button variant="quiet" onClick={onDiscard}>
+                  Discard my edits
+                </Button>
+              ) : null}
+            </div>
+            {/* Always in the page, so its words are announced; empty, it takes no room. */}
+            <p role="status" className={addedWords === "" ? "m-0" : "m-0 mt-3"}>
+              {addedWords}
+            </p>
           </div>
           <p className="m-0 text-[12.5px] text-text-3">
             A new question adds its columns at the next facetdb migrate; its answers for existing
