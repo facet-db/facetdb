@@ -626,3 +626,88 @@ describe("the test message", () => {
     expect(store.history).toEqual([]);
   });
 });
+
+describe("a reload's new binding", () => {
+  it("sends the next alert to a channel it adds and none to one it takes out, in the same process", async () => {
+    const ops = recording("slack:#ops", null);
+    const data = recording("slack:#data", null);
+    const { store, alerts } = rig([ops.channel], utc(2026, 11, 14, 12, 0));
+    alerts.rebind([data.channel]);
+    await alerts.raise(eventOf("model_failing"));
+    expect(ops.sent).toEqual([]);
+    expect(data.sent).toEqual([expect.objectContaining({ severity: "critical" })]);
+    expect(store.history[0]?.deliveries).toEqual([{ channel: "slack:#data", ok: true }]);
+    expect(await alerts.test("slack:#ops", PAGE)).toEqual({ kind: "unknown_channel" });
+  });
+
+  it("@timing keeps the summary owed by a channel whose quiet hours it takes away, and holds nothing more for it", async () => {
+    const ops = recording("slack:#ops");
+    const { clock, store, alerts } = rig([ops.channel], utc(2026, 11, 14, 2, 0));
+    await alerts.raise(eventOf("backfill_failed"));
+    expect(ops.sent).toEqual([]);
+    // 03:00, inside the hours: the same address, and no quiet hours from now on.
+    clock.advance(HOUR);
+    const bare = recording("slack:#ops", null);
+    alerts.rebind([bare.channel]);
+    await alerts.raise(eventOf("spending_80", "all sources"));
+    expect(bare.sent).toEqual([expect.objectContaining({ severity: "warning" })]);
+    // The period they were taken away in ends at 07:00: its summary goes then, through the new binding.
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(bare.sent).toHaveLength(1);
+    clock.advance(utc(2026, 11, 14, 7, 0) + SUMMARY_GRACE_MS - clock.now());
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(bare.sent).toHaveLength(2);
+    expect(bare.sent[1]?.text).toContain("1 alert was held for this channel while they lasted");
+    expect(bare.sent[1]?.text).toContain("Backfill failed (listings)");
+    // Owed no more: the next night holds nothing for it, and its ticks cost the store nothing.
+    const calls = store.quietCalls;
+    clock.advance(20 * HOUR);
+    await alerts.raise(eventOf("backfill_failed", "sellers"));
+    expect(bare.sent).toHaveLength(3);
+    clock.advance(10 * HOUR);
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(store.quietCalls).toBe(calls);
+    expect(bare.sent).toHaveLength(3);
+    expect(ops.sent).toEqual([]);
+  });
+
+  it("sums up under a channel's new hours what its old ones held, the store's key being its address", async () => {
+    const ops = recording("slack:#ops");
+    const { clock, alerts } = rig([ops.channel], utc(2026, 11, 14, 2, 0));
+    await alerts.raise(eventOf("backfill_failed"));
+    clock.advance(HOUR);
+    const later = recording("slack:#ops", night("UTC", "23:00", "06:00"));
+    alerts.rebind([later.channel]);
+    clock.advance(utc(2026, 11, 14, 6, 0) + SUMMARY_GRACE_MS - clock.now());
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(later.sent).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining("1 alert was held for this channel") as string,
+      }),
+    ]);
+    expect(ops.sent).toEqual([]);
+  });
+
+  it("reaches back to what the old hours held when the new ones start later and the channel was never summarized", async () => {
+    const ops = recording("slack:#ops");
+    const { clock, store, alerts } = rig([ops.channel], utc(2026, 11, 14, 2, 0));
+    await alerts.raise(eventOf("backfill_failed"));
+    clock.advance(HOUR);
+    // 03:00: hours from 04:00 to 06:00 from now on, after the warning held at 02:00.
+    const later = recording("slack:#ops", night("UTC", "04:00", "06:00"));
+    alerts.rebind([later.channel]);
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))).toBeUndefined();
+    clock.advance(utc(2026, 11, 14, 6, 0) + SUMMARY_GRACE_MS - clock.now());
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(later.sent).toEqual([
+      expect.objectContaining({
+        text: expect.stringContaining("1 alert was held for this channel") as string,
+      }),
+    ]);
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))?.since).toBe(utc(2026, 11, 13, 22, 0));
+    // The next night's summary starts where this one ended, as any other.
+    clock.advance(24 * HOUR);
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(later.sent).toHaveLength(1);
+  });
+});

@@ -30,14 +30,20 @@ const testBody = z.strictObject({
 });
 
 /**
- * The project's own settings a draft may change (Settings' spending section): the monthly cap in
- * billable input tokens, `null` removing it, and what happens at 100%. Nothing else of the project
- * is a draft's: `modelUrl` decides where every record's state is sent and `alerts` where alerts
- * post, so they stay the operator's, edited by hand. The cap's own rules are the loader's.
+ * The project's own settings a draft may change: Settings' spending section (the monthly cap in
+ * billable input tokens, `null` removing it, and what happens at 100%), and the Alerts page's
+ * `alerts` (`null` taking it out) and the Plugins page's `plugins`, a plugin's settings by its key.
+ * Nothing else of the project is a draft's: `modelUrl` decides where every record's state is sent,
+ * so it stays the operator's, edited by hand. Only the shape of `alerts` and `plugins` is checked
+ * here: their rules (a channel's address and quiet hours, a plugin's schema, a secret's variable)
+ * are the loader's and the worker's plugins', behind the door, which refuses a draft that would not
+ * load before any diff.
  */
 const draftProject = z.strictObject({
   spendingCap: z.number().int().positive().nullable().exactOptional(),
   onCapReached: z.enum(["pause", "continue"]).exactOptional(),
+  alerts: z.looseObject({}).nullable().exactOptional(),
+  plugins: z.record(z.string(), z.looseObject({})).exactOptional(),
 });
 
 const applyBody = z
@@ -51,7 +57,7 @@ const applyBody = z
     force: z.boolean().default(false),
   })
   .transform(({ source, project, confirm, force }, context) => {
-    // One draft per Apply: a source, or the project's spending settings, so one diff shows one change.
+    // One draft per Apply: a source, or the project's own settings, so one diff shows one change.
     const draft: ConfigDraft | undefined =
       source !== undefined && project === undefined
         ? { source }
@@ -75,7 +81,7 @@ const DRAFT_SHAPE =
   '{"source": {"name": "<source name>", "questions": {…}, "thresholds": {…}}} in the project JSON\'s shape (GET /v1/config)';
 
 const PROJECT_DRAFT_SHAPE =
-  '{"project": {"spendingCap": <billable input tokens a month, or null for no cap>, "onCapReached": "pause" | "continue"}}';
+  '{"project": {…}} with any of "spendingCap" (billable input tokens a month, or null for no cap), "onCapReached" ("pause" or "continue"), "alerts" ({"channels": […]}, or null for none) and "plugins" ({"<plugin>": {…its settings}})';
 
 async function parsed<Schema extends z.ZodType>(
   schema: Schema,
@@ -247,13 +253,14 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
   // Apply: without `confirm`, the diff the draft makes to facetdb.config.ts and the plan that names
   // it; with the plan as `confirm`, the write, and the worker's reload. Show before doing: nothing
   // is written that was not shown. The draft is one source (the Questions page) or the project's
-  // spending settings (Settings); any reviewer who may Apply may send either, and the reload puts a
-  // written cap in force at once.
+  // own settings (Settings' cap, the Alerts page's channels, the Plugins page's settings); any
+  // reviewer who may Apply may send either, and the reload puts a written cap, channels and
+  // settings in force at once.
   route.post("/apply", async (c) => {
     const body = await parsed(
       applyBody,
       c.req,
-      `Send ${DRAFT_SHAPE}, or ${PROJECT_DRAFT_SHAPE} for the spending cap, for the diff; to write it, send the same draft with "confirm": "<the plan the diff answered with>", and "force": true to replace a file git keeps no copy of.`,
+      `Send ${DRAFT_SHAPE}, or ${PROJECT_DRAFT_SHAPE} for the project's own settings, for the diff; to write it, send the same draft with "confirm": "<the plan the diff answered with>", and "force": true to replace a file git keeps no copy of.`,
     );
     const projectId = c.get("projectId");
     const outcome =

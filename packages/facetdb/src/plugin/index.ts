@@ -7,7 +7,9 @@
  *
  * `definePlugin` checks the manifest (name, version, the `facetdb` core range, the config schema,
  * every entry) and throws a `PluginError` naming each wrong field. To type `ctx.config` inside
- * `source`, `action`, ... annotate the first parameter: `(ctx: PluginContext<Infer<typeof config>>)`.
+ * `source`, `action`, ... annotate the first parameter: `(ctx: PluginContext<Infer<typeof
+ * config>>)`. In the config schema, `z.secret()` marks a setting read from the environment, and
+ * `z.editable()` one a studio draft may change; every other setting is changed in the file by hand.
  */
 export type {
   ActionPayload,
@@ -64,6 +66,7 @@ export { definePlugin, isPlugin, PluginError, packageNames, shortName } from "./
 export type {
   HostedPlugin,
   HostedVariable,
+  LivePluginHost,
   PluginHost,
   PluginHostOptions,
   PluginRefusal,
@@ -72,8 +75,11 @@ export {
   BUILTIN_PLUGINS,
   createPluginHost,
   importFromProject,
+  livePluginHost,
   PluginHostError,
 } from "./host.ts";
+export type { SettingsInForce, SettingsReload } from "./in-force.ts";
+export { createSettingsInForce, draftPlugins } from "./in-force.ts";
 export type {
   ActionContext,
   ActionDefinition,

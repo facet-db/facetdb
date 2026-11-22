@@ -15,7 +15,7 @@ import {
   type SourceDefinition,
 } from "./kinds.ts";
 import { isValidRange, isValidVersion } from "./semver.ts";
-import { type Infer, SecretWalkError, secretPaths } from "./zod.ts";
+import { editablePaths, type Infer, SecretWalkError, secretPaths } from "./zod.ts";
 
 /** What an author passes to `definePlugin`. */
 export type PluginDefinition<Schema extends ZodObject> = {
@@ -162,6 +162,10 @@ export function definePlugin<Schema extends ZodObject>(
 
   // Listed from the schema, never from the author: a secret the walker cannot reach is refused here.
   const secrets = config instanceof ZodObject ? declaredSecrets(config, issues) : [];
+  // A setting marked z.editable() may be changed from the studio; never a secret.
+  if (config instanceof ZodObject) {
+    declaredEditables(config, issues);
+  }
 
   if (issues.length > 0 || !(config instanceof ZodObject)) {
     throw new PluginError(
@@ -213,6 +217,22 @@ export function declaredSecrets(config: ZodObject, issues: PluginIssue[]): reado
     }
     return [];
   }
+}
+
+/**
+ * The settings a studio draft may change, as `editablePaths` lists them, with one issue per
+ * `z.editable()` on a secret or on what could hold one. Both `definePlugin` and the loader use it,
+ * so a plugin that marks a secret editable is refused before any draft could reach it.
+ */
+export function declaredEditables(config: ZodObject, issues: PluginIssue[]): readonly string[] {
+  const { paths, refused } = editablePaths(config);
+  for (const stop of refused) {
+    issues.push({
+      field: stop.path === "" ? "config" : `config.${stop.path}`,
+      message: stop.message,
+    });
+  }
+  return refused.length > 0 ? [] : paths;
 }
 
 /**

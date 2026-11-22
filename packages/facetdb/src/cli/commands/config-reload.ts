@@ -30,13 +30,14 @@ import {
   type ConfigDraft,
   ConfigError,
   type ConfigFiles,
+  type DraftPlugins,
   type ProjectConfig,
   planApply,
   type SourceConfig,
   toProjectJson,
   uncommittedWords,
 } from "../../config/index.ts";
-import type { ReceiveOutcome } from "../../plugin/index.ts";
+import type { ReceiveOutcome, SettingsReload } from "../../plugin/index.ts";
 import { CliError } from "../program.ts";
 import { hasUrl, variableOf } from "./database.ts";
 
@@ -197,6 +198,14 @@ export type FleetDeps = {
    * who applied which source, that reload's load alone.
    */
   readonly project?: (config: ProjectConfig, applied?: AppliedBy) => void;
+  /**
+   * Puts the alert channels and plugin settings of a config a reload loaded in force, at each
+   * reload, before its plan is made: answers which plugin's changed settings restart a source
+   * (planned as a restart even where its own JSON is unchanged), and what the reload says of them.
+   * One that cannot put them in force answers why, and the reload then changes nothing: the fleet
+   * keeps the config it had, as for a file that does not load. Absent, both stay the start's.
+   */
+  readonly settings?: (config: ProjectConfig) => SettingsReload;
   /** Reads facetdb.config.ts again through the loader; a `ConfigError` when it does not load. */
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
@@ -269,7 +278,13 @@ export type Fleet = {
 /** What a reload does to one source: the pure half of the reload, judged before anything moves. */
 export type ReloadStep =
   | { readonly kind: "unchanged"; readonly name: string }
-  | { readonly kind: "restart"; readonly name: string; readonly source: SourceConfig }
+  | {
+      readonly kind: "restart";
+      readonly name: string;
+      readonly source: SourceConfig;
+      /** Set when only the settings of this plugin, which the source uses, changed. */
+      readonly plugin?: string;
+    }
   /** Questions added and nothing else reaching the install: switched once `installed` holds. */
   | {
       readonly kind: "added";
@@ -380,11 +395,14 @@ function questionsAdded(ran: SourceConfig, next: SourceConfig): readonly string[
 /**
  * Compares what each loop runs with the config as the file now loads. A loop is compared with its
  * own source and model, not with the file it started from, so a source kept on its old set by an
- * earlier reload is judged again against what it really runs.
+ * earlier reload is judged again against what it really runs. `restarts` names the plugin whose
+ * settings the reload put in force that a source uses: an unchanged source of that plugin is
+ * restarted, so its loop opens again on them.
  */
 export function planReload(
   running: ReadonlyMap<string, SourceLoop>,
   next: ProjectConfig,
+  restarts: (source: SourceConfig) => string | undefined = () => undefined,
 ): readonly ReloadStep[] {
   const steps: ReloadStep[] = [];
   for (const source of next.sources) {
@@ -397,7 +415,10 @@ export function planReload(
       JSON.stringify(sourceJsonOf(next, loop.source)) ===
         JSON.stringify(sourceJsonOf(next, source)) &&
       loop.questionSet.model === (source.model ?? next.model);
-    if (same) {
+    const plugin = same ? restarts(source) : undefined;
+    if (plugin !== undefined) {
+      steps.push({ kind: "restart", name: source.name, source, plugin });
+    } else if (same) {
       steps.push({ kind: "unchanged", name: source.name });
     } else if (installShape(loop.source) !== installShape(source)) {
       const added = questionsAdded(loop.source, source);
@@ -422,11 +443,12 @@ export function planReload(
 /**
  * The project's own settings a running worker holds from its start: a change takes a restart. The
  * spending cap and what happens at 100% are not among them: the fleet hands each loaded config to
- * `deps.project`, and the worker's gate reads the cap in force on every check. `plugins` is: the
- * plugin host is loaded once, at the start, so the actions keep the settings it read.
+ * `deps.project`, and the worker's gate reads the cap in force on every check. Nor,, are `alerts`
+ * and `plugins`: the fleet hands them to `deps.settings`, which puts them in force or says why it
+ * keeps the ones it runs.
  */
 function projectNotes(started: ProjectConfig, next: ProjectConfig): string[] {
-  const fields = (["modelUrl", "provider", "studioUrl", "alerts", "plugins"] as const).filter(
+  const fields = (["modelUrl", "provider", "studioUrl"] as const).filter(
     (field) => JSON.stringify(started[field]) !== JSON.stringify(next[field]),
   );
   return fields.length === 0
@@ -1152,8 +1174,26 @@ export function createFleet(deps: FleetDeps): Fleet {
         swapped: done,
       };
     }
-    const steps = planReload(new Map([...slots].map(([name, slot]) => [name, slot.loop])), next);
-    const notes = started === undefined ? [] : projectNotes(started, next);
+    // The channels and plugin settings first, so a loop restarted for its plugin opens on the
+    // settings in force, and every alert the reload raises goes to the channels in force. When they
+    // cannot be put in force, nothing of the file is: the worker runs on the config it had, its
+    // plugins and channels with it, as for a file that does not load.
+    const settled = deps.settings?.(next);
+    if (settled !== undefined && !settled.ok) {
+      const message = `facetdb.config.ts loads, but ${settled.message}, so the worker keeps running on the config it had.`;
+      const fix = `${settled.fix.charAt(0).toUpperCase()}${settled.fix.slice(1)}; then apply again, or Check again.`;
+      deps.print(`${message}\n${fix}`);
+      return { summary: { loaded: false, message, fix }, swapped: done };
+    }
+    const steps = planReload(
+      new Map([...slots].map(([name, slot]) => [name, slot.loop])),
+      next,
+      settled?.restarts,
+    );
+    const notes = [
+      ...(started === undefined ? [] : projectNotes(started, next)),
+      ...(settled?.notes ?? []),
+    ];
     current = next;
     deps.project?.(next, applied);
     const sources: SourceReload[] = [];
@@ -1392,11 +1432,11 @@ export function createFleet(deps: FleetDeps): Fleet {
           break;
         case "restart":
           if (slot !== undefined) {
-            await openAnew(
-              slot,
-              step.source,
-              (fresh) =>
-                `the question set changed: it finishes the batch in hand, then answers with version ${fresh}; nothing already answered is asked again.`,
+            const { plugin } = step;
+            await openAnew(slot, step.source, (fresh) =>
+              plugin === undefined
+                ? `the question set changed: it finishes the batch in hand, then answers with version ${fresh}; nothing already answered is asked again.`
+                : `the settings of the plugin ${plugin} it uses changed: it finishes the batch in hand with the settings it began with, then answers with version ${fresh} on the new ones; nothing already answered is asked again.`,
             );
           }
           break;
@@ -1746,17 +1786,18 @@ export function fileQueue(): FileQueue {
 
 /**
  * The Apply a reload follows: the reviewer who confirmed it, and the source its draft wrote, null
- * for the project's spending settings. A question set that write changes is named as theirs in its
- * Question set changed alert.
+ * for a project draft (the cap, the channels, a plugin's settings). A question set that write
+ * changes is named as theirs in its Question set changed alert.
  */
 export type AppliedBy = { readonly by: string; readonly source: string | null };
 
 /**
  * The studio's door to facetdb.config.ts (`ServerDeps.config.file`): the diff a draft makes (one
- * source, or the project's spending settings from Settings), and on confirmation the write and the
- * fleet's reload, which puts the written cap in force at once. The draft is judged within the
- * project as the file loads now, so a change committed to the file since the worker started is
- * kept, not reverted. Applies run one at a time.
+ * source, or the project's own settings: the spending cap from Settings, the channels and a
+ * plugin's settings), and on confirmation the write and the fleet's reload, which puts the written
+ * cap, channels and plugin settings in force at once. The draft is judged within the project as the
+ * file loads now, so a change committed to the file since the worker started is kept, not reverted.
+ * Applies run one at a time.
  */
 export function configFileDoor(deps: {
   /** The config file, as `--config` names it. */
@@ -1765,6 +1806,11 @@ export function configFileDoor(deps: {
   /** The loader, quiet: its warnings are the draft's, returned with the diff. */
   readonly load: () => Promise<ProjectConfig>;
   readonly env: Readonly<Record<string, string | undefined>>;
+  /**
+   * The plugins the worker runs, which a project draft's `alerts` and `plugins` are judged with
+   * (`draftPlugins`); absent, such a draft is refused.
+   */
+  readonly plugins?: DraftPlugins;
   /** After an Apply's write, told who applied which source; Check again tells nothing. */
   readonly reload: (applied?: AppliedBy) => Promise<ReloadSummary>;
   /**
@@ -1809,7 +1855,13 @@ export function configFileDoor(deps: {
       }
       throw error;
     }
-    const planned = planApply({ path, text: read.text, config }, draft, deps.env);
+    const planned = planApply(
+      { path, text: read.text, config },
+      draft,
+      deps.env,
+      undefined,
+      deps.plugins,
+    );
     return planned.ok ? planned : { kind: "invalid", issues: planned.issues };
   }
 

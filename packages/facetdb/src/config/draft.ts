@@ -1,7 +1,8 @@
 import type { QuestionSet } from "@facetdb/core";
 import type { OnCapReached, ProjectConfig } from "./dsl.ts";
 import { fromProjectJson, toProjectJson } from "./json.ts";
-import { ConfigError, type ConfigIssue } from "./schema.ts";
+import { settingsVariables } from "./load.ts";
+import { ConfigError, type ConfigIssue, formatPath, isPluginKey } from "./schema.ts";
 import { type ConfigWarning, wordingWarnings } from "./warnings.ts";
 
 /**
@@ -178,13 +179,19 @@ function seenOf(
 }
 
 /**
- * A draft of the project's own settings (Settings' spending section): the monthly cap in billable
- * input tokens, `null` removing it, and what happens at 100%. Any other key is refused by
- * `judgeDraftProject` in plain words; the HTTP route already sends only these two.
+ * A draft of the project's own settings: Settings' spending section (the monthly cap in billable
+ * input tokens, `null` removing it, and what happens at 100%), and the Alerts page's channels and
+ * the Plugins page's settings. `alerts` is the whole of `alerts` in the project JSON's shape,
+ * `null` taking it out; `plugins` holds the settings of each plugin it names, by its key in
+ * `plugins`, each replacing that plugin's entry whole and leaving the others as they are; only the
+ * settings the plugin marks `z.editable()` may differ from the file's. Any other key is refused by
+ * `judgeDraftProject` in plain words.
  */
 export type ProjectDraft = {
   readonly spendingCap?: number | null;
   readonly onCapReached?: OnCapReached;
+  readonly alerts?: unknown;
+  readonly plugins?: unknown;
 } & Readonly<Record<string, unknown>>;
 
 export type ProjectDraftJudgement =
@@ -195,13 +202,40 @@ export type ProjectDraftJudgement =
     }
   | { readonly ok: false; readonly issues: readonly ConfigIssue[] };
 
-/** The project keys a draft may change: the spending cap and what happens when it is reached. */
-const PROJECT_DRAFT_KEYS: ReadonlySet<string> = new Set(["spendingCap", "onCapReached"]);
+/**
+ * What a project draft's `alerts` and `plugins` are judged with beyond the schema: the plugins the
+ * worker runs, which only the CLI's plugin host knows. The worker hands one in (`draftPlugins` in
+ * the plugin module); a draft that carries either key is refused without it.
+ */
+export type DraftPlugins = {
+  /**
+   * Why the draft's settings for the plugin at `key` cannot go in, judged before the schema reads
+   * them and before any variable is: a plugin the worker does not run, the settings of the plugin
+   * that supplies the model provider, a value at a path the plugin's own schema marks secret, and
+   * any change to a setting the plugin's schema does not mark `z.editable()` (deny by default).
+   */
+  refusals(file: ProjectConfig, key: string, settings: unknown): readonly ConfigIssue[];
+  /**
+   * The loader's own checks of the whole project with the draft in place, as the worker's start
+   * makes them: each plugin's settings parsed by its schema with its variables read, and each alert
+   * channel bound to its plugin's channel with its quiet hours' zone.
+   */
+  check(config: ProjectConfig): readonly ConfigIssue[];
+};
+
+/** The project keys a draft may change: the spending cap and its 100%, the channels, plugin settings. */
+const PROJECT_DRAFT_KEYS: ReadonlySet<string> = new Set([
+  "spendingCap",
+  "onCapReached",
+  "alerts",
+  "plugins",
+]);
 
 /**
  * Why a project key stays out of a project draft, said where a draft names it. `modelUrl` decides
- * where every record's state is sent, `studioUrl` where every link points and `alerts` where alerts
- * post: the operator's, edited by hand as `where` and actions are. `model` and `sources` are each source's own draft's, or the file's.
+ * where every record's state is sent and `studioUrl` where every link points: the operator's,
+ * edited by hand as `where` and actions are. `model` and `sources` are each source's own draft's,
+ * or the file's.
  */
 const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
   model:
@@ -212,8 +246,6 @@ const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
     "a draft cannot change provider: it decides where every record's state is sent and which key goes with it; edit provider in facetdb.config.ts by hand",
   studioUrl:
     "a draft cannot change studioUrl: it is the address every alert and notification link opens; edit studioUrl in facetdb.config.ts by hand",
-  alerts:
-    "a draft cannot change alerts: they decide where the worker posts its alerts; edit alerts in facetdb.config.ts by hand",
   sources:
     "a project draft does not carry sources: change a source with its own draft (the Questions page), or edit facetdb.config.ts by hand",
   // The one-source form's plugin source: it names the plugin that reads every record and the
@@ -222,16 +254,61 @@ const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
     "a draft cannot change source: it names the plugin that reads every record and the settings it reads them with; edit source in facetdb.config.ts by hand",
 };
 
+/** A plain object, as `plugins` is: anything else is the schema's to refuse in its own words. */
+function isPlainObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
- * Judges a project draft within `config`: the draft over `toProjectJson(config)`, `spendingCap`
- * removed where the draft sends `null`, read back through `fromProjectJson` with only the connection
- * variables the file already names (as a source draft is), so the cap meets the loader's own rules
- * at its own path (`spendingCap`). Nothing is written.
+ * Why the `env(...)` a draft's settings for the plugin at `key` carry are not the file's own: each
+ * must be the very variable the file names at that very place. A draft that could name another, or
+ * move one, could have a plugin send one of the machine's variables to a third party as a "token"
+ * or a channel. Judged on the text alone, before anything reads a variable, in words that are the
+ * same whether or not the variable is set.
+ */
+function pluginVariableRefusals(
+  file: ProjectConfig,
+  key: string,
+  settings: unknown,
+): readonly ConfigIssue[] {
+  const own = new Map(
+    settingsVariables(key, file.plugins?.[key] ?? {}).map(({ path, variable }) => [
+      formatPath(path),
+      variable,
+    ]),
+  );
+  return settingsVariables(key, settings).flatMap(({ path, variable }): ConfigIssue[] => {
+    const named = own.get(formatPath(path));
+    if (named === variable) {
+      return [];
+    }
+    const at = formatPath(["plugins", key, ...path]);
+    return [
+      {
+        path: at,
+        message:
+          named === undefined
+            ? `a draft cannot make ${at} read a variable: a draft keeps each env(...) of a plugin's settings where facetdb.config.ts writes it, and adds none; write a value there, or name the variable in facetdb.config.ts by hand`
+            : `a draft cannot change which variable ${at} reads: facetdb.config.ts names ${named} there, and the variable a plugin reads is named in facetdb.config.ts by hand`,
+      },
+    ];
+  });
+}
+
+/**
+ * Judges a project draft within `config`: the draft over `toProjectJson(config)`, `spendingCap` and
+ * `alerts` removed where the draft sends `null`, each plugin it names replacing that plugin's entry
+ * in `plugins`, read back through `fromProjectJson` with only the connection variables the file
+ * already names (as a source draft is), so each value meets the loader's own rules at its own path.
+ * A draft carrying `alerts` or `plugins` meets `plugins` too: its variables and secrets first,
+ * before the schema, then the worker's own checks of its plugins and channels. A draft that carries
+ * neither is judged as before. Nothing is written.
  */
 export function judgeDraftProject(
   config: ProjectConfig,
   draft: ProjectDraft,
   env: Readonly<Record<string, string | undefined>>,
+  plugins?: DraftPlugins,
 ): ProjectDraftJudgement {
   const refused = Object.keys(draft)
     .filter((key) => !PROJECT_DRAFT_KEYS.has(key))
@@ -241,21 +318,60 @@ export function judgeDraftProject(
         path: key,
         message:
           REFUSED_PROJECT_KEYS[key] ??
-          `a project draft changes only spendingCap and onCapReached, not ${key}; edit facetdb.config.ts by hand`,
+          `a project draft changes only spendingCap, onCapReached, alerts and plugins, not ${key}; edit facetdb.config.ts by hand`,
       }),
     );
   if (refused.length > 0) {
     return { ok: false, issues: refused };
   }
-  const { spendingCap, ...rest } = { ...toProjectJson(config), ...draft };
-  // `null` removes the cap; a project with none, and a draft that does not name it, write no key.
-  const json = spendingCap === null || spendingCap === undefined ? rest : { ...rest, spendingCap };
+  const drafted = (["alerts", "plugins"] as const).filter((key) => Object.hasOwn(draft, key));
+  if (drafted.length > 0 && plugins === undefined) {
+    return {
+      ok: false,
+      issues: drafted.map((key) => ({
+        path: key,
+        message: `${key} in a draft is judged against the plugins a running facetdb worker loaded, and this one has none to judge it with; apply it from the studio of a running facetdb worker, or edit facetdb.config.ts by hand`,
+      })),
+    };
+  }
+  const settings = draft.plugins;
+  if (isPlainObject(settings)) {
+    // A key `plugins` may not have is the schema's to refuse, in its words: none is repeated here.
+    // A variable's refusal first and alone for its plugin: its place would be refused twice else.
+    const issues = Object.entries(settings)
+      .filter(([key]) => isPluginKey(key))
+      .flatMap(([key, entry]) => {
+        const variables = pluginVariableRefusals(config, key, entry);
+        return variables.length > 0 ? variables : (plugins?.refusals(config, key, entry) ?? []);
+      });
+    if (issues.length > 0) {
+      return { ok: false, issues };
+    }
+  }
+  const json = toProjectJson(config);
+  const { spendingCap, alerts, plugins: _plugins, ...rest } = { ...json, ...draft };
+  const merged = {
+    ...rest,
+    // `null` removes the cap, or every channel; a project with none, and a draft that does not
+    // name it, write no key.
+    ...(spendingCap === null || spendingCap === undefined ? {} : { spendingCap }),
+    ...(alerts === null || alerts === undefined ? {} : { alerts }),
+    // Anything but an object of entries is the schema's to refuse, in its words.
+    ...(settings === undefined
+      ? json.plugins === undefined
+        ? {}
+        : { plugins: json.plugins }
+      : { plugins: isPlainObject(settings) ? { ...json.plugins, ...settings } : settings }),
+  };
+  let judged: ProjectConfig;
   try {
-    return { ok: true, config: fromProjectJson(json, seenOf(namedVariables(config, []), env)) };
+    judged = fromProjectJson(merged, seenOf(namedVariables(config, []), env));
   } catch (error) {
     if (error instanceof ConfigError) {
       return { ok: false, issues: error.issues };
     }
     throw error;
   }
+  const issues = drafted.length === 0 ? [] : (plugins?.check(judged) ?? []);
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, config: judged };
 }

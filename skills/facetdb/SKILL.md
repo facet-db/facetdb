@@ -317,7 +317,10 @@ export default definePlugin({
 
 A plugin never writes a decision. The worker, thresholds, review screen and log belong to core.
 Secrets are declared in the schema and read from the environment by the host, never from the config
-file. Look up the exact helpers in `facetdb/plugin` before you use one.
+file. A setting the studio may change through Apply is marked `z.editable(...)` in the schema; mark
+only one that moves neither a credential nor a record's data (never an address, host, port, login,
+endpoint or secret: `definePlugin` refuses the mark on a secret). Every other setting is changed in
+facetdb.config.ts by hand. Look up the exact helpers in `facetdb/plugin` before you use one.
 
 To use someone else's plugin, run `facetdb add <name>`: it installs the package and prints the
 `plugins` entry to paste, each secret as `env("NAME")`. A plugin runs inside the worker with the

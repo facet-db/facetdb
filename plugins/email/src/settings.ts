@@ -62,6 +62,10 @@ export const emailSettings = z
       .default(false),
     user: user.optional(),
     password: z.secret().optional(),
+    // Not z.editable() (deny by default): a message is sent with no envelope sender of its own, so
+    // whoever writes `from` receives the bounces and replies of every notification, which carry a
+    // record's data to recipients the operator chose. Like every setting here, it is changed in
+    // facetdb.config.ts by hand.
     from: addressSchema(
       "from",
       'from is missing: FacetDB sends email from one address your SMTP server accepts; add from: "alerts@example.com" to the settings of the plugin',

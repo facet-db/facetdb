@@ -385,6 +385,23 @@ describe("POST /v1/apply", () => {
     ]);
   });
 
+  it("carries the channels and a plugin's settings to the door as a project draft, null taking alerts out", async () => {
+    const t = fileDoor();
+    const call = rig(t.door);
+    const channels = { channels: ["slack:#ops", { to: "slack:#data", sends: "warnings" }] };
+    const settings = { slack: { token: { env: "SLACK_TOKEN" }, mention: "@here" } };
+    expect((await call({ project: { alerts: channels, plugins: settings } })).status).toBe(200);
+    expect((await call({ project: { alerts: null }, confirm: "plan-1" })).status).toBe(200);
+    expect(t.calls).toEqual([
+      { kind: "diff", draft: { project: { alerts: channels, plugins: settings } } },
+      {
+        kind: "apply",
+        draft: { project: { alerts: null } },
+        options: { plan: "plan-1", force: false, by: "os:alex" },
+      },
+    ]);
+  });
+
   it("refuses a body with both drafts, with neither, and a project key a draft does not change", async () => {
     const t = fileDoor();
     const call = rig(t.door);
@@ -394,10 +411,13 @@ describe("POST /v1/apply", () => {
     const neither = await call({ confirm: "plan-1" });
     expect(neither).toMatchObject({ status: 400, json: { error: { code: "invalid_request" } } });
     expect(JSON.stringify(neither.json)).toContain("no draft");
-    // modelUrl decides where every record's state is sent: the operator's, never a draft's.
+    // modelUrl decides where every record's state is sent: the operator's, never a draft's. The
+    // channels and a plugin's settings are objects; their rules are the loader's, behind the door.
     for (const project of [
       { modelUrl: "https://elsewhere.example" },
-      { alerts: { channels: ["slack:#x"] } },
+      { alerts: ["slack:#x"] },
+      { plugins: { slack: "token" } },
+      { plugins: [] },
       { spendingCap: 0 },
       { spendingCap: 1.5 },
       { onCapReached: "stop" },

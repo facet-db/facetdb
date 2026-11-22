@@ -199,9 +199,12 @@ describe("judging a project draft (Settings' spending section)", () => {
   it.each([
     ["model", "jev-1.14.0", "change a source's model on the Questions page"],
     ["modelUrl", "https://elsewhere.example", "where every record's state is sent"],
-    ["alerts", { channels: ["slack:#ops"] }, "where the worker posts its alerts"],
+    ["studioUrl", "https://elsewhere.example", "the address every alert and notification link"],
+    // Alerts and plugins are judged against the worker's plugins, refused without them.
+    ["alerts", { channels: ["slack:#ops"] }, "judged against the plugins a running facetdb worker"],
+    ["plugins", { slack: {} }, "judged against the plugins a running facetdb worker"],
     ["sources", [], "change a source with its own draft"],
-    ["retries", 3, "changes only spendingCap and onCapReached"],
+    ["retries", 3, "changes only spendingCap, onCapReached, alerts and plugins"],
   ])("refuses %s in plain words, nothing judged", (key, value, words) => {
     const judged = judgeDraftProject(CONFIG, { spendingCap: 1000, [key]: value }, ENV);
     expect(judged).toEqual({

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  type DraftPlugins,
   judgeDraftProject,
   judgeDraftSource,
   type NewSourceSetup,
@@ -88,7 +89,8 @@ export type ApplyPlan = {
 
 /**
  * What Apply places into the file: one source (the Questions page, the setup flow), or the
- * project's own spending settings (Settings), never both in one draft.
+ * project's own settings (Settings' spending cap, the Alerts page's channels and the Plugins page's
+ * settings), never both in one draft.
  */
 export type ConfigDraft = { readonly source: SourceDraft } | { readonly project: ProjectDraft };
 
@@ -203,6 +205,7 @@ function judgeDraft(
   draft: ConfigDraft,
   env: Readonly<Record<string, string | undefined>>,
   setup: NewSourceSetup | undefined,
+  plugins: DraftPlugins | undefined,
 ):
   | {
       readonly ok: true;
@@ -213,7 +216,7 @@ function judgeDraft(
   if ("source" in draft) {
     return judgeDraftSource(file, draft.source, env, setup);
   }
-  const judged = judgeDraftProject(file, draft.project, env);
+  const judged = judgeDraftProject(file, draft.project, env, plugins);
   return judged.ok ? { ok: true, config: judged.config, warnings: [] } : judged;
 }
 
@@ -222,23 +225,27 @@ function judgeDraft(
  * project through the exporter and diffs it against the file's text. `env` is the worker's: a draft
  * may name only the connection variables the file already names (`judgeDraftSource`). `setup` is
  * the studio's setup flow's alone: the operator on this machine adding a new source, which may name
- * its own variable and carry a where filter; a project draft never takes one.
+ * its own variable and carry a where filter; a project draft never takes one. `plugins` is the
+ * running worker's: a project draft's `alerts` and `plugins` are judged against the plugins it
+ * loaded, and refused without them.
  */
 export function planApply(
   current: { readonly path: string; readonly text: string; readonly config: ProjectConfig },
   draft: ConfigDraft,
   env: Readonly<Record<string, string | undefined>>,
   setup?: NewSourceSetup,
+  plugins?: DraftPlugins,
 ): PlanResult {
   const pinned = pinVariables(current.config, current.text, env);
   if (!pinned.ok) {
     return pinned;
   }
   const file = pinned.config;
-  // A project draft (Settings' spending cap) changes no source, so it has no where filter or
-  // actions to guard and no wording to warn about; the whole file is still rendered again, so the
-  // variables stay pinned above and the unset-variable check below holds for it too.
-  const judged = judgeDraft(file, draft, env, setup);
+  // A project draft (Settings' spending cap, the channels, a plugin's settings) changes no source,
+  // so it has no where filter or actions to guard and no wording to warn about; the whole file is
+  // still rendered again, so the variables stay pinned above and the unset-variable check below
+  // holds for it too.
+  const judged = judgeDraft(file, draft, env, setup, plugins);
   if (!judged.ok) {
     return judged;
   }

@@ -400,7 +400,11 @@ type Loaded = {
 };
 
 /** Checks one plugin's settings and reads its variables; throws the first refusal. */
-function settle(found: FoundPlugin, key: string | undefined, options: PluginHostOptions): Loaded {
+function settle(
+  found: FoundPlugin,
+  key: string | undefined,
+  options: Pick<PluginHostOptions, "config" | "env" | "coreVersion">,
+): Loaded {
   const { plugin, specifier } = found;
   const { manifest } = plugin;
   const short = shortName(specifier) ?? specifier;
@@ -542,11 +546,7 @@ export async function createPluginHost(options: PluginHostOptions): Promise<Plug
     const specifier = (found.get(key) as FoundPlugin).specifier;
     const first = keyOf.get(specifier);
     if (first !== undefined) {
-      throw new PluginHostError(
-        "plugin-named-twice",
-        `${formatPath(["plugins", first])} and ${formatPath(["plugins", key])} are both the settings of the plugin "${specifier}"`,
-        `keep one of them in the config file and remove the other`,
-      );
+      throw namedTwice(first, key, specifier);
     }
     keyOf.set(specifier, key);
   }
@@ -582,11 +582,142 @@ export async function createPluginHost(options: PluginHostOptions): Promise<Plug
     contextFor: (name, signal) => {
       const entry = byName.get(name);
       if (entry === undefined) {
-        throw new Error(
-          `the plugin "${name}" is not one the config names, so the host has no context for it`,
-        );
+        throw noContext(name);
       }
       return { config: entry.config, secrets: entry.secrets, signal };
+    },
+  };
+}
+
+/** Two `plugins` keys that are one package's settings. */
+function namedTwice(first: string, key: string, specifier: string): PluginHostError {
+  return new PluginHostError(
+    "plugin-named-twice",
+    `${formatPath(["plugins", first])} and ${formatPath(["plugins", key])} are both the settings of the plugin "${specifier}"`,
+    `keep one of them in the config file and remove the other`,
+  );
+}
+
+/** A context asked for a plugin the host never loaded: a bug, not a setup problem. */
+function noContext(name: string): Error {
+  return new Error(
+    `the plugin "${name}" is not one the config names, so the host has no context for it`,
+  );
+}
+
+/** A signal that never fires: a context read to carry a plugin's settings over, nothing run. */
+const UNUSED = new AbortController().signal;
+
+/**
+ * The host the worker started with, for each host `rehost` made: every name is resolved through
+ * it, so a host made again at every reload stays one step from the start's.
+ */
+const startedWith = new WeakMap<PluginHost, PluginHost>();
+
+/** What `rehost` made of a config: the host with its settings, and whose settings changed. */
+export type Rehosted = {
+  /** The given host itself when no plugin's settings changed. */
+  readonly host: PluginHost;
+  /** The packages whose settings were settled again, in the host's order. */
+  readonly changed: readonly string[];
+};
+
+/**
+ * The plugins `host` holds, with the settings `config` gives them: the plugins themselves are the
+ * ones loaded when the worker started, never imported again, and a plugin is settled again as the
+ * start settles it (its settings parsed by its schema, its variables read, a secret never a
+ * literal) only where its entry in `plugins` changed, or where it lost its entry and `config` still
+ * uses it. A `plugins` key naming a plugin `host` does not hold is refused: it was not loaded when
+ * the worker started. Throws the first refusal, in the host's words, which name a variable and
+ * never its value; nothing is changed by a call, and the host given still holds.
+ */
+export function rehost(
+  host: PluginHost,
+  config: ProjectConfig,
+  options: Pick<PluginHostOptions, "env" | "coreVersion" | "projectDir">,
+): Rehosted {
+  const keyOf = new Map<string, string>();
+  for (const key of Object.keys(config.plugins ?? {})) {
+    const hosted = host.plugin(key);
+    if (hosted === undefined) {
+      const at = formatPath(["plugins", key]);
+      throw new PluginHostError(
+        "plugin-not-installed",
+        `${at} names the plugin "${key}", which this worker did not load when it started`,
+        `run facetdb add ${shortName(key) ?? key} in ${options.projectDir} if it is not installed, then restart facetdb worker; or take ${at} out of the config`,
+      );
+    }
+    const first = keyOf.get(hosted.packageName);
+    if (first !== undefined) {
+      throw namedTwice(first, key, hosted.packageName);
+    }
+    keyOf.set(hosted.packageName, key);
+  }
+  const used = new Set(usesOf(config).flatMap((use) => host.plugin(use.name)?.packageName ?? []));
+  const entries = new Map<string, Loaded>();
+  const changed: string[] = [];
+  for (const hosted of host.all()) {
+    const key = keyOf.get(hosted.packageName);
+    const settings = key === undefined ? {} : (config.plugins?.[key] ?? {});
+    // A plugin nothing uses any more, its entry gone too, keeps what it had: nothing runs it.
+    const kept =
+      JSON.stringify(settings) === JSON.stringify(hosted.settings) ||
+      (key === undefined && !used.has(hosted.packageName));
+    if (kept) {
+      const context = host.contextFor(hosted.packageName, UNUSED);
+      entries.set(hosted.packageName, { hosted, config: context.config, secrets: context.secrets });
+      continue;
+    }
+    entries.set(
+      hosted.packageName,
+      settle({ specifier: hosted.packageName, plugin: hosted.plugin }, key, { ...options, config }),
+    );
+    changed.push(hosted.packageName);
+  }
+  if (changed.length === 0) {
+    return { host, changed };
+  }
+  const start = startedWith.get(host) ?? host;
+  const entryOf = (name: string) => {
+    const at = start.plugin(name);
+    return at === undefined ? undefined : entries.get(at.packageName);
+  };
+  const next: PluginHost = {
+    plugin: (name) => entryOf(name)?.hosted,
+    all: () => start.all().flatMap((hosted) => entries.get(hosted.packageName)?.hosted ?? []),
+    contextFor: (name, signal) => {
+      const entry = entryOf(name);
+      if (entry === undefined) {
+        throw noContext(name);
+      }
+      return { config: entry.config, secrets: entry.secrets, signal };
+    },
+  };
+  startedWith.set(next, start);
+  return { host: next, changed };
+}
+
+/**
+ * The host a running worker hands everything that runs a plugin: each call reads the host in force,
+ * which a reload replaces with the one `rehost` made, so an action, a plugin source's read, the
+ * webhook's signing secret and its endpoints, and the Plugins page all see the settings in force.
+ */
+export type LivePluginHost = PluginHost & {
+  /** The host in force: what `rehost` is handed. */
+  current(): PluginHost;
+  /** Puts `next` in force for every call from now on. */
+  swap(next: PluginHost): void;
+};
+
+export function livePluginHost(start: PluginHost): LivePluginHost {
+  let inForce = start;
+  return {
+    plugin: (name) => inForce.plugin(name),
+    all: () => inForce.all(),
+    contextFor: (name, signal) => inForce.contextFor(name, signal),
+    current: () => inForce,
+    swap: (next) => {
+      inForce = next;
     },
   };
 }

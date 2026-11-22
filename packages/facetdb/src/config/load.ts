@@ -180,8 +180,16 @@ function variablesIn(
  */
 export function pluginVariables(config: ProjectConfig): readonly PluginVariable[] {
   return Object.entries(config.plugins ?? {}).flatMap(([plugin, settings]) =>
-    variablesIn(plugin, settings, []),
+    settingsVariables(plugin, settings),
   );
+}
+
+/**
+ * Every `env("NAME")` inside one plugin's settings as written, judged or not (a project draft's,
+ * before the schema reads it): by the plugin's key and the path inside its settings.
+ */
+export function settingsVariables(plugin: string, settings: unknown): readonly PluginVariable[] {
+  return variablesIn(plugin, settings, []);
 }
 
 export async function loadConfig(path: string, options: LoadOptions): Promise<LoadedConfig> {

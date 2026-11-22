@@ -3,6 +3,7 @@ import { ZodObject } from "zod";
 import {
   checkEntries,
   checkManifestFields,
+  declaredEditables,
   declaredSecrets,
   isPlugin,
   type Plugin,
@@ -174,6 +175,9 @@ function manifestIssues(manifest: unknown): readonly PluginIssue[] {
         message: `the plugin declares ${listed(secrets)} but its config schema marks ${listed(computed)} as z.secret(); a secret missing from the list would be saved in the config file in the clear, so rebuild the plugin with the current \`facetdb\` package (\`definePlugin\` writes the list itself) or ask its author to`,
       });
     }
+    // Read again from the schema too, so no copy of `facetdb/plugin` makes a secret a studio
+    // draft's to change.
+    declaredEditables(fields["config"], issues);
   }
   return issues;
 }

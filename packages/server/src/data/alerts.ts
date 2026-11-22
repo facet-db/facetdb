@@ -161,9 +161,15 @@ export type AlertsService = {
 export type AlertsDeps = {
   /** The project the worker serves. */
   readonly projectId: string;
-  /** The channels the worker runs with (`alerts.channels` as it started), each bound or not. */
+  /**
+   * The channels the worker runs with, each bound or not: `alerts.channels` as it started, then as
+   * each reload that bound them put them in force.
+   */
   readonly channels: () => readonly RunningChannel[];
-  /** The channels facetdb.config.ts names now, read on each request; a reload changes them. */
+  /**
+   * The channels facetdb.config.ts names now, read on each request: they differ from the ones in
+   * force only while a reload could not bind them (or a worker that never reloads runs).
+   */
   readonly fileChannels: () => readonly ConfiguredChannel[];
   readonly reads: Pick<DashboardReads, "recentAlerts" | "lastDeliveries">;
 };

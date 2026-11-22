@@ -18,8 +18,24 @@ function secret(params?: { readonly error?: string }) {
     .meta({ [SECRET_META]: true });
 }
 
-/** zod, plus `z.secret()`. Authors import this one so the config schema is a single description. */
-export const z = { ...zod, secret };
+/** The `meta` key that marks a config field as one a studio draft may change. */
+const EDITABLE_META = "editable";
+
+/**
+ * `z.editable(schema)`: a setting a person signed in to the studio may change through Apply, the
+ * diff first. Every setting not marked so is the operator's, edited in facetdb.config.ts by hand.
+ * Mark only a setting that can move neither a credential nor a record's data: not an address, a
+ * host, a port, a login, an endpoint or anything that decides where the plugin connects or sends. A
+ * `z.secret()` is never editable: `definePlugin` and the loader refuse the mark on one, or on
+ * anything holding one, and on an object's catchall or one option of a union or an intersection,
+ * whose path would also cover settings it does not mark.
+ */
+function editable<Schema extends zod.ZodType>(schema: Schema): Schema {
+  return schema.meta({ [EDITABLE_META]: true });
+}
+
+/** zod, plus `z.secret()` and `z.editable()`. Authors import this one so the config schema is a single description. */
+export const z = { ...zod, secret, editable };
 
 /** The value type of a config schema: `Infer<typeof config>`. */
 export type Infer<Schema extends zod.ZodType> = zod.output<Schema>;
@@ -255,4 +271,85 @@ export function secretPaths(schema: zod.ZodObject): readonly string[] {
     throw new SecretWalkError(stops);
   }
   return [...paths];
+}
+
+function isMarkedEditable(schema: Schema): boolean {
+  return zod.globalRegistry.get(schema)?.[EDITABLE_META] === true;
+}
+
+/** Why a `z.editable()` is refused where it is: it is a secret, or a secret could be inside it. */
+const EDITABLE_SECRET =
+  "a z.editable() setting is a z.secret(), holds one, or has a shape a secret could hide in: a secret is never a draft's to change; take z.editable() off it, or the secret out of it";
+
+/**
+ * Why a `z.editable()` is refused at or under an object's catchall: its path is `*`, which covers
+ * every key at that level, the ones the object declares among them.
+ */
+const EDITABLE_CATCHALL =
+  "a z.editable() on an object's catchall, or inside it, would cover every key at that level, the ones the object declares among them (an address or a login could be one); mark each declared key, or keep the person's own keys in a z.record()";
+
+/**
+ * Why a `z.editable()` is refused at or under one option of a union or an intersection: an option
+ * adds nothing to a path, so the mark would cover the same place in every other option too.
+ */
+const EDITABLE_OPTION =
+  "a z.editable() inside one option of a union or an intersection would cover the same place in every other option (an address or a login could be there); mark the whole union or intersection, or nothing in it";
+
+/** The settings a draft may change, and each `z.editable()` refused where it stands. */
+export type EditableSettings = {
+  /** In `secretPaths`' form: `labels`, `limits.perMinute`, `teams.*`. Everything under one is editable. */
+  readonly paths: readonly string[];
+  /** A mark on a secret, or on what could hold one: the plugin cannot be used until it is taken off. */
+  readonly refused: readonly SecretStop[];
+};
+
+/**
+ * The paths of every `z.editable()` in an object schema, as `secretPaths` writes a path; a mark
+ * covers everything under it, so the walk stops there. A mark is listed as refused instead where
+ * its path would reach further than the setting it marks: on a `z.secret()`, or on a part that
+ * holds one or has a shape the walker cannot look inside; at or under an object's catchall (`*`
+ * covers the declared keys too); at or under one option of a union or an intersection (an option
+ * adds nothing to the path). The plugin is refused at definition and at load for any of them, so a
+ * draft never reaches a secret, an address or a login through a mark.
+ */
+export function editablePaths(schema: zod.ZodObject): EditableSettings {
+  const paths = new Set<string>();
+  const refused: SecretStop[] = [];
+  const ancestors = new Set<unknown>();
+  /** `under`: the refusal a mark here meets, from the catchall or the option on the way down. */
+  const walk = (current: unknown, path: string, under: string | undefined): void => {
+    // A shape the walker cannot follow holds no mark it can see; `secretPaths` refuses it if it
+    // could hide a secret, and a setting inside it is then no draft's to change.
+    if (!(current instanceof zod.core.$ZodType) || ancestors.has(current)) {
+      return;
+    }
+    if (isMarkedEditable(current)) {
+      if (under !== undefined) {
+        refused.push({ path, message: under });
+      } else if (mayHideSecret(current)) {
+        refused.push({ path, message: EDITABLE_SECRET });
+      } else {
+        paths.add(path);
+      }
+      return;
+    }
+    if (isMarkedSecret(current) || ancestors.size >= MAX_DEPTH) {
+      return;
+    }
+    const inside = insideOf(current);
+    if ("stop" in inside) {
+      return;
+    }
+    const def = current._zod.def as unknown as Readonly<Record<string, unknown>>;
+    const options = def["type"] === "union" || def["type"] === "intersection";
+    ancestors.add(current);
+    for (const edge of inside) {
+      const catchall = def["type"] === "object" && edge.schema === def["catchall"];
+      const next = catchall ? EDITABLE_CATCHALL : options ? EDITABLE_OPTION : undefined;
+      walk(edge.schema, joined(path, edge.step), under ?? next);
+    }
+    ancestors.delete(current);
+  };
+  walk(schema, "", undefined);
+  return { paths: [...paths], refused };
 }

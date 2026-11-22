@@ -30,15 +30,20 @@ import {
 export type SourceDraft = { readonly name: string } & Readonly<Record<string, unknown>>;
 
 /**
- * A draft of the project's own spending settings (Settings): the monthly cap in billable input
- * tokens, `null` removing it, and what happens at 100%. The route sends no other key.
+ * A draft of the project's own settings: Settings' spending cap (billable input tokens a month,
+ * `null` removing it) and what happens at 100%, and the Alerts page's `alerts` (the whole key in
+ * the project JSON's shape, `null` taking it out) and the Plugins page's `plugins` (each plugin it
+ * names by its key, its settings replacing that entry whole). Only the shape is the route's; every
+ * rule is the loader's and the worker's plugins', behind the door.
  */
 export type ProjectDraft = {
   readonly spendingCap?: number | null;
   readonly onCapReached?: "pause" | "continue";
+  readonly alerts?: Readonly<Record<string, unknown>> | null;
+  readonly plugins?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 };
 
-/** What Apply places into facetdb.config.ts: one source, or the project's spending settings. */
+/** What Apply places into facetdb.config.ts: one source, or the project's own settings. */
 export type ConfigDraft = { readonly source: SourceDraft } | { readonly project: ProjectDraft };
 
 /** A problem the loader found, with its field path as the config file writes it (`sources[0].questions.urgency.levels`). */

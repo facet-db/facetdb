@@ -10,7 +10,13 @@ import {
   FAILURE_WINDOW_MS,
   resolvedMessage,
 } from "./events.ts";
-import { isQuiet, lastQuietPeriod, type QuietPeriod, type QuietWindow } from "./quiet-hours.ts";
+import {
+  isQuiet,
+  lastQuietPeriod,
+  type QuietPeriod,
+  type QuietWindow,
+  quietPeriodAt,
+} from "./quiet-hours.ts";
 
 /** An alert that has been raised and not yet resolved. */
 export type ActiveAlert = {
@@ -308,6 +314,15 @@ export type Alerts = {
    * `address`, now, whatever its quiet hours and `sends`. Never recorded in the history.
    */
   test(address: string, page: AlertsPage): Promise<ChannelTest>;
+  /**
+   * A reload's new binding: the channels in force from now on. Every raise, resolve, summary and
+   * test made after it reads these; one already on its way keeps the channels it started with. A
+   * channel kept at the same address keeps its quiet-hours state (the store keys it by address);
+   * one whose quiet hours this takes away keeps its last window for its summary alone (it holds
+   * nothing more), until the period they were taken away in, or the last one before, has been
+   * summarized, so nothing it held goes unsent.
+   */
+  rebind(channels: readonly BoundChannel[]): void;
 };
 
 /** The project a summary or a test message speaks for, and the link to its Alerts page. */
@@ -430,6 +445,18 @@ function endedPeriod(window: QuietWindow, at: number): QuietPeriod | undefined {
   }
 }
 
+/**
+ * The period whose summary a channel still owes when its quiet hours are taken away at `at`: the
+ * one `at` falls in, else the last one that ended. Undefined when the zone cannot be read.
+ */
+function owedPeriod(window: QuietWindow, at: number): QuietPeriod | undefined {
+  try {
+    return quietPeriodAt(window, at) ?? lastQuietPeriod(window, at);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The words a failed delivery is kept with: a `ChannelFailed`'s, cleaned, or the fixed ones. */
 function failureWords(error: unknown): string {
   if (error instanceof ChannelFailed) {
@@ -440,7 +467,21 @@ function failureWords(error: unknown): string {
 }
 
 export function createAlerts(deps: AlertsDeps): Alerts {
-  const { store, clock, channels, report } = deps;
+  const { store, clock, report } = deps;
+  /** The channels in force: the binding the process started with, then each `rebind`'s. */
+  let channels = deps.channels;
+  /**
+   * Per address, the quiet window a `rebind` took away from a channel it kept, and the end of the
+   * period whose summary is still owed: the period they were taken away in, or the last one before
+   * it. The summary tick goes on under the window until that period is summarized.
+   */
+  const retired = new Map<string, { readonly window: QuietWindow; readonly owed: number }>();
+  /**
+   * Per address, the start of the period a `rebind` changed a channel's quiet hours in: a channel
+   * never summarized before reaches back to it in its first summary, so what its old hours held is
+   * not left out when the new ones start later. Dropped once a summary is claimed.
+   */
+  const carried = new Map<string, number>();
   /** The sliding window of model calls this process made, oldest first. */
   let calls: Call[] = [];
   /**
@@ -792,12 +833,20 @@ export function createAlerts(deps: AlertsDeps): Alerts {
 
   /** Every quiet channel's summary side by side: a channel that hangs to its bound holds no other. */
   async function summarize(page: AlertsPage): Promise<SummaryReport> {
-    const quiet = channels.flatMap((channel) =>
-      channel.quiet === undefined ? [] : [{ channel, window: channel.quiet }],
-    );
+    // A channel whose quiet hours a rebind took away is summarized under the window it had, until
+    // the period it owes is.
+    const quiet = channels.flatMap((channel) => {
+      const window = channel.quiet ?? retired.get(channel.name)?.window;
+      return window === undefined ? [] : [{ channel, window }];
+    });
     const outcomes = await Promise.allSettled(
       quiet.map(({ channel, window }) => summarizeFor(channel, window, page)),
     );
+    for (const [name, { owed }] of retired) {
+      if ((summarized.get(quietKey(page.project, name)) ?? Number.NEGATIVE_INFINITY) >= owed) {
+        retired.delete(name);
+      }
+    }
     const failures: ChannelFailure[] = [];
     const unmarked: string[] = [];
     let storeFailed = false;
@@ -850,14 +899,18 @@ export function createAlerts(deps: AlertsDeps): Alerts {
         return undefined;
       }
     }
-    const since =
-      state === undefined ? period.start : state.sentAt === null ? state.since : state.until;
+    // A channel never summarized whose hours a rebind changed reaches back to what its old hours
+    // held: their period may start before the new one's.
+    const first = Math.min(period.start, carried.get(channel.name) ?? period.start);
+    const since = state === undefined ? first : state.sentAt === null ? state.since : state.until;
     const claim: QuietSummaryState = { until: period.end, since, triedAt: now, sentAt: null };
     if (!(await store.swapQuietState(key, state, claim))) {
       // Another worker claimed it between the read and the swap: that worker sends it.
       summaryPacedUntil.set(key, now + RETRY_EVERY_MS);
       return undefined;
     }
+    // The claim holds `since` from now on: the next summary starts from it, or from its end.
+    carried.delete(channel.name);
     const held = await store.heldFor(page.project, channel.name, since, period.end);
     const sent: QuietSummaryState = { ...claim, sentAt: now };
     if (held.length === 0) {
@@ -890,5 +943,37 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     return failure === undefined ? { kind: "sent" } : { kind: "failed", error: failure.error };
   }
 
-  return { raise, resolve, signals, drain, summarize, test };
+  function rebind(next: readonly BoundChannel[]): void {
+    const now = clock.now();
+    for (const channel of channels) {
+      const kept = next.find((each) => each.name === channel.name);
+      const before = channel.quiet ?? retired.get(channel.name)?.window;
+      // A channel taken out has nowhere to send a summary to.
+      if (before === undefined || kept === undefined) {
+        continue;
+      }
+      const owed = owedPeriod(before, now);
+      if (owed === undefined) {
+        continue;
+      }
+      if (kept.quiet === undefined) {
+        // Its hours taken away: summed up under the window it had, until what it owes is sent.
+        if (channel.quiet !== undefined) {
+          retired.set(channel.name, { window: channel.quiet, owed: owed.end });
+        }
+      } else if (JSON.stringify(kept.quiet) !== JSON.stringify(before)) {
+        // Its hours changed: its first summary under the new ones reaches back to the old ones'.
+        carried.set(channel.name, Math.min(carried.get(channel.name) ?? owed.start, owed.start));
+      }
+    }
+    for (const name of [...retired.keys()]) {
+      const kept = next.find((each) => each.name === name);
+      if (kept === undefined || kept.quiet !== undefined) {
+        retired.delete(name);
+      }
+    }
+    channels = next;
+  }
+
+  return { raise, resolve, signals, drain, summarize, test, rebind };
 }

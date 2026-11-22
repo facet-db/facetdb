@@ -84,10 +84,10 @@ export type ServerDeps = {
   /**
    * The Alerts and Settings pages: the host this surface listens on (`--host`), and the alert
    * channels (`alerts.channels`, `slack:#ops`): `alertChannels` the ones the worker runs with (the
-   * config as it started; a reload changes them only at the next restart), each with what it sends,
-   * its quiet hours and whether it was bound, and `fileAlertChannels` the ones the file names now,
-   * read on each request, so the page can say they differ. The config's own words alone: no setting
-   * of a channel's plugin ever reaches this package.
+   * config as it started, then each reload's that bound them), each with what it sends, its quiet
+   * hours and whether it was bound, and `fileAlertChannels` the ones the file names now, read on
+   * each request, so the page can say they differ. The config's own words alone: no setting of a
+   * channel's plugin ever reaches this package.
    */
   readonly host: string;
   readonly alertChannels: () => readonly RunningChannel[];

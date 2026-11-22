@@ -466,12 +466,12 @@ describe("the worker runs a source's actions through their plugins (worker-actio
         },
       ],
     });
-    // A changed `plugins` key is the host's, loaded at the start: the reload says to restart.
+    // A `plugins` entry giving the plugin the settings it already runs with changes nothing, so
+    // nothing restarts and the reload says nothing of it (no restart is asked for).
     inFile = { ...renamed, plugins: { tracker: {} } };
     expect(await reload()).toMatchObject({
-      notes: [
-        "The project's plugins changed in facetdb.config.ts; the worker keeps what it started with until you restart facetdb worker.",
-      ],
+      sources: [{ source: "listings", outcome: "unchanged" }],
+      notes: [],
     });
     stop.abort();
     const result = await running;

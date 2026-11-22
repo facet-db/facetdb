@@ -12,12 +12,14 @@ import {
   type ProjectConfig,
 } from "../config/index.ts";
 import { VERSION } from "../index.ts";
+import { rehost } from "./host.ts";
 import {
   action,
   channel,
   createPluginHost,
   definePlugin,
   importFromProject,
+  livePluginHost,
   type Plugin,
   type PluginHostError,
   type PluginHostOptions,
@@ -631,5 +633,110 @@ describe("importFromProject resolves a plugin from the project's directory", () 
     expect(await importModule("facetdb-plugin-plain")).toMatchObject({
       default: { from: "a string export" },
     });
+  });
+});
+
+describe("rehost: a reload's plugin settings over the plugins the start loaded", () => {
+  const OPTIONS = { env: ENV, coreVersion: VERSION, projectDir: PROJECT_DIR };
+  const github = (repo: string) => ({ repo, token: env("GITHUB_TOKEN") });
+  const SLACK = { bot: env("SLACK_TOKEN") };
+
+  /** Whatever a rehost refuses, it refuses in the host's words, which repeat no value. */
+  function refused(run: () => unknown): PluginHostError {
+    let caught: unknown;
+    try {
+      run();
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as Error | undefined)?.name).toBe("PluginHostError");
+    const error = caught as PluginHostError;
+    for (const value of VALUES) {
+      expect(`${error.message}\n${error.fix}`).not.toContain(value);
+    }
+    return error;
+  }
+
+  it("settles again only a plugin whose entry changed, imports nothing, and answers to every name the start did", async () => {
+    const extra = { actions: true, channels: ["slack:#ops"] } as const;
+    const { built, imports } = host(project({ github: github("acme/web"), slack: SLACK }, extra));
+    const start = await built;
+    const imported = imports.length;
+
+    const next = project({ github: github("acme/api"), slack: SLACK }, extra);
+    const { host: after, changed } = rehost(start, next, OPTIONS);
+    expect(changed).toEqual(["@facetdb/github"]);
+    expect(imports).toHaveLength(imported);
+    for (const name of ["github", "@facetdb/github"]) {
+      expect(after.contextFor(name, signal).config).toEqual({
+        repo: "acme/api",
+        token: GITHUB_TOKEN,
+      });
+    }
+    expect(after.plugin("github")?.settings).toEqual(github("acme/api"));
+    expect(after.contextFor("slack", signal)).toEqual(start.contextFor("slack", signal));
+    // The host given is untouched: what runs keeps it until the worker swaps it.
+    expect(start.contextFor("github", signal).config).toMatchObject({ repo: "acme/web" });
+    expect(after.all().map((hosted) => hosted.packageName)).toEqual(
+      start.all().map((hosted) => hosted.packageName),
+    );
+
+    // The same settings again: the host given back, nothing settled.
+    expect(rehost(after, next, OPTIONS)).toEqual({ host: after, changed: [] });
+    // Made again from a host made again, every name still answers.
+    const third = rehost(
+      after,
+      project({ github: github("acme/three"), slack: SLACK }, extra),
+      OPTIONS,
+    );
+    expect(third.changed).toEqual(["@facetdb/github"]);
+    expect(third.host.contextFor("@facetdb/github", signal).config).toMatchObject({
+      repo: "acme/three",
+    });
+    expect(third.host.plugin("slack")).toEqual(start.plugin("slack"));
+  });
+
+  it("refuses a plugin the start did not load, settings its schema refuses, and an entry taken from a plugin still in use", async () => {
+    const extra = { actions: true } as const;
+    const start = await host(project({ github: github("acme/web"), slack: SLACK }, extra)).built;
+
+    const unloaded = refused(() =>
+      rehost(start, project({ github: github("acme/web"), mailer: {} }, extra), OPTIONS),
+    );
+    expect(unloaded.code).toBe("plugin-not-installed");
+    expect(unloaded.message).toBe(
+      'plugins.mailer names the plugin "mailer", which this worker did not load when it started',
+    );
+    expect(unloaded.fix).toContain("restart facetdb worker");
+
+    const schema = refused(() =>
+      rehost(start, project({ github: github("not a repo"), slack: SLACK }, extra), OPTIONS),
+    );
+    expect(schema.code).toBe("plugin-settings");
+    expect(schema.message).toContain("repo is owner/name");
+
+    // The actions still name github: an entry taken out is settings of none, which it refuses.
+    const gone = refused(() => rehost(start, project({ slack: SLACK }, extra), OPTIONS));
+    expect(gone.code).toBe("plugin-settings");
+    // With nothing using it any more, it keeps what it had and nothing is settled.
+    const unused = project({ slack: SLACK });
+    expect(rehost(start, unused, OPTIONS)).toEqual({ host: start, changed: [] });
+  });
+
+  it("a live host reads the host in force on every call, and a swap puts another in force", async () => {
+    const extra = { actions: true } as const;
+    const start = await host(project({ github: github("acme/web"), slack: SLACK }, extra)).built;
+    const live = livePluginHost(start);
+    const { host: after } = rehost(
+      live.current(),
+      project({ github: github("acme/api"), slack: SLACK }, extra),
+      OPTIONS,
+    );
+    expect(live.contextFor("github", signal).config).toMatchObject({ repo: "acme/web" });
+    live.swap(after);
+    expect(live.current()).toBe(after);
+    expect(live.contextFor("github", signal).config).toMatchObject({ repo: "acme/api" });
+    expect(live.plugin("@facetdb/github")?.settings).toEqual(github("acme/api"));
+    expect(live.all()).toEqual(after.all());
   });
 });

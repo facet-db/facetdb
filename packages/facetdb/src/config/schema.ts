@@ -352,9 +352,13 @@ const pluginName = z
  */
 const PLUGIN_KEY_RULE =
   'a plugin is named by its short name ("github") or its package name ("@facetdb/github" or "facetdb-plugin-github")';
-const pluginKey = z
-  .string()
-  .regex(/^(?:@facetdb\/|facetdb-plugin-)?[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/, PLUGIN_KEY_RULE);
+const PLUGIN_KEY = /^(?:@facetdb\/|facetdb-plugin-)?[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const pluginKey = z.string().regex(PLUGIN_KEY, PLUGIN_KEY_RULE);
+
+/** Whether `key` is a key `plugins` may have: a draft's other keys are the schema's to refuse. */
+export function isPluginKey(key: string): boolean {
+  return PLUGIN_KEY.test(key);
+}
 
 type PluginSecretKind = SecretKind | "env-name";
 

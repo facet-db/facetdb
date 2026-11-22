@@ -12,6 +12,7 @@ export type {
 export { apply, planApply, uncommittedWords } from "./apply.ts";
 export type {
   DraftJudgement,
+  DraftPlugins,
   NewSourceSetup,
   ProjectDraft,
   ProjectDraftJudgement,

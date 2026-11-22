@@ -69,10 +69,12 @@ import {
   createActionRunner,
   createDigestRunner,
   createPluginSourceConnector,
+  createSettingsInForce,
   deliveryFailureLine,
+  draftPlugins,
   type HostedSource,
   hostedSource,
-  notifyQuiet,
+  livePluginHost,
   type PluginHost,
   PluginHostError,
   PluginProviderError,
@@ -323,8 +325,9 @@ export type WorkerParts = {
   readonly studio?: StudioBuild;
   /**
    * The plugins the config names, as the host loaded them at the start: the Plugins page's
-   * installed plugins and packs, and every source's actions. A reload does not load them again: a
-   * changed `plugins` key waits for a restart, and the reload says so.
+   * installed plugins and packs, and every source's actions. A reload never imports a plugin again;
+   * it settles the ones loaded here again under a changed `plugins` entry and puts them in force,
+   * and refuses a plugin the start did not load.
    */
   readonly plugins: PluginHost;
   /**
@@ -444,21 +447,43 @@ export async function runWorkers(
     projectId: project.id,
     outbox: outboxQueue(parts.storeClient, clock),
   };
-  // Every alert of this process goes to the channels the config names, bound to their plugins when
-  // the config loaded (`loadWorkerConfig` refused any it could not bind). A channel that fails is a
-  // printed line and a line of the alert's history, never a stopped pass. A reload keeps these
-  // until a restart (changing them live is not built yet).
-  const alerts = createAlerts({
-    store: store.alerts,
-    clock,
-    channels: bindChannels({
-      config,
-      host: withOutbox(parts.plugins, webhooks),
+  /**
+   * The plugins as everything that runs one reads them, each call the host in force: the start's,
+   * then each reload's that put a plugin's changed settings in force.
+   */
+  const plugins = livePluginHost(parts.plugins);
+  /** The channels of `from` bound to the plugins of `host`, delivering through this process. */
+  const bindFor = (from: ProjectConfig, host: PluginHost) =>
+    bindChannels({
+      config: from,
+      host: withOutbox(host, webhooks),
       env: deps.env,
       clock,
       stop: deps.stopSignal,
-    }),
+    });
+  // Every alert of this process goes to the channels the config names, bound to their plugins when
+  // the config loaded (`loadWorkerConfig` refused any it could not bind). A channel that fails is a
+  // printed line and a line of the alert's history, never a stopped pass. A reload binds them again
+  // and hands them over (`settings` below), or keeps these and says why.
+  const alerts = createAlerts({
+    store: store.alerts,
+    clock,
+    channels: bindFor(config, parts.plugins),
     report: (failure) => print(deliveryFailureLine(failure)),
+  });
+  /**
+   * The channels and plugin settings in force, which a reload replaces with the file's when they
+   * bind and settle, restarting the sources of a plugin whose settings changed.
+   */
+  const settings = createSettingsInForce({
+    config,
+    host: plugins,
+    env: deps.env,
+    coreVersion: VERSION,
+    projectDir: deps.projectDir,
+    bind: bindFor,
+    rebind: (bound) => alerts.rebind(bound),
+    machineZone: processZone,
   });
   for (const note of store.migrationNotes) {
     print(`note: ${note}`);
@@ -469,8 +494,7 @@ export async function runWorkers(
   /**
    * The project's spending settings in force: the file's at start, then each reload's (the fleet's
    * `project` hook), so a cap saved from Settings is enforced at the gate's next check and Home
-   * shows it, with no restart. The model URL and the alert channels still take a restart: the
-   * reload's notes say so.
+   * shows it, with no restart. The model URL still takes a restart: the reload's notes say so.
    */
   let projectInForce: ProjectSpendingSettings = config;
   /**
@@ -585,7 +609,7 @@ export async function runWorkers(
   async function openLoop(source: SourceConfig, from: ProjectConfig): Promise<SourceLoop> {
     // Its actions against the plugins this worker loaded, before anything opens: a reload whose
     // `actions` changed restarts the loop with the new steps, or keeps the old loop and says why.
-    checkSourceActions(from, source, parts.plugins, deps.env);
+    checkSourceActions(from, source, plugins, deps.env);
     const questionSet = questionSetOf(from, source);
     // The loop's own policy, kept on the loop so a restart hands its held records on.
     const outage = createOutagePolicy({ onOutage: source.onOutage, clock });
@@ -644,7 +668,7 @@ export async function runWorkers(
    */
   function pluginSourceOf(source: SourceConfig, from: ProjectConfig): HostedSource {
     try {
-      return hostedSource(parts.plugins, from, source, deps.env);
+      return hostedSource(plugins, from, source, deps.env);
     } catch (error) {
       if (error instanceof PluginHostError) {
         throw new CliError(error.code, error.message, error.fix);
@@ -666,12 +690,15 @@ export async function runWorkers(
     outage: OutagePolicyHandle,
   ): Promise<SourceLoop> {
     const hosted = pluginSourceOf(source, from);
+    // The loop reads its plugin with the settings in force when it opened, to its close: a reload
+    // that changes them restarts it, and the batch in hand finishes on these.
+    const opened = plugins.current();
     const version = await start(source, "plugin-source", questionSet);
     const connector = createPluginSourceConnector({
       store: store.connector({ sourceId: idOf(source), fields: source.read, workerId }),
       name: source.name,
       hosted,
-      context: (signal) => parts.plugins.contextFor(hosted.packageName, signal),
+      context: (signal) => opened.contextFor(hosted.packageName, signal),
       fields: source.read,
       clock,
       cursors: store.cursors,
@@ -815,6 +842,8 @@ export async function runWorkers(
       projectInForce = next;
       raisers.loaded(next, applied);
     },
+    // A reload's channels and plugin settings, put in force or kept with the reason.
+    settings: (next) => settings.reload(next),
     load: () => {
       if (parts.configFile === undefined) {
         return Promise.reject(new Error("this worker has no config file to reload"));
@@ -879,7 +908,7 @@ export async function runWorkers(
                   config: fleet.config(),
                   source: loop.source,
                   project,
-                  host: parts.plugins,
+                  host: plugins,
                   env: deps.env,
                   clock,
                   workerId: backfillId,
@@ -950,7 +979,7 @@ export async function runWorkers(
     // A notification goes through its plugin's channel, bounded and stopped as an alert is, and
     // links its record's page or, for a digest, the Decisions list.
     const actionRunning = {
-      host: parts.plugins,
+      host: plugins,
       env: deps.env,
       notify: { clock, stop: deps.stopSignal, recordLink: links.record, listLink: links.list },
     };
@@ -963,14 +992,14 @@ export async function runWorkers(
       // from the variable the config names; never another project's row with it. A refusal is the
       // outbox's fixed "the signing secret could not be read": its text goes nowhere.
       secretFor: (projectId) => {
-        const secret = projectId === project.id ? webhookSecret(parts.plugins) : undefined;
+        const secret = projectId === project.id ? webhookSecret(plugins) : undefined;
         return secret === undefined
           ? Promise.reject(new Error("this worker holds no signing secret for that webhook"))
           : Promise.resolve(secret);
       },
       // A webhook the built-in queued is sent only to an endpoint the config in force still names;
       // one queued under an older config, or by a review from a stale copy, is closed.
-      refuseWebhook: (row) => webhookRefusal(fleet.config(), parts.plugins, row),
+      refuseWebhook: (row) => webhookRefusal(fleet.config(), plugins, row),
       // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
       // worker's other alerts are; one that cannot be raised is the outbox's to retry.
       onGiveUp: async (event, _signal, lastError) => {
@@ -983,7 +1012,8 @@ export async function runWorkers(
       // A notification past the first 10 of its minute, or held by its channel's quiet hours (the
       // alert channel of the same address), goes out in one digest with the others.
       runDigest: createDigestRunner({ ...actionRunning, source: actionSource }),
-      quietPeriod: notifyQuiet(config, parts.plugins, processZone),
+      // The quiet hours of the channels in force, which a reload's rebind replaces.
+      quietPeriod: (batchKey, at) => settings.quietPeriod(batchKey, at),
     });
 
     if (options.http) {
@@ -1053,10 +1083,11 @@ export async function runWorkers(
           },
         },
         // The Alerts and Settings pages: where this surface listens, the channel addresses the
-        // worker runs with (the config as it started; a reload keeps them until a restart), and the
-        // ones the file names now, so the page can say they differ.
+        // worker runs with (the start's, then each reload's that bound them, every one in force is
+        // bound), and the ones the file names now, so the page can say they differ when a reload
+        // could not bind them.
         host: options.host,
-        alertChannels: () => channelsOf(config).map((channel) => ({ ...channel, bound: true })),
+        alertChannels: () => settings.channels().map((channel) => ({ ...channel, bound: true })),
         fileAlertChannels: () => channelsOf(fleet.config()),
         // The test button sends through the channels this worker runs; none under --once.
         ...(options.once
@@ -1086,7 +1117,7 @@ export async function runWorkers(
         ...(jobs === undefined ? {} : { backfill: jobs }),
         // The Plugins page: the hosted plugins, the registry's gallery, the packs.
         plugins: createPluginsDoor({
-          host: parts.plugins,
+          host: plugins,
           env: deps.env,
           coreVersion: VERSION,
           registry: registryAddress(deps.env),
@@ -1096,7 +1127,7 @@ export async function runWorkers(
           clock,
         }),
         // A plugin source's webhook, handed to the loop in force of the source it names.
-        hooks: createHooksDoor({ fleet, plugins: parts.plugins, clock, print }),
+        hooks: createHooksDoor({ fleet, plugins, clock, print }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
@@ -1126,6 +1157,14 @@ export async function runWorkers(
                   files: configFile.files,
                   load: () => configFile.load({ quiet: true }),
                   env: deps.env,
+                  // A draft's channels and plugin settings are judged against the plugins in force,
+                  // as the reload after its write puts them in force.
+                  plugins: draftPlugins({
+                    host: () => plugins.current(),
+                    env: deps.env,
+                    coreVersion: VERSION,
+                    projectDir: deps.projectDir,
+                  }),
                   // An Apply's reviewer is who a question set its write changes is by, handed to
                   // that reload's own load and no other.
                   reload: (applied) => fleet.reload(applied),
@@ -1249,7 +1288,7 @@ export async function runWorkers(
       await parts.listening?.(options.host, listener.port);
     } else if (!options.once) {
       // No route under --no-http; a source whose plugin takes webhooks relies on its poll.
-      for (const line of hooklessNotes(config, parts.plugins)) {
+      for (const line of hooklessNotes(config, plugins)) {
         print(line);
       }
     }
