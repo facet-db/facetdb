@@ -10,11 +10,13 @@ import {
   VERSION,
 } from "facetdb";
 import {
+  ACTION_WORDS_MAX,
   type ActionContext,
   type ActionDefinition,
   actionSteps,
   checkActions,
   createPluginHost,
+  firstPartyFailure,
   type Plugin,
   type PluginHost,
   PluginHostError,
@@ -1125,6 +1127,57 @@ describe("GitHub's refusals", () => {
     );
     expect([error.status, error.retryAfterMs]).toEqual([403, undefined]);
     expect(error.message).toContain("rate limit");
+  });
+
+  it("says which refusals are for good, as the action host reads them for the outbox", async () => {
+    const kept = (error: GithubActionError) =>
+      firstPartyFailure("@facetdb/github", error, [TOKEN], ACTION_WORDS_MAX);
+
+    // A refused token: for good, the words kept whole, the fix among them.
+    let error = await refusedWith(() => json(401, { message: `Bad credentials ${TOKEN}` }));
+    expect(error.temporary).toBeUndefined();
+    expect(kept(error)).toEqual({ words: error.message, permanent: true });
+    expect(error.message).toContain(error.fix);
+    // A missing repository: GitHub's 404 for it, for good.
+    const missing = failure(
+      await thrown(run(await world(), "label", { repo: "your-org/other-repo", add: ["x"] })),
+    );
+    expect([missing.status, kept(missing)?.permanent]).toEqual([404, true]);
+
+    // A rate limit is never for good, 403 or not, with or without a wait.
+    error = await refusedWith(() =>
+      json(403, { message: "You have exceeded a secondary rate limit" }),
+    );
+    expect(error.temporary).toBe(true);
+    expect(kept(error)).toMatchObject({ permanent: false });
+    // GitHub Enterprise Server's older secondary limit: a 403 naming its abuse detection, no wait.
+    error = await refusedWith(() =>
+      json(403, {
+        message:
+          "You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.",
+      }),
+    );
+    expect([error.status, error.retryAfterMs, error.temporary]).toEqual([403, undefined, true]);
+    expect(error.message).toContain("rate limit");
+    expect(kept(error)).toMatchObject({ permanent: false });
+    error = await refusedWith(() => json(429, { message: "BODY-TEXT" }, { "retry-after": "30" }));
+    expect(kept(error)).toMatchObject({ retryAfterMs: 30_000, permanent: false });
+    // GitHub's own trouble is tried again on the backoff.
+    error = await refusedWith(() => new Response("<html>BODY-TEXT</html>", { status: 502 }));
+    expect(kept(error)).toMatchObject({ permanent: false });
+
+    // Issues turned off, and a key that is no issue number: for good, the fix promising no retry.
+    const w = await world();
+    w.gh.repo(REPO, { hasIssues: false });
+    error = failure(await thrown(run(w, "label", { repo: REPO, add: ["x"] })));
+    expect([error.temporary, kept(error)?.permanent]).toEqual([false, true]);
+    expect(error.fix).not.toContain("tried again");
+    error = failure(await thrown(run(w, "label", { repo: REPO, add: ["x"] }, { key: "07" })));
+    expect([error.status, error.temporary, kept(error)?.permanent]).toEqual([
+      undefined,
+      false,
+      true,
+    ]);
   });
 
   it("throws a 5xx so the outbox tries again, and names a 422 for what it is", async () => {

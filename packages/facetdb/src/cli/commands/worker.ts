@@ -35,8 +35,10 @@ import {
   createCheckStore,
   createOutbox,
   createServer,
+  DeliveryPassFailed,
   type DeliveryReport,
   gaveUpAlert,
+  gaveUpHow,
   gaveUpSubject,
   hideSecrets,
   OpenSurfaceError,
@@ -716,7 +718,12 @@ export async function runWorkers(
         connector,
         keyText: undefined,
         outage,
-        plugin: { packageName: hosted.packageName, entry: hosted.entry, settings: hosted.settings },
+        plugin: {
+          packageName: hosted.packageName,
+          entry: hosted.entry,
+          settings: hosted.settings,
+          variables: hosted.variables,
+        },
         // Its store answers a pass whatever its plugin does: only a read through the plugin that
         // answered starts its backoff over after a failure.
         proven: (heard) => connector.onWorking(heard),
@@ -1333,7 +1340,7 @@ export async function runWorkers(
           }
         }
       }
-      printAlertFailures(await outbox.deliverDue(clock.now()), print);
+      await deliverPass(() => outbox.deliverDue(clock.now()), print);
     } else {
       // A loop that fails stops alone and is tried again; the fleet's run rejects only for a
       // failure of the fleet itself, which stops the rest.
@@ -1463,7 +1470,7 @@ export async function deliverUntil(
   let summarizing: Promise<void> | undefined;
   while (!signal.aborted) {
     try {
-      printAlertFailures(await deliver(), print);
+      await deliverPass(deliver, print);
     } catch {
       print(OUTBOX_PASS_FAILED);
     }
@@ -1481,6 +1488,26 @@ export async function deliverUntil(
   await summarizing;
 }
 
+/**
+ * One delivery pass, every give-up alert it could not raise printed; also those of a pass that
+ * failed after its other rows ran (`DeliveryPassFailed` carries its report), which then rejects
+ * with the store's own error, as a pass did before.
+ */
+async function deliverPass(
+  deliver: () => Promise<Pick<DeliveryReport, "alertFailures">>,
+  print: (text: string) => void,
+): Promise<void> {
+  try {
+    printAlertFailures(await deliver(), print);
+  } catch (error) {
+    if (error instanceof DeliveryPassFailed) {
+      printAlertFailures(error.report, print);
+      throw error.cause;
+    }
+    throw error;
+  }
+}
+
 /** Every give-up alert of a delivery pass that could not be raised, one line each, none dropped. */
 function printAlertFailures(
   report: Pick<DeliveryReport, "alertFailures">,
@@ -1494,9 +1521,8 @@ function printAlertFailures(
 /** One alert that did not go out, in plain words: which webhook, why, and what happens next. */
 function alertFailureLine({ event, error, final }: AlertFailure): string {
   const reason = error instanceof Error ? error.message : String(error);
-  const attempts = `${event.attempts} attempt${event.attempts === 1 ? "" : "s"}`;
   const row = "host" in event ? "webhook" : "action";
-  return `${gaveUpSubject(event)} (delivery ${event.deliveryId}) was given up after ${attempts} in 24 hours, and its alert could not be raised: ${reason}. ${
+  return `${gaveUpSubject(event)} (delivery ${event.deliveryId}) was given up ${gaveUpHow(event)}, and its alert could not be raised: ${reason}. ${
     final
       ? `That was the alert's last try: the ${row} is closed, and this line is its only alert.`
       : `FacetDB tries the alert once more on the ${row}'s next attempt; the ${row} itself is not ${"host" in event ? "sent" : "run"} again.`

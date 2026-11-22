@@ -1,7 +1,12 @@
 import { DEFAULT_WORKER_LIMITS, monthOf, type SummaryReport } from "@facetdb/core";
 import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
-import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
+import {
+  DEFAULT_FETCH_TIMEOUT_MS,
+  DeliveryPassFailed,
+  GIVE_UP_AFTER_MS,
+  RETRY_FIRST_MS,
+} from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { summaryFailureLine, summaryUnmarkedLine } from "../../plugin/index.ts";
@@ -1235,6 +1240,51 @@ describe("the worker's outbox loop", () => {
       `webhook to hooks.example.com (delivery 8) was given up after 31 attempts in 24 hours, and its alert could not be raised: timed out. ${RETRIED}`,
       `webhook to hooks.example.com (delivery 7) was given up after 31 attempts in 24 hours, and its alert could not be raised: still down. ${CLOSED}`,
     ]);
+  });
+
+  it("prints the give-up alerts a pass could not raise when the pass failed after its other rows ran", async () => {
+    const refused = {
+      projectId: "p",
+      deliveryId: "9",
+      sourceId: "p:issues",
+      plugin: "@facetdb/github",
+      action: "label",
+      attempts: 1,
+      queuedAt: START,
+      refused: true as const,
+    };
+    const report = {
+      delivered: [],
+      retrying: ["9"],
+      gaveUp: [],
+      superseded: [],
+      closed: [],
+      deferred: [],
+      held: [],
+      lost: [],
+      alertFailures: [
+        { event: refused, error: new Error("the alerts table is unreachable"), final: false },
+      ],
+    };
+    const driver = new Error(`connect ECONNREFUSED: ${WORKER_URL}`);
+    const stop = new AbortController();
+    const printed: string[] = [];
+
+    await deliverUntil(
+      stop.signal,
+      () => {
+        stop.abort();
+        return Promise.reject(new DeliveryPassFailed(report, driver));
+      },
+      new FakeClock(START),
+      (text) => printed.push(text),
+    );
+
+    expect(printed).toEqual([
+      "action label of plugin @facetdb/github for source issues (delivery 9) was given up at once, refused for good after 1 attempt, and its alert could not be raised: the alerts table is unreachable. FacetDB tries the alert once more on the action's next attempt; the action itself is not run again.",
+      OUTBOX_PASS_FAILED,
+    ]);
+    expect(printed.join("\n")).not.toContain("ECONNREFUSED");
   });
 
   it("--once prints every give-up alert that could not be raised too, the last one included", async () => {

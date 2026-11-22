@@ -18,6 +18,7 @@ export type {
   QueuedAction,
 } from "./action-host.ts";
 export {
+  ACTION_WORDS_MAX,
   actionSteps,
   checkActions,
   checkSourceActions,
@@ -44,9 +45,15 @@ export {
   webhookSecret,
   withOutbox,
 } from "./builtin/webhook.ts";
-export type { ChannelBinding, ChannelHostDeps, ZoneReader } from "./channel-host.ts";
+export type {
+  ChannelBinding,
+  ChannelHostDeps,
+  FirstPartyFailure,
+  ZoneReader,
+} from "./channel-host.ts";
 export {
   bindChannels,
+  ChannelRefused,
   channelsOf,
   checkChannels,
   DELIVERY_BOUND_MS,
@@ -55,6 +62,7 @@ export {
   deliveryFailedWords,
   deliveryFailureLine,
   FIRST_PARTY_DELIVERY_ERRORS,
+  firstPartyFailure,
   quietWindowFor,
   revealsSecret,
   sendsSeverity,

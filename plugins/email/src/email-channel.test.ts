@@ -342,6 +342,8 @@ describe("no line break from an alert's text, from or where reaches a header", (
       const fake = fakeTransport();
       const error = await failure(deliver(fake, ALERT, where));
       expect(error.failure).toBe("address-refused");
+      // A change of the address comes first, so it is refused for good.
+      expect(error.temporary).toBe(false);
       expect(error.message).toMatch(/^where holds a line break/);
       expect(error.message).not.toContain("attacker");
       expect(fake.made).toEqual([]);
@@ -980,6 +982,39 @@ describe("a failed delivery says what the server said, and never the password", 
     }
   });
 
+  it("a 5xx naming a sending quota or limit is temporary: it lifts with time", async () => {
+    for (const [code, response, command, kind] of [
+      ["EENVELOPE", "550 5.4.5 Daily user sending limit exceeded", "MAIL FROM", "sender-refused"],
+      ["EMESSAGE", "550 5.4.5 Daily user sending quota exceeded", "DATA", "message-refused"],
+      ["EENVELOPE", "552 5.2.2 The email account is over quota", "RCPT TO", "recipient-refused"],
+      ["EMESSAGE", "554 5.7.0 Too many messages: sending limit reached", "DATA", "message-refused"],
+    ] as const) {
+      const error = await failure(
+        deliver(fakeTransport(failing(smtpError("Refused", code, response, command)))),
+      );
+      expect(error.failure, response).toBe(kind);
+      expect([error.status, error.temporary], response).toEqual([
+        Number(response.slice(0, 3)),
+        true,
+      ]);
+      expect(error.message, response).toContain(
+        "for now: its reply names a sending quota or limit, which lifts with time. The server said: ",
+      );
+      expect(error.message, response).not.toMatch(/from must be|check the address/);
+    }
+    // A limit inside another word is no limit: this 5xx stays a refusal for good.
+    const unlimited = await failure(
+      deliver(
+        fakeTransport(
+          failing(
+            smtpError("Refused", "EENVELOPE", "550 5.7.1 Unlimited relaying denied", "RCPT TO"),
+          ),
+        ),
+      ),
+    );
+    expect(unlimited.temporary).toBe(false);
+  });
+
   it("a refused recipient: the server's words, the address included", async () => {
     const fake = fakeTransport(
       failing(
@@ -1076,11 +1111,17 @@ describe("a failed delivery says what the server said, and never the password", 
       ),
     );
     expect(slow.failure).toBe("timed-out");
+    // No reply code, and the server did not answer: worth trying again, never given up at once by
+    // the outbox, which reads `temporary` before any status.
+    expect([unreachable.status, unreachable.temporary]).toEqual([undefined, true]);
+    expect([slow.status, slow.temporary]).toEqual([undefined, true]);
   });
 
   it("anything else thrown, even a bare string or a transport that cannot be made, holds no password", async () => {
     const odd = await failure(deliver(fakeTransport(failing(`exploded with ${PASSWORD}`))));
     expect(odd.failure).toBe("failed");
+    // A failure of no kind FacetDB knows, with no reply code: tried again.
+    expect(odd.temporary).toBe(true);
     expect(odd.message).toBe(
       "the email to ops@example.com through the SMTP server smtp.example.com:587 failed. The error's words were left out, as they could carry the login",
     );
@@ -1112,6 +1153,7 @@ describe("a failed delivery says what the server said, and never the password", 
     );
     expect(error.failure).toBe("stopped");
     expect(error.message).toBe("the email to ops@example.com was not sent: FacetDB is stopping");
+    expect(error.temporary).toBe(true);
     expect(fake.made).toEqual([]);
   });
 

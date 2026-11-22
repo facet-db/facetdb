@@ -38,26 +38,59 @@ function isTemporary(status: number | undefined): boolean {
   return status !== undefined && status >= 400 && status < 500;
 }
 
+/**
+ * The failures worth trying again unchanged when the server gave no 4xx or 5xx: it did not answer
+ * (or not yet), the worker stopped (the message may have been sent), or the failure is of no kind
+ * FacetDB knows. The other kinds (`address-refused`, `tls-failed`, a refused login, sender,
+ * recipient or message) need a change of settings or address first.
+ */
+const TRIED_AGAIN: ReadonlySet<DeliveryFailure> = new Set([
+  "timed-out",
+  "unreachable",
+  "stopped",
+  "failed",
+]);
+
+/**
+ * A 5xx reply that is a sending quota or a rate limit, which lifts with time though its code says
+ * the refusal is permanent (so a notification is not given up at once for it): the enhanced status
+ * code 5.4.5 (RFC 3463's congestion, which Gmail answers its daily sending limit with, `550 5.4.5
+ * Daily user sending limit exceeded`), and any reply naming a quota (`552 5.2.2 ... over quota`) or
+ * a limit as a word of its own (`554 5.7.0 ... sending limit`, `rate limited`; never inside another
+ * word, such as "unlimited"). Read in the server's reply only, never in the transport's own error
+ * words. Its cost: a 5xx naming another limit (a message size limit) is tried for 24 hours, as
+ * every failure was before, rather than given up at once.
+ */
+const QUOTA_REPLY = /\b5\.4\.5\b|quota|\blimit/i;
+
+/** What the words say of a refusal that may pass later: the server asked, or its reply names a quota. */
+const ASKED_LATER = "for now and asked to try again later";
+const QUOTA_LATER = "for now: its reply names a sending quota or limit, which lifts with time";
+
 export class EmailDeliveryError extends Error {
   readonly failure: DeliveryFailure;
   /** The SMTP reply code the server refused with, when it answered one (`status`, as Slack's and Telegram's errors name theirs). */
   readonly status: number | undefined;
   /**
-   * True when the server answered a 4xx: it asked to try again later. It reads the reply code only,
-   * so it is false for a failure that carries none: a caller deciding on a retry also reads
-   * `failure`, where `timed-out` and `unreachable` are worth a retry (the server did not answer, or
-   * not yet), and `stopped` is the worker's own stop (the message may have been sent). The other
-   * kinds without a 4xx (`address-refused`, `tls-failed`, and a 5xx refusal) need a change of
-   * settings or address first.
+   * Whether trying again unchanged can succeed, which FacetDB reads before `status` (an SMTP reply
+   * code is not an HTTP status, and a notification refused for good is given up at once). With a
+   * 4xx or 5xx reply code, the code says: true for a 4xx, the server asking to try again later;
+   * false for a 5xx, unless its reply names a sending quota or limit (`QUOTA_REPLY`, the `quota`
+   * argument). Without one, the kind says (`TRIED_AGAIN`): true when the server did not answer, the
+   * worker stopped, or the kind is unknown; false for a failure that needs a change of settings or
+   * address first.
    */
   readonly temporary: boolean;
 
-  constructor(failure: DeliveryFailure, message: string, status?: number) {
+  constructor(failure: DeliveryFailure, message: string, status?: number, quota = false) {
     super(message);
     this.name = "EmailDeliveryError";
     this.failure = failure;
     this.status = status;
-    this.temporary = isTemporary(status);
+    this.temporary =
+      status !== undefined && status >= 400 && status < 600
+        ? isTemporary(status) || quota
+        : TRIED_AGAIN.has(failure);
   }
 }
 
@@ -253,39 +286,44 @@ function failureOf(code: string | undefined, command: string | undefined): Deliv
   }
 }
 
-/** FacetDB's own sentence for a failed step: fixed words and settings that are not secret. */
-function what(failure: DeliveryFailure, scene: DeliveryScene, temporary: boolean): string {
+/**
+ * FacetDB's own sentence for a failed step: fixed words and settings that are not secret. `later`
+ * is what it says of a refusal that may pass later (`ASKED_LATER`, `QUOTA_LATER`), undefined for
+ * one that needs a change first.
+ */
+function what(failure: DeliveryFailure, scene: DeliveryScene, later: string | undefined): string {
   const server = `the SMTP server ${scene.host}:${scene.port}`;
-  const later = "for now and asked to try again later";
   switch (failure) {
     case "login-refused":
-      return temporary
+      return later !== undefined
         ? `${server} refused the login ${later}`
         : `${server} refused the login: check user and the variable password names`;
     case "sender-refused":
-      return temporary
+      return later !== undefined
         ? `${server} refused the sender ${scene.from} ${later}`
         : `${server} refused the sender ${scene.from}: from must be an address this server lets the login send from`;
     case "recipient-refused":
-      return temporary
+      return later !== undefined
         ? `${server} refused the recipient ${scene.to} ${later}`
         : `${server} refused the recipient ${scene.to}: check the address of the channel`;
     case "message-refused":
-      return temporary ? `${server} refused the message ${later}` : `${server} refused the message`;
+      return later !== undefined
+        ? `${server} refused the message ${later}`
+        : `${server} refused the message`;
     case "tls-failed":
-      return temporary
+      return later !== undefined
         ? `${server} refused TLS ${later}, and FacetDB sends nothing without it`
         : `TLS with ${server} failed, and FacetDB sends nothing without it: the server must offer STARTTLS on this port with a certificate valid for ${scene.host}, or take secure: true on its TLS port (465)`;
     case "timed-out":
       return `${server} did not answer in time`;
     case "unreachable":
-      return temporary
+      return later !== undefined
         ? `${server} closed the connection ${later}`
         : `${server} could not be reached: check host and port`;
     case "stopped":
       return `FacetDB stopped while the email to ${scene.to} was being sent; it may or may not have been sent`;
     default:
-      return temporary
+      return later !== undefined
         ? `${server} turned the email to ${scene.to} away ${later}`
         : `the email to ${scene.to} through ${server} failed`;
   }
@@ -293,7 +331,7 @@ function what(failure: DeliveryFailure, scene: DeliveryScene, temporary: boolean
 
 /** A send the server answered without taking the recipient: a failed delivery all the same. */
 export function recipientNotAccepted(scene: DeliveryScene): EmailDeliveryError {
-  return new EmailDeliveryError("recipient-refused", what("recipient-refused", scene, false));
+  return new EmailDeliveryError("recipient-refused", what("recipient-refused", scene, undefined));
 }
 
 /**
@@ -305,7 +343,7 @@ export function deliveryStopped(scene: DeliveryScene, handedOver: boolean): Emai
   return new EmailDeliveryError(
     "stopped",
     handedOver
-      ? what("stopped", scene, false)
+      ? what("stopped", scene, undefined)
       : `the email to ${scene.to} was not sent: FacetDB is stopping`,
   );
 }
@@ -328,7 +366,14 @@ export function deliveryFailure(thrown: unknown, scene: DeliveryScene): EmailDel
     replyCode !== undefined && Number.isInteger(replyCode) && replyCode >= 200 && replyCode < 600
       ? replyCode
       : undefined;
-  const sentence = what(failure, scene, isTemporary(status));
+  // A 5xx reply naming a sending quota or limit lifts with time (`QUOTA_REPLY`).
+  const quota =
+    status !== undefined && status >= 500 && response !== undefined && QUOTA_REPLY.test(response);
+  const sentence = what(
+    failure,
+    scene,
+    isTemporary(status) ? ASKED_LATER : quota ? QUOTA_LATER : undefined,
+  );
   const label = response === undefined ? "The error was" : "The server said";
   const { password, user } = scene;
   const secret = password !== undefined && password !== "";
@@ -344,5 +389,5 @@ export function deliveryFailure(thrown: unknown, scene: DeliveryScene): EmailDel
   } else if (reply !== undefined && keptReply(reply) !== "") {
     message = `${sentence}. ${label}: ${keptReply(reply)}`;
   }
-  return new EmailDeliveryError(failure, message, status);
+  return new EmailDeliveryError(failure, message, status, quota);
 }

@@ -38,6 +38,15 @@ export function retryDelayMs(attempt: number): number {
   return Math.min(RETRY_FIRST_MS * 2 ** Math.max(0, attempt - 1), RETRY_MAX_MS);
 }
 
+/**
+ * How long to wait when a failure says how long the service asked for (a rate limit's retry-after,
+ * `ActionFailed.retryAfterMs`): that wait, held to at least the first backoff step and at most the
+ * backoff's longest, an hour, in place of the backoff.
+ */
+export function retryAfterDelayMs(retryAfterMs: number): number {
+  return Math.min(Math.max(retryAfterMs, RETRY_FIRST_MS), RETRY_MAX_MS);
+}
+
 /** What the outbox needs from `fetch`; the composition root passes the real one. */
 export type WebhookFetch = (
   url: string,
@@ -62,7 +71,10 @@ export type EndpointGaveUp = {
   readonly queuedAt: number;
 };
 
-/** A plugin's action on one record that did not succeed within 24 hours. */
+/**
+ * A plugin's action on one record that did not succeed within 24 hours, or that its runner said was
+ * refused for good (`ActionFailed.permanent`), given up at once.
+ */
 export type ActionGaveUp = {
   readonly projectId: string;
   readonly deliveryId: string;
@@ -72,6 +84,8 @@ export type ActionGaveUp = {
   readonly action: string;
   readonly attempts: number;
   readonly queuedAt: number;
+  /** Present when it was given up at once, refused for good, before its 24 hours were spent. */
+  readonly refused?: true;
 };
 
 /**
@@ -189,13 +203,46 @@ export const HELD_FOR_DIGEST = `held for the digest: more than ${DIGEST_AFTER} r
 export const HELD_FOR_QUIET =
   "held for quiet hours: its channel is in quiet hours, so it goes out in one digest with every row queued inside them when they end";
 
+/** What an `ActionFailed` may say of the next try, besides its words. */
+export type ActionFailedHints = {
+  /**
+   * The wait the service asked for before the next try, in milliseconds (a rate limit's
+   * retry-after): the row is tried again after it (`retryAfterDelayMs`) instead of the backoff.
+   */
+  readonly retryAfterMs?: number;
+  /**
+   * True when the same refusal comes back on every try (a refused token, a missing repository):
+   * the row is given up at once, its give-up alert raised now with these words, instead of after
+   * 24 hours of the same refusal. Wins over `retryAfterMs`.
+   */
+  readonly permanent?: boolean;
+};
+
 /**
  * An action's failure in words the runner vouches for: they are kept in the row's `last_error` and
- * repeated in the give-up alert, so they carry no secret and no record state. Any other error a
- * runner throws counts as a failed attempt too, but its text is not kept: a plugin's error may
- * hold a token or a URL.
+ * repeated in the give-up alert, so they carry no secret and no record state, and what it says of
+ * the next try (`ActionFailedHints`) is followed. Any other error a runner throws counts as a
+ * failed attempt too, retried on the backoff, but its text is not kept: a plugin's error may hold
+ * a token or a URL.
  */
-export class ActionFailed extends Error {}
+export class ActionFailed extends Error {
+  readonly retryAfterMs: number | undefined;
+  readonly permanent: boolean;
+
+  constructor(message: string, hints: ActionFailedHints = {}) {
+    super(message);
+    this.retryAfterMs = hints.retryAfterMs;
+    this.permanent = hints.permanent === true;
+  }
+}
+
+/**
+ * Appended to the `last_error` of a row given up at once, before `ALERT_NOT_RAISED`'s note when its
+ * alert could not be raised: the note is how the alert's one more try knows it. True whether the
+ * plugin marked the refusal so or FacetDB read it from a bare 4xx.
+ */
+export const REFUSED_FOR_GOOD =
+  "given up at once: FacetDB reads this refusal as one that comes back on every try";
 
 /** `last_error` of an action whose runner threw anything but `ActionFailed`. */
 export const ACTION_ERROR_NOT_KEPT =
@@ -228,15 +275,18 @@ export type OutboxDeps = {
   /**
    * Raises the alert event for a webhook or an action given up on, within the send timeout
    * (`signal` aborts when it runs out); `lastError` is the failure the row ends on, in the words
-   * `last_error` keeps. May run twice for one row after a crash, or after an alert that failed.
+   * `last_error` keeps (without `REFUSED_FOR_GOOD`: the event's `refused` says it). May run twice
+   * for one row after a crash, or after an alert that failed.
    */
   onGiveUp(event: WebhookGaveUp, signal: AbortSignal, lastError: string): Promise<void>;
   /**
    * Runs one attempt of a plugin's action, within the send timeout (`signal` aborts when it runs
-   * out): resolves when it succeeded, with `ActionClose` when the row must be closed untried
-   * again, or with `ActionDefer` when it cannot be tried yet; throws (`ActionFailed` for words
-   * worth keeping) when the attempt failed, which is retried on the webhook's schedule. An outbox
-   * without a runner sends webhooks only and leaves action rows to the loop that has one.
+   * out): resolves when it succeeded, with `ActionClose` when the row must be closed untried again,
+   * or with `ActionDefer` when it cannot be tried yet; throws (`ActionFailed` for words worth
+   * keeping) when the attempt failed, which is retried on the webhook's schedule, after the wait an
+   * `ActionFailed` asked for when it says one, and given up at once when it says the refusal is for
+   * good. An outbox without a runner sends webhooks only and leaves action rows to the loop that
+   * has one.
    */
   readonly runAction?: (
     row: ActionDelivery,
@@ -248,8 +298,9 @@ export type OutboxDeps = {
    * of the batch's channel, once it ended. Resolves when the digest was delivered (every row is
    * then delivered), with `ActionClose` when its rows must be closed untried; throws for a failure
    * (`ActionFailed` for words worth keeping), and the digest is retried as a whole on the webhook's
-   * schedule with its rows still open: a crash before they are marked sends it again. Absent, a row
-   * with a batch key is run alone, as any other action row.
+   * schedule with its rows still open: a crash before they are marked sends it again. An
+   * `ActionFailed`'s wait and its refusal for good hold for the whole digest. Absent, a row with a
+   * batch key is run alone, as any other action row.
    */
   readonly runDigest?: (
     digest: DigestDelivery,
@@ -379,6 +430,28 @@ export type AlertFailure = {
   readonly final: boolean;
 };
 
+/** `DeliveryPassFailed`'s own words. */
+export const DELIVERY_PASS_FAILED =
+  "the outbox's pass failed after its other rows ran: the store failed while the digest rule placed a batched row, which is placed again once its lease runs out";
+
+/**
+ * A delivery pass that failed after its other rows ran (the store failed while the digest rule
+ * placed a batched row, which waits out its lease and is placed again then). It carries the report
+ * of what did run, so the give-up alerts that pass could not raise are printed all the same, and
+ * the store's own error as its `cause`, never as its words (`DELIVERY_PASS_FAILED`): a driver's
+ * message can name the store's connection string.
+ */
+export class DeliveryPassFailed extends Error {
+  readonly report: DeliveryReport;
+
+  constructor(report: DeliveryReport, cause: unknown) {
+    // Fixed words: the store's own message can name its connection string; it is the `cause`.
+    super(DELIVERY_PASS_FAILED, { cause });
+    this.name = "DeliveryPassFailed";
+    this.report = report;
+  }
+}
+
 /** The signing secret could not be read for an attempt. */
 class SecretUnreadable extends Error {}
 
@@ -397,7 +470,11 @@ class TimedOut extends Error {
 export type Outbox = {
   /** Queues a webhook, or a plugin's action, for delivery now; returns its delivery id. */
   enqueue(entry: NewWebhook | NewAction): Promise<string>;
-  /** Sends every webhook whose `next_attempt_at` is at or before `now`; the worker loop calls it each pass. */
+  /**
+   * Sends every webhook whose `next_attempt_at` is at or before `now`; the worker loop calls it each
+   * pass. Rejects with `DeliveryPassFailed`, holding the report of the rows that ran, when the
+   * store failed while the digest rule placed a row; with the store's own error for any other.
+   */
   deliverDue(now: number): Promise<DeliveryReport>;
 };
 
@@ -428,9 +505,10 @@ type Claimed = {
   readonly createdAt: number;
   /**
    * Set when an earlier attempt gave up on the row but could not raise its alert: the send failure
-   * it recorded. This claim is the alert's one more try, and the webhook is not sent again.
+   * it recorded, and whether it was given up at once, refused for good. This claim is the alert's
+   * one more try, and the webhook is not sent again.
    */
-  readonly alertRetryOf: string | undefined;
+  readonly alertRetryOf: { readonly failure: string; readonly refused: boolean } | undefined;
 };
 
 /** An action row with a batch key, which the digest rule places. */
@@ -477,6 +555,24 @@ type Member = {
 
 const ALERT_NOTE = `; ${ALERT_NOT_RAISED}`;
 
+const REFUSED_NOTE = `; ${REFUSED_FOR_GOOD}`;
+
+/** The failure a row given up on ends on in `last_error`: noted when it was given up at once. */
+function endedOn(failure: string, refused: boolean): string {
+  return refused ? `${failure}${REFUSED_NOTE}` : failure;
+}
+
+/** What `last_error` says of a row awaiting its give-up alert's one more try, or undefined. */
+function awaitingAlert(lastError: unknown): Claimed["alertRetryOf"] {
+  if (typeof lastError !== "string" || !lastError.endsWith(ALERT_NOTE)) {
+    return undefined;
+  }
+  const ended = lastError.slice(0, -ALERT_NOTE.length);
+  return ended.endsWith(REFUSED_NOTE)
+    ? { failure: ended.slice(0, -REFUSED_NOTE.length), refused: true }
+    : { failure: ended, refused: false };
+}
+
 /**
  * SQL that holds for a row not awaiting its give-up alert's one more try: such a row carries
  * `ALERT_NOTE` at the end of its `last_error` (`claimed`), and the note is all that says its
@@ -515,7 +611,6 @@ function targetOf(row: SqlRow): Target {
 }
 
 function claimed(row: SqlRow): Claimed {
-  const lastError = row["last_error"];
   return {
     id: String(row["id"]),
     projectId: String(row["project_id"]),
@@ -523,19 +618,55 @@ function claimed(row: SqlRow): Claimed {
     payload: String(row["payload"]),
     attempts: Number(row["attempts"]),
     createdAt: Number(row["created_at"]),
-    alertRetryOf:
-      typeof lastError === "string" && lastError.endsWith(ALERT_NOTE)
-        ? lastError.slice(0, -ALERT_NOTE.length)
-        : undefined,
+    alertRetryOf: awaitingAlert(row["last_error"]),
   };
 }
+
+/** A failed try: its words, and what an `ActionFailed` said of the next one. */
+type Failure = { readonly failure: string } & ActionFailedHints;
 
 /** One try of a row: it succeeded, it failed and why, or it is to be closed untried again and why. */
 type Attempted =
   | { readonly outcome: "done" }
-  | { readonly outcome: "failed"; readonly failure: string }
+  | ({ readonly outcome: "failed" } & Failure)
   | { readonly outcome: "closed"; readonly reason: string }
   | { readonly outcome: "deferred"; readonly reason: string };
+
+/**
+ * Kept words with the outbox's own notes taken out: a note is read back from the end of
+ * `last_error` (`awaitingAlert`, and `notAwaitingAlert` in SQL), and kept words (an email's end
+ * with its SMTP server's reply) must never pass for one, which would give a row up untried or call
+ * it refused. Each note's text inside them becomes "…": none is left, nor made again by the
+ * replacing, as a note holds no "…" and what lies between two replaced texts held none.
+ */
+function withoutNotes(words: string): string {
+  return words.replaceAll(ALERT_NOT_RAISED, "…").replaceAll(REFUSED_FOR_GOOD, "…");
+}
+
+/** What a runner's throw comes to: an `ActionFailed`'s words and hints, or fixed words alone. */
+function failureOf(error: unknown): Failure {
+  if (!(error instanceof ActionFailed)) {
+    return { failure: ACTION_ERROR_NOT_KEPT };
+  }
+  return {
+    failure: withoutNotes(error.message),
+    ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+    ...(error.permanent ? { permanent: true } : {}),
+  };
+}
+
+/**
+ * When a failed row is tried again: after the wait its failure asked for (`retryAfterDelayMs`),
+ * else the backoff for its `attempts`; never past its deadline, so its 24 hours still count from
+ * when it was queued.
+ */
+function nextTry(now: number, failed: Failure, attempts: number, deadline: number): number {
+  const wait =
+    failed.retryAfterMs === undefined
+      ? retryDelayMs(attempts)
+      : retryAfterDelayMs(failed.retryAfterMs);
+  return Math.min(now + wait, deadline);
+}
 
 /** The same, a close carrying the report's list it lands in. */
 type Tried =
@@ -909,17 +1040,15 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       if (error instanceof TimedOut) {
         return { outcome: "failed", failure: `the action did not finish within ${timeoutMs} ms` };
       }
-      return {
-        outcome: "failed",
-        failure: error instanceof ActionFailed ? error.message : ACTION_ERROR_NOT_KEPT,
-      };
+      return { outcome: "failed", ...failureOf(error) };
     }
   }
 
   /**
-   * The 24 hours are spent. Renews the lease, raises the alert under the timeout, then closes the
-   * row; an alert that fails keeps the row open for one more try of the alert alone. `failure` is
-   * the send failure the row ends on.
+   * The 24 hours are spent, or the runner said the action is refused for good, and it is given up
+   * at once. Renews the lease, raises the alert under the timeout, then closes the row; an alert
+   * that fails keeps the row open for one more try of the alert alone, its `last_error` noting a
+   * refusal so that try says it too. `failure` is the send failure the row ends on.
    */
   async function giveUp(
     row: Claimed,
@@ -931,6 +1060,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       readonly lost: string[];
       readonly alertFailures: AlertFailure[];
     },
+    refused: boolean,
   ): Promise<void> {
     // Renew the lease first, from the clock's time now (the send took some of the claim's), and
     // never shorter than it was: it proves this loop still holds the row (a loop that lost it
@@ -968,14 +1098,16 @@ export function createOutbox(deps: OutboxDeps): Outbox {
             action: target.action,
             attempts,
             queuedAt: row.createdAt,
+            ...(refused ? { refused: true as const } : {}),
           };
+    const ended = endedOn(failure, refused);
     try {
       await withinTimeout((signal) => deps.onGiveUp(event, signal, failure));
     } catch (error) {
       // An alert that failed keeps the row open for one more try of the alert, and only one: the
       // row says so in `last_error`, and that try closes it whatever happens.
       report.alertFailures.push({ event, error, final: retry });
-      const note = `${failure}${ALERT_NOTE}`;
+      const note = `${ended}${ALERT_NOTE}`;
       if (retry) {
         const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [
           now,
@@ -991,7 +1123,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       }
       return;
     }
-    const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [now, failure]);
+    const closed = await whileHeld(row, "gave_up_at = $4::bigint, last_error = $5", [now, ended]);
     (closed ? report.gaveUp : report.lost).push(row.id);
   }
 
@@ -1195,18 +1327,16 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       if (error instanceof TimedOut) {
         return { outcome: "failed", failure: `the digest did not finish within ${timeoutMs} ms` };
       }
-      return {
-        outcome: "failed",
-        failure: error instanceof ActionFailed ? error.message : ACTION_ERROR_NOT_KEPT,
-      };
+      return { outcome: "failed", ...failureOf(error) };
     }
   }
 
   /**
    * One digest: its rows gathered, handed to the runner together, and every row written with the
-   * one outcome. A failure reschedules them all on the oldest row's attempt; past the 24 hours of
-   * its oldest row, that row is given up with its alert (`giveUp`, which keeps it open for one more
-   * try of a failed alert) and the others are closed with it, so one digest raises one alert.
+   * one outcome. A failure reschedules them all on the oldest row's attempt, or after the wait the
+   * failure asked for; past the 24 hours of its oldest row, or at once when the failure is refused
+   * for good, that row is given up with its alert (`giveUp`, which keeps it open for one more try
+   * of a failed alert) and the others are closed with it, so one digest raises one alert.
    */
   async function sendDigest(
     run: NonNullable<OutboxDeps["runDigest"]>,
@@ -1265,16 +1395,18 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     }
     const queuedAt = Math.min(...members.map((member) => member.createdAt));
     const deadline = queuedAt + GIVE_UP_AFTER_MS;
-    if (now < deadline) {
-      const next = Math.min(now + retryDelayMs(oldest.attempts), deadline);
+    // A wait the runner asked for, and a refusal for good, hold for the whole digest.
+    const refused = tried.permanent === true;
+    if (!refused && now < deadline) {
       await settle(lists.retrying, "next_attempt_at = $4::bigint, last_error = $5", [
-        next,
+        nextTry(now, tried, oldest.attempts, deadline),
         tried.failure,
       ]);
       return;
     }
     // The alert first, as for one row: a crash before the others are closed gives them up again
-    // after the lease, and the alert's 30-minute rule absorbs the second raise.
+    // after the lease, and the alert's 30-minute rule absorbs the second raise. Every give-up of
+    // the pass adds to the one list, so the oldest row's own failure is looked for by its id.
     const failuresBefore = lists.alertFailures.length;
     await giveUp(
       {
@@ -1289,21 +1421,24 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       now,
       tried.failure,
       lists,
+      refused,
     );
     const others = members.slice(1);
     if (others.length > 0) {
       // Said as it went: the alert raised, kept for one more try on the oldest row, or not raised
       // by this loop at all because another took the oldest row.
-      const alert =
-        lists.alertFailures.length > failuresBefore
-          ? `its alert could not be raised, and delivery ${oldest.id} tries it once more`
-          : lists.lost.includes(oldest.id)
-            ? `its alert is delivery ${oldest.id}'s, which another worker took`
-            : `delivery ${oldest.id} raised its alert`;
+      const notRaised = lists.alertFailures
+        .slice(failuresBefore)
+        .some((failure) => failure.event.deliveryId === oldest.id);
+      const alert = notRaised
+        ? `its alert could not be raised, and delivery ${oldest.id} tries it once more`
+        : lists.lost.includes(oldest.id)
+          ? `its alert is delivery ${oldest.id}'s, which another worker took`
+          : `delivery ${oldest.id} raised its alert`;
       await settle(
         lists.gaveUp,
         "gave_up_at = $4::bigint, last_error = $5",
-        [now, `${tried.failure} (given up with its digest; ${alert})`],
+        [now, `${endedOn(tried.failure, refused)} (given up with its digest; ${alert})`],
         others,
       );
     }
@@ -1356,8 +1491,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       /** One row's attempt and its outcome written, as every row was before the digest rule. */
       async function deliverRow(row: Claimed): Promise<void> {
         if (row.alertRetryOf !== undefined) {
-          // The webhook's 24 hours were spent when its alert failed: only the alert is retried.
-          await giveUp(row, now, row.alertRetryOf, report);
+          // The webhook's 24 hours were spent (or it was refused for good) when its alert failed:
+          // only the alert is retried.
+          await giveUp(row, now, row.alertRetryOf.failure, report, row.alertRetryOf.refused);
           return;
         }
         const tried = await tryRow(row);
@@ -1381,13 +1517,15 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           (kept ? deferred : lost).push(row.id);
           return;
         }
-        // The last attempt falls exactly on the deadline; a failure at or after it is the end.
+        // The last attempt falls exactly on the deadline; a failure at or after it is the end, and
+        // so is one the runner says is refused for good, at once.
         const deadline = row.createdAt + GIVE_UP_AFTER_MS;
-        if (now >= deadline) {
-          await giveUp(row, now, tried.failure, report);
+        const refused = tried.permanent === true;
+        if (refused || now >= deadline) {
+          await giveUp(row, now, tried.failure, report, refused);
           return;
         }
-        const next = Math.min(now + retryDelayMs(row.attempts), deadline);
+        const next = nextTry(now, tried, row.attempts, deadline);
         const rescheduled = await whileHeld(row, "next_attempt_at = $4::bigint, last_error = $5", [
           next,
           tried.failure,
@@ -1464,11 +1602,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           ? []
           : [...digests.values()].map((group) => sendDigest(runDigest, group, now, lists))),
       ]);
-      // Said once every other row of the pass has run: the pass failed for the rows not placed.
-      if (unplaced !== undefined) {
-        throw unplaced.error;
-      }
-      return {
+      const done: DeliveryReport = {
         delivered,
         retrying,
         gaveUp,
@@ -1479,6 +1613,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         lost,
         alertFailures,
       };
+      // Said once every other row of the pass has run: the pass failed for the rows not placed,
+      // and its report goes with the error, so no give-up alert it could not raise goes unsaid.
+      if (unplaced !== undefined) {
+        throw new DeliveryPassFailed(done, unplaced.error);
+      }
+      return done;
     },
   };
 }

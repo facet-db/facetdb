@@ -42,9 +42,11 @@ import {
   WEBHOOK_PLUGIN,
   webhookStep,
 } from "./builtin/webhook.ts";
+import { firstPartyFailure, handedValues } from "./channel-host.ts";
 import { shortName } from "./define.ts";
 import {
   type HostedPlugin,
+  type HostedVariable,
   type PluginHost,
   PluginHostError,
   resolved,
@@ -497,10 +499,13 @@ export type ActionSource =
       /**
        * A plugin source's plugin, by its package name, and the source's settings as its schema
        * parsed them: an action of that same plugin is handed them as `ctx.source.settings`.
+       * `variables` names each variable the plugin's settings and the source's read (the source
+       * host's `HostedSource.variables`): no words of that action's error kept may repeat one.
        */
       readonly plugin?: {
         readonly packageName: string;
         readonly settings: Readonly<Record<string, unknown>>;
+        readonly variables: readonly string[];
       };
     }
   /** In the config, but its loop is stopped: the row waits for it, no attempt spent. */
@@ -618,6 +623,38 @@ function supersededBy(
   return status === "needs_review" ? WAITS_FOR_PERSON : SUPERSEDED;
 }
 
+/**
+ * The longest a first-party action's own words are kept: GitHub's name the issue, the request and
+ * its fix, which for a refused token's access runs past 300 characters, a delivery's length; still
+ * bounded, as they go into the row and the alert.
+ */
+export const ACTION_WORDS_MAX = 600;
+
+/**
+ * Every value a plugin's action was handed from the environment, which no words kept may repeat
+ * (the channel host's `handedValues`): the secrets its context holds, the plugin's settings'
+ * variables, each variable the action's own settings read, and, run on a source of the same
+ * plugin, each its settings read.
+ */
+function actionValues(
+  env: Env,
+  secrets: Readonly<Record<string, string>>,
+  pluginVariables: readonly HostedVariable[],
+  /** The action's settings as queued: each variable as `{ env: "NAME" }`. */
+  settings: unknown,
+  own: { readonly variables: readonly string[] } | undefined,
+): readonly string[] {
+  return handedValues(
+    secrets,
+    [
+      ...pluginVariables.map(({ variable }) => variable),
+      ...variablesIn(settings).map(({ variable }) => variable),
+      ...(own?.variables ?? []),
+    ],
+    env,
+  );
+}
+
 /** The settings with each `{ env: "NAME" }` read; fails, naming the variable, when one is not set. */
 function withVariables(settings: Settings, env: Env): unknown {
   const unset = variablesIn(settings).filter(
@@ -638,9 +675,13 @@ function withVariables(settings: Settings, env: Env): unknown {
  * plugin's `run` with the record, the decisions and the settings, which its schema parses again
  * with each variable read now. A row whose source is stopped waits, spending no attempt. The
  * plugin's own error is passed on as it is, never in words the outbox keeps: only this runner's
- * `ActionFailed` reaches the row, a log or an alert, since a plugin's message may hold a secret. A
- * `notify` row, one of the first 10 of its minute, is judged the same way, then sent through its
- * plugin's channel (`sendNotification`) instead of an action's `run`.
+ * `ActionFailed` reaches the row, a log or an alert, since a plugin's message may hold a secret.
+ * One exception, by the channel host's rule and table: a first-party plugin's own error
+ * (`firstPartyFailure`) becomes an `ActionFailed` in its words, held to `ACTION_WORDS_MAX`, unless
+ * they repeat a value the action was handed (`actionValues`), with the wait the service asked for
+ * and whether the refusal is for good, which the outbox follows. A `notify` row, one of the first
+ * 10 of its minute, is judged the same way, then sent through its plugin's channel
+ * (`sendNotification`) instead of an action's `run`.
  */
 export function createActionRunner(
   deps: ActionRunnerDeps,
@@ -738,13 +779,34 @@ export function createActionRunner(
     // A source of this same plugin hands the action its own settings (a GitHub label action reads
     // the repository of its GitHub issues source there); any other source, none.
     const own = source.plugin?.packageName === hosted.packageName ? source.plugin : undefined;
+    const handed = deps.host.contextFor(row.plugin, signal);
+    // What no kept words may repeat is read here, in the same turn as the context, never at the
+    // throw: a reload may put other settings in force while the action runs, and its words could
+    // hold a value it was handed, not one in force by then. The context exists, so the plugin does
+    // in this same host; the fallback only satisfies the type.
+    const values = actionValues(
+      deps.env,
+      handed.secrets,
+      (deps.host.plugin(row.plugin) ?? hosted).variables,
+      payload.settings,
+      own,
+    );
     const ctx: ActionContext<unknown> = {
-      ...deps.host.contextFor(row.plugin, signal),
+      ...handed,
       source: { name: source.name, settings: own?.settings ?? null },
     };
     try {
       await entry.run(ctx, decided, decisions, checked.data);
     } catch (error) {
+      // A first-party plugin's own error keeps its words, its wait and its refusal for good, by the
+      // channel host's rule; a community plugin's never, whatever it is named.
+      const vouched = firstPartyFailure(hosted.packageName, error, values, ACTION_WORDS_MAX);
+      if (vouched !== undefined) {
+        throw new ActionFailed(vouched.words, {
+          ...(vouched.retryAfterMs === undefined ? {} : { retryAfterMs: vouched.retryAfterMs }),
+          permanent: vouched.permanent,
+        });
+      }
       // A plugin that throws an `ActionFailed` of its own would have its words kept: they are
       // dropped, as any other error of the plugin's is.
       throw error instanceof ActionFailed ? new Error("the plugin's action failed") : error;

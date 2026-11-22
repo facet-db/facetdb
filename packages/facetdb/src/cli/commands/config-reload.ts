@@ -121,13 +121,15 @@ export type SourceLoop = {
   readonly outage?: { readonly held: readonly RecordKey[]; hold(keys: readonly RecordKey[]): void };
   /**
    * A plugin source's plugin: its package, the source's name in it, and the source's settings as
-   * its schema parsed them, which an action of the same plugin is handed. Absent for a table or an
-   * API source.
+   * its schema parsed them, which an action of the same plugin is handed, with the variables those
+   * settings and the plugin's read (no kept words of that action's error repeat one). Absent for a
+   * table or an API source.
    */
   readonly plugin?: {
     readonly packageName: string;
     readonly entry: string;
     readonly settings: Readonly<Record<string, unknown>>;
+    readonly variables: readonly string[];
   };
   /**
    * For a loop whose passes say nothing of its health (a plugin source: its store answers a pass

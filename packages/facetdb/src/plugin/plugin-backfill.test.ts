@@ -432,7 +432,11 @@ async function rigOf(count: number, pageSize: number): Promise<Rig> {
           connector: loop,
           log: store.log(ID),
           questionSet: setOf(["not_priority"]),
-          plugin: { packageName: hosted.packageName, settings: hosted.settings },
+          plugin: {
+            packageName: hosted.packageName,
+            settings: hosted.settings,
+            variables: hosted.variables,
+          },
         }),
         env: ENV,
         // No notification here (notify-action.test.ts sends those).

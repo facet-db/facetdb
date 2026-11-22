@@ -5,6 +5,7 @@ import {
   type ChannelFailure,
   type ChannelMessage,
   type Clock,
+  DELIVERY_WORDS_MAX,
   deliveryWords,
   knownZone,
   processZone,
@@ -43,7 +44,9 @@ import type { ChannelDefinition } from "./kinds.ts";
  * the plugin builds from fixed words, a reason code and its settings that are not secret, is kept,
  * cleaned, unless it repeats a secret its settings read. The words a `check` returns are meant to
  * be read at load, so they are shown, cleaned and held to a length, unless they repeat any form of
- * a secret the plugin's settings read (`revealsSecret`): then only fixed words are.
+ * a secret the plugin's settings read (`revealsSecret`): then only fixed words are. That rule and
+ * its table are shared with the action host (`firstPartyFailure`), and a kept error's wait and
+ * refusal for good go with its words (`ChannelRefused`) to a notify action's outbox row.
  */
 
 /**
@@ -87,8 +90,9 @@ export function deliveryFailedWords(plugin: string, carried: Carried = "alert"):
 }
 
 /**
- * The delivery errors of FacetDB's own channel plugins, by package: each is built fresh from fixed
- * words, the channel's address, the service's reason code or reply, and no cause, and the plugin
+ * The delivery errors of FacetDB's own plugins, by package, its channels' and,, its actions' (the
+ * action host keeps them by the same rule, from this one table): each is built fresh from fixed
+ * words, the address or the issue, the service's reason code or reply, and no cause, and the plugin
  * leaves out a reply that repeats its secret (Telegram's token, the SMTP password). Only an error
  * of this name thrown by that package is kept, and only while its words repeat no secret the
  * plugin's settings read; every other error is the fixed words above.
@@ -97,7 +101,111 @@ export const FIRST_PARTY_DELIVERY_ERRORS: Readonly<Record<string, string>> = {
   "@facetdb/slack": "SlackDeliveryError",
   "@facetdb/telegram": "TelegramDeliveryError",
   "@facetdb/email": "EmailDeliveryError",
+  "@facetdb/github": "GithubActionError",
 };
+
+/**
+ * The 4xx statuses worth trying again unchanged: 408 Request Timeout, 425 Too Early and 429 Too
+ * Many Requests. Any other 4xx says the request itself is refused, and will be on every try.
+ */
+const TRIED_AGAIN_4XX: ReadonlySet<number> = new Set([408, 425, 429]);
+
+/** A first-party plugin's own error, its words kept, and what it says of the next try. */
+export type FirstPartyFailure = {
+  /** Cleaned (control and invisible characters made spaces) and held to the caller's length. */
+  readonly words: string;
+  /** The wait the service asked for, in milliseconds (`retryAfterMs`, a rate limit's). */
+  readonly retryAfterMs?: number;
+  /**
+   * The same refusal comes back on every try: the error says so (`temporary: false`), or, saying
+   * neither way, it carries an HTTP 4xx `status` other than 408, 425 and 429. Never with a wait.
+   */
+  readonly permanent: boolean;
+};
+
+/** Text with control and invisible format characters made spaces, held to `max` characters. */
+function heldTo(text: string, max: number): string {
+  const plain = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").trim();
+  return plain.length <= max ? plain : `${plain.slice(0, max - 1)}…`;
+}
+
+/**
+ * Whether a first-party error is refused for good. Its own `temporary` decides when it has one
+ * (the email plugin's, whose `status` is an SMTP reply code; GitHub's for a rate limit GitHub
+ * answers 403 to); otherwise its `status`, read as HTTP's. Each field is read only as the type it
+ * should be: anything else is as if absent.
+ */
+function refusedForGood(error: Error): boolean {
+  const { temporary, status } = error as {
+    readonly temporary?: unknown;
+    readonly status?: unknown;
+  };
+  if (typeof temporary === "boolean") {
+    return !temporary;
+  }
+  return (
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 400 &&
+    status < 500 &&
+    !TRIED_AGAIN_4XX.has(status)
+  );
+}
+
+/** The wait a first-party error asks for: a whole, finite number of milliseconds from 0, else none. */
+function waitAskedFor(error: Error): number | undefined {
+  const { retryAfterMs } = error as { readonly retryAfterMs?: unknown };
+  return typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs >= 0
+    ? retryAfterMs
+    : undefined;
+}
+
+/**
+ * A first-party plugin's own delivery error (`FIRST_PARTY_DELIVERY_ERRORS`: of the class the table
+ * names, thrown by that package) with its words, cleaned and held to `max`, and what it says of the
+ * next try; undefined for anything else, for empty words, and for words that repeat any form of a
+ * value the plugin's settings read (`revealsSecret` over `values`). A community plugin's error is
+ * never one, whatever it is named. The channel host keeps these words for a delivery's outcome, and
+ * the action host for an outbox row and its give-up alert, with the wait and the refusal for good;
+ * an error whose words are not kept says nothing of the next try either.
+ */
+export function firstPartyFailure(
+  packageName: string,
+  error: unknown,
+  values: readonly string[],
+  max: number,
+): FirstPartyFailure | undefined {
+  const name = FIRST_PARTY_DELIVERY_ERRORS[packageName];
+  if (name === undefined || !(error instanceof Error) || error.name !== name) {
+    return undefined;
+  }
+  // Read once: the words kept are the very words searched for a secret, even from a getter.
+  const { message } = error;
+  const words = heldTo(message, max);
+  if (words === "" || revealsSecret(message, values)) {
+    return undefined;
+  }
+  const retryAfterMs = waitAskedFor(error);
+  return retryAfterMs === undefined
+    ? { words, permanent: refusedForGood(error) }
+    : { words, retryAfterMs, permanent: false };
+}
+
+/**
+ * A delivery a first-party plugin failed in words it may keep (`firstPartyFailure`), as the channel
+ * host rejects with it: a `ChannelFailed` to core's alerts as any other, carrying what the error
+ * said of the next try for a notify action's row, which the outbox follows.
+ */
+export class ChannelRefused extends ChannelFailed {
+  readonly retryAfterMs: number | undefined;
+  readonly permanent: boolean;
+
+  constructor(failure: FirstPartyFailure) {
+    super(failure.words);
+    this.retryAfterMs = failure.retryAfterMs;
+    this.permanent = failure.permanent;
+  }
+}
 
 /** Reads the machine's time zone as Node names it, unjudged (core's `processZone`); a test passes its own. */
 export type ZoneReader = () => string | undefined;
@@ -201,9 +309,24 @@ const NEVER = new AbortController().signal;
 
 /** Every value a hosted plugin was handed from the environment: its secrets and its other variables. */
 export function valuesOf(host: PluginHost, hosted: HostedPlugin, env: Env): readonly string[] {
-  const secrets = Object.values(host.contextFor(hosted.name, NEVER).secrets);
-  const variables = hosted.variables.map(({ variable }) => env[variable]);
-  return [...secrets, ...variables].filter(
+  return handedValues(
+    host.contextFor(hosted.name, NEVER).secrets,
+    hosted.variables.map(({ variable }) => variable),
+    env,
+  );
+}
+
+/**
+ * The values a plugin was handed: the secrets of the context it was given, and each named variable
+ * read from `env`, none empty. The action host reads them with the context it hands an action, so a
+ * reload that puts other settings in force while the action runs changes none of them.
+ */
+export function handedValues(
+  secrets: Readonly<Record<string, string>>,
+  variables: readonly string[],
+  env: Env,
+): readonly string[] {
+  return [...Object.values(secrets), ...variables.map((variable) => env[variable])].filter(
     (value): value is string => typeof value === "string" && value !== "",
   );
 }
@@ -419,20 +542,6 @@ export type ChannelHostDeps = {
 type Cut = { readonly cut: string };
 
 /**
- * A first-party plugin's own delivery error in words that may be kept (`FIRST_PARTY_DELIVERY_ERRORS`),
- * cleaned and held to a length; undefined for anything else, for empty words, and for words that
- * repeat any form of a value the plugin read from the environment.
- */
-function firstPartyWords(resolved: Resolved, error: unknown): string | undefined {
-  const name = FIRST_PARTY_DELIVERY_ERRORS[resolved.hosted.packageName];
-  if (name === undefined || !(error instanceof Error) || error.name !== name) {
-    return undefined;
-  }
-  const words = deliveryWords(error.message);
-  return words === "" || revealsSecret(error.message, resolved.values) ? undefined : words;
-}
-
-/**
  * Delivers one message through a resolved channel, raced against the bound and the stop; its
  * failure's words name what it carried (an alert, or a record notification, whose notify action
  * delivers through it too).
@@ -488,10 +597,17 @@ export async function deliverThrough(
     outcome = await Promise.race([call.then(() => undefined), cut]);
   } catch (error) {
     // Whatever the plugin threw (a `ChannelFailed` of its own included), its cause and properties
-    // go nowhere, and its words too unless it is a first-party plugin's own delivery error.
-    throw new ChannelFailed(
-      firstPartyWords(resolved, error) ?? deliveryFailedWords(resolved.hosted.packageName, carried),
+    // go nowhere, and its words too unless it is a first-party plugin's own delivery error, whose
+    // wait and refusal for good go with them (a notify row's outbox follows them).
+    const vouched = firstPartyFailure(
+      resolved.hosted.packageName,
+      error,
+      resolved.values,
+      DELIVERY_WORDS_MAX,
     );
+    throw vouched === undefined
+      ? new ChannelFailed(deliveryFailedWords(resolved.hosted.packageName, carried))
+      : new ChannelRefused(vouched);
   } finally {
     settled.abort();
     stop.removeEventListener("abort", onStop);

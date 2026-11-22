@@ -166,11 +166,18 @@ export { openStudioBuild, STUDIO_INDEX_FILE, STUDIO_ROUTES_FILE } from "./studio
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
 export type { GaveUpLink } from "./webhooks/gave-up.ts";
-export { GAVE_UP_DID, gaveUpAlert, gaveUpSubject } from "./webhooks/gave-up.ts";
+export {
+  GAVE_UP_DID,
+  GAVE_UP_REFUSED_DID,
+  gaveUpAlert,
+  gaveUpHow,
+  gaveUpSubject,
+} from "./webhooks/gave-up.ts";
 export type {
   ActionClose,
   ActionDefer,
   ActionDelivery,
+  ActionFailedHints,
   ActionGaveUp,
   AlertFailure,
   DeliveryReport,
@@ -194,6 +201,8 @@ export {
   ActionFailed,
   createOutbox,
   DEFAULT_FETCH_TIMEOUT_MS,
+  DELIVERY_PASS_FAILED,
+  DeliveryPassFailed,
   DIGEST_AFTER,
   DIGEST_MINUTE_MS,
   GIVE_UP_AFTER_MS,
@@ -202,8 +211,10 @@ export {
   outboxQueue,
   queueAction,
   queueWebhook,
+  REFUSED_FOR_GOOD,
   RETRY_FIRST_MS,
   RETRY_MAX_MS,
+  retryAfterDelayMs,
   retryDelayMs,
 } from "./webhooks/outbox.ts";
 export type { Verification } from "./webhooks/sign.ts";

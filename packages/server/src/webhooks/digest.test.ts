@@ -9,6 +9,8 @@ import {
   ALERT_NOT_RAISED,
   CLAIM_LEASE_MS,
   createOutbox,
+  DELIVERY_PASS_FAILED,
+  DeliveryPassFailed,
   DIGEST_AFTER,
   DIGEST_MINUTE_MS,
   type DigestDelivery,
@@ -16,6 +18,7 @@ import {
   HELD_FOR_DIGEST,
   HELD_FOR_QUIET,
   type OutboxDeps,
+  REFUSED_FOR_GOOD,
   retryDelayMs,
   type TimeSpan,
   type WebhookGaveUp,
@@ -593,7 +596,8 @@ describe("a store failure while the digest rule places a row", () => {
     });
     t.script.placingFails = true;
 
-    await expect(t.outbox.deliverDue(t.clock.now())).rejects.toThrow("the store went away");
+    // The pass's own fixed words, the store's error its cause.
+    await expect(t.outbox.deliverDue(t.clock.now())).rejects.toThrow(DELIVERY_PASS_FAILED);
     expect(t.alone.map((row) => row.deliveryId)).toEqual([plain]);
     expect((await t.row(plain))?.["delivered_at"]).not.toBeNull();
     expect((await t.row(batched as string))?.["delivered_at"]).toBeNull();
@@ -602,6 +606,96 @@ describe("a store failure while the digest rule places a row", () => {
     const later = t.clock.now() + CLAIM_LEASE_MS;
     expect((await t.outbox.deliverDue(later)).delivered).toEqual([batched]);
     expect(t.alone.map((row) => row.deliveryId)).toEqual([plain, batched]);
+  });
+
+  it("hands the pass's report back with its error, so a give-up alert it could not raise is still said", async () => {
+    const t = await rig();
+    await t.notify(1);
+    const plain = await t.outbox.enqueue({
+      projectId: PROJECT,
+      sourceId: SOURCE_ID,
+      recordKey: "T-0",
+      plugin: "@facetdb/github",
+      action: "label",
+      position: 2,
+      payload: { label: "urgent" },
+    });
+    const outbox = createOutbox({
+      ...t.deps("loop-a"),
+      runAction: () => Promise.reject(new ActionFailed("GitHub refused", { permanent: true })),
+    });
+    t.script.placingFails = true;
+    t.script.alertFails = true;
+
+    const failed = await outbox.deliverDue(t.clock.now()).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(DeliveryPassFailed);
+    const pass = failed as DeliveryPassFailed;
+    // Fixed words of its own: the driver's message, which can name the connection string, is the cause.
+    expect(pass.message).toBe(DELIVERY_PASS_FAILED);
+    expect(pass.message).not.toContain("store went away");
+    expect(pass.cause).toEqual(new Error("the store went away"));
+    expect(pass.report.retrying).toEqual([plain]);
+    expect(pass.report.alertFailures).toEqual([
+      expect.objectContaining({
+        final: false,
+        event: expect.objectContaining({ deliveryId: plain, refused: true }),
+      }),
+    ]);
+  });
+});
+
+describe("a digest given up while another row's alert of the same pass fails", () => {
+  it("says its own alert was raised: only the oldest row's own failure counts", async () => {
+    const t = await rig();
+    const ids = await t.notify(DIGEST_AFTER + 2);
+    await t.drain(t.clock.now());
+    const [oldest, other] = ids.slice(DIGEST_AFTER);
+    const plain = await t.outbox.enqueue({
+      projectId: PROJECT,
+      sourceId: SOURCE_ID,
+      recordKey: "T-99",
+      plugin: "@facetdb/github",
+      action: "label",
+      position: 2,
+      payload: { label: "urgent" },
+    });
+    // The plain row's alert fails only once the digest's own alert is on its way, and the digest's
+    // returns only once that failure is recorded: the order a shared count misread.
+    let digestAsked = () => undefined as void;
+    const asked = new Promise<void>((resolve) => {
+      digestAsked = resolve;
+    });
+    let plainFailed = () => undefined as void;
+    const failed = new Promise<void>((resolve) => {
+      plainFailed = resolve;
+    });
+    const raised: string[] = [];
+    const outbox = createOutbox({
+      ...t.deps("loop-a"),
+      runAction: () => Promise.reject(new ActionFailed("GitHub refused", { permanent: true })),
+      runDigest: () => Promise.reject(new ActionFailed("Slack refused", { permanent: true })),
+      onGiveUp: async (event) => {
+        if (event.deliveryId === plain) {
+          await asked;
+          plainFailed();
+          throw new Error("the alerts table is unreachable");
+        }
+        digestAsked();
+        await failed;
+        // The plain row's failure is pushed in the microtasks after its rejection.
+        await new Promise((resolve) => setImmediate(resolve));
+        raised.push(event.deliveryId);
+      },
+    });
+
+    const report = await outbox.deliverDue(MINUTE + DIGEST_MINUTE_MS);
+    expect(raised).toEqual([oldest]);
+    expect(report.alertFailures).toEqual([
+      expect.objectContaining({ event: expect.objectContaining({ deliveryId: plain }) }),
+    ]);
+    expect((await t.row(other as string))?.["last_error"]).toBe(
+      `Slack refused; ${REFUSED_FOR_GOOD} (given up with its digest; delivery ${oldest} raised its alert)`,
+    );
   });
 });
 

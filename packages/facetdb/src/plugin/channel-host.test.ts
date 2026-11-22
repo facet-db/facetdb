@@ -1025,10 +1025,12 @@ describe("a channel's quiet hours and a first-party plugin's words", () => {
     ]);
     expect(leaks(JSON.stringify(w.store.history))).toEqual([]);
     expect(leaks(w.printed.join("\n"))).toEqual([]);
+    // One table for the channels and the actions; GitHub's is an action's error.
     expect(Object.keys(FIRST_PARTY_DELIVERY_ERRORS)).toEqual([
       "@facetdb/slack",
       "@facetdb/telegram",
       "@facetdb/email",
+      "@facetdb/github",
     ]);
   });
 });

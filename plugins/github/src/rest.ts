@@ -32,8 +32,9 @@ export type GithubFetch = (
 ) => Promise<Response>;
 
 /**
- * The end of every failure's fix: the outbox tries a failed action again with backoff for 24
- * hours, then raises "Action gave up".
+ * The end of the fix of a failure worth trying again (no answer, a redirect, an answer FacetDB
+ * cannot read): the outbox tries a failed action again with backoff for 24 hours, then raises
+ * "Action gave up". Never the end of a refusal for good (`GithubActionError`), given up at once.
  */
 export const TRIED_AGAIN =
   'the action is tried again for 24 hours, then FacetDB raises an "Action gave up" alert';
@@ -57,10 +58,13 @@ export const PAGE_SIZE = 100;
 export const RETRY_AFTER_MAX_MS = 60 * 60_000;
 
 /**
- * An action GitHub did not let finish, in words that never quote the token, a URL or GitHub's
- * body. A rate limit (a 429, or a 403 GitHub marks as one) and a 5xx carry `status`, and a rate
- * limit the wait GitHub asked for as `retryAfterMs`, the shape the Slack and Telegram errors use;
- * the outbox tries every failed action again with its own backoff for 24 hours.
+ * An action GitHub did not let finish, in words that never quote the token, a URL or GitHub's body.
+ * A rate limit (a 429, or a 403 GitHub marks as one) and a 5xx carry `status`, and a rate limit the
+ * wait GitHub asked for as `retryAfterMs`, the shape the Slack and Telegram errors use. FacetDB
+ * keeps these words for the outbox row and its "Action gave up" alert, tries the action again after
+ * the wait GitHub asked for, else on its backoff for 24 hours, and gives it up at once when GitHub
+ * refused it for good: `temporary` false, or, when it says neither way, a 4xx `status` other than
+ * 408, 425 and 429.
  */
 export class GithubActionError extends Error {
   /** The HTTP status GitHub answered; undefined when no answer came or the action never asked. */
@@ -69,18 +73,27 @@ export class GithubActionError extends Error {
   readonly retryAfterMs: number | undefined;
   /** What to do, in plain words; also the end of `message`, for a reader who prints only that. */
   readonly fix: string;
+  /**
+   * Whether trying again unchanged can succeed, when the error knows better than its `status`:
+   * true for a rate limit (GitHub may answer it 403), a stop or an answer cut off (a 4xx's body
+   * that did not arrive); false for a failure the action itself makes certain (a record's key that
+   * is not an issue number). Undefined lets the `status` say.
+   */
+  readonly temporary: boolean | undefined;
 
   constructor(
     what: string,
     fix: string,
     status: number | undefined = undefined,
     retryAfterMs: number | undefined = undefined,
+    temporary: boolean | undefined = undefined,
   ) {
     super(`${what}. ${fix}`);
     this.name = "GithubActionError";
     this.status = status;
     this.retryAfterMs = retryAfterMs;
     this.fix = fix;
+    this.temporary = temporary;
   }
 }
 
@@ -165,6 +178,9 @@ export function urlOf(
     throw new GithubActionError(
       "a request's path would hold an empty, . or .. segment, which could reach another route than the one meant, so it is not sent",
       "a label's name or a login may not be only dots or empty: change it in the action's settings",
+      undefined,
+      undefined,
+      false,
     );
   }
   return url;
@@ -231,19 +247,26 @@ async function boundedText(response: Response, stop: AbortSignal): Promise<strin
   }
 }
 
-/** The words for a request the worker stopped, or that outlived `TIMEOUT_MS`. */
+/**
+ * The words for a request the worker stopped, or that outlived `TIMEOUT_MS`: worth trying again
+ * whatever its `status` (a 4xx whose body never arrived may be a rate limit).
+ */
 function stoppedError(session: Session, step: string, status?: number): GithubActionError {
   if (session.signal.aborted) {
     return new GithubActionError(
       `${session.subject}: ${step} was stopped before GitHub answered`,
       "the worker stopped the action (it is stopping, or the action took too long); it is tried again",
       status,
+      undefined,
+      true,
     );
   }
   return new GithubActionError(
     `${session.subject}: GitHub did not answer ${step} within ${TIMEOUT_MS / 1000} seconds`,
     "GitHub or the way to it is slow: the action is tried again; if it keeps happening, check that the worker reaches the API over HTTPS",
     status,
+    undefined,
+    true,
   );
 }
 
@@ -316,6 +339,8 @@ async function exchange(session: Session, request: Request, url: URL): Promise<R
         `${session.subject}: GitHub's answer to ${request.step} (status ${status}) could not be read to its end`,
         "the connection broke while GitHub answered; the action is tried again",
         status,
+        undefined,
+        true,
       );
     }
     if (text === undefined) {
@@ -348,9 +373,17 @@ function seconds(header: string | null): number | undefined {
 }
 
 /**
+ * The words of a 403 that is a rate limit: GitHub's own "API rate limit exceeded" and "secondary
+ * rate limit", and the "abuse detection mechanism" older GitHub Enterprise Server versions answer
+ * for their secondary limit, often with no `retry-after` (without it, the 403 would read as a
+ * refusal for good and be given up at once, though the limit lifts in minutes).
+ */
+const RATE_LIMIT_WORDS = /rate limit|abuse detection/i;
+
+/**
  * Whether a 403 or a 429 is GitHub's rate limit (https://docs.github.com/rest/using-the-rest-api/
  * rate-limits-for-the-rest-api): a 429; a 403 with `x-ratelimit-remaining: 0` (the primary limit)
- * or a `retry-after` (a secondary one); or a 403 whose message says rate limit.
+ * or a `retry-after` (a secondary one); or a 403 whose message says so (`RATE_LIMIT_WORDS`).
  */
 export function rateLimited(reply: Reply): boolean {
   if (reply.status === 429) {
@@ -366,7 +399,7 @@ export function rateLimited(reply: Reply): boolean {
     return true;
   }
   const parsed = errorBody.safeParse(reply.body);
-  return parsed.success && /rate limit/i.test(parsed.data.message);
+  return parsed.success && RATE_LIMIT_WORDS.test(parsed.data.message);
 }
 
 /**
@@ -400,6 +433,8 @@ export function refusal(session: Session, request: Request, reply: Reply): Githu
       "the action is tried again later; if it keeps happening, the token makes too many requests (one token shared by many workers or tools)",
       status,
       wait,
+      // A rate limit GitHub answers 403 is no refusal for good.
+      true,
     );
   }
   if (status === 401) {
@@ -440,9 +475,10 @@ export function refusal(session: Session, request: Request, reply: Reply): Githu
       status,
     );
   }
+  // No "tried again" here: a 4xx other than 408, 425 and 429 is given up at once.
   return new GithubActionError(
     `${at}, which FacetDB does not read as done`,
-    "check that apiUrl names GitHub's REST API; the action is tried again",
+    "check that apiUrl names GitHub's REST API",
     status,
   );
 }

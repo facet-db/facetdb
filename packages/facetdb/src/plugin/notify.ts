@@ -31,6 +31,7 @@ import {
 import type { ActionSource } from "./action-host.ts";
 import { WEBHOOK_PLUGIN } from "./builtin/webhook.ts";
 import {
+  ChannelRefused,
   channelsOf,
   deliverThrough,
   quietWindowFor,
@@ -405,7 +406,11 @@ export function digestText(digest: {
     : `${records} more ${records === 1 ? "record" : "records"} on ${source} ${matched} within the same minute, after the first ${DIGEST_AFTER} were sent one by one; ${asDecided}.`;
 }
 
-/** Delivers a message through a resolved channel; the channel host's fixed words are the failure. */
+/**
+ * Delivers a message through a resolved channel; the channel host's words are the failure, with,
+ * for a first-party plugin's own error (`ChannelRefused`), the wait it asked for and whether its
+ * refusal is for good, which the outbox follows for the row or the whole digest.
+ */
 async function deliver(
   host: PluginHost,
   deps: NotifyDeps,
@@ -421,6 +426,12 @@ async function deliver(
     );
   } catch (error) {
     // The host's words carry no secret and nothing the plugin threw (channel-host.ts).
+    if (error instanceof ChannelRefused) {
+      throw new ActionFailed(error.message, {
+        ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+        permanent: error.permanent,
+      });
+    }
     throw error instanceof ChannelFailed ? new ActionFailed(error.message) : error;
   }
 }

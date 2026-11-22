@@ -40,18 +40,22 @@ export function issueOf(
   key: string,
 ): IssueRef {
   const subject = `github ${action} on the source ${source.name}`;
+  // Each refusal here is certain before any request, and the same at every try of this row: it is
+  // refused for good (`temporary` false), given up at once with its fix.
+  const refused = (what: string, fix: string) =>
+    new GithubActionError(what, fix, undefined, undefined, false);
   let repoText: string;
   if (source.settings !== null) {
     // A source of this plugin (the issues source): the repository is its own.
     const given = source.settings["repo"];
     if (typeof given !== "string" || parseRepo(given) === undefined) {
-      throw new GithubActionError(
+      throw refused(
         `${subject}: the GitHub source gives no repository FacetDB can read`,
         `set the source's repo: it ${REPO_RULE}`,
       );
     }
     if (ownRepo !== undefined && ownRepo.toLowerCase() !== given.toLowerCase()) {
-      throw new GithubActionError(
+      throw refused(
         `${subject}: the action names the repository ${ownRepo}, but the source reads ${given}, whose issue numbers are the records' keys`,
         `write repo: "${given}" in the action, the source's own repository, so the action changes the issue the record names`,
       );
@@ -60,7 +64,7 @@ export function issueOf(
   } else if (ownRepo !== undefined) {
     repoText = ownRepo;
   } else {
-    throw new GithubActionError(
+    throw refused(
       `${subject}: the source is not a GitHub source, so the action does not know the repository`,
       "name it in the action, github." +
         `${action}({ repo: "your-org/your-repo", ... }), and make the record's key the issue's number`,
@@ -70,7 +74,7 @@ export function issueOf(
   const repo = parseRepo(repoText) as Repo;
   const number = parseIssueNumber(key);
   if (number === undefined) {
-    throw new GithubActionError(
+    throw refused(
       `${subject}: the record's key is not an issue number (a whole number from 1, written with digits only)`,
       "run the action on a source whose record key is the issue's number",
     );
@@ -136,10 +140,14 @@ async function confirmRepository(
     );
   }
   if (!parsed.data.has_issues) {
+    // Refused for good: the issue's own 404 or 410 says so, and FacetDB gives it up at once, so the
+    // fix promises no retry.
     throw new GithubActionError(
       `${session.subject}: issues are turned off in the repository ${name}`,
-      `turn issues on in the repository's settings, or take the action out of the config; ${TRIED_AGAIN}`,
+      "turn issues on in the repository's settings, or take the action out of the config",
       issueStatus === 0 ? undefined : issueStatus,
+      undefined,
+      false,
     );
   }
 }
