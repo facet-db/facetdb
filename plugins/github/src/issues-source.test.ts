@@ -138,6 +138,11 @@ function hostFor(
   });
 }
 
+/** The plugin's lines are its poll's (reconcile.test.ts), which read, scan and receive never print. */
+function noLine(line: string): never {
+  throw new Error(`the source printed a line: ${line}`);
+}
+
 /** A fake GitHub with the repository, the plugin over it, its host, and the source as the host checked it. */
 async function world(options: WorldOptions = {}): Promise<World> {
   const gh = fakeGithub({
@@ -147,7 +152,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
     ...(options.basePath === undefined ? {} : { basePath: options.basePath }),
   });
   gh.repo(REPO);
-  const plugin = createGithubPlugin({ fetch: gh.fetch, now: () => NOW });
+  const plugin = createGithubPlugin({ fetch: gh.fetch, now: () => NOW, warn: noLine });
   const environment = options.environment ?? ENV;
   const config = project(options);
   const host = await hostFor(plugin, config, environment);
@@ -159,7 +164,10 @@ async function world(options: WorldOptions = {}): Promise<World> {
   return { gh, plugin, host, hosted, issues };
 }
 
-/** The source's context as the SDK's adapter builds it; the clock never sleeps, the cursor is never used. */
+/**
+ * The source's context as the SDK's adapter builds it, for read, scan and receive: the clock never
+ * sleeps and the cursor is never used (only the poll, `watch`, waits and keeps one: reconcile.test.ts).
+ */
 function contextOf(w: World, signal = new AbortController().signal): Context {
   return {
     ...w.host.contextFor("@facetdb/github", signal),
@@ -171,11 +179,11 @@ function contextOf(w: World, signal = new AbortController().signal): Context {
     },
     clock: {
       now: () => NOW,
-      sleep: () => Promise.reject(new Error("the source never waits in these tests")),
+      sleep: () => Promise.reject(new Error("read, scan and receive never wait")),
     },
     cursor: {
-      load: () => Promise.reject(new Error("the source keeps no cursor of its own yet")),
-      save: () => Promise.reject(new Error("the source keeps no cursor of its own yet")),
+      load: () => Promise.reject(new Error("read, scan and receive use no cursor")),
+      save: () => Promise.reject(new Error("read, scan and receive use no cursor")),
     },
   } as Context;
 }
@@ -1193,6 +1201,7 @@ describe("issues-source: the plugin", () => {
       const plugin = createGithubPlugin({
         fetch: fakeGithub({ token: TOKEN, login: "x" }).fetch,
         now: () => NOW,
+        warn: noLine,
       });
       try {
         hostedSource(await hostFor(plugin, config, ENV), config, config.sources[0] as never, ENV);
@@ -1211,19 +1220,6 @@ describe("issues-source: the plugin", () => {
       'include takes "issues" and "pull_requests"',
     );
     expect(await refusal({ repo: REPO, include: [] })).toContain("at least one");
-  });
-
-  it("watch yields nothing and ends when the source stops, leaving no timer", async () => {
-    vi.useFakeTimers();
-    const w = await world();
-    const stop = new AbortController();
-    const iterator = w.issues.watch(contextOf(w, stop.signal))[Symbol.asyncIterator]();
-    const next = iterator.next();
-    await Promise.resolve();
-    expect(vi.getTimerCount()).toBe(0);
-    stop.abort();
-    expect(await next).toEqual({ done: true, value: undefined });
-    expect(w.gh.requests).toEqual([]);
   });
 
   it("takes a signed delivery through the SDK's adapter: the record read and queued once; a forged one queues nothing", async () => {

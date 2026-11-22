@@ -55,7 +55,7 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
  * `value` when it is a time as GitHub writes one and as the scan compares them (UTC, to the second,
  * a real date that reads back the same, so two of them order as text), else undefined.
  */
-function timeOf(value: unknown): string | undefined {
+export function timeOf(value: unknown): string | undefined {
   if (typeof value !== "string" || !TIMESTAMP.test(value)) {
     return undefined;
   }

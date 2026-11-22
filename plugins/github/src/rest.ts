@@ -373,7 +373,7 @@ export function rateLimited(reply: Reply): boolean {
  * The wait a rate limit asks for: `retry-after` in seconds, else until `x-ratelimit-reset` (epoch
  * seconds) by the session's clock; held to `RETRY_AFTER_MAX_MS`, undefined when GitHub said neither.
  */
-function retryAfterMs(reply: Reply, now: number): number | undefined {
+export function retryAfterMs(reply: Reply, now: number): number | undefined {
   const after = seconds(reply.headers.get("retry-after"));
   if (after !== undefined) {
     return Math.min(after * 1000, RETRY_AFTER_MAX_MS);

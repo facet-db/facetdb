@@ -120,13 +120,18 @@ type World = {
   readonly now: { ms: number };
 };
 
+/** The plugin's lines are the issues source's poll's, which no action runs. */
+function noLine(line: string): never {
+  throw new Error(`an action printed a line: ${line}`);
+}
+
 /** A fake GitHub with the repository and issue 7, the plugin over it, and its host. */
 async function world(config: ProjectConfig = project([]), token = TOKEN): Promise<World> {
   const gh = fakeGithub({ token: TOKEN, login: LOGIN });
   gh.repo(REPO);
   gh.issue(REPO, 7);
   const now = { ms: Date.UTC(2026, 10, 14, 12, 0, 0) };
-  const plugin = createGithubPlugin({ fetch: gh.fetch, now: () => now.ms });
+  const plugin = createGithubPlugin({ fetch: gh.fetch, now: () => now.ms, warn: noLine });
   const host = await hostFor(plugin, config, token);
   return { gh, plugin, host, now };
 }
@@ -718,7 +723,7 @@ describe("comment", () => {
   it("two workers racing can leave two comments (open); a later run keeps both at the same text", async () => {
     const w = await world();
     const issue = w.gh.issue(REPO, 7);
-    const other = createGithubPlugin({ fetch: w.gh.fetch, now: () => w.now.ms });
+    const other = createGithubPlugin({ fetch: w.gh.fetch, now: () => w.now.ms, warn: noLine });
     await Promise.all([
       run(w, "comment", { ...C, body: BODY }),
       run({ ...w, plugin: other }, "comment", { ...C, body: BODY }),
@@ -1198,6 +1203,7 @@ describe("when the config loads", () => {
     const plugin = createGithubPlugin({
       fetch: fakeGithub({ token, login: LOGIN }).fetch,
       now: Date.now,
+      warn: noLine,
     });
     try {
       const host = await hostFor(plugin, config, token);
@@ -1360,6 +1366,7 @@ describe("when the config loads", () => {
     const plugin = createGithubPlugin({
       fetch: fakeGithub({ token: TOKEN, login: LOGIN }).fetch,
       now: Date.now,
+      warn: noLine,
     });
     expect(plugin.manifest.secrets).toEqual(["token", "webhookSecret"]);
     expect(Object.keys(plugin.actions).sort()).toEqual(["assign", "comment", "label"]);

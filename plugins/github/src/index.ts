@@ -16,7 +16,8 @@
  *
  * The `issues` source reads one repository's issues and pull requests, the record's key the number:
  * GitHub's signed webhook names what changed (`receive`), `read` reads it, `scan` pages through
- * every open one for `facetdb backfill` (issues-source.ts). Its own poll is not built yet.
+ * every open one for `facetdb backfill` (issues-source.ts), and its poll (`watch`) asks GitHub what
+ * changed since the last change it saw, for a delivery GitHub never resends.
  *
  * `repo` is required in every action, and refused at load when missing: the SDK lets an action's
  * schema see nothing of the source it is configured on, so an action cannot yet take the repository
@@ -30,12 +31,13 @@
 import { type ActionCall, actionCall, type JsonValue, type SourceCall, sourceCall } from "facetdb";
 import { definePlugin, type Plugin } from "facetdb/plugin";
 import { type ActionDeps, githubActions } from "./actions.ts";
-import { issuesSource } from "./issues-source.ts";
+import { issuesSource, type SourceDeps } from "./issues-source.ts";
 import type { Kind } from "./issues-state.ts";
 import { triage } from "./packs/triage.ts";
 import { type GithubConfig, pluginConfig } from "./settings.ts";
 
-export type { ActionDeps as GithubPluginOptions } from "./actions.ts";
+/** What the plugin is given: `fetch`, the actions' clock, and where the source's poll writes a line. */
+export type GithubPluginOptions = ActionDeps & SourceDeps;
 export { COMMENT_MAX, MARKER_PREFIX, NEEDS_REVIEW, VALUE_MAX } from "./comment-body.ts";
 export { SCAN_PAGE, SEEN_MAX } from "./issues-scan.ts";
 export { type IssuesSettings, issuesSettings } from "./issues-source.ts";
@@ -71,23 +73,29 @@ export {
 } from "./rest.ts";
 export { DEFAULT_API_URL, type GithubConfig } from "./settings.ts";
 
-/** The plugin, its two side effects passed in: `fetch` and the clock (the source reads the worker's). */
-export function createGithubPlugin(options: ActionDeps): Plugin<GithubConfig> {
+/** The plugin, its side effects passed in: `fetch`, the clock (the source reads the worker's), the lines. */
+export function createGithubPlugin(options: GithubPluginOptions): Plugin<GithubConfig> {
   return definePlugin({
     name: "github",
     version: "0.0.0",
     facetdb: ">=0.0.0 <1.0.0",
     config: pluginConfig,
-    sources: { issues: issuesSource({ fetch: options.fetch }) },
+    sources: { issues: issuesSource({ fetch: options.fetch, warn: options.warn }) },
     actions: githubActions(options),
     packs: { triage },
   });
 }
 
-/** The plugin the worker loads: the one place the real `fetch` and clock are wired. */
+/**
+ * The plugin the worker loads: the one place the real `fetch` and clock are wired, and the poll's
+ * lines sent to stderr beside the worker's own, as a connector's warnings are.
+ */
 export default createGithubPlugin({
   fetch: (url, init) => globalThis.fetch(url, init),
   now: () => Date.now(),
+  warn: (line) => {
+    process.stderr.write(`warning: ${line}\n`);
+  },
 });
 
 /** A `when` term, as `facetdb` reads it: a decision value, a status, or `{ atLeast }` on a number. */

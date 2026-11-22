@@ -20,6 +20,7 @@ import {
   stateOf,
 } from "./issues-state.ts";
 import { type Receipt, receiveEvent } from "./issues-webhook.ts";
+import { POLL_INTERVAL_MS, POLL_INTERVAL_NO_WEBHOOK_MS, reconcile } from "./reconcile.ts";
 import { GithubActionError, type GithubFetch, type Session } from "./rest.ts";
 import {
   apiBase,
@@ -40,9 +41,9 @@ import {
  *   changed files (`GET /repos/{o}/{r}/pulls/{n}/files`, and `GET /repos/{o}/{r}/pulls/{n}` for the
  *   count when there is more than a page); requests one after another, as GitHub asks.
  * - `scan`: every open issue and pull request, newest first, through GitHub's search (issues-scan.ts).
- * - `watch`: yields nothing and ends when the source stops. The poll that finds what a webhook
- *   missed (at start and every 5 minutes, every 60 s with no webhook secret) is not built yet,
- *   and runs here.
+ * - `watch`: the poll that finds what a webhook missed (reconcile.ts):
+ *   at start and every 5 minutes, every 60 s with no webhook secret, the issues and pull
+ *   requests updated since its cursor, until the source stops.
  *
  * Every request goes to `apiUrl` only (rest.ts builds each from its segments) with the token, a
  * user agent and the API version; a 401, or a 403 that is not a rate limit, is the SDK's
@@ -74,8 +75,14 @@ export type IssuesSettings = Infer<typeof issuesSettings>;
 
 type Context = SourceContext<GithubConfig, IssuesSettings>;
 
-/** What the source is given besides its context: `fetch`, wired in index.ts (the clock is the worker's). */
-export type SourceDeps = { readonly fetch: GithubFetch };
+/**
+ * What the source is given besides its context, wired in index.ts (the clock is the worker's):
+ * `fetch`, and where the poll's lines go (a rate limit's wait, a poll GitHub failed).
+ */
+export type SourceDeps = {
+  readonly fetch: GithubFetch;
+  readonly warn: (line: string) => void;
+};
 
 /** The repository the source reads; its schema judged it. */
 function repoOf(ctx: Context): Repo {
@@ -190,17 +197,6 @@ async function readIssues(
   return rows;
 }
 
-/** Resolves when `signal` fires: the only wait of `watch`, with no timer behind it. */
-function stopped(signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
-
 /** The issues source, over the `fetch` it is given. */
 export function issuesSource(
   deps: SourceDeps,
@@ -213,10 +209,19 @@ export function issuesSource(
   const ids = new Map<string, number>();
   return source<GithubConfig, typeof issuesSettings>({
     config: issuesSettings,
-    async *watch(ctx) {
-      // The poll goes here. Until then a change reaches the source by its webhook alone.
-      await stopped(ctx.signal);
-      yield* [];
+    watch(ctx) {
+      const repo = repoOf(ctx);
+      return reconcile({
+        session: sessionOf(deps, ctx, repo),
+        repo,
+        include: new Set<Kind>(ctx.source.settings.include),
+        // With no webhook secret every delivery is refused: the poll is all the source hears.
+        interval:
+          ctx.config.webhookSecret === undefined ? POLL_INTERVAL_NO_WEBHOOK_MS : POLL_INTERVAL_MS,
+        clock: ctx.clock,
+        cursor: ctx.cursor,
+        warn: deps.warn,
+      });
     },
     read: (ctx, keys) => readIssues(deps, ctx, keys),
     scan(ctx, cursor) {

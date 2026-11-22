@@ -69,7 +69,7 @@ export const issueFields = z.object({
 export type IssueFields = Infer<typeof issueFields>;
 
 /** Whether GitHub's answer is a pull request (it carries `pull_request`) or an issue. */
-export function kindOf(item: IssueFields): Kind {
+export function kindOf(item: Pick<IssueFields, "pull_request">): Kind {
   return item.pull_request === undefined || item.pull_request === null ? "issues" : "pull_requests";
 }
 
@@ -136,7 +136,7 @@ export function stateOf(
 }
 
 /** The end of every refused token's words: where it is set and what it needs. */
-const TOKEN_FIX =
+export const TOKEN_FIX =
   "put a valid token in the variable plugins.github.token names: a fine-grained token with Issues and Pull requests read on the repository (a classic token with the repo scope, or public_repo for a public repository); the source is tried again by itself, so a token restored is picked up without a restart";
 
 /** The fix of a source's failure other than a refused token. */
@@ -145,9 +145,10 @@ export const SOURCE_FIX =
 
 /**
  * One request of the source: `send` (rest.ts), with a 401, and a 403 that is not a rate limit,
- * thrown as `SourceAccessLost` in fixed words (the worker stops this source alone and tries it
- * again later); a 403 rate limit is the `GithubActionError` `refusal` makes, with the wait GitHub
- * asked for. The token is in no word of either.
+ * thrown as `SourceAccessLost` in fixed words (the worker stops this source alone and tries it again
+ * later); a 403 rate limit is the `GithubActionError` `refusal` makes, with the wait GitHub asked
+ * for: it fails the read or the scan, which the worker tries again (the poll waits out its own
+ * list's, reconcile.ts). The token is in no word of either.
  */
 export async function ask(session: Session, request: GithubRequest): Promise<Reply> {
   const reply = await send(session, {

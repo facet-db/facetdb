@@ -12,6 +12,8 @@ import type { GithubFetch } from "./rest.ts";
  * GitHub documents them (never seen from a session): the query must say `is:issue` or `is:pr` (422
  * otherwise), `created:<=T` takes a time with its offset, and items created in the same second come
  * in no promised order (here: the lower number first, the opposite of the source's own order).
+ * The repository's issues list (`GET /repos/{o}/{r}/issues`, the poll's) keeps its documented
+ * `since`, read as strictly after (`list` below).
  */
 
 /** One request as the fake saw it, its path's segments decoded. */
@@ -37,6 +39,8 @@ export type FakeIssue = {
   body: string | null;
   /** GitHub's creation time, to the second: `YYYY-MM-DDTHH:MM:SSZ`. */
   createdAt: string;
+  /** GitHub's time of its last change, to the second; its creation time until a test moves it. */
+  updatedAt: string;
   open: boolean;
   /** A pull request's changed files, in GitHub's order; undefined for an issue. */
   files: string[] | undefined;
@@ -77,6 +81,11 @@ export function fakeGithub(options: {
   readonly origin?: string;
   /** The API's path on its origin, as GitHub Enterprise Server's `/api/v3`; none by default. */
   readonly basePath?: string;
+  /**
+   * GitHub's clock: given, every answer carries its `Date` header (an HTTP date, to the second),
+   * as GitHub's do, unless a script's answer sets its own; none by default.
+   */
+  readonly now?: () => number;
 }) {
   const origin = options.origin ?? "https://api.github.com";
   const basePath = (options.basePath ?? "").replace(/\/+$/, "");
@@ -109,13 +118,15 @@ export function fakeGithub(options: {
 
   function issue(fullName: string, number: number, seed: Partial<FakeIssue> = {}): FakeIssue {
     const target = repos.get(fullName.toLowerCase()) ?? repo(fullName);
+    const createdAt = seed.createdAt ?? createdAtOf(number);
     const made: FakeIssue = {
       labels: seed.labels ?? [],
       assignees: seed.assignees ?? [],
       comments: seed.comments ?? [],
       title: seed.title ?? `Issue ${number}`,
       body: seed.body === undefined ? `The body of ${number}.` : seed.body,
-      createdAt: seed.createdAt ?? createdAtOf(number),
+      createdAt,
+      updatedAt: seed.updatedAt ?? createdAt,
       open: seed.open ?? true,
       files: seed.files,
       gone: seed.gone,
@@ -143,6 +154,7 @@ export function fakeGithub(options: {
       body: found.body,
       state: found.open ? "open" : "closed",
       created_at: found.createdAt,
+      updated_at: found.updatedAt,
       labels: found.labels.map((name) => ({ id: 1, name, color: "ededed" })),
       assignees: found.assignees.map((login) => ({ login, id: 1 })),
       repository_url: `${origin}${basePath}/repos/${fullName}`,
@@ -229,6 +241,51 @@ export function fakeGithub(options: {
     });
   }
 
+  /**
+   * `GET /repos/{o}/{r}/issues`: the repository's issues and pull requests as the poll asks for
+   * them (`state=all`, `sort=updated`, `direction=asc`, `since`, `per_page`, `page`), by GitHub's
+   * documentation (never seen from a session): those updated after `since` ("only show results
+   * that were last updated after the given time", read here as strictly after, to the second),
+   * oldest change first, with a `Link` to the next page that keeps the query. Changes in the same
+   * second come in no promised order (here: the lower number first). A deleted or transferred
+   * issue is not listed. Any other parameter or value is refused 422.
+   */
+  function list(seen: Seen, target: FakeRepo): Response {
+    const params = seen.url.searchParams;
+    const known = new Set(["state", "sort", "direction", "since", "per_page", "page"]);
+    const since = params.get("since") ?? "";
+    if (
+      [...params.keys()].some((key) => !known.has(key)) ||
+      params.get("state") !== "all" ||
+      params.get("sort") !== "updated" ||
+      params.get("direction") !== "asc" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(since)
+    ) {
+      return json(422, { message: "Validation Failed", errors: [{ code: "invalid" }] });
+    }
+    const after = Date.parse(since);
+    const found = [...target.issues.entries()]
+      .filter(([, one]) => one.gone === undefined && Date.parse(one.updatedAt) > after)
+      .sort(([a, x], [b, y]) =>
+        x.updatedAt === y.updatedAt ? a - b : x.updatedAt < y.updatedAt ? -1 : 1,
+      );
+    const size = Math.min(100, Number(params.get("per_page") ?? "30"));
+    const page = Number(params.get("page") ?? "1");
+    const last = Math.max(1, Math.ceil(found.length / size));
+    const link = (to: number) => {
+      const url = new URL(seen.url.href);
+      url.searchParams.set("page", String(to));
+      return `<${url.href}>`;
+    };
+    return json(
+      200,
+      found
+        .slice((page - 1) * size, page * size)
+        .map(([number, one]) => issueJson(number, one, target)),
+      page < last ? { link: `${link(page + 1)}; rel="next", ${link(last)}; rel="last"` } : {},
+    );
+  }
+
   function route(seen: Seen): Response {
     const { method, segments: s, body } = seen;
     if (s.length === 1 && s[0] === "user" && method === "GET") {
@@ -279,6 +336,9 @@ export function fakeGithub(options: {
         return json(201, { name });
       }
       return wrong(seen);
+    }
+    if (rest.length === 1 && rest[0] === "issues" && method === "GET") {
+      return list(seen, target);
     }
     if (rest[0] !== "issues" || rest.length < 2) {
       return wrong(seen);
@@ -428,10 +488,20 @@ export function fakeGithub(options: {
     requests.push(seen);
     // An answer comes back later than the request goes out, so two runs interleave as they would.
     await Promise.resolve();
+    return dated(await answer(seen, parsed, inside, init));
+  };
+
+  /** The answer to one request: a script's first, else the routes'. */
+  async function answer(
+    seen: Seen,
+    parsed: URL,
+    inside: string | undefined,
+    init: Parameters<GithubFetch>[1],
+  ): Promise<Response> {
     for (const script of scripts) {
-      const answer = await script(seen);
-      if (answer !== undefined) {
-        return answer;
+      const scripted = await script(seen);
+      if (scripted !== undefined) {
+        return scripted;
       }
     }
     if (parsed.origin !== origin || inside === undefined) {
@@ -442,7 +512,15 @@ export function fakeGithub(options: {
       return json(401, { message: "Bad credentials" });
     }
     return route(seen);
-  };
+  }
+
+  /** `response` with GitHub's `Date` header, when the fake has a clock and it carries none. */
+  function dated(response: Response): Response {
+    if (options.now !== undefined && !response.headers.has("date")) {
+      response.headers.set("date", new Date(options.now()).toUTCString());
+    }
+    return response;
+  }
 
   return {
     fetch,
