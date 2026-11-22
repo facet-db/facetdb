@@ -131,6 +131,14 @@ function operatorOnly(
       message: `a draft cannot ${before === undefined ? "give a new source" : "change"} actions: they run plugins with each record's state and the settings they name; edit the actions in facetdb.config.ts by hand`,
     });
   }
+  // A plugin source names the plugin that reads every record and its settings, as an action does;
+  // adding one from the studio is not offered.
+  if (JSON.stringify(drafted.source) !== JSON.stringify(before?.source)) {
+    issues.push({
+      path: `sources[${index}].source`,
+      message: `a draft cannot ${before === undefined ? "give a new source" : "change"} source: it names the plugin that reads every record and the settings it reads them with; edit source in facetdb.config.ts by hand`,
+    });
+  }
   return issues;
 }
 
@@ -238,7 +246,7 @@ export function planApply(
   // has judged (`databaseEnv`). One the loader could not record (its value unset where the worker
   // runs) would be written as DATABASE_URL: another connection than the one in force.
   const issues = judged.config.sources.flatMap((source, index): ConfigIssue[] =>
-    source.api || source.databaseEnv !== undefined
+    source.api || source.source !== undefined || source.databaseEnv !== undefined
       ? []
       : [
           {

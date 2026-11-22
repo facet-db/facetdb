@@ -5,7 +5,7 @@ import {
   type PluginManifest,
   parseQuestionSet,
 } from "@facetdb/core";
-import { ZodObject } from "zod";
+import { ZodObject, type ZodType } from "zod";
 import type {
   ActionDefinition,
   ChannelDefinition,
@@ -26,7 +26,8 @@ export type PluginDefinition<Schema extends ZodObject> = {
   readonly facetdb: string;
   /** The one schema that validates the config file and draws the dashboard's settings form. */
   readonly config: Schema;
-  readonly sources?: { readonly [name: string]: SourceDefinition<Infer<Schema>> };
+  // `never` for a source's own settings: each source types its own from its schema.
+  readonly sources?: { readonly [name: string]: SourceDefinition<Infer<Schema>, ZodType, never> };
   readonly actions?: { readonly [name: string]: ActionDefinition<Infer<Schema>> };
   readonly channels?: { readonly [name: string]: ChannelDefinition<Infer<Schema>> };
   readonly providers?: { readonly [name: string]: ProviderDefinition<Infer<Schema>> };
@@ -307,6 +308,24 @@ function checkEntry(kind: PluginKind, name: string, value: unknown, issues: Plug
     typeof definition["check"] !== "function"
   ) {
     issues.push({ field: `${field}.check`, message: "must be a function, or be left out" });
+  }
+  // A source's settings schema and its `receive` are optional, as a channel's `check` is.
+  if (
+    kind === "source" &&
+    definition["receive"] !== undefined &&
+    typeof definition["receive"] !== "function"
+  ) {
+    issues.push({ field: `${field}.receive`, message: "must be a function, or be left out" });
+  }
+  if (
+    kind === "source" &&
+    definition["config"] !== undefined &&
+    !(definition["config"] instanceof ZodObject)
+  ) {
+    issues.push({
+      field: `${field}.config`,
+      message: "must be the settings of one use as `z.object({ ... })`, or be left out",
+    });
   }
   if (
     (kind === "action" || kind === "channel" || kind === "provider") &&

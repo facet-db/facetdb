@@ -246,7 +246,8 @@ export const devCommand = defineCommand<DevOptions>("dev", {
         const seeded = seed === undefined ? [] : await runSeed(client, seed, print);
         const installed: SourceConfig[] = [];
         for (const source of config.sources) {
-          if (source.api) {
+          // An API or plugin source is the store's: nothing to install in a table.
+          if (source.api || source.source !== undefined) {
             installed.push(source);
             continue;
           }

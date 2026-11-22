@@ -569,10 +569,11 @@ end $$`,
  * log's version numbers) and the set its worker last ran (store migration 8; a reinstalled source's
  * review must not judge by it), its review cards (made from that log: a reinstalled source's record
  * written done at its old hash must find no card left), and its registration in `sources` (the
- * worker's, under the project, as a plugin-kind source; with its log gone it holds nothing). An
- * unresolved source gets no `delete` at all. Then each table, once no row of anyone's is left and
- * no store uses it. Both serve the store: with the store elsewhere, the CLI's store door purges and
- * the engine plans neither.
+ * worker's, under the project, as a plugin-kind source; with its log gone it holds nothing; an API
+ * or plugin source's registration, `api` or `plugin-source`, is never deleted here). An unresolved
+ * source gets no `delete` at all. Then each table, once no row of anyone's is left and no store
+ * uses it. Both serve the store: with the store elsewhere, the CLI's store door purges and the
+ * engine plans neither.
  */
 function purgeStatements(sourceId: string | undefined): readonly InstallStatement[] {
   const source = `current_setting('${SOURCE_SETTING}')`;
@@ -967,8 +968,10 @@ type StoreSource = {
 
 /**
  * The store's plugin-kind sources matching `condition` (on `s`): a database table's source is
- * registered as one by the worker and backfill (the store has no third kind), its log written
- * under its id. API sources are never a table's and are not listed.
+ * registered as one by the worker and backfill, its log written under its id. API sources are never
+ * a table's and are not listed, and neither are plugin sources (`plugin-source`; store migration
+ * 9): their records, log and cursor are the store's, never a table to uninstall, and no table's
+ * purge resolves to them, as none resolves to an API source's.
  */
 async function pluginSources(
   query: SqlQuery,

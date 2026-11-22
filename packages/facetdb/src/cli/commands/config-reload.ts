@@ -117,6 +117,22 @@ export type SourceLoop = {
    * drops a record held during a model outage. Absent for a loop without a policy.
    */
   readonly outage?: { readonly held: readonly RecordKey[]; hold(keys: readonly RecordKey[]): void };
+  /**
+   * A plugin source's plugin: its package, the source's name in it, and the source's settings as
+   * its schema parsed them, which an action of the same plugin is handed. Absent for a table or an
+   * API source.
+   */
+  readonly plugin?: {
+    readonly packageName: string;
+    readonly entry: string;
+    readonly settings: Readonly<Record<string, unknown>>;
+  };
+  /**
+   * For a loop whose passes say nothing of its health (a plugin source: its store answers a pass
+   * whatever its plugin does), how the loop tells the fleet it works again (a read through its
+   * plugin that answered): only that starts a failed source's backoff over. Absent, a pass does.
+   */
+  readonly proven?: (heard: () => void) => void;
   close(): Promise<void>;
 };
 
@@ -157,6 +173,16 @@ export type FleetDeps = {
    * and a source added again under that name is made anew).
    */
   readonly removed?: (source: SourceConfig) => void;
+  /**
+   * Why a plugin source cannot run in this worker, in the CLI's words with the fix, or undefined
+   * when it can: its plugin not loaded when the worker started, a source the plugin lacks, a
+   * variable unset, settings the source's schema refuses. No reading of a database is involved, and
+   * no wait mends one. Absent, every plugin source is taken as runnable.
+   */
+  readonly pluginRefusal?: (
+    source: SourceConfig,
+    config: ProjectConfig,
+  ) => { readonly message: string; readonly fix: string } | undefined;
   /**
    * The project's settings a running worker takes up without a restart (the spending cap and what
    * happens at 100%): told each config that loads, at open and at every reload, before the
@@ -281,6 +307,11 @@ function installShape(source: SourceConfig): string {
 
 /** The install's fields, its questions' columns among them only when `questions` says so. */
 function installFields(source: SourceConfig, questions: boolean): unknown {
+  // A plugin source installs nothing and is read through a loop the worker opens anew with whatever
+  // the file says: any change to it restarts its loop.
+  if (source.source !== undefined) {
+    return { plugin: true };
+  }
   if (source.api) {
     return { api: true, read: source.read };
   }
@@ -310,7 +341,7 @@ function installFields(source: SourceConfig, questions: boolean): unknown {
  * install depends on is equal. Undefined for any other change, and for an API source (no install).
  */
 function questionsAdded(ran: SourceConfig, next: SourceConfig): readonly string[] | undefined {
-  if (ran.api || next.api) {
+  if (ran.api || next.api || ran.source !== undefined || next.source !== undefined) {
     return undefined;
   }
   if (JSON.stringify(installFields(ran, false)) !== JSON.stringify(installFields(next, false))) {
@@ -355,7 +386,7 @@ export function planReload(
       const added = questionsAdded(loop.source, source);
       steps.push(
         added === undefined
-          ? { kind: "keep", name: source.name, migrate: !source.api }
+          ? { kind: "keep", name: source.name, migrate: !source.api && source.source === undefined }
           : { kind: "added", name: source.name, source, questions: added },
       );
     } else {
@@ -410,6 +441,16 @@ type NotStarted =
   | { readonly kind: "no-url"; readonly variable: string }
   /** Not read for the file as it is now: the next reload reads it. */
   | { readonly kind: "unchecked" }
+  /**
+   * A plugin source the worker can run (its plugin loaded at the start, its settings pass), not
+   * started since the file changed: the next reload starts it.
+   */
+  | { readonly kind: "plugin" }
+  /**
+   * A plugin source this worker cannot run: its plugin not loaded when the worker started, a source
+   * the plugin lacks, a variable unset, settings refused; the fix says what to do.
+   */
+  | { readonly kind: "plugin-refused"; readonly message: string; readonly fix: string }
   /** The reload came while the worker was stopping, which starts nothing. */
   | { readonly kind: "stopping" }
   /**
@@ -440,6 +481,7 @@ function checkAgainStarts(reason: NotStarted): boolean {
     case "unchecked":
     case "unread":
     case "stopped":
+    case "plugin":
       return true;
     case "missing":
     case "failed":
@@ -449,6 +491,7 @@ function checkAgainStarts(reason: NotStarted): boolean {
     case "stopping":
     case "refused":
     case "cannot-tell":
+    case "plugin-refused":
       return false;
   }
 }
@@ -464,6 +507,10 @@ function notStartedMessage(name: string, reason: NotStarted): string {
       return `${NEW_AND_NOT_ANSWERED}: its connection string is read from ${reason.variable}, which was not set when facetdb worker started. Set ${reason.variable} where the worker runs, then restart facetdb worker.`;
     case "unchecked":
       return `${NEW_AND_NOT_ANSWERED}: its install was not checked since the file changed. Check again: the worker reads its database and starts the source once the install is there.`;
+    case "plugin":
+      return `${NEW_AND_NOT_ANSWERED}: it is read by a plugin this worker loaded when it started, and nothing is installed for it. Check again starts it.`;
+    case "plugin-refused":
+      return `${NEW_AND_NOT_ANSWERED}: ${reason.message}; ${reason.fix}.`;
     case "stopping":
       return "new in facetdb.config.ts and not started: the worker is stopping, which starts nothing; it answers once facetdb worker runs again.";
     case "refused":
@@ -572,6 +619,8 @@ function migrateHelps(reason: NotStarted): boolean {
     case "refused":
     case "unread":
     case "stopped":
+    case "plugin":
+    case "plugin-refused":
       return false;
   }
 }
@@ -732,10 +781,16 @@ export function createFleet(deps: FleetDeps): Fleet {
   function launch(slot: Slot, stop: AbortSignal): void {
     const name = slot.loop.source.name;
     const seen = deps.onPass(slot.loop);
+    // A loop that says when it works (a plugin source) starts its backoff over on that alone: its
+    // store's pass works even while its plugin keeps failing.
+    const { proven } = slot.loop;
+    proven?.(() => backoff.delete(name));
     slot.done = slot.loop.worker
       .run(AbortSignal.any([stop, slot.halt.signal]), (report) => {
         // A pass that works: the next failure waits the first wait again.
-        backoff.delete(name);
+        if (proven === undefined) {
+          backoff.delete(name);
+        }
         seen(report);
       })
       .catch((error: unknown) => {
@@ -904,7 +959,8 @@ export function createFleet(deps: FleetDeps): Fleet {
       }
       return { kind: "stopped" } as const;
     };
-    if (!entry.source.api) {
+    // A table source's install is read first; an API or plugin source installs nothing to read.
+    if (!entry.source.api && entry.source.source === undefined) {
       let check: InstallCheck;
       try {
         check = await deps.installed(entry.source, entry.config);
@@ -1130,12 +1186,58 @@ export function createFleet(deps: FleetDeps): Fleet {
         notStarted({ kind: "api" });
         return;
       }
+      /** Read afresh at each step: the stop may fire during the check or the open. */
+      const stopping = () => ending?.aborted === true;
+      // A plugin source installs nothing: it starts when the worker can run it (its plugin loaded
+      // at the start, its settings passing), and says why not otherwise.
+      if (source.source !== undefined) {
+        const refused = deps.pluginRefusal?.(source, next);
+        if (refused !== undefined) {
+          notStarted({ kind: "plugin-refused", ...refused });
+          return;
+        }
+        if (stopping()) {
+          notStarted({ kind: "stopping" });
+          return;
+        }
+        let opened: SourceLoop;
+        try {
+          opened = await deps.open(source, next);
+        } catch (error) {
+          notStarted(
+            error instanceof CliError
+              ? { kind: "plugin-refused", message: error.message, fix: error.fix }
+              : { kind: "failed", why: wordsOf(error), rightsRead: true },
+          );
+          return;
+        }
+        if (stopping()) {
+          try {
+            await opened.close();
+          } catch (error) {
+            deps.print(`${source.name}: closing it failed: ${messageOf(error)}`);
+          }
+          notStarted({ kind: "stopping" });
+          return;
+        }
+        unstarted.delete(source.name);
+        const slot = slotOf(opened);
+        slots.set(source.name, slot);
+        if (ending !== undefined) {
+          launch(slot, ending);
+        }
+        say({
+          source: source.name,
+          outcome: "started",
+          version: opened.version,
+          message: `it is read by the plugin ${source.source.plugin}, so it started: it answers every change the plugin reports from now on with version ${opened.version}.`,
+        });
+        return;
+      }
       if (!hasUrl(source)) {
         notStarted({ kind: "no-url", variable: variableOf(source) });
         return;
       }
-      /** Read afresh at each step: the stop may fire during the check or the open. */
-      const stopping = () => ending?.aborted === true;
       // A worker that is stopping starts nothing, and reads nothing for it: `run` waits for this
       // plan, then closes what runs.
       if (stopping()) {
@@ -1342,6 +1444,23 @@ export function createFleet(deps: FleetDeps): Fleet {
       .sort((a, b) => at(a.source.name) - at(b.source.name));
   }
 
+  /**
+   * Why a plugin source new in the file does not run: what this worker cannot run of it, judged now
+   * (its plugin not loaded at the start, a variable unset, settings refused), else the last try's
+   * failure for the file as it is now, else not tried since the file changed.
+   */
+  function pluginReason(
+    source: SourceConfig,
+    file: ProjectConfig,
+    lastRead: NotStarted | undefined,
+  ): NotStarted {
+    const refused = deps.pluginRefusal?.(source, file);
+    if (refused !== undefined) {
+      return { kind: "plugin-refused", ...refused };
+    }
+    return lastRead ?? { kind: "plugin" };
+  }
+
   /** The reload's plan against the file as last loaded, read again whenever it is asked. */
   function pendingNow(): PendingSource[] {
     if (current === undefined) {
@@ -1376,13 +1495,15 @@ export function createFleet(deps: FleetDeps): Fleet {
         // What the file says of it, else the last reading of its database for the file as it is
         // now, else not read since the file changed: a reload reads it again.
         const read = unstarted.get(step.name);
+        const lastRead = () =>
+          read !== undefined && read.file === sourceKey(file, wanted) ? read.reason : undefined;
         const reason: NotStarted = wanted.api
           ? { kind: "api" }
-          : !hasUrl(wanted)
-            ? { kind: "no-url", variable: variableOf(wanted) }
-            : read !== undefined && read.file === sourceKey(file, wanted)
-              ? read.reason
-              : { kind: "unchecked" };
+          : wanted.source !== undefined
+            ? pluginReason(wanted, file, lastRead())
+            : !hasUrl(wanted)
+              ? { kind: "no-url", variable: variableOf(wanted) }
+              : (lastRead() ?? { kind: "unchecked" });
         pending.push({
           source: step.name,
           outcome: "not-started",

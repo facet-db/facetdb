@@ -9,6 +9,7 @@ import {
   type OnCapReached,
   type PluginSettings,
   type ProjectConfig,
+  type SourceCall,
   type SourceConfig,
   type StorageMode,
 } from "./dsl.ts";
@@ -30,6 +31,8 @@ export type SourceJson = {
   readonly connector?: ConnectorChoice;
   readonly capture?: CaptureMode;
   readonly lastChanged?: string | false;
+  /** A plugin source's plugin, source and settings, a variable as `{ "env": "NAME" }`. */
+  readonly source?: SourceCall;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -74,6 +77,7 @@ function sourceJson(source: SourceConfig): SourceJson {
     ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.capture === undefined ? {} : { capture: source.capture }),
     ...(source.lastChanged === undefined ? {} : { lastChanged: source.lastChanged }),
+    ...(source.source === undefined ? {} : { source: source.source }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(source.where === undefined ? {} : { where: source.where }),
     read: source.read,
@@ -238,7 +242,11 @@ function questionSource(question: Question): string {
 
 function sourceSource(source: SourceConfig): string {
   const fields: string[] = [`name: ${text(source.name)}`];
-  if (source.api) {
+  if (source.source !== undefined) {
+    // A plugin source: its call as written, each variable `env("NAME")`, no table.
+    const { plugin, source: entry, settings } = source.source;
+    fields.push(`source: sourceCall(${text(plugin)}, ${text(entry)}, ${settingSource(settings)})`);
+  } else if (source.api) {
     fields.push("api: true");
   } else {
     fields.push(`database: env(${text(source.databaseEnv ?? "DATABASE_URL")})`);
@@ -319,8 +327,14 @@ export function configFileSource(config: ProjectConfig): string {
     used.add("env");
   }
   for (const source of config.sources) {
-    // A table source names its variable with `env(...)`; the name, never the string, is in the file.
-    if (!source.api) used.add("env");
+    if (source.source !== undefined) {
+      // A plugin source is its call; its settings import `env` only when they name a variable.
+      used.add("sourceCall");
+      if (readsVariable(source.source.settings)) used.add("env");
+    } else if (!source.api) {
+      // A table source names its variable with `env(...)`; the name, never the string, is in the file.
+      used.add("env");
+    }
     if (source.actions.length > 0) used.add("actionCall");
     for (const question of source.questions) used.add(question.type);
   }

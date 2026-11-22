@@ -9,6 +9,7 @@ import { ConfigError, type ProjectConfig, type SourceConfig } from "../../config
 import {
   checkActions,
   checkChannels,
+  checkSources,
   type PluginHost,
   PluginHostError,
 } from "../../plugin/index.ts";
@@ -115,6 +116,8 @@ export async function loadWorkerConfig(
     checkActions(config, plugins, deps.env);
     // Each alert channel bound to its plugin's channel, refused here when it cannot be.
     checkChannels(config, plugins, deps.env);
+    // Each plugin source against its plugin, as its loop opens it.
+    checkSources(config, plugins, deps.env);
   } catch (error) {
     if (error instanceof PluginHostError) {
       throw new CliError(error.code, error.message, error.fix);
@@ -155,11 +158,15 @@ export function tableTargets(
       source.table === undefined ? [] : [{ source, ...splitTable(source.table) }],
     );
   if (targets.length === 0) {
+    // A plugin source is the store's, as an API source is: never a table to touch.
+    const pluginRead = config.sources.find((source) => source.name === only)?.source;
     throw new CliError(
       "no-table-source",
       only === undefined
         ? "no source in the config reads a table, so there is nothing to install"
-        : `the source "${only}" does not read a table (an API source keeps its answers in the FacetDB store)`,
+        : pluginRead === undefined
+          ? `the source "${only}" does not read a table (an API source keeps its answers in the FacetDB store)`
+          : `the source "${only}" does not read a table (it is read by the plugin ${pluginRead.plugin}, and a plugin source keeps its records and answers in the FacetDB store)`,
       'add a source with table: "<name>" and database: env("DATABASE_URL") to facetdb.config.ts',
     );
   }

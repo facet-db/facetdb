@@ -130,6 +130,13 @@ export function createMigrateDoor(deps: MigrateDoorDeps): MigrateDoor {
         `pick one of: ${config.sources.map((candidate) => candidate.name).join(", ")}`,
       );
     }
+    if (source.source !== undefined) {
+      refusal(
+        "plugin-source",
+        `the source "${name}" is read by the plugin ${source.source.plugin}, so there is no table to install its questions in`,
+        "nothing to install: its answers live in the FacetDB store; restart facetdb worker to run the file as it is",
+      );
+    }
     if (source.api) {
       refusal(
         "api-source",

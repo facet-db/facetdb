@@ -216,6 +216,10 @@ const REFUSED_PROJECT_KEYS: Readonly<Record<string, string>> = {
     "a draft cannot change alerts: they decide where the worker posts its alerts; edit alerts in facetdb.config.ts by hand",
   sources:
     "a project draft does not carry sources: change a source with its own draft (the Questions page), or edit facetdb.config.ts by hand",
+  // The one-source form's plugin source: it names the plugin that reads every record and the
+  // settings it reads them with, as an action names its plugin.
+  source:
+    "a draft cannot change source: it names the plugin that reads every record and the settings it reads them with; edit source in facetdb.config.ts by hand",
 };
 
 /**

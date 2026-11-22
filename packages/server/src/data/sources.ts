@@ -41,8 +41,8 @@ export type Line = { readonly label: string; readonly words: string };
 
 export type SourceRow = {
   readonly name: string;
-  readonly kind: "table" | "api";
-  /** The connector in words, the row's tag: `Postgres, trigger`, `API`. */
+  readonly kind: "table" | "api" | "plugin";
+  /** The connector in words, the row's tag: `Postgres, trigger`, `API`, `Plugin @facetdb/github, issues`. */
   readonly connector: string;
   /** Doctor's install line under the worker login: its status and words; null for an API source. */
   readonly install: { readonly status: DoctorCheck["status"]; readonly words: string } | null;
@@ -167,7 +167,9 @@ async function backfillOf(
     finishedAt: null,
     words,
   });
-  if (source.table === undefined) {
+  // An API source's records arrive one by one; a plugin source's are paged through `scan` by a
+  // backfill, whose cursor is read as a table source's is.
+  if (source.table === undefined && source.plugin === undefined) {
     return none("None: records arrive one by one.");
   }
   const prefix = `${BACKFILL_RUN_PREFIX}${door.projectId}:${source.name}:`;
@@ -221,7 +223,21 @@ export function createSourcesService(deps: SourcesDeps): SourcesService {
       rows,
       backfill,
     };
-    const { table } = source;
+    const { table, plugin } = source;
+    if (plugin !== undefined) {
+      // A plugin source: the plugin says which records changed, the store keeps them.
+      return {
+        ...common,
+        kind: "plugin",
+        connector: `Plugin ${plugin.packageName}, ${plugin.source}`,
+        install: null,
+        how: {
+          label: "Arrives",
+          words: `The plugin ${plugin.packageName} reports each changed record of its ${plugin.source}, and the worker reads it into the FacetDB store and queues it. ${lastSeen}`,
+        },
+        login: null,
+      };
+    }
     if (table === undefined) {
       return {
         ...common,

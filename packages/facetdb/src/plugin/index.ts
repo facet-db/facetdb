@@ -64,12 +64,16 @@ export type {
   PluginContext,
   ProviderDefinition,
   ProviderSpec,
+  SourceAction,
+  SourceContext,
   SourceDefinition,
   SourcePage,
+  SourceReceipt,
+  SourceRequest,
   SourceRow,
   SourceSpec,
 } from "./kinds.ts";
-export { action, channel, pack, provider, source } from "./kinds.ts";
+export { action, channel, pack, provider, SourceAccessLost, source } from "./kinds.ts";
 export type { FoundPlugin, LoadPluginOptions } from "./load.ts";
 export { findPlugin, loadPlugin, PluginNotInstalledError } from "./load.ts";
 export type { PluginProviderOptions } from "./provider.ts";
@@ -84,5 +88,23 @@ export {
 export type { RegistryIndex, RegistryListing } from "./registry.ts";
 export { RegistryError, readRegistryIndex } from "./registry.ts";
 export { satisfies } from "./semver.ts";
+export type {
+  IntakeReport,
+  PluginSourceConnector,
+  PluginSourceDeps,
+  ReceiveOutcome,
+  RecordStore,
+} from "./source-connector.ts";
+export {
+  createPluginSourceConnector,
+  keyProblem,
+  MAX_CURSOR_LENGTH,
+  MAX_KEY_BYTES,
+  MAX_STATE_BYTES,
+  PluginSourceFailed,
+  printableKey,
+} from "./source-connector.ts";
+export type { HostedSource } from "./source-host.ts";
+export { checkSources, hostedSource } from "./source-host.ts";
 export type { Infer } from "./zod.ts";
 export { z } from "./zod.ts";

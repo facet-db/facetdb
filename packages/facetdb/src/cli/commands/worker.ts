@@ -62,9 +62,14 @@ import {
   checkPluginProvider,
   checkSourceActions,
   createActionRunner,
+  createPluginSourceConnector,
   deliveryFailureLine,
+  type HostedSource,
+  hostedSource,
   type PluginHost,
+  PluginHostError,
   PluginProviderError,
+  printableKey,
 } from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
@@ -521,7 +526,7 @@ export async function runWorkers(
    */
   async function start(
     source: SourceConfig,
-    kind: "api" | "plugin",
+    kind: "api" | "plugin" | "plugin-source",
     questionSet: QuestionSet,
   ): Promise<number> {
     await store.ensureSource({ projectId: project.id, name: source.name, kind });
@@ -565,6 +570,9 @@ export async function runWorkers(
         close: () => Promise.resolve(),
       });
     }
+    if (source.source !== undefined) {
+      return openPluginSource(source, from, questionSet, outage);
+    }
     // Its facts for the dashboard, made once per loop (its doctor's cache with them) from the
     // source and project the loop is opened with, so Home checks the question set in force; before
     // the connector opens, since nothing connects for them and a refusal leaves nothing to close.
@@ -595,6 +603,69 @@ export async function runWorkers(
     }
   }
 
+  /**
+   * The plugin source of `source`, checked against the plugins this worker loaded, or why it cannot
+   * run here, as the CLI's own refusal: a plugin the worker did not load, a source it lacks, a
+   * variable unset or settings its schema refuses. No wait mends one, so a loop it stops is not
+   * tried again until Check again or a restart.
+   */
+  function pluginSourceOf(source: SourceConfig, from: ProjectConfig): HostedSource {
+    try {
+      return hostedSource(parts.plugins, from, source, deps.env);
+    } catch (error) {
+      if (error instanceof PluginHostError) {
+        throw new CliError(error.code, error.message, error.fix);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * A plugin source's loop: registered in the store as a `plugin-source`, its records, queue, log
+   * and review cards the store's, through the adapter over the store's connector. The plugin's
+   * `watch` runs from the loop's first wait until its close, which stops it; under `--once` the
+   * loop never waits, so it answers what is queued and the pump never starts.
+   */
+  async function openPluginSource(
+    source: SourceConfig,
+    from: ProjectConfig,
+    questionSet: QuestionSet,
+    outage: OutagePolicyHandle,
+  ): Promise<SourceLoop> {
+    const hosted = pluginSourceOf(source, from);
+    const version = await start(source, "plugin-source", questionSet);
+    const connector = createPluginSourceConnector({
+      store: store.connector({ sourceId: idOf(source), fields: source.read, workerId }),
+      name: source.name,
+      hosted,
+      context: (signal) => parts.plugins.contextFor(hosted.packageName, signal),
+      fields: source.read,
+      clock,
+      cursors: store.cursors,
+      cursorRun: `plugin-source:${idOf(source)}`,
+      note: (line) => print(`${source.name}: ${line}`),
+    });
+    try {
+      return await inForce({
+        source,
+        questionSet,
+        version,
+        worker: workerFor(source, questionSet, version, connector, outage),
+        connector,
+        keyText: undefined,
+        outage,
+        plugin: { packageName: hosted.packageName, entry: hosted.entry, settings: hosted.settings },
+        // Its store answers a pass whatever its plugin does: only a read through the plugin that
+        // answered starts its backoff over after a failure.
+        proven: (heard) => connector.onWorking(heard),
+        close: () => connector.close(),
+      });
+    } catch (error) {
+      await connector.close();
+      throw error;
+    }
+  }
+
   /** What each source answered over the run, by name, across its restarts. */
   const tallies = new Map<string, Tally>();
   const tallyOf = (name: string): Tally => {
@@ -611,9 +682,11 @@ export async function runWorkers(
     entry.answered += report.written.length + report.skipped.length;
     entry.alreadyAnswered += report.alreadyAnswered.length;
     entry.failed += report.failures.length;
-    // Keys as the user writes them, the form `explain` reads back.
-    const shown = (keys: readonly string[]) =>
-      keys.map((key) => keyWords(loop.keyText, key)).join(", ");
+    // Keys as the user writes them, the form `explain` reads back; a plugin's key is the plugin's
+    // text, printed with no control or format character and cut short.
+    const keyOf = (key: string) =>
+      loop.plugin === undefined ? keyWords(loop.keyText, key) : printableKey(key);
+    const shown = (keys: readonly string[]) => keys.map(keyOf).join(", ");
     if (report.written.length > 0) {
       print(`${entry.source}: answered ${shown(report.written)}`);
     }
@@ -628,7 +701,7 @@ export async function runWorkers(
       print(
         failure.stage === "log"
           ? `${entry.source}: the decision log could not be read: ${message}`
-          : `${entry.source}: ${failure.key === null ? "the pass" : keyWords(loop.keyText, failure.key)} failed at ${failure.stage}: ${message}`,
+          : `${entry.source}: ${failure.key === null ? "the pass" : keyOf(failure.key)} failed at ${failure.stage}: ${message}`,
       );
     }
   };
@@ -654,6 +727,19 @@ export async function runWorkers(
       );
     },
     removed: (source) => parts.forgetTable?.(source),
+    // Why a plugin source cannot run in this worker (its plugin not loaded at the start, a variable
+    // unset, settings refused), or undefined when it can; `pending()` says it.
+    pluginRefusal: (source, from) => {
+      try {
+        pluginSourceOf(source, from);
+        return undefined;
+      } catch (error) {
+        if (error instanceof CliError) {
+          return { message: error.message, fix: error.fix };
+        }
+        throw error;
+      }
+    },
     project: (next) => {
       projectInForce = next;
     },
@@ -781,6 +867,8 @@ export async function runWorkers(
             connector: fleet.connector(named.name),
             log: store.log(sourceId),
             questionSet: loop.questionSet,
+            // A plugin source's settings, for an action of the same plugin.
+            ...(loop.plugin === undefined ? {} : { plugin: loop.plugin }),
           };
         },
       }),
@@ -840,6 +928,11 @@ export async function runWorkers(
               questions: loop.questionSet.questions.length,
               version: loop.version,
               table: loop.table,
+              ...(loop.plugin === undefined
+                ? {}
+                : {
+                    plugin: { packageName: loop.plugin.packageName, source: loop.plugin.entry },
+                  }),
             }));
           },
           // A source whose loop failed is no loop: Home names it with why and its next try.

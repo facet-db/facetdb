@@ -115,6 +115,47 @@ describe("the store's purge of one source's log", () => {
     expect(storePurgeRefusal(new Error("connection lost"))).toBeUndefined();
   });
 
+  it("treats a plugin source's log as an API source's: never purged while it holds records, its registration never deleted", async () => {
+    const { db } = await newStore();
+    const client = pgliteClient(db);
+    await client.query("insert into facetdb.projects (id, name) values ($1, $1)", [PROJECT]);
+    await client.query(
+      `insert into facetdb.sources (id, project_id, name, kind) values ($1, $2, 'listings', 'plugin-source')`,
+      [ID, PROJECT],
+    );
+    // The statements take no kind but the table source's own: a registration of any other stays.
+    const script = storePurgeStatements(source).join("\n");
+    expect(script).toContain("and kind = 'plugin';");
+    expect(script).not.toContain("plugin-source");
+
+    // Before it holds a record: the purge runs, and the plugin source's registration stays.
+    await runAll(client, storePurgeStatements(source));
+    expect(await client.query("select kind from facetdb.sources")).toEqual([
+      { kind: "plugin-source" },
+    ]);
+
+    // Once it holds records, as it does from its first change on, the guard refuses the purge.
+    await client.query(
+      `insert into facetdb.records (source_id, record_key, state, hash, status)
+       values ($1, 'k1', '{}', 'h', 'done')`,
+      [ID],
+    );
+    await client.query(
+      `insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+       values ($1, 'k1', 'answer', 1, 'h', 'jev-1.14.0', '{}', '{}', now())`,
+      [ID],
+    );
+    expect(await readStoreLog(client.query, ID)).toEqual({ decisions: 1, versions: 0, records: 1 });
+    const refused = await runAll(client, storePurgeStatements(source)).catch(
+      (error: unknown) => error,
+    );
+    expect(storePurgeRefusal(refused)).toContain("which holds records and is live");
+    expect(await readStoreLog(client.query, ID)).toEqual({ decisions: 1, versions: 0, records: 1 });
+    expect(await client.query("select kind from facetdb.sources")).toEqual([
+      { kind: "plugin-source" },
+    ]);
+  });
+
   it("writes every value through a setting, so a quote in a name is data, not SQL", () => {
     const statements = storePurgeStatements({ ...source, projectId: "it's-mine" });
     expect(statements[0]).toContain("'it''s-mine'");

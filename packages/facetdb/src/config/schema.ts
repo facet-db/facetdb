@@ -491,6 +491,36 @@ const actionSchema = strict({
     .default({}),
 });
 
+/**
+ * A plugin source as the file writes it: the plugin by its package name, as an action names one,
+ * the source by the name its plugin gives it, and the settings of this use, judged for secrets by
+ * the plugin settings' own rule: `env("NAME")` at any depth, and a secret always that. What the
+ * settings must hold is the plugin's schema's to say, once the worker has loaded it.
+ */
+const sourceCallSchema = strict({
+  plugin: pluginName,
+  source: z
+    .string()
+    .regex(
+      PLUGIN_ENTRY_NAME,
+      "a source is named as its plugin names it: lowercase letters and digits, words joined by _ or -, such as issues",
+    ),
+  settings: z
+    .record(z.string(), z.json(), {
+      error:
+        'a source\'s settings are an object of its fields, such as { repo: "acme/web", include: ["issues"] }',
+    })
+    .default({}),
+}).superRefine((call, context) => {
+  for (const { path, kind } of pluginSecretProblems(call.settings, [], false)) {
+    context.addIssue({
+      code: "custom",
+      path: ["settings", ...path],
+      message: pluginSecretMessage(call.plugin, keyOf(call.source, path), kind),
+    });
+  }
+});
+
 /** The schemes of a SQL Server connection string, the one database with Change Tracking (cli/engines.ts). */
 const CHANGE_TRACKING_SCHEMES: ReadonlySet<string> = new Set(["mssql", "sqlserver"]);
 
@@ -564,6 +594,7 @@ const sourceSchema = strict({
     })
     .exactOptional(),
   lastChanged: lastChangedSchema.exactOptional(),
+  source: sourceCallSchema.exactOptional(),
   table: z.string().min(1, "table must not be empty").exactOptional(),
   // The rest of the question-set fields are judged by core's schema, per source, below.
   where: z.unknown().optional(),
@@ -656,8 +687,46 @@ function issuesOf(error: z.ZodError, prefix: readonly PropertyKey[] = []): Confi
   }));
 }
 
+/** The fields of a table source that a plugin or API source never has; `databaseEnv` is written `database`. */
+const TABLE_FIELDS = [
+  "table",
+  "where",
+  "database",
+  "databaseEnv",
+  "connector",
+  "capture",
+  "lastChanged",
+] as const;
+
 function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
+  if (source.source !== undefined) {
+    // A plugin source: its records come from the plugin, and they and their answers are kept in the
+    // FacetDB store, so nothing of a table or of the check API belongs beside it.
+    const plugin = `the plugin ${source.source.plugin}`;
+    for (const field of TABLE_FIELDS) {
+      if (source[field] !== undefined) {
+        const written = field === "databaseEnv" ? "database" : field;
+        issues.push({
+          path: `${at}.${written}`,
+          message: `a plugin source has no ${written}: ${plugin} reads its records; remove ${written}, or remove source to read a table`,
+        });
+      }
+    }
+    if (source.api) {
+      issues.push({
+        path: `${at}.api`,
+        message: `a source is read by a plugin or sent by your code, not both: remove api: true to let ${plugin} read it, or remove source to send the records to /v1/check`,
+      });
+    }
+    if (source.storage === "side-table") {
+      issues.push({
+        path: `${at}.storage`,
+        message: `a plugin source keeps its answers in the FacetDB store; remove storage, or remove source to read a table`,
+      });
+    }
+    return issues;
+  }
   if (source.api) {
     for (const field of [
       "table",
@@ -690,7 +759,7 @@ function sourceStructureIssues(source: ParsedSource, at: string): ConfigIssue[] 
     issues.push({
       path: `${at}.table`,
       message:
-        'a source reads a table: add table: "<name>", or add api: true if your code sends the records',
+        'a source reads a table: add table: "<name>", add api: true if your code sends the records, or add source: <plugin>.<source>({ ... }) for a plugin to read them',
     });
   }
   if (source.database === undefined && source.databaseEnv === undefined) {
@@ -926,6 +995,14 @@ function sourceConfig(
     ...(source.connector === undefined ? {} : { connector: source.connector }),
     ...(source.capture === undefined ? {} : { capture: source.capture }),
     ...(source.lastChanged === undefined ? {} : { lastChanged: source.lastChanged }),
+    ...(source.source === undefined
+      ? {}
+      : {
+          source: {
+            ...source.source,
+            settings: source.source.settings as NonNullable<SourceConfig["source"]>["settings"],
+          },
+        }),
     ...(source.table === undefined ? {} : { table: source.table }),
     ...(questionSet.where === undefined ? {} : { where: questionSet.where }),
     read: questionSet.read,

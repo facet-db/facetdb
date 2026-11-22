@@ -30,12 +30,14 @@ export type {
   JsonValue,
   NoulOptions,
   OnCapReached,
+  OneSourceInput,
   PluginSettings,
   ProjectConfig,
   ProjectInput,
   QuestionDraft,
   QuietHours,
   ScoreOptions,
+  SourceCall,
   SourceConfig,
   SourceInput,
   StorageMode,
@@ -50,6 +52,7 @@ export {
   isEnvReference,
   noul,
   score,
+  sourceCall,
 } from "./dsl.ts";
 export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";

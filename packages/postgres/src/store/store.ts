@@ -79,7 +79,14 @@ export type StoreOptions = {
   | { readonly pglite: PGlite; readonly url?: undefined }
 );
 
-export type SourceKind = "plugin" | "api";
+/**
+ * A source's kind in `facetdb.sources`: `plugin` is a database table's source (the worker and the
+ * backfill register one under the name, its log written under its id; the name is older than plugin
+ * sources), `api` an API source, and `plugin-source` a source a plugin reads. Uninstall and purge
+ * act on `plugin` alone: an API or plugin source keeps its records and log in the store and is
+ * never a table to uninstall.
+ */
+export type SourceKind = "plugin" | "plugin-source" | "api";
 
 export type Store = {
   readonly usage: UsageStore;

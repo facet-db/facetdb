@@ -46,6 +46,27 @@ export function actionCall(
   return { plugin, action, config };
 }
 
+/**
+ * A plugin source as written in the config: the plugin that provides it, the source's name in that
+ * plugin, and the settings of this one use. `github.issues({ repo })` builds one with
+ * `sourceCall("@facetdb/github", "issues", { repo })`; like an action, the JSON export carries
+ * exactly these three fields. A setting may name a variable, `env("NAME")`, at any depth, and a
+ * secret always does: the value is read where the worker runs, never written here.
+ */
+export type SourceCall = {
+  readonly plugin: string;
+  readonly source: string;
+  readonly settings: { readonly [key: string]: JsonValue };
+};
+
+export function sourceCall(
+  plugin: string,
+  source: string,
+  settings: { readonly [key: string]: JsonValue } = {},
+): SourceCall {
+  return { plugin, source, settings };
+}
+
 /** What a question needs besides its text; `thresholds` is the per-question way to set them. */
 type QuestionOptions = {
   readonly stakes?: Stakes;
@@ -189,6 +210,11 @@ export type SourceInput = {
   readonly lastChanged?: string | false;
   /** An API source: your code sends the records to `/v1/check`. */
   readonly api?: boolean;
+  /**
+   * A plugin source: `github.issues({ repo })`, or `sourceCall(...)`. Its records, queue, log and
+   * review cards are kept in the FacetDB store; it has no table, database or where filter.
+   */
+  readonly source?: SourceCall;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -247,7 +273,8 @@ export function channelSendsOf(channel: AlertChannel): AlertSends {
   return typeof channel === "string" ? "everything" : (channel.sends ?? "everything");
 }
 
-export type ProjectInput = {
+/** The project's own settings, whichever way its sources are written. */
+type ProjectSettings = {
   readonly model: string;
   readonly modelUrl?: string;
   /**
@@ -273,8 +300,28 @@ export type ProjectInput = {
    * env("GITHUB_TOKEN") } }`.
    */
   readonly plugins?: { readonly [name: string]: PluginSettings };
-  readonly sources: readonly SourceInput[];
 };
+
+/** The fields of the one-source form that belong to its source (the GitHub example). */
+type OneSourceFields = Pick<
+  SourceInput,
+  "read" | "questions" | "thresholds" | "actions" | "onChange" | "onOutage" | "maxStateTokens"
+>;
+
+/** A project as the file writes it, with a list of `sources`. */
+export type ProjectInput = ProjectSettings & { readonly sources: readonly SourceInput[] };
+
+/**
+ * The one-source form for a plugin source, `facetdb({ source: github.issues({ ... }), read,
+ * questions, ... })`: one `sources` entry, named after the plugin's source (`issues`) unless `name`
+ * says otherwise.
+ */
+export type OneSourceInput = ProjectSettings &
+  OneSourceFields & {
+    readonly source: SourceCall;
+    /** The source's name in the config; the plugin's source's name (`issues`) when left out. */
+    readonly name?: string;
+  };
 
 /** A source with every default filled and its questions named: what the rest of FacetDB reads. */
 export type SourceConfig = {
@@ -296,6 +343,8 @@ export type SourceConfig = {
   readonly capture?: CaptureMode;
   /** The column a polled table is read by, or `false` for the hourly scan; absent, found by name. */
   readonly lastChanged?: string | false;
+  /** A plugin source's plugin, its source and settings as written; absent otherwise. */
+  readonly source?: SourceCall;
   readonly table?: string;
   readonly where?: string;
   readonly read: readonly string[];
@@ -371,6 +420,7 @@ function sourceConfig(input: SourceInput): SourceConfig {
     connector: input.connector,
     capture: input.capture,
     lastChanged: input.lastChanged,
+    source: input.source,
     table: input.table,
     where: input.where,
     read: input.read,
@@ -386,10 +436,58 @@ function sourceConfig(input: SourceInput): SourceConfig {
 }
 
 /**
- * Shapes a project: fills the defaults (`inline`, `reset`, `hold`, `pause`) and names the
- * questions. It does not judge the result; the loader does, with the schema.
+ * The sources a project writes: its `sources`, or the one-source form's single source, named after
+ * the plugin's source with any dash read as an underscore (a source's name is lowercase letters,
+ * digits and underscores). A file that writes both keeps both, the one-source entry first, and the
+ * schema judges them as it judges any two sources.
  */
-export function facetdb(project: ProjectInput): ProjectConfig {
+function sourcesOf(project: ProjectInput | OneSourceInput): readonly SourceInput[] {
+  // Read as written: a JavaScript file may give either form, so neither key is taken on trust.
+  const call = (project as Partial<OneSourceInput>).source;
+  if (call === undefined) {
+    return (project as ProjectInput).sources;
+  }
+  const form = project as OneSourceInput;
+  // What only a table or the check API has, which a JavaScript file may still write beside
+  // `source`: carried onto the source, so the schema refuses each where it is written.
+  const stray = project as Partial<
+    Pick<
+      SourceInput,
+      "table" | "where" | "api" | "storage" | "database" | "connector" | "capture" | "lastChanged"
+    >
+  >;
+  const one: SourceInput = {
+    name: form.name ?? call.source.replaceAll("-", "_"),
+    source: call,
+    ...(stray.table === undefined ? {} : { table: stray.table }),
+    ...(stray.where === undefined ? {} : { where: stray.where }),
+    ...(stray.api === undefined ? {} : { api: stray.api }),
+    ...(stray.storage === undefined ? {} : { storage: stray.storage }),
+    ...(stray.database === undefined ? {} : { database: stray.database }),
+    ...(stray.connector === undefined ? {} : { connector: stray.connector }),
+    ...(stray.capture === undefined ? {} : { capture: stray.capture }),
+    ...(stray.lastChanged === undefined ? {} : { lastChanged: stray.lastChanged }),
+    read: form.read,
+    questions: form.questions,
+    ...(form.thresholds === undefined ? {} : { thresholds: form.thresholds }),
+    ...(form.actions === undefined ? {} : { actions: form.actions }),
+    ...(form.onChange === undefined ? {} : { onChange: form.onChange }),
+    ...(form.onOutage === undefined ? {} : { onOutage: form.onOutage }),
+    ...(form.maxStateTokens === undefined ? {} : { maxStateTokens: form.maxStateTokens }),
+  };
+  // Both written is not a form TypeScript allows; a JavaScript file may still write it.
+  const others = (project as Partial<ProjectInput>).sources ?? [];
+  return [one, ...others];
+}
+
+/**
+ * Shapes a project: fills the defaults (`inline`, `reset`, `hold`, `pause`) and names the
+ * questions. It does not judge the result; the loader does, with the schema. The one-source form
+ * is written first so that `Parameters<typeof facetdb>` stays the list form.
+ */
+export function facetdb(project: OneSourceInput): ProjectConfig;
+export function facetdb(project: ProjectInput): ProjectConfig;
+export function facetdb(project: ProjectInput | OneSourceInput): ProjectConfig {
   return withDefined<ProjectConfig>({
     model: project.model,
     modelUrl: project.modelUrl,
@@ -399,6 +497,6 @@ export function facetdb(project: ProjectInput): ProjectConfig {
     spendingCap: project.spendingCap,
     onCapReached: project.onCapReached ?? "pause",
     plugins: project.plugins,
-    sources: project.sources.map(sourceConfig),
+    sources: sourcesOf(project).map(sourceConfig),
   });
 }

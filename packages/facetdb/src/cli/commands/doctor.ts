@@ -11,6 +11,7 @@ import {
   checkActions,
   checkChannels,
   checkPluginProvider,
+  checkSources,
   type PluginHost,
   PluginHostError,
   PluginProviderError,
@@ -260,6 +261,8 @@ async function configLoads(environment: DoctorEnvironment): Promise<{
       checkActions(config, plugins, environment.deps.env);
       // And each alert channel bound to its plugin's channel.
       checkChannels(config, plugins, environment.deps.env);
+      // Each plugin source against its plugin, as the worker checks it at its start.
+      checkSources(config, plugins, environment.deps.env);
     } catch (error) {
       if (error instanceof PluginHostError) {
         // A check is one line: the schema's listed reasons follow the heading, joined.

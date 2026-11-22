@@ -58,6 +58,16 @@ export function createDoctors(clock: Clock, freshMs: number = DOCTOR_FRESH_MS): 
 
   return {
     async verdict(source) {
+      if (source.plugin !== undefined) {
+        // A plugin source has no database of its own to check: its loop says when its plugin fails,
+        // by stopping alone.
+        return {
+          verdict: "healthy",
+          words: `read by the plugin ${source.plugin.packageName}, with no database to check`,
+          failedCheck: null,
+          checks: [],
+        };
+      }
       if (source.table === undefined) {
         return {
           verdict: "healthy",

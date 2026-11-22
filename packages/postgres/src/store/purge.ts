@@ -8,7 +8,10 @@ import { quoteLiteral, type SqlQuery } from "../sql/index.ts";
  * migration 8), its review cards (made from that log) and its registration, after a guard that
  * refuses while a live store source of the same id (an API or plugin source holding records) still
  * writes the log. The values reach the statements through transaction-local settings, as the
- * engine's scripts do, so no value is spliced into a `do` block.
+ * engine's scripts do, so no value is spliced into a `do` block. Only a table's registration (`kind
+ * = 'plugin'`) is deleted: an API source's (`api`) or a plugin source's (`plugin-source`) stays,
+ * and a plugin source holds records from its first change on, so the guard refuses its log as it
+ * refuses an API source's.
  */
 
 /** A source's decision log in the store, read before the purge is shown. */

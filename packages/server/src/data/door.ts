@@ -57,6 +57,11 @@ export type SourceFacts = {
   readonly version: number;
   /** How its database is reached; undefined for an API source, whose records arrive by POST /v1/check. */
   readonly table: TableFacts | undefined;
+  /**
+   * The plugin that reads a plugin source: its package and the source's name in it; absent for a
+   * table or an API source. Such a source has no table: its records are the store's.
+   */
+  readonly plugin?: { readonly packageName: string; readonly source: string };
 };
 
 /**

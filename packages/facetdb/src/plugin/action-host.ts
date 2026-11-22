@@ -22,7 +22,7 @@ import {
   type ActionDelivery,
   ActionFailed,
 } from "@facetdb/server";
-import { ZodObject, z } from "zod";
+import { ZodObject, type ZodType, z } from "zod";
 import {
   type ActionCall,
   formatPath,
@@ -124,11 +124,11 @@ function splitSettings(call: ActionCall): {
   return { own, otherwise: otherwise as Settings | undefined };
 }
 
-/** One variable a setting reads: where, inside the action's settings, and its name. */
-type Variable = { readonly path: readonly (string | number)[]; readonly variable: string };
+/** One variable a setting reads: where, inside the action's (or a source's) settings, and its name. */
+export type Variable = { readonly path: readonly (string | number)[]; readonly variable: string };
 
-/** Every `env("NAME")` in an action's settings, at any depth. */
-function variablesIn(value: unknown, path: readonly (string | number)[] = []): Variable[] {
+/** Every `env("NAME")` in an action's (or a source's) settings, at any depth. */
+export function variablesIn(value: unknown, path: readonly (string | number)[] = []): Variable[] {
   if (isEnvReference(value)) {
     return [{ path, variable: value.env }];
   }
@@ -144,20 +144,22 @@ function variablesIn(value: unknown, path: readonly (string | number)[] = []): V
 }
 
 /** The variables' names for a sentence, each once: `HOOK_URL and OTHER_URL`. */
-function listed(variables: readonly Variable[]): string {
+export function listed(variables: readonly Variable[]): string {
   return [...new Set(variables.map(({ variable }) => variable))].join(" and ");
 }
 
 /**
  * The schema's refusal of one value, as lines under `base`; a schema that throws is one line. A
  * reason may quote what it was given, so where a variable fed the value (at the issue's path,
- * inside it or around it) only the variable's name is said, as the plugin host does.
+ * inside it or around it) only the variable's name is said, as the plugin host does. `whose` names
+ * the schema in the words: an action's, or a source's.
  */
-function refusals(
-  entry: ActionDefinition<unknown>,
+export function refusals(
+  entry: { readonly config: ZodType },
   value: unknown,
   base: string,
   variables: readonly Variable[],
+  whose: "action" | "source" = "action",
 ): string[] {
   let parsed: ReturnType<typeof entry.config.safeParse>;
   try {
@@ -165,7 +167,7 @@ function refusals(
   } catch {
     // A transform or a refine that throws is the plugin's fault: none of its words are kept.
     return [
-      `${base}: the action's schema failed while it read these settings, instead of refusing a value in words`,
+      `${base}: the ${whose}'s schema failed while it read these settings, instead of refusing a value in words`,
     ];
   }
   if (parsed.success) {
@@ -178,22 +180,34 @@ function refusals(
     );
     return fed.length === 0
       ? `${formatPath([base, ...path])}: ${issue.message}`
-      : `${formatPath([base, ...path])}: the value of ${listed(fed)} is refused by the action's schema (its reason is not shown, as it could quote the value)`;
+      : `${formatPath([base, ...path])}: the value of ${listed(fed)} is refused by the ${whose}'s schema (its reason is not shown, as it could quote the value)`;
   });
 }
 
 /** The paths of the action's schema that hold a secret (`z.secret()`); refuses one it cannot walk. */
 function secretsOf(entry: ActionDefinition<unknown>, call: ActionCall, where: string): string[] {
-  if (!(entry.config instanceof ZodObject)) {
+  return schemaSecrets(entry.config, `${where} (${call.plugin} ${call.action})`, "action");
+}
+
+/**
+ * The paths of a settings schema that hold a secret (`z.secret()`), none for a schema that is not
+ * an object; refuses, in words naming `what`, a schema the walker cannot read.
+ */
+export function schemaSecrets(
+  schema: ZodType | undefined,
+  what: string,
+  whose: "action" | "source",
+): string[] {
+  if (!(schema instanceof ZodObject)) {
     return [];
   }
   try {
-    return [...secretPaths(entry.config)];
+    return [...secretPaths(schema)];
   } catch (error) {
     throw new PluginHostError(
-      "action-settings",
-      `the settings schema of ${where} (${call.plugin} ${call.action}) cannot be read for the secrets it holds: ${error instanceof Error ? error.message : String(error)}`,
-      "install a version of the plugin whose action schema FacetDB can read, or ask its author to fix it",
+      whose === "action" ? "action-settings" : "source-settings",
+      `the settings schema of ${what} cannot be read for the secrets it holds: ${error instanceof Error ? error.message : String(error)}`,
+      `install a version of the plugin whose ${whose} schema FacetDB can read, or ask its author to fix it`,
     );
   }
 }
@@ -371,6 +385,14 @@ export type ActionSource =
       readonly connector: Pick<Connector, "read">;
       readonly log: Pick<DecisionLog, "history">;
       readonly questionSet: QuestionSet;
+      /**
+       * A plugin source's plugin, by its package name, and the source's settings as its schema
+       * parsed them: an action of that same plugin is handed them as `ctx.source.settings`.
+       */
+      readonly plugin?: {
+        readonly packageName: string;
+        readonly settings: Readonly<Record<string, unknown>>;
+      };
     }
   /** In the config, but its loop is stopped: the row waits for it, no attempt spent. */
   | { readonly kind: "stopped"; readonly name: string }
@@ -574,10 +596,12 @@ export function createActionRunner(
       );
     }
 
+    // A source of this same plugin hands the action its own settings (a GitHub label action reads
+    // the repository of its GitHub issues source there); any other source, none.
+    const own = source.plugin?.packageName === hosted.packageName ? source.plugin : undefined;
     const ctx: ActionContext<unknown> = {
       ...deps.host.contextFor(row.plugin, signal),
-      // No source comes from a plugin yet (143 adds them): no action has its source's settings.
-      source: { name: source.name, settings: null },
+      source: { name: source.name, settings: own?.settings ?? null },
     };
     try {
       await entry.run(

@@ -103,7 +103,11 @@ export type PluginRefusal =
   /** An action the config names that its plugin does not provide (action-host.ts). */
   | "plugin-no-action"
   /** An action's settings, or its `else`, that the action's own schema refuses (action-host.ts). */
-  | "action-settings";
+  | "action-settings"
+  /** A source the config names that its plugin does not provide (source-host.ts). */
+  | "plugin-no-source"
+  /** A plugin source's settings that the source's own schema refuses (source-host.ts). */
+  | "source-settings";
 
 /** A plugin the config names cannot run: what is wrong and what to do, never a secret's value. */
 export class PluginHostError extends Error {
@@ -233,6 +237,10 @@ function usesOf(config: ProjectConfig): Use[] {
     uses.push({ name: providedBy.plugin, where: "provider" });
   }
   config.sources.forEach((source, index) => {
+    // A plugin source's plugin, before the source's actions, as the file writes them.
+    if (source.source !== undefined) {
+      uses.push({ name: source.source.plugin, where: `sources[${index}].source.plugin` });
+    }
     source.actions.forEach((action, position) => {
       uses.push({
         name: action.plugin,

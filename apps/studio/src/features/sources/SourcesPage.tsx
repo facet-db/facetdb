@@ -51,7 +51,7 @@ function Row({ source }: { readonly source: SourceRow }) {
         <h2 id={id} className="text-lg font-bold tracking-tight">
           {source.name}
         </h2>
-        <Tag tone={source.kind === "api" ? "facet" : "yes"}>{source.connector}</Tag>
+        <Tag tone={source.kind === "table" ? "yes" : "facet"}>{source.connector}</Tag>
       </div>
       <dl className="m-0 grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-2.5">
         <Line label={source.how.label}>{source.how.words}</Line>
@@ -62,8 +62,9 @@ function Row({ source }: { readonly source: SourceRow }) {
           )}
         </Line>
         <Line label="Backfill">
-          {source.kind === "api" ? (
-            // Records arrive one by one through the check API: nothing to go back over.
+          {source.kind !== "table" ? (
+            // Records arrive one by one through the check API, and a plugin source's backfill is
+            // not offered here yet: the words say where it stands.
             <span className="text-text-2">{backfill.words}</span>
           ) : (
             <BackfillControls source={source.name} known={backfill} />

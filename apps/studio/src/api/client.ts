@@ -803,7 +803,7 @@ const sourcesSchema = z.object({
   sources: z.array(
     z.object({
       name: z.string().min(1),
-      kind: z.enum(["table", "api"]),
+      kind: z.enum(["table", "api", "plugin"]),
       connector: z.string(),
       install: z
         .object({ status: z.enum(["ok", "fail", "skip", "warn"]), words: z.string() })
