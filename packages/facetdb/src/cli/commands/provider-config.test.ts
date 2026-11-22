@@ -468,6 +468,17 @@ describe("doctor names the provider and the variable it checks", () => {
     expect(lineFor(result.stdout, "model key")).not.toContain("not sent");
   });
 
+  it("a preset the team has run (strands-decider) carries no not-run note", async () => {
+    const result = await run(
+      offline,
+      projectWith({ provider: "strands-decider", modelUrl: "http://127.0.0.1:8000" }),
+      {},
+    );
+    const line = lineFor(result.stdout, "model reachable");
+    expect(line).toMatch(/^skip/);
+    expect(line).not.toContain("has not run");
+  });
+
   it("the Cloudflare gateway reads CF_AIG_TOKEN, never the broad CLOUDFLARE_API_TOKEN", async () => {
     const config = projectWith({
       provider: "cloudflare-ai-gateway",

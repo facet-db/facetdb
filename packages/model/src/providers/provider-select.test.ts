@@ -202,9 +202,9 @@ describe("every preset", () => {
     },
   );
 
-  it("is marked not run until a live run proves it", () => {
+  it("is marked run only for strands-decider, the one preset a live run has proven", () => {
     for (const name of PRESET_NAMES) {
-      expect(PRESET_KEYS[name].proven, name).toBe(false);
+      expect(PRESET_KEYS[name].proven, name).toBe(name === "strands-decider");
     }
   });
 

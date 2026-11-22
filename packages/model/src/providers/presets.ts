@@ -34,8 +34,9 @@ export type PresetKey = {
   /** False for a server that may need no key (a local Ollama, a self-hosted Decider). */
   readonly required: boolean;
   /**
-   * True once a real request has gone through the preset. None has been run yet: `strands-decider`
-   * goes first, through its own server; the others stay unproven until someone runs one.
+   * True once a real request has gone through the preset: `strands-decider` only, run against the
+   * publisher's server on 127.0.0.1; the others stay unproven until someone runs one
+   * (`presets.live.test.ts` holds the Ollama case).
    */
   readonly proven: boolean;
 };
@@ -61,7 +62,7 @@ export const PRESET_KEYS = {
   "vercel-ai-gateway": { variable: "AI_GATEWAY_API_KEY", required: true, proven: false },
   "cloudflare-ai-gateway": { variable: "CF_AIG_TOKEN", required: true, proven: false },
   ollama: { variable: "OLLAMA_API_KEY", required: false, proven: false },
-  "strands-decider": { variable: "STRANDS_DECIDER_API_KEY", required: false, proven: false },
+  "strands-decider": { variable: "STRANDS_DECIDER_API_KEY", required: false, proven: true },
   "solar-decide": { variable: "UPSTAGE_API_KEY", required: true, proven: false },
 } as const satisfies Record<PresetName, PresetKey>;
 

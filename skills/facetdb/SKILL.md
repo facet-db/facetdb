@@ -109,6 +109,11 @@ Rules of the shape:
   A source may set its own `model`.
 - Optional project settings: `spendingCap` with `onCapReached` (`"pause"` or `"continue"`), `modelUrl`
   for a compatible server, and per source `maxStateTokens`.
+- Of the built-in `provider` presets, the FacetDB team has run only `strands-decider`;
+  `facetdb doctor` says so for the others. A Strands Decider server ignores the request's `model`,
+  so `model` pins nothing there: when you change the checkpoint it serves, change `model` too
+  (such as `strandsdecider-1.2610.0` for `strands-decider-2B-qwen3.5-v1-2610`), so a new
+  question-set version starts and its thresholds are checked again for the new model.
 - A table watched by polling (CockroachDB, Oracle, or `connector: "polling"`) is read by the column the
   application sets on every insert and every update: name it with `lastChanged: "changed_on"` (a time,
   NOT NULL), or write `lastChanged: false` to read the whole table every hour on purpose, without a
