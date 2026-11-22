@@ -45,7 +45,7 @@ type Sample = {
   readonly fields: readonly string[];
   readonly answers: readonly string[];
   readonly about: string;
-  readonly issues: readonly Issue[];
+  readonly records: readonly Issue[];
 };
 
 /** The fewest records per answer that the sample is held to, per question. */
@@ -282,7 +282,7 @@ describe("the triage pack's questions", () => {
 
 describe("the triage pack's sample", () => {
   it("holds 50 complete records, each with an allowed answer to every question and its own id", async () => {
-    const { pack, fields, answers, issues } = await sample();
+    const { pack, fields, answers, records: issues } = await sample();
     expect(pack).toBe("triage");
     expect(fields).toEqual([...FIELDS]);
     expect(answers).toEqual([...YES_NO]);
@@ -292,7 +292,7 @@ describe("the triage pack's sample", () => {
   });
 
   it("fails a record that lacks an expected answer, or carries one the question does not take", async () => {
-    const [first] = (await sample()).issues;
+    const [first] = (await sample()).records;
     if (first === undefined) {
       throw new Error("the sample is empty");
     }
@@ -307,7 +307,7 @@ describe("the triage pack's sample", () => {
   });
 
   it("holds each record as the state the issues source writes, issues and pull requests both", async () => {
-    const { issues } = await sample();
+    const { records: issues } = await sample();
     for (const issue of issues) {
       const files = filesOf(issue.changed_files);
       const state = stateOf(
@@ -341,7 +341,7 @@ describe("the triage pack's sample", () => {
   });
 
   it("spreads every question over each of its answers, and missing_reproduction over the bug reports alone", async () => {
-    const { issues, about } = await sample();
+    const { records: issues, about } = await sample();
     for (const question of QUESTIONS) {
       for (const [answer, least] of Object.entries(AT_LEAST[question] ?? {})) {
         const count = issues.filter((issue) => issue.expected[question] === answer).length;
@@ -361,7 +361,7 @@ describe("the triage pack's sample", () => {
   });
 
   it("labels each record as the criteria read: no missing reproduction without a bug, no low priority on a security or regression label", async () => {
-    const { issues } = await sample();
+    const { records: issues } = await sample();
     for (const issue of issues) {
       const kind = issue.expected["kind"];
       if (issue.changed_files !== "" || (kind !== "bug_report" && kind !== "unsure")) {
@@ -385,7 +385,7 @@ describe("the triage pack's sample", () => {
 
   it("shares no quoted phrase and no run of four words with any question's wording", async () => {
     // Criteria that repeat the sample's own hard cases would test the sample against itself.
-    const { issues } = await sample();
+    const { records: issues } = await sample();
     const wording = triage.questions.flatMap(textsOf);
     const quoted = wording.flatMap((text) =>
       [...text.matchAll(/(?:^|[\s(])['"‘“]([^'"’”]+)['"’”](?=[\s.,;:)]|$)/g)].map((m) =>
@@ -404,7 +404,7 @@ describe("the triage pack's sample", () => {
   });
 
   it("holds only invented text: no address, no link and no handle", async () => {
-    const { issues } = await sample();
+    const { records: issues } = await sample();
     const text = issues
       .map((issue) => [issue.title, issue.body ?? "", issue.labels, issue.changed_files].join("\n"))
       .join("\n");

@@ -3,7 +3,7 @@
   "fields": ["title", "description"],
   "answers": ["yes", "no", "unsure"],
   "about": "50 listings written for this sample: invented text, invented names and brands, phone numbers in the 555-0100 to 555-0199 range kept for fiction, and addresses on the reserved .example domain, which never resolves. Each listing carries the answer a careful moderator would give to each question from its text alone. \"unsure\" means that moderator would not decide from the text alone and would send the listing to review: a live run counts it as agreement when the model's probability lands anywhere in the question's review band, which is strictly between 0.10 and 0.90 for a high-stakes question (scam, banned_item, counterfeit) and strictly between 0.30 and 0.70 for a low-stakes one (off_platform), so the evidence reports the agreement on unsure listings per stakes level, and reports an automatic yes or no on an unsure listing apart from the answers that are wrong. The criteria describe kinds of situations and share no distinctive phrase with any listing.",
-  "listings": [
+  "records": [
     {
       "id": "m01",
       "title": "Case of red wine, twelve bottles, unopened",

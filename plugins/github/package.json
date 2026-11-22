@@ -11,12 +11,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:live": "vitest run --config vitest.live.config.ts"
   },
   "dependencies": {
     "facetdb": "workspace:*"
   },
   "devDependencies": {
+    "@facetdb/core": "workspace:*",
+    "@facetdb/model": "workspace:*",
     "@facetdb/slack": "workspace:*"
   }
 }

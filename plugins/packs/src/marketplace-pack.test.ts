@@ -26,7 +26,7 @@ type Sample = {
   readonly pack: string;
   readonly fields: readonly string[];
   readonly answers: readonly string[];
-  readonly listings: readonly Listing[];
+  readonly records: readonly Listing[];
 };
 
 /** The fewest listings per question that carry each answer: the spread the sample is held to. */
@@ -158,7 +158,7 @@ describe("the marketplace pack's questions", () => {
 
 describe("the marketplace pack's sample", () => {
   it("holds 50 complete listings, each with an allowed answer to every question and its own id", async () => {
-    const { pack, fields, answers, listings } = await sample();
+    const { pack, fields, answers, records: listings } = await sample();
     expect(pack).toBe("marketplace");
     expect(fields).toEqual(["title", "description"]);
     expect(answers).toEqual([...ANSWERS]);
@@ -178,7 +178,7 @@ describe("the marketplace pack's sample", () => {
   });
 
   it("spreads every question over yes, no and unsure", async () => {
-    const { listings } = await sample();
+    const { records: listings } = await sample();
     for (const question of QUESTIONS) {
       for (const answer of ANSWERS) {
         const count = listings.filter((listing) => listing.expected[question] === answer).length;
@@ -190,7 +190,7 @@ describe("the marketplace pack's sample", () => {
   it("holds scams that stay on the marketplace, and a branded replica sold for display", async () => {
     // A scam label always beside an off-platform yes could not show whether the model spots a
     // scam on its own; a display-only branded replica is the cover the counterfeit wording closes.
-    const { listings } = await sample();
+    const { records: listings } = await sample();
     const onPlatformScams = listings.filter(
       (listing) => listing.expected["scam"] === "yes" && listing.expected["off_platform"] === "no",
     );
@@ -235,7 +235,7 @@ describe("the marketplace pack's sample", () => {
       .split(";")
       .map((kind) => kind.trim());
     expect(kinds).toHaveLength(Object.keys(COVERAGE).length);
-    const { listings } = await sample();
+    const { records: listings } = await sample();
     for (const [key, covered] of Object.entries(COVERAGE)) {
       expect(
         kinds.filter((kind) => kind.startsWith(key)),
@@ -254,7 +254,7 @@ describe("the marketplace pack's sample", () => {
 
   it("shares no quoted phrase and no run of four words with any question's wording", async () => {
     // Criteria that repeat the sample's own hard cases would test the sample against itself.
-    const { listings } = await sample();
+    const { records: listings } = await sample();
     const wording = marketplace.questions.flatMap(textsOf);
     const quoted = wording.flatMap((text) =>
       [...text.matchAll(/(?:^|[\s(])['"‘“]([^'"’”]+)['"’”](?=[\s.,;:)]|$)/g)].map((m) =>
@@ -273,7 +273,7 @@ describe("the marketplace pack's sample", () => {
   });
 
   it("holds only invented contacts: .example addresses and 555-01xx numbers", async () => {
-    const { listings } = await sample();
+    const { records: listings } = await sample();
     const text = listings.map((listing) => `${listing.title}\n${listing.description}`).join("\n");
     expect(text).not.toMatch(/https?:|www\./i);
     for (const [domain] of text.matchAll(/[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi)) {

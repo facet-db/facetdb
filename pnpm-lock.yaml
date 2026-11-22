@@ -297,6 +297,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/facetdb
     devDependencies:
+      '@facetdb/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@facetdb/model':
+        specifier: workspace:*
+        version: link:../../packages/model
       '@facetdb/slack':
         specifier: workspace:*
         version: link:../slack
@@ -306,6 +312,13 @@ importers:
       facetdb:
         specifier: workspace:*
         version: link:../../packages/facetdb
+    devDependencies:
+      '@facetdb/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@facetdb/model':
+        specifier: workspace:*
+        version: link:../../packages/model
 
   plugins/slack:
     dependencies:
