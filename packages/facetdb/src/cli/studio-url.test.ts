@@ -212,6 +212,41 @@ describe("the links", () => {
     );
   });
 
+  it("name a range of decision times for a digest's list", () => {
+    const links = createLinks({
+      configured: "https://facetdb.example.com",
+      served: () => undefined,
+    });
+
+    expect(
+      links.list("orders", {
+        from: new Date("2026-11-14T09:30:01.000Z"),
+        to: new Date("2026-11-14T09:30:59.001Z"),
+      }),
+    ).toBe(
+      "https://facetdb.example.com/decisions?source=orders&from=2026-11-14T09%3A30%3A01.000Z&to=2026-11-14T09%3A30%3A59.001Z",
+    );
+  });
+
+  it("link a key of . or .. through the list of that one key, which no path can name", () => {
+    const links = createLinks({
+      configured: "https://facetdb.example.com",
+      served: () => undefined,
+    });
+
+    for (const key of [".", ".."]) {
+      const link = new URL(links.record("orders", key) ?? "");
+      // A path segment of . or .. (or %2E) is resolved away by the URL parser; a query value is not.
+      expect(link.pathname).toBe("/decisions");
+      expect(Object.fromEntries(link.searchParams)).toEqual({
+        source: "orders",
+        q: key,
+        time: "all",
+      });
+    }
+    expect(links.record("orders", "...")).toBe("https://facetdb.example.com/decisions/orders/...");
+  });
+
   it("name the address the studio prints: every interface stands for this machine", () => {
     expect(studioUrl("127.0.0.1", 4040)).toBe("http://127.0.0.1:4040");
     expect(studioUrl("0.0.0.0", 4040)).toBe("http://127.0.0.1:4040");

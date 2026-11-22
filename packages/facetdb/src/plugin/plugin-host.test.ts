@@ -82,7 +82,7 @@ function slackPlugin() {
       shared: z.secret().optional(),
       defaultChannel: z.string().default("#general"),
     }),
-    actions: { notify: action({ config: z.object({ channel: z.string() }), run: noop }) },
+    // Its `notify` is FacetDB's own, which a plugin with a channel has without declaring it.
     channels: { slack: channel({ config: z.object({ where: z.string() }), deliver: noop }) },
   });
 }

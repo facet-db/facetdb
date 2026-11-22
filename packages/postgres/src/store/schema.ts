@@ -470,6 +470,21 @@ end $$`,
       ),
     ],
   },
+  {
+    version: 10,
+    statements: [
+      // The digest rule reads the rows one batch key queued in a clock minute (the first 10 run
+      // alone, the rest go as one digest at its end) and the rows a quiet period held, in an outbox
+      // that is never pruned. Partial: only a notification's row has a batch key. A plain `create
+      // index` inside the migration's transaction, as migration 9's `webhook_outbox_action`: it
+      // holds off appends to the outbox once, during `facetdb migrate`, while it builds.
+      unlessRelation(
+        "facetdb.webhook_outbox_batch",
+        `create index webhook_outbox_batch on facetdb.webhook_outbox (project_id, batch_key, created_at, id)
+  where batch_key is not null`,
+      ),
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */

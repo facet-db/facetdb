@@ -60,16 +60,30 @@ export const DELIVERY_BOUND_MS = 20_000;
 /** The longest a `check`'s words are shown. */
 const CHECK_WORDS_MAX = 300;
 
+/** What a delivery carries, as its failure's words name it: an alert, or a record notification. */
+export type Carried = "alert" | "notification";
+
+function carriedBy(message: ChannelMessage): Carried {
+  return message.kind === "record-notification" ? "notification" : "alert";
+}
+
 /** A delivery the bound cut off. */
-export const DELIVERY_TIMED_OUT = `the channel did not answer within ${DELIVERY_BOUND_MS / 1000} seconds, so the delivery was given up (the alert may still arrive)`;
+export function deliveryTimedOutWords(carried: Carried): string {
+  return `the channel did not answer within ${DELIVERY_BOUND_MS / 1000} seconds, so the delivery was given up (the ${carried} may still arrive)`;
+}
+
+export const DELIVERY_TIMED_OUT = deliveryTimedOutWords("alert");
 
 /** A delivery the worker's stop cut off, or one not started because the worker was stopping. */
-export const DELIVERY_STOPPED =
-  "the worker stopped before the channel answered; the alert may or may not have arrived";
+export function deliveryStoppedWords(carried: Carried): string {
+  return `the worker stopped before the channel answered; the ${carried} may or may not have arrived`;
+}
+
+export const DELIVERY_STOPPED = deliveryStoppedWords("alert");
 
 /** A channel whose plugin rejected or threw: its own error is not kept. */
-export function deliveryFailedWords(plugin: string): string {
-  return `the channel plugin ${plugin} did not deliver the alert; its own error is not kept, as it may hold a secret`;
+export function deliveryFailedWords(plugin: string, carried: Carried = "alert"): string {
+  return `the channel plugin ${plugin} did not deliver the ${carried}; its own error is not kept, as it may hold a secret`;
 }
 
 /**
@@ -164,8 +178,11 @@ export function sendsSeverity(sends: AlertSends, severity: AlertSeverity): boole
   return true;
 }
 
-/** A channel resolved against its plugin: what binding it needs. */
-type Resolved = {
+/**
+ * A channel resolved against its plugin: what binding it needs. A notify action's channel is
+ * resolved in its own words and delivered through `deliverTo`.
+ */
+export type ResolvedChannel = {
   readonly binding: ChannelBinding;
   readonly hosted: HostedPlugin;
   readonly entry: ChannelDefinition<unknown>;
@@ -175,13 +192,15 @@ type Resolved = {
   readonly values: readonly string[];
 };
 
+type Resolved = ResolvedChannel;
+
 type Env = Readonly<Record<string, string | undefined>>;
 
 /** A signal that never fires: a `check` is called once, at load, with nothing to stop. */
 const NEVER = new AbortController().signal;
 
 /** Every value a hosted plugin was handed from the environment: its secrets and its other variables. */
-function valuesOf(host: PluginHost, hosted: HostedPlugin, env: Env): readonly string[] {
+export function valuesOf(host: PluginHost, hosted: HostedPlugin, env: Env): readonly string[] {
   const secrets = Object.values(host.contextFor(hosted.name, NEVER).secrets);
   const variables = hosted.variables.map(({ variable }) => env[variable]);
   return [...secrets, ...variables].filter(
@@ -248,7 +267,7 @@ export function revealsSecret(words: string, values: readonly string[]): boolean
 }
 
 /** A plugin's words for a refusal, cleaned and held to a length; fixed words when they repeat a secret. */
-function shownWords(words: string, values: readonly string[], kind: string): string {
+export function shownWords(words: string, values: readonly string[], kind: string): string {
   if (revealsSecret(words, values)) {
     return `the ${kind} plugin's reason is not shown, as it repeats a value its settings read from the environment`;
   }
@@ -413,16 +432,22 @@ function firstPartyWords(resolved: Resolved, error: unknown): string | undefined
   return words === "" || revealsSecret(error.message, resolved.values) ? undefined : words;
 }
 
-/** Delivers one message through a resolved channel, raced against the bound and the stop. */
-async function deliverThrough(
-  deps: ChannelHostDeps,
+/**
+ * Delivers one message through a resolved channel, raced against the bound and the stop; its
+ * failure's words name what it carried (an alert, or a record notification, whose notify action
+ * delivers through it too).
+ */
+export async function deliverThrough(
+  deps: Pick<ChannelHostDeps, "host" | "clock" | "stop">,
   resolved: Resolved,
   message: ChannelMessage,
 ): Promise<void> {
   const { clock } = deps;
+  const carried = carriedBy(message);
+  const stopped = deliveryStoppedWords(carried);
   const stop = deps.stop();
   if (stop.aborted) {
-    throw new ChannelFailed(DELIVERY_STOPPED);
+    throw new ChannelFailed(stopped);
   }
   // The plugin's signal: it fires at the bound or at the stop, whichever comes first.
   const ended = new AbortController();
@@ -433,17 +458,17 @@ async function deliverThrough(
     why ??= words;
     ended.abort();
   };
-  const onStop = () => end(DELIVERY_STOPPED);
+  const onStop = () => end(stopped);
   stop.addEventListener("abort", onStop, { once: true });
   const cut = new Promise<Cut>((resolveCut) => {
-    ended.signal.addEventListener("abort", () => resolveCut({ cut: why ?? DELIVERY_STOPPED }), {
+    ended.signal.addEventListener("abort", () => resolveCut({ cut: why ?? stopped }), {
       once: true,
     });
   });
   void clock.sleep(DELIVERY_BOUND_MS, settled.signal).then(
     () => {
       if (!settled.signal.aborted) {
-        end(DELIVERY_TIMED_OUT);
+        end(deliveryTimedOutWords(carried));
       }
     },
     // A clock that cannot wait leaves the stop as the only end: nothing to report from here.
@@ -465,7 +490,7 @@ async function deliverThrough(
     // Whatever the plugin threw (a `ChannelFailed` of its own included), its cause and properties
     // go nowhere, and its words too unless it is a first-party plugin's own delivery error.
     throw new ChannelFailed(
-      firstPartyWords(resolved, error) ?? deliveryFailedWords(resolved.hosted.packageName),
+      firstPartyWords(resolved, error) ?? deliveryFailedWords(resolved.hosted.packageName, carried),
     );
   } finally {
     settled.abort();

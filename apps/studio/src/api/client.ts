@@ -312,6 +312,8 @@ export type DecisionFilters = {
   readonly reviewer?: string;
   /** ISO 8601, included. */
   readonly from?: string;
+  /** ISO 8601, not included (a digest's link). */
+  readonly to?: string;
 };
 
 /** `GET /v1/decisions/:source/:key`: the entries `facetdb explain` prints, oldest first, in its words. */

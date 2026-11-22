@@ -21,8 +21,16 @@ export type StudioBase = {
   readonly served: () => string | undefined;
 };
 
-/** The Decisions page's time choices (the studio's `TIME_CHOICES`). */
-export type ListTime = "today" | "week" | "month" | "all";
+/**
+ * The Decisions page's time choices (the studio's `TIME_CHOICES`), or a range of decision times (a
+ * digest's records), `from` included and `to` not, as the page's `from` and `to`.
+ */
+export type ListTime =
+  | "today"
+  | "week"
+  | "month"
+  | "all"
+  | { readonly from: Date; readonly to: Date };
 
 export type Links = {
   /** The worker not running: Home, else the docs page. */
@@ -47,7 +55,11 @@ export type Links = {
   readonly spendingCap: () => string;
   /** A question set changed: Questions, on that source, else the docs page. */
   readonly questionSet: (source: string) => string;
-  /** A record's "why" page; absent with no studio. */
+  /**
+   * A record's "why" page; absent with no studio. A key of `.` or `..` has no page of its own an
+   * address can name (a browser resolves the segment, percent-encoded or not, to the page above),
+   * so its link is the Decisions list of that one key, at any time.
+   */
   readonly record: (source: string, key: string) => string | undefined;
   /** The Decisions page filtered to a source and a time range; absent with no studio. */
   readonly list: (source: string, time: ListTime) => string | undefined;
@@ -115,8 +127,11 @@ export function createLinks(base: StudioBase): Links {
     questionSet: (source) => page(`/questions?source=${encode(source)}`, "question-set"),
     record: (source, key) => {
       const address = studio();
-      return address === undefined
-        ? undefined
+      if (address === undefined) {
+        return undefined;
+      }
+      return key === "." || key === ".."
+        ? `${address}/decisions?source=${encode(source)}&q=${encode(key)}&time=all`
         : `${address}/decisions/${encode(source)}/${encode(key)}`;
     },
     list: (source, time) => {
@@ -124,8 +139,14 @@ export function createLinks(base: StudioBase): Links {
       if (address === undefined) {
         return undefined;
       }
-      // Today is the page's own default and has no key in its address.
-      const range = time === "today" ? "" : `&time=${time}`;
+      // Today is the page's own default and has no key in its address; a range is two times the
+      // page reads instead of a choice.
+      const range =
+        time === "today"
+          ? ""
+          : typeof time === "string"
+            ? `&time=${time}`
+            : `&from=${encode(time.from.toISOString())}&to=${encode(time.to.toISOString())}`;
       return `${address}/decisions?source=${encode(source)}${range}`;
     },
   };

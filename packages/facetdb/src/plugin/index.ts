@@ -94,9 +94,28 @@ export type {
   SourceRow,
   SourceSpec,
 } from "./kinds.ts";
-export { action, channel, pack, provider, SourceAccessLost, source } from "./kinds.ts";
+export {
+  action,
+  channel,
+  NOTIFY_ACTION,
+  pack,
+  provider,
+  SourceAccessLost,
+  source,
+} from "./kinds.ts";
 export type { FoundPlugin, LoadPluginOptions } from "./load.ts";
 export { findPlugin, loadPlugin, PluginNotInstalledError } from "./load.ts";
+export type { DigestRunnerDeps, Notification, NotifyDeps, NotifyQueueing } from "./notify.ts";
+export {
+  batchKeyOf,
+  conditionWords,
+  createDigestRunner,
+  digestText,
+  notificationText,
+  notifyAddress,
+  notifyQuiet,
+  sendNotification,
+} from "./notify.ts";
 export type { PluginProviderOptions } from "./provider.ts";
 export {
   checkPluginProvider,

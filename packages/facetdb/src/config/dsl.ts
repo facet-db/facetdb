@@ -82,6 +82,42 @@ export function webhook(options: WebhookOptions): ActionCall {
 }
 
 /**
+ * A condition on a record's decisions, as an action's `when` writes it (core's `ActionCondition`):
+ * a question equal to a decided value (`urgency: "high"`, `wants_refund: true`), `status` equal to
+ * a record status, or `{ atLeast: n }` on `<question>.probability` or `.confidence`; every term
+ * must hold. One type for every plugin's actions.
+ */
+export type { ActionCondition } from "@facetdb/core";
+
+/**
+ * What every channel plugin's `notify` takes: the channel to send to, written as what follows the
+ * colon in that plugin's alert channel address (`#support` for `slack:#support`), under `channel`
+ * or, the same, `to`; and the condition a decision must meet.
+ */
+export type NotifyOptions = (
+  | { readonly channel: string; readonly to?: never }
+  | { readonly to: string; readonly channel?: never }
+) & {
+  /** Send only when this holds; without it, every decision of the source is sent. */
+  readonly when?: ActionCondition;
+};
+
+/**
+ * `<plugin>.notify(...)` in a config file: a record notification through the plugin's channel each
+ * time a decision matches `when`. Every plugin that provides an alert channel has this action
+ * without declaring one; the worker checks the channel against the plugin's channel schema when the
+ * config loads. A plugin's own helper builds it: `slack.notify({ channel: "#support" })` is
+ * `notifyCall("@facetdb/slack", { channel: "#support" })`.
+ */
+export function notifyCall(plugin: string, options: NotifyOptions): ActionCall {
+  const { when } = options;
+  return actionCall(plugin, "notify", {
+    ...(options.to === undefined ? { channel: options.channel } : { to: options.to }),
+    ...(when === undefined ? {} : { when }),
+  });
+}
+
+/**
  * A plugin source as written in the config: the plugin that provides it, the source's name in that
  * plugin, and the settings of this one use. `github.issues({ repo })` builds one with
  * `sourceCall("@facetdb/github", "issues", { repo })`; like an action, the JSON export carries

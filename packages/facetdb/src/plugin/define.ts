@@ -6,12 +6,13 @@ import {
   parseQuestionSet,
 } from "@facetdb/core";
 import { ZodObject, type ZodType } from "zod";
-import type {
-  ActionDefinition,
-  ChannelDefinition,
-  PackDefinition,
-  ProviderDefinition,
-  SourceDefinition,
+import {
+  type ActionDefinition,
+  type ChannelDefinition,
+  NOTIFY_ACTION,
+  type PackDefinition,
+  type ProviderDefinition,
+  type SourceDefinition,
 } from "./kinds.ts";
 import { isValidRange, isValidVersion } from "./semver.ts";
 import { type Infer, SecretWalkError, secretPaths } from "./zod.ts";
@@ -290,6 +291,12 @@ function checkEntry(kind: PluginKind, name: string, value: unknown, issues: Plug
     issues.push({
       field,
       message: "the name must use lowercase letters, digits, dashes and underscores",
+    });
+  }
+  if (kind === "action" && name === NOTIFY_ACTION) {
+    issues.push({
+      field,
+      message: `"${NOTIFY_ACTION}" is FacetDB's own action, which every plugin that provides an alert channel has without declaring it (a record notification through that channel): name this action otherwise`,
     });
   }
   const definition = value as Readonly<Record<string, unknown>> | null;

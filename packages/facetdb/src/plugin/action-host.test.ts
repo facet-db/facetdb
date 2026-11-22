@@ -11,6 +11,7 @@ import {
   statusOf,
   WITHDRAWN,
 } from "@facetdb/core";
+import { FakeClock } from "@facetdb/core/testing";
 import { type ActionDelivery, ActionFailed } from "@facetdb/server";
 import { describe, expect, it } from "vitest";
 import {
@@ -516,6 +517,13 @@ async function runnerFor(
     host,
     source: () => options.source ?? running,
     env: options.env ?? ENV,
+    // No row here is a notification (notify-action.test.ts sends those).
+    notify: {
+      clock: new FakeClock(0),
+      stop: () => new AbortController().signal,
+      recordLink: () => undefined,
+      listLink: () => undefined,
+    },
   });
   return { ran, reads, run };
 }

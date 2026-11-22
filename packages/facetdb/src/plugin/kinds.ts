@@ -177,6 +177,13 @@ export type ActionDefinition<Config = never, Settings extends ZodType = ZodType>
   Settings
 > & { readonly kind: "action" };
 
+/**
+ * The action FacetDB gives every plugin that provides an alert channel: `slack.notify({ channel,
+ * when })` sends a record notification through the plugin's channel. It is FacetDB's own, never
+ * declared, so no plugin may name an action of its own so.
+ */
+export const NOTIFY_ACTION = "notify";
+
 export function action<Config = unknown, Settings extends ZodType = ZodType>(
   spec: ActionSpec<Config, Settings>,
 ): ActionDefinition<Config, Settings> {

@@ -11,7 +11,7 @@
  * actions: [slack.notify({ channel: "#support-urgent", when: { urgency: "high" } })],
  * ```
  */
-import { type ActionCall, actionCall } from "facetdb";
+import { type ActionCall, type NotifyOptions, notifyCall } from "facetdb";
 import { channel, definePlugin, type PluginContext } from "facetdb/plugin";
 import { checkChannel, deliverMessage, type Fetch } from "./deliver.ts";
 import { channelSettings, pluginConfig, type SlackConfig } from "./settings.ts";
@@ -45,15 +45,13 @@ export function createSlackPlugin(options: SlackPluginOptions) {
 /** The plugin the worker loads: the one place the real `fetch` is wired. */
 export default createSlackPlugin({ fetch: (url, init) => globalThis.fetch(url, init) });
 
-/** A `when` term, as `facetdb` reads it: a decision value, a status, or `{ atLeast }` on a number. */
-type Condition = { readonly [term: string]: boolean | string | { readonly atLeast: number } };
-
-/** `slack.notify(...)` in a config file: a record notification to a channel (its action is not built yet). */
+/**
+ * `slack.notify({ channel: "#support-urgent", when: { urgency: "high" } })` in a config file: a
+ * record notification to a Slack channel each time a decision matches `when`. The action is
+ * FacetDB's own, which every plugin with a channel has; this only writes it down.
+ */
 export const slack = {
-  notify(options: { readonly channel: string; readonly when?: Condition }): ActionCall {
-    return actionCall("@facetdb/slack", "notify", {
-      channel: options.channel,
-      ...(options.when === undefined ? {} : { when: options.when }),
-    });
+  notify(options: NotifyOptions): ActionCall {
+    return notifyCall("@facetdb/slack", options);
   },
 };

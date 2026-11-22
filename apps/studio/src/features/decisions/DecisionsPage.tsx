@@ -16,9 +16,13 @@ import {
   STATUS_CHOICES,
   TIME_CHOICES,
   TIME_WORDS,
+  type TimeChoice,
   timeStart,
 } from "./search.ts";
-import { dayKey, untilNextDay } from "./when.ts";
+import { dayKey, untilNextDay, whenWords } from "./when.ts";
+
+/** The Time choice a digest's range shows as, pressed, beside the four. */
+const RANGE = "range" as const;
 
 /**
  * The Decisions page: the log of one source and the run log as two views, the record key, the
@@ -71,6 +75,11 @@ export function DecisionsPage({
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: `day` is what turns the start over
   const start = useMemo(() => timeStart(time, new Date(schedule.now())), [time, schedule, day]);
+  // A digest's link names the decision times of its records instead of a choice.
+  const range =
+    search.from === undefined || search.to === undefined
+      ? undefined
+      : { from: search.from, to: search.to };
   const filters: DecisionFilters | undefined =
     source === undefined
       ? undefined
@@ -80,8 +89,16 @@ export function DecisionsPage({
           ...(search.question === undefined ? {} : { question: search.question }),
           ...(search.status === undefined ? {} : { status: search.status }),
           ...(search.reviewer === undefined ? {} : { reviewer: search.reviewer }),
-          ...(start === undefined ? {} : { from: start.toISOString() }),
+          ...(range ?? (start === undefined ? {} : { from: start.toISOString() })),
         };
+  const rangeWords =
+    range === undefined
+      ? undefined
+      : `${whenWords(new Date(range.from), new Date(schedule.now()), { seconds: true })} to ${whenWords(
+          new Date(range.to),
+          new Date(schedule.now()),
+          { seconds: true },
+        )}`;
 
   const sourceOptions = [
     ...(runs ? [{ value: EVERY_SOURCE, label: "Every source" }] : []),
@@ -144,15 +161,25 @@ export function DecisionsPage({
                   onChange({ status: STATUS_CHOICES.find((status) => status === value) });
                 }}
               />
-              <Choices
+              <Choices<TimeChoice | typeof RANGE>
                 label="Time"
-                options={TIME_CHOICES.map((choice) => ({
-                  value: choice,
-                  label: TIME_WORDS[choice],
-                }))}
-                value={time}
+                options={[
+                  ...TIME_CHOICES.map((choice) => ({
+                    value: choice,
+                    label: TIME_WORDS[choice],
+                  })),
+                  ...(rangeWords === undefined ? [] : [{ value: RANGE, label: rangeWords }]),
+                ]}
+                value={rangeWords === undefined ? time : RANGE}
                 onPick={(choice) => {
-                  onChange({ time: choice === "today" ? undefined : choice });
+                  if (choice !== RANGE) {
+                    // A choice replaces the link's range.
+                    onChange({
+                      time: choice === "today" ? undefined : choice,
+                      from: undefined,
+                      to: undefined,
+                    });
+                  }
                 }}
               />
               <Button
@@ -279,6 +306,8 @@ function Body({
           question: undefined,
           reviewer: undefined,
           time: "all",
+          from: undefined,
+          to: undefined,
         });
       }}
     />

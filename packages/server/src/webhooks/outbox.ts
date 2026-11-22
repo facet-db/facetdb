@@ -137,6 +137,59 @@ export type ActionDefer = { readonly defer: string };
 export const ACTION_DEFER_MS = 60_000;
 
 /**
+ * The digest rule: of the rows one batch key queues in one clock minute, the first this many, in
+ * the order they were queued, are run one by one as they happen.
+ */
+export const DIGEST_AFTER = 10;
+
+/** The clock minute the digest rule counts in: from a whole minute since the epoch to the next. */
+export const DIGEST_MINUTE_MS = 60_000;
+
+/** A span of time from `start` (inside it) to `end` (outside), in ms since the epoch. */
+export type TimeSpan = { readonly start: number; readonly end: number };
+
+/**
+ * Why the rows of a digest are one message: the rest of a clock minute after its first
+ * `DIGEST_AFTER`, or a quiet period of the batch's channel, every row queued inside it.
+ */
+export type DigestWindow = { readonly kind: "minute" | "quiet" } & TimeSpan;
+
+/** One row of a digest: its record and the payload as it was queued. */
+export type DigestRow = {
+  readonly deliveryId: string;
+  readonly recordKey: string;
+  /** Read back from its JSON. */
+  readonly payload: unknown;
+  readonly queuedAt: number;
+};
+
+/**
+ * The rows of one batch key the digest rule gathers into one message, as the digest's runner
+ * receives them at each attempt: the source, plugin, action and place they share, the window that
+ * made them one, and every row, oldest first.
+ */
+export type DigestDelivery = {
+  readonly projectId: string;
+  /** The store's id of the source: `sourceIdOf(project, name)`. */
+  readonly sourceId: string;
+  readonly plugin: string;
+  readonly action: string;
+  readonly position: number;
+  readonly batchKey: string;
+  readonly window: DigestWindow;
+  readonly rows: readonly DigestRow[];
+  /** This attempt's number, from 1: its oldest row's. */
+  readonly attempt: number;
+};
+
+/** `last_error` of a row held for its minute's digest: it is no failure, and spends no attempt. */
+export const HELD_FOR_DIGEST = `held for the digest: more than ${DIGEST_AFTER} rows of its batch were queued in its minute, so it goes out with the others of that minute as one message when the minute ends`;
+
+/** `last_error` of a row held because its channel is in quiet hours. */
+export const HELD_FOR_QUIET =
+  "held for quiet hours: its channel is in quiet hours, so it goes out in one digest with every row queued inside them when they end";
+
+/**
  * An action's failure in words the runner vouches for: they are kept in the row's `last_error` and
  * repeated in the give-up alert, so they carry no secret and no record state. Any other error a
  * runner throws counts as a failed attempt too, but its text is not kept: a plugin's error may
@@ -189,6 +242,25 @@ export type OutboxDeps = {
     row: ActionDelivery,
     signal: AbortSignal,
   ) => Promise<ActionClose | ActionDefer | undefined>;
+  /**
+   * With `runAction`, runs one digest within the send timeout: the rows of one batch key past the
+   * first `DIGEST_AFTER` of a minute, once the minute ended, or every row queued in a quiet period
+   * of the batch's channel, once it ended. Resolves when the digest was delivered (every row is
+   * then delivered), with `ActionClose` when its rows must be closed untried; throws for a failure
+   * (`ActionFailed` for words worth keeping), and the digest is retried as a whole on the webhook's
+   * schedule with its rows still open: a crash before they are marked sends it again. Absent, a row
+   * with a batch key is run alone, as any other action row.
+   */
+  readonly runDigest?: (
+    digest: DigestDelivery,
+    signal: AbortSignal,
+  ) => Promise<ActionClose | undefined>;
+  /**
+   * The quiet period of a batch key's channel that the instant `at` falls in, or undefined when the
+   * channel is not quiet then: a batched row due inside it is held until it ends, and every row
+   * queued inside it then goes out as one digest. Absent, no channel of a batch has quiet hours.
+   */
+  readonly quietPeriod?: (batchKey: string, at: number) => TimeSpan | undefined;
   /**
    * With `runAction`, the one project whose action rows this loop takes: a worker runs the plugins
    * of its own project's config, and a row of another project sharing the store waits for that
@@ -281,6 +353,12 @@ export type DeliveryReport = {
   /** Action rows their runner put back to wait (`ActionDefer`), no attempt spent. */
   readonly deferred: readonly string[];
   /**
+   * Batched rows the digest rule held, no attempt spent: past the first `DIGEST_AFTER` of their
+   * minute before it ended, or due while their channel is in quiet hours. Only the rows this pass
+   * claimed are listed; the other due rows of the same window are held with them.
+   */
+  readonly held: readonly string[];
+  /**
    * Sent, but this loop no longer held the claim when it came to record the outcome (its lease ran
    * out and another loop took the row): nothing was written and no alert was raised.
    */
@@ -355,7 +433,59 @@ type Claimed = {
   readonly alertRetryOf: string | undefined;
 };
 
+/** An action row with a batch key, which the digest rule places. */
+type Batched = Extract<Target, { readonly kind: "action" }> & { readonly batchKey: string };
+
+/** Every instant: a quiet hold takes every due row of the batch, whenever it was queued. */
+const EVERY_TIME: TimeSpan = { start: 0, end: Number.MAX_SAFE_INTEGER };
+
+/** What the digest rule makes of a batched row due now (`place`). */
+type Placement =
+  | { readonly kind: "alone" }
+  | {
+      readonly kind: "held";
+      readonly until: number;
+      readonly reason: string;
+      /** The other due rows held with it: queued inside `window`, with an id above `after`. */
+      readonly window: TimeSpan;
+      readonly after: string;
+    }
+  | {
+      readonly kind: "digest";
+      readonly window: DigestWindow;
+      /** The digest's rows have an id above this one (the minute's last row run alone). */
+      readonly after: string;
+    };
+
+/** The rows of one digest this pass claimed, with what they share. */
+type DigestGroup = {
+  readonly projectId: string;
+  readonly mine: readonly Claimed[];
+  readonly target: Batched;
+  readonly window: DigestWindow;
+  readonly after: string;
+};
+
+/** One row of a digest as this loop gathered it: the attempt it holds it at. */
+type Member = {
+  readonly id: string;
+  readonly recordKey: string;
+  readonly payload: string;
+  readonly attempts: number;
+  readonly createdAt: number;
+};
+
 const ALERT_NOTE = `; ${ALERT_NOT_RAISED}`;
+
+/**
+ * SQL that holds for a row not awaiting its give-up alert's one more try: such a row carries
+ * `ALERT_NOTE` at the end of its `last_error` (`claimed`), and the note is all that says its
+ * 24 hours are spent, so the digest rule neither holds nor gathers it. `param` is bound to
+ * `ALERT_NOTE`.
+ */
+function notAwaitingAlert(param: string): string {
+  return `right(coalesce(last_error, ''), char_length(${param}::text)) <> ${param}::text`;
+}
 
 /** A text column that may be null, as the row holds it. */
 function optionalText(value: unknown): string | undefined {
@@ -423,31 +553,51 @@ function supersededBy(laterId: string): string {
   return `superseded by delivery ${laterId}: a later decision queued the same action for this record`;
 }
 
+/** The clock minute an instant falls in. */
+function minuteOf(at: number): TimeSpan {
+  const start = Math.floor(at / DIGEST_MINUTE_MS) * DIGEST_MINUTE_MS;
+  return { start, end: start + DIGEST_MINUTE_MS };
+}
+
 /**
  * Queues a plugin's action for delivery now: no URL, and the row names the record, the action and
  * its place; returns its delivery id. The outbox's `enqueue` does this, and so does a process that
- * only queues and delivers nothing (`facetdb review`: the running worker delivers its rows).
+ * only queues and delivers nothing (`facetdb review`: the running worker delivers its rows). A row
+ * with a batch key whose minute already holds `DIGEST_AFTER` rows of that key is due at the
+ * minute's end, when its digest goes: a guess that saves the loop claiming it before then, as two
+ * processes queueing at once may both count nine. The digest rule at delivery decides, by the rows'
+ * order in the store, whatever the guess was.
  */
 export async function queueAction(
   client: OutboxDatabase,
   clock: Pick<Clock, "now">,
   entry: NewAction,
 ): Promise<string> {
+  const now = clock.now();
+  const minute = minuteOf(now);
   const rows = await client.query(
     `insert into facetdb.webhook_outbox
        (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position, batch_key)
-     values ($1, $2, $3::bigint, $3::bigint, $4, $5, $6, $7, $8::integer, $9)
+     values ($1, $2, $3::bigint,
+             case when $9::text is not null and (
+               select count(*) from facetdb.webhook_outbox
+                where project_id = $1 and batch_key = $9 and created_at >= $10::bigint and created_at < $11::bigint
+             ) >= $12::integer then $11::bigint else $3::bigint end,
+             $4, $5, $6, $7, $8::integer, $9)
      returning id::text as id`,
     [
       entry.projectId,
       JSON.stringify(entry.payload),
-      clock.now(),
+      now,
       entry.sourceId,
       entry.recordKey,
       entry.plugin,
       entry.action,
       entry.position,
       entry.batchKey ?? null,
+      minute.start,
+      minute.end,
+      DIGEST_AFTER,
     ],
   );
   return String(rows[0]?.["id"]);
@@ -616,7 +766,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       `select id::text as id from facetdb.webhook_outbox
         where project_id = $1 and source_id = $2 and record_key = $3 and plugin = $4 and action = $5
           and position = $6::integer and id > $7::bigint and endpoint is null
-        order by id desc
+        order by webhook_outbox.id desc
         limit 1`,
       [
         row.projectId,
@@ -845,6 +995,320 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     (closed ? report.gaveUp : report.lost).push(row.id);
   }
 
+  /**
+   * The id of the `DIGEST_AFTER`th row a batch key queued in a minute, in the store's order (its
+   * ids), or undefined while the minute holds fewer: a row at or below it is run alone, one above
+   * it goes in the minute's digest. Every row queued counts, whatever became of it, so the answer
+   * never changes once the minute is over.
+   */
+  async function lastAlone(
+    projectId: string,
+    batchKey: string,
+    minute: TimeSpan,
+  ): Promise<string | undefined> {
+    const rows = await client.query(
+      // Ordered by the column, not by the text it is answered as (`10` sorts before `9`).
+      `select id::text as id from facetdb.webhook_outbox
+        where project_id = $1 and batch_key = $2 and created_at >= $3::bigint and created_at < $4::bigint
+        order by webhook_outbox.id
+        offset $5::integer limit 1`,
+      [projectId, batchKey, minute.start, minute.end, DIGEST_AFTER - 1],
+    );
+    return optionalText(rows[0]?.["id"]);
+  }
+
+  /**
+   * Where the digest rule puts a batched row due now: held while its channel is quiet (every due
+   * row of its batch with it) until the quiet period ends; in the digest of the quiet period it was
+   * queued in, once that ended; run alone when it is one of the first `DIGEST_AFTER` of its minute;
+   * else held until its minute ends (with the minute's other due rows past the first ones), then in
+   * that minute's digest.
+   */
+  async function place(row: Claimed, target: Batched, now: number): Promise<Placement> {
+    const quietNow = deps.quietPeriod?.(target.batchKey, now);
+    if (quietNow !== undefined) {
+      return {
+        kind: "held",
+        until: quietNow.end,
+        reason: HELD_FOR_QUIET,
+        window: EVERY_TIME,
+        after: "0",
+      };
+    }
+    const quietThen = deps.quietPeriod?.(target.batchKey, row.createdAt);
+    if (quietThen !== undefined) {
+      return { kind: "digest", window: { kind: "quiet", ...quietThen }, after: "0" };
+    }
+    const minute = minuteOf(row.createdAt);
+    const last = await lastAlone(row.projectId, target.batchKey, minute);
+    if (last === undefined || BigInt(row.id) <= BigInt(last)) {
+      return { kind: "alone" };
+    }
+    if (now < minute.end) {
+      return {
+        kind: "held",
+        until: minute.end,
+        reason: HELD_FOR_DIGEST,
+        window: minute,
+        after: last,
+      };
+    }
+    return { kind: "digest", window: { kind: "minute", ...minute }, after: last };
+  }
+
+  /**
+   * Holds a claimed batched row until `until`, giving back the attempt it was claimed for, then
+   * the other due rows of its window past `after`, so the loop does not claim each of them in turn
+   * only to hold it. A row another loop holds (its lease runs, so it is not due) is left alone, and
+   * so is one awaiting its give-up alert's one more try (`notAwaitingAlert`): its note stays.
+   */
+  async function hold(
+    row: Claimed,
+    target: Batched,
+    placement: Extract<Placement, { readonly kind: "held" }>,
+    now: number,
+  ): Promise<boolean> {
+    const held = await whileHeld(
+      row,
+      "attempts = attempts - 1, next_attempt_at = $4::bigint, last_error = $5",
+      [placement.until, placement.reason],
+    );
+    if (held) {
+      await client.query(
+        `update facetdb.webhook_outbox set next_attempt_at = $5::bigint, last_error = $8
+          where project_id = $1 and batch_key = $2 and created_at >= $3::bigint and created_at < $4::bigint
+            and id > $6::bigint and delivered_at is null and gave_up_at is null
+            and next_attempt_at <= $7::bigint and ${notAwaitingAlert("$9")}`,
+        [
+          row.projectId,
+          target.batchKey,
+          placement.window.start,
+          placement.window.end,
+          placement.until,
+          placement.after,
+          now,
+          placement.reason,
+          ALERT_NOTE,
+        ],
+      );
+    }
+    return held;
+  }
+
+  /**
+   * Takes every open row of a digest for this loop: the rows this pass claimed (`mine`, already
+   * counted an attempt) and every due one of the window past `after` that no other loop holds, each
+   * counted an attempt and leased as a claim leases. Oldest first. A row awaiting its give-up
+   * alert's one more try is never taken: its 24 hours are spent, and only its alert is tried.
+   */
+  async function gather(group: DigestGroup, now: number): Promise<Member[]> {
+    const { mine, window } = group;
+    const rows = await client.query(
+      `update facetdb.webhook_outbox
+          set attempts = case when id = any($7::bigint[]) then attempts else attempts + 1 end,
+              next_attempt_at = $6::bigint + $9::bigint, claimed_by = $8
+        where id in (
+          select id from facetdb.webhook_outbox
+           where project_id = $1 and batch_key = $2 and created_at >= $3::bigint and created_at < $4::bigint
+             and id > $5::bigint and delivered_at is null and gave_up_at is null
+             and (next_attempt_at <= $6::bigint or (id = any($7::bigint[]) and claimed_by = $8))
+             and ${notAwaitingAlert("$10")}
+           order by id
+             for update skip locked)
+        returning id::text as id, record_key, payload, attempts, created_at::text as created_at`,
+      [
+        group.projectId,
+        group.target.batchKey,
+        window.start,
+        window.end,
+        group.after,
+        now,
+        mine.map((row) => row.id),
+        loopId,
+        CLAIM_LEASE_MS,
+        ALERT_NOTE,
+      ],
+    );
+    return rows
+      .map((row) => ({
+        id: String(row["id"]),
+        recordKey: String(row["record_key"]),
+        payload: String(row["payload"]),
+        attempts: Number(row["attempts"]),
+        createdAt: Number(row["created_at"]),
+      }))
+      .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+  }
+
+  /**
+   * `whileHeld` for every row of a digest at once: each is written only while this loop holds it
+   * at the attempt it gathered it with. Answers the ids written; `set` may use `$4` and up, and no
+   * column on its right side (the update joins the list of rows).
+   */
+  async function whileHeldAll(
+    members: readonly Member[],
+    set: string,
+    params: readonly unknown[],
+  ): Promise<ReadonlySet<string>> {
+    const updated = await client.query(
+      `update facetdb.webhook_outbox o set ${set}
+         from unnest($1::bigint[], $2::integer[]) as gathered(id, attempts)
+        where o.id = gathered.id and o.attempts = gathered.attempts and o.claimed_by = $3
+          and o.delivered_at is null and o.gave_up_at is null
+        returning o.id::text as id`,
+      [
+        members.map((member) => member.id),
+        members.map((member) => member.attempts),
+        loopId,
+        ...params,
+      ],
+    );
+    return new Set(updated.map((row) => String(row["id"])));
+  }
+
+  /** One attempt of a digest through its runner, under the same timeout as a send. */
+  async function digestAttempt(
+    run: NonNullable<OutboxDeps["runDigest"]>,
+    digest: Omit<DigestDelivery, "rows">,
+    members: readonly Member[],
+  ): Promise<Exclude<Attempted, { readonly outcome: "deferred" }>> {
+    try {
+      const outcome = await withinTimeout((signal) =>
+        run(
+          {
+            ...digest,
+            // Read inside the attempt: a payload that cannot be read fails it, never the pass.
+            rows: members.map((member) => ({
+              deliveryId: member.id,
+              recordKey: member.recordKey,
+              payload: JSON.parse(member.payload) as unknown,
+              queuedAt: member.createdAt,
+            })),
+          },
+          signal,
+        ),
+      );
+      return outcome === undefined
+        ? { outcome: "done" }
+        : { outcome: "closed", reason: outcome.close };
+    } catch (error) {
+      if (error instanceof TimedOut) {
+        return { outcome: "failed", failure: `the digest did not finish within ${timeoutMs} ms` };
+      }
+      return {
+        outcome: "failed",
+        failure: error instanceof ActionFailed ? error.message : ACTION_ERROR_NOT_KEPT,
+      };
+    }
+  }
+
+  /**
+   * One digest: its rows gathered, handed to the runner together, and every row written with the
+   * one outcome. A failure reschedules them all on the oldest row's attempt; past the 24 hours of
+   * its oldest row, that row is given up with its alert (`giveUp`, which keeps it open for one more
+   * try of a failed alert) and the others are closed with it, so one digest raises one alert.
+   */
+  async function sendDigest(
+    run: NonNullable<OutboxDeps["runDigest"]>,
+    group: DigestGroup,
+    now: number,
+    lists: {
+      readonly delivered: string[];
+      readonly closed: string[];
+      readonly retrying: string[];
+      readonly gaveUp: string[];
+      readonly lost: string[];
+      readonly alertFailures: AlertFailure[];
+    },
+  ): Promise<void> {
+    const { target } = group;
+    const members = await gather(group, now);
+    const gathered = new Set(members.map((member) => member.id));
+    // A row this pass claimed that the gathering did not take was taken by another loop since.
+    lists.lost.push(...group.mine.filter((row) => !gathered.has(row.id)).map((row) => row.id));
+    const [oldest] = members;
+    if (oldest === undefined) {
+      return;
+    }
+    const tried = await digestAttempt(
+      run,
+      {
+        projectId: group.projectId,
+        sourceId: target.sourceId,
+        plugin: target.plugin,
+        action: target.action,
+        position: target.position,
+        batchKey: target.batchKey,
+        window: group.window,
+        attempt: oldest.attempts,
+      },
+      members,
+    );
+    const settle = async (
+      list: string[],
+      set: string,
+      params: readonly unknown[],
+      of = members,
+    ) => {
+      const written = await whileHeldAll(of, set, params);
+      for (const member of of) {
+        (written.has(member.id) ? list : lists.lost).push(member.id);
+      }
+    };
+    if (tried.outcome === "done") {
+      await settle(lists.delivered, "delivered_at = $4::bigint, last_error = null", [now]);
+      return;
+    }
+    if (tried.outcome === "closed") {
+      await settle(lists.closed, CLOSE_UNTRIED, [now, tried.reason]);
+      return;
+    }
+    const queuedAt = Math.min(...members.map((member) => member.createdAt));
+    const deadline = queuedAt + GIVE_UP_AFTER_MS;
+    if (now < deadline) {
+      const next = Math.min(now + retryDelayMs(oldest.attempts), deadline);
+      await settle(lists.retrying, "next_attempt_at = $4::bigint, last_error = $5", [
+        next,
+        tried.failure,
+      ]);
+      return;
+    }
+    // The alert first, as for one row: a crash before the others are closed gives them up again
+    // after the lease, and the alert's 30-minute rule absorbs the second raise.
+    const failuresBefore = lists.alertFailures.length;
+    await giveUp(
+      {
+        id: oldest.id,
+        projectId: group.projectId,
+        target: { ...target, recordKey: oldest.recordKey },
+        payload: oldest.payload,
+        attempts: oldest.attempts,
+        createdAt: queuedAt,
+        alertRetryOf: undefined,
+      },
+      now,
+      tried.failure,
+      lists,
+    );
+    const others = members.slice(1);
+    if (others.length > 0) {
+      // Said as it went: the alert raised, kept for one more try on the oldest row, or not raised
+      // by this loop at all because another took the oldest row.
+      const alert =
+        lists.alertFailures.length > failuresBefore
+          ? `its alert could not be raised, and delivery ${oldest.id} tries it once more`
+          : lists.lost.includes(oldest.id)
+            ? `its alert is delivery ${oldest.id}'s, which another worker took`
+            : `delivery ${oldest.id} raised its alert`;
+      await settle(
+        lists.gaveUp,
+        "gave_up_at = $4::bigint, last_error = $5",
+        [now, `${tried.failure} (given up with its digest; ${alert})`],
+        others,
+      );
+    }
+  }
+
   return {
     ...outboxQueue(client, clock),
 
@@ -855,6 +1319,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       const superseded: string[] = [];
       const closed: string[] = [];
       const deferred: string[] = [];
+      const held: string[] = [];
       const lost: string[] = [];
       const alertFailures: AlertFailure[] = [];
 
@@ -888,53 +1353,132 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         return ran.outcome === "closed" ? { ...ran, list: closed } : ran;
       }
 
-      const rows = await claim(now);
-      await Promise.all(
-        rows.map(async (row) => {
-          if (row.alertRetryOf !== undefined) {
-            // The webhook's 24 hours were spent when its alert failed: only the alert is retried.
-            await giveUp(row, now, row.alertRetryOf, report);
-            return;
-          }
-          const tried = await tryRow(row);
-          if (tried.outcome === "closed") {
-            const held = await whileHeld(row, CLOSE_UNTRIED, [now, tried.reason]);
-            (held ? tried.list : lost).push(row.id);
-            return;
-          }
-          if (tried.outcome === "done") {
-            const held = await whileHeld(row, "delivered_at = $4::bigint, last_error = null", [
-              now,
-            ]);
-            (held ? delivered : lost).push(row.id);
-            return;
-          }
-          if (tried.outcome === "deferred") {
-            // A wait, not a failure: the claim's attempt is given back and no give-up is judged.
-            const held = await whileHeld(
-              row,
-              "attempts = attempts - 1, next_attempt_at = $4::bigint, last_error = $5",
-              [now + ACTION_DEFER_MS, tried.reason],
-            );
-            (held ? deferred : lost).push(row.id);
-            return;
-          }
-          // The last attempt falls exactly on the deadline; a failure at or after it is the end.
-          const deadline = row.createdAt + GIVE_UP_AFTER_MS;
-          if (now >= deadline) {
-            await giveUp(row, now, tried.failure, report);
-            return;
-          }
-          const next = Math.min(now + retryDelayMs(row.attempts), deadline);
-          const rescheduled = await whileHeld(
+      /** One row's attempt and its outcome written, as every row was before the digest rule. */
+      async function deliverRow(row: Claimed): Promise<void> {
+        if (row.alertRetryOf !== undefined) {
+          // The webhook's 24 hours were spent when its alert failed: only the alert is retried.
+          await giveUp(row, now, row.alertRetryOf, report);
+          return;
+        }
+        const tried = await tryRow(row);
+        if (tried.outcome === "closed") {
+          const kept = await whileHeld(row, CLOSE_UNTRIED, [now, tried.reason]);
+          (kept ? tried.list : lost).push(row.id);
+          return;
+        }
+        if (tried.outcome === "done") {
+          const kept = await whileHeld(row, "delivered_at = $4::bigint, last_error = null", [now]);
+          (kept ? delivered : lost).push(row.id);
+          return;
+        }
+        if (tried.outcome === "deferred") {
+          // A wait, not a failure: the claim's attempt is given back and no give-up is judged.
+          const kept = await whileHeld(
             row,
-            "next_attempt_at = $4::bigint, last_error = $5",
-            [next, tried.failure],
+            "attempts = attempts - 1, next_attempt_at = $4::bigint, last_error = $5",
+            [now + ACTION_DEFER_MS, tried.reason],
           );
-          (rescheduled ? retrying : lost).push(row.id);
-        }),
+          (kept ? deferred : lost).push(row.id);
+          return;
+        }
+        // The last attempt falls exactly on the deadline; a failure at or after it is the end.
+        const deadline = row.createdAt + GIVE_UP_AFTER_MS;
+        if (now >= deadline) {
+          await giveUp(row, now, tried.failure, report);
+          return;
+        }
+        const next = Math.min(now + retryDelayMs(row.attempts), deadline);
+        const rescheduled = await whileHeld(row, "next_attempt_at = $4::bigint, last_error = $5", [
+          next,
+          tried.failure,
+        ]);
+        (rescheduled ? retrying : lost).push(row.id);
+      }
+
+      const rows = await claim(now);
+      // A row with a batch key is placed by the digest rule when this loop runs digests; every
+      // other row, and one whose alert is to be raised again, is delivered as before.
+      const { runDigest } = deps;
+      const batched: { readonly row: Claimed; readonly target: Batched }[] = [];
+      const single: Claimed[] = [];
+      for (const row of rows) {
+        const { target } = row;
+        if (
+          runDigest !== undefined &&
+          row.alertRetryOf === undefined &&
+          target.kind === "action" &&
+          target.batchKey !== undefined
+        ) {
+          batched.push({ row, target: { ...target, batchKey: target.batchKey } });
+        } else {
+          single.push(row);
+        }
+      }
+      // Every other row starts at once, as every row did before the digest rule: a store error while
+      // placing holds none of them up. It is observed below, so an early rejection is not unhandled.
+      const plain = Promise.all(single.map(deliverRow));
+      plain.catch(() => undefined);
+      const placed = await Promise.allSettled(
+        batched.map(async (entry) => ({
+          ...entry,
+          placement: await place(entry.row, entry.target, now),
+        })),
       );
-      return { delivered, retrying, gaveUp, superseded, closed, deferred, lost, alertFailures };
+      const alone: Claimed[] = [];
+      const digests = new Map<string, DigestGroup>();
+      const holds: Promise<void>[] = [];
+      /** The first placement the store failed: its row waits out its lease, placed again then. */
+      let unplaced: { readonly error: unknown } | undefined;
+      for (const outcome of placed) {
+        if (outcome.status === "rejected") {
+          unplaced ??= { error: outcome.reason };
+          continue;
+        }
+        const { row, target, placement } = outcome.value;
+        if (placement.kind === "alone") {
+          alone.push(row);
+        } else if (placement.kind === "held") {
+          holds.push(
+            hold(row, target, placement, now).then((kept) => {
+              (kept ? held : lost).push(row.id);
+            }),
+          );
+        } else {
+          const key = JSON.stringify([row.projectId, target.batchKey, placement.window]);
+          const group = digests.get(key);
+          digests.set(key, {
+            projectId: row.projectId,
+            mine: [...(group?.mine ?? []), row],
+            target,
+            window: placement.window,
+            after: placement.after,
+          });
+        }
+      }
+      const lists = { delivered, closed, retrying, gaveUp, lost, alertFailures };
+      await Promise.all([
+        plain,
+        ...alone.map(deliverRow),
+        ...holds,
+        ...(runDigest === undefined
+          ? []
+          : [...digests.values()].map((group) => sendDigest(runDigest, group, now, lists))),
+      ]);
+      // Said once every other row of the pass has run: the pass failed for the rows not placed.
+      if (unplaced !== undefined) {
+        throw unplaced.error;
+      }
+      return {
+        delivered,
+        retrying,
+        gaveUp,
+        superseded,
+        closed,
+        deferred,
+        held,
+        lost,
+        alertFailures,
+      };
     },
   };
 }

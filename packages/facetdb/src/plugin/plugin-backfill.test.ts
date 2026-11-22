@@ -435,6 +435,13 @@ async function rigOf(count: number, pageSize: number): Promise<Rig> {
           plugin: { packageName: hosted.packageName, settings: hosted.settings },
         }),
         env: ENV,
+        // No notification here (notify-action.test.ts sends those).
+        notify: {
+          clock: new FakeClock(START),
+          stop: () => new AbortController().signal,
+          recordLink: () => undefined,
+          listLink: () => undefined,
+        },
       });
       for (const [index, row] of rows.splice(0).entries()) {
         const delivery: ActionDelivery = {

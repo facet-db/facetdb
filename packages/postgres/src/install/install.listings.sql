@@ -453,6 +453,16 @@ end $$;
 
 insert into facetdb.store_migrations (version) values (9) on conflict (version) do nothing;
 
+do $$
+begin
+  if to_regclass('facetdb.webhook_outbox_batch') is null then
+    create index webhook_outbox_batch on facetdb.webhook_outbox (project_id, batch_key, created_at, id)
+  where batch_key is not null;
+  end if;
+end $$;
+
+insert into facetdb.store_migrations (version) values (10) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,

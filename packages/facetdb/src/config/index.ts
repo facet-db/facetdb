@@ -20,6 +20,7 @@ export type {
 export { judgeDraftProject, judgeDraftSource } from "./draft.ts";
 export type {
   ActionCall,
+  ActionCondition,
   AlertChannel,
   AlertSends,
   AlertsConfig,
@@ -28,6 +29,7 @@ export type {
   ConnectorChoice,
   EnvVariable,
   JsonValue,
+  NotifyOptions,
   NoulOptions,
   OnCapReached,
   OneSourceInput,
@@ -51,6 +53,7 @@ export {
   env,
   facetdb,
   isEnvReference,
+  notifyCall,
   noul,
   score,
   sourceCall,

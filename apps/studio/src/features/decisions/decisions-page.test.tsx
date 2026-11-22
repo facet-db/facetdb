@@ -263,6 +263,34 @@ describe("the Decisions page", () => {
     expect(api.calls.filter((call) => call.startsWith("sourceNames"))).toHaveLength(1);
   });
 
+  it("asks for a digest's range of decision times, shown pressed, until a choice replaces it", async () => {
+    const api = fakeApi();
+    const from = new Date(STUDIO_NOW.getTime() - 50_000).toISOString();
+    const to = new Date(STUDIO_NOW.getTime() - 1_000).toISOString();
+    const { user, history } = await openedLog(
+      `/decisions?source=listings&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      api,
+    );
+    expect(asked(api.calls)).toEqual([{ source: "listings", from, to }]);
+    const times = screen.getByRole("group", { name: "Time" });
+    const now = new Date(STUDIO_NOW.getTime());
+    const words = `${whenWords(new Date(from), now, { seconds: true })} to ${whenWords(new Date(to), now, { seconds: true })}`;
+    expect(within(times).getByRole("button", { name: words })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(times).getByRole("button", { name: "Today" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await user.click(within(times).getByRole("button", { name: "All" }));
+    await waitFor(() => {
+      expect(asked(api.calls).at(-1)).toEqual({ source: "listings" });
+    });
+    expect(history.location.search).not.toContain("from");
+    expect(within(times).queryByRole("button", { name: words })).not.toBeInTheDocument();
+  });
+
   it("searches a record key on Enter, and the address holds it", async () => {
     const api = fakeApi();
     const { user, history } = await openedLog("/decisions?time=all", api);
@@ -1452,6 +1480,24 @@ describe("the view in the address", () => {
     // A page only means something on the run log.
     expect(decisionsSearch({ page: 3 })).toEqual({});
     expect(decisionsSearch({ tab: "runs", page: 1e20 })).toEqual({ tab: "runs" });
+  });
+
+  it("keeps a range of two times in order, setting the time choice aside, and nothing else", () => {
+    const from = "2026-11-14T09:30:00.000Z";
+    const to = "2026-11-14T09:31:00.000Z";
+    expect(decisionsSearch({ time: "week", from, to })).toEqual({ from, to });
+    expect(decisionsSearch({ from: "2026-11-14T11:30:00+02:00", to })).toEqual({ from, to });
+    expect(narrowed({ from, to })).toBe(true);
+    for (const raw of [
+      { from },
+      { from: to, to: from },
+      { from, to: from },
+      { from: "yesterday", to },
+      { from: "2026-11-14", to },
+      { from: 1_700_000_000_000, to },
+    ]) {
+      expect(decisionsSearch(raw)).toEqual({});
+    }
   });
 
   it("goes back to the first page when anything but the page changes", () => {

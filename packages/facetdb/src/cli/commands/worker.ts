@@ -14,6 +14,7 @@ import {
   type ModelProvider,
   type OpenConnector,
   type PassReport,
+  processZone,
   type QuestionSet,
   reviewsOf,
   type SpendingGate,
@@ -59,16 +60,19 @@ import {
 } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
 import {
+  type ActionSource,
   actionSteps,
   bindChannels,
   channelsOf,
   checkPluginProvider,
   checkSourceActions,
   createActionRunner,
+  createDigestRunner,
   createPluginSourceConnector,
   deliveryFailureLine,
   type HostedSource,
   hostedSource,
+  notifyQuiet,
   type PluginHost,
   PluginHostError,
   PluginProviderError,
@@ -923,6 +927,33 @@ export async function runWorkers(
       .filter((loop) => loop.source.api)
       .map((loop) => ({ name: loop.source.name, fields: loop.source.read }));
 
+    /** The source a queued action row names, as this worker runs it now. */
+    const actionSource = (sourceId: string): ActionSource => {
+      const named = fleet.config().sources.find((source) => idOf(source) === sourceId);
+      if (named === undefined) {
+        return { kind: "gone" };
+      }
+      const loop = fleet.loop(named.name);
+      if (loop === undefined) {
+        return { kind: "stopped", name: named.name };
+      }
+      return {
+        kind: "running",
+        name: named.name,
+        connector: fleet.connector(named.name),
+        log: store.log(sourceId),
+        questionSet: loop.questionSet,
+        // A plugin source's settings, for an action of the same plugin.
+        ...(loop.plugin === undefined ? {} : { plugin: loop.plugin }),
+      };
+    };
+    // A notification goes through its plugin's channel, bounded and stopped as an alert is, and
+    // links its record's page or, for a digest, the Decisions list.
+    const actionRunning = {
+      host: parts.plugins,
+      env: deps.env,
+      notify: { clock, stop: deps.stopSignal, recordLink: links.record, listLink: links.list },
+    };
     const outbox = createOutbox({
       client: parts.storeClient,
       clock,
@@ -948,29 +979,11 @@ export async function runWorkers(
       // A plugin's action row runs here, through the plugins this worker loaded, on the record read
       // through its source's loop in force; only this project's rows are taken.
       actionProject: project.id,
-      runAction: createActionRunner({
-        host: parts.plugins,
-        env: deps.env,
-        source: (sourceId) => {
-          const named = fleet.config().sources.find((source) => idOf(source) === sourceId);
-          if (named === undefined) {
-            return { kind: "gone" };
-          }
-          const loop = fleet.loop(named.name);
-          if (loop === undefined) {
-            return { kind: "stopped", name: named.name };
-          }
-          return {
-            kind: "running",
-            name: named.name,
-            connector: fleet.connector(named.name),
-            log: store.log(sourceId),
-            questionSet: loop.questionSet,
-            // A plugin source's settings, for an action of the same plugin.
-            ...(loop.plugin === undefined ? {} : { plugin: loop.plugin }),
-          };
-        },
-      }),
+      runAction: createActionRunner({ ...actionRunning, source: actionSource }),
+      // A notification past the first 10 of its minute, or held by its channel's quiet hours (the
+      // alert channel of the same address), goes out in one digest with the others.
+      runDigest: createDigestRunner({ ...actionRunning, source: actionSource }),
+      quietPeriod: notifyQuiet(config, parts.plugins, processZone),
     });
 
     if (options.http) {

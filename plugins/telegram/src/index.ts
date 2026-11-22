@@ -12,7 +12,7 @@
  * `-100…` form) or a public channel's `@name`. The bot token is a secret read from a variable; it
  * sits in the request's path, so the URL is never put in an error or a log line (bot-api.ts).
  */
-import { type ActionCall, actionCall, type JsonValue } from "facetdb";
+import { type ActionCall, type NotifyOptions, notifyCall } from "facetdb";
 import {
   channel,
   definePlugin,
@@ -97,20 +97,16 @@ export function telegramPlugin(options: TelegramPluginOptions): Plugin<TelegramS
 // The one place the real `fetch` is wired in: the plugin the host imports.
 export default telegramPlugin({ fetch: (url, init) => fetch(url, init) });
 
-/** A record notification to a Telegram chat, as a source's action (wired by the worker). */
-export type TelegramNotify = {
-  /** The chat: its number (`-1001234567890`) or a public channel's `@name`. */
-  readonly channel: string;
-  /** The condition on the decisions: `{ urgent: true }`, `{ status: "needs_review" }`. */
-  readonly when?: { readonly [key: string]: JsonValue };
-};
+/**
+ * A record notification to a Telegram chat, as a source's action: the chat under `channel` (or
+ * `to`), its number (`-1001234567890`) or a public channel's `@name`, and the condition on the
+ * decisions, `{ urgent: true }` or `{ status: "needs_review" }`.
+ */
+export type TelegramNotify = NotifyOptions;
 
 export const telegram = {
   /** `telegram.notify({ channel: "@acme_ops", when: { urgent: true } })`, written into `actions`. */
   notify(options: TelegramNotify): ActionCall {
-    return actionCall("@facetdb/telegram", "notify", {
-      channel: options.channel,
-      ...(options.when === undefined ? {} : { when: options.when }),
-    });
+    return notifyCall("@facetdb/telegram", options);
   },
 };

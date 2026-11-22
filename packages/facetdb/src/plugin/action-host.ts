@@ -1,7 +1,9 @@
 import {
+  type ActionCondition,
   type ActionDecisions,
   type ActionInvocation,
   ActionNotQueued,
+  type ActionRecord,
   type ActionStep,
   type AnswerEntry,
   answeredSet,
@@ -41,8 +43,23 @@ import {
   webhookStep,
 } from "./builtin/webhook.ts";
 import { shortName } from "./define.ts";
-import { type PluginHost, PluginHostError, resolved, secretPlaces, startsWith } from "./host.ts";
-import type { ActionContext, ActionDefinition } from "./kinds.ts";
+import {
+  type HostedPlugin,
+  type PluginHost,
+  PluginHostError,
+  resolved,
+  secretPlaces,
+  startsWith,
+} from "./host.ts";
+import { type ActionContext, type ActionDefinition, NOTIFY_ACTION } from "./kinds.ts";
+import {
+  checkNotify,
+  type NotifyDeps,
+  notifyQueueing,
+  payloadCondition,
+  providesChannel,
+  sendNotification,
+} from "./notify.ts";
 import { secretPaths } from "./zod.ts";
 
 /**
@@ -85,7 +102,12 @@ export type QueuedAction = {
   readonly action: string;
   /** Its place in the source's `actions`, from 0. */
   readonly position: number;
-  readonly payload: ActionPayload;
+  /** A notification's: the batch the outbox's digest rule counts it in. */
+  readonly batchKey?: string;
+  readonly payload: ActionPayload & {
+    /** A notification's: the condition it was queued under, which its words name. */
+    readonly condition?: ActionCondition;
+  };
 };
 
 /** Where an action is written in the file: `sources[0].actions[1]`. */
@@ -93,8 +115,8 @@ function placeOf(sourceIndex: number, position: number): string {
   return `sources[${sourceIndex}].actions[${position}]`;
 }
 
-/** The plugin's action a call names; refuses in words when the plugin does not provide it. */
-function entryOf(host: PluginHost, call: ActionCall, where: string): ActionDefinition<unknown> {
+/** The plugin a call names, as the host loaded it; refuses in words when it was not loaded. */
+function hostedOf(host: PluginHost, call: ActionCall, where: string): HostedPlugin {
   const hosted = host.plugin(call.plugin);
   if (hosted === undefined) {
     // The host loads every plugin the config names when the worker starts; one named only since
@@ -105,6 +127,12 @@ function entryOf(host: PluginHost, call: ActionCall, where: string): ActionDefin
       "restart facetdb worker so it loads the plugin, after installing it with facetdb add if it is not installed",
     );
   }
+  return hosted;
+}
+
+/** The plugin's action a call names; refuses in words when the plugin does not provide it. */
+function entryOf(host: PluginHost, call: ActionCall, where: string): ActionDefinition<unknown> {
+  const hosted = hostedOf(host, call, where);
   const entry = Object.hasOwn(hosted.plugin.actions, call.action)
     ? hosted.plugin.actions[call.action]
     : undefined;
@@ -228,6 +256,11 @@ export function schemaSecrets(
  * passes it laid over them. Throws the refusal in words with its fix, never a variable's value.
  */
 function checkAction(host: PluginHost, call: ActionCall, where: string, env: Env): void {
+  // `notify` is FacetDB's own on every plugin with a channel, checked against it.
+  if (call.action === NOTIFY_ACTION) {
+    checkNotify(host, hostedOf(host, call, where), call, where, env);
+    return;
+  }
   const entry = entryOf(host, call, where);
   const { own, otherwise } = splitSettings(call);
   // The built-in webhook's step queues its endpoint row at the decision, its address in the row
@@ -367,6 +400,10 @@ export function checkActions(config: ProjectConfig, host: PluginHost, env: Env):
  * every decision as a signed delivery and none is superseded by a later one; the same decision
  * queued again is the one delivery it already has. The worker and `facetdb review` always pass
  * `webhooks`; given none, such a step queues nothing and says so (`ActionNotQueued`).
+ *
+ * And one for `notify`: its row carries a batch key (the source, its place, the channel), which the
+ * outbox's digest rule counts it in, and the condition it was queued under, which its words name;
+ * it has no `else`, so nothing is queued when its condition does not hold.
  */
 export function actionSteps(
   source: SourceConfig,
@@ -388,6 +425,9 @@ export function actionSteps(
         : webhookStep(source, call, position, webhooks);
     }
     const name = `${shortName(call.plugin) ?? call.plugin}.${call.action}`;
+    // A notification's row carries its batch and its condition, and it has no `else`.
+    const notify =
+      call.action === NOTIFY_ACTION ? notifyQueueing(source.name, call, position) : undefined;
     return configureAction<Settings>(
       name,
       {
@@ -398,12 +438,14 @@ export function actionSteps(
               plugin: call.plugin,
               action: call.action,
               position,
+              ...(notify === undefined ? {} : { batchKey: notify.batchKey }),
               payload: {
                 status: record.status,
                 decidedAt: record.decidedAt.toISOString(),
                 stateHash: record.stateHash,
                 decisions,
                 settings,
+                ...(notify === undefined ? {} : { condition: notify.condition }),
               },
             });
           } catch (error) {
@@ -416,7 +458,7 @@ export function actionSteps(
       },
       // The config's schema judged `when` (each term against the source's questions) and `else`
       // (an object) when the file loaded: this is the invocation core's pipeline reads.
-      call.config as ActionInvocation<Settings>,
+      (notify?.invocation ?? call.config) as ActionInvocation<Settings>,
     );
   });
 }
@@ -473,6 +515,8 @@ export type ActionRunnerDeps = {
   readonly source: (sourceId: string) => ActionSource;
   /** The worker's environment: a setting queued as `{ env: "NAME" }` is read from it at delivery. */
   readonly env: Env;
+  /** What a notification's delivery needs besides the plugins: the clock, the stop, the links. */
+  readonly notify: NotifyDeps;
 };
 
 /**
@@ -594,7 +638,9 @@ function withVariables(settings: Settings, env: Env): unknown {
  * plugin's `run` with the record, the decisions and the settings, which its schema parses again
  * with each variable read now. A row whose source is stopped waits, spending no attempt. The
  * plugin's own error is passed on as it is, never in words the outbox keeps: only this runner's
- * `ActionFailed` reaches the row, a log or an alert, since a plugin's message may hold a secret.
+ * `ActionFailed` reaches the row, a log or an alert, since a plugin's message may hold a secret. A
+ * `notify` row, one of the first 10 of its minute, is judged the same way, then sent through its
+ * plugin's channel (`sendNotification`) instead of an action's `run`.
  */
 export function createActionRunner(
   deps: ActionRunnerDeps,
@@ -610,17 +656,20 @@ export function createActionRunner(
       };
     }
     const hosted = deps.host.plugin(row.plugin);
+    // A notification is FacetDB's own, run through the plugin's channel (notify.ts).
+    const notify = row.action === NOTIFY_ACTION;
     const entry =
-      hosted !== undefined && Object.hasOwn(hosted.plugin.actions, row.action)
+      hosted !== undefined && !notify && Object.hasOwn(hosted.plugin.actions, row.action)
         ? hosted.plugin.actions[row.action]
         : undefined;
-    if (hosted === undefined || entry === undefined) {
+    if (hosted === undefined || (notify ? !providesChannel(hosted) : entry === undefined)) {
       return {
         close: `the action ${row.plugin} ${row.action} is no longer one this worker runs, so it is not run`,
       };
     }
     const parsed = payloadSchema.safeParse(row.payload);
-    if (!parsed.success) {
+    const condition = notify ? payloadCondition(row.payload) : {};
+    if (!parsed.success || condition === undefined) {
       throw new ActionFailed("the queued decision could not be read back from the store");
     }
     const payload = parsed.data;
@@ -644,6 +693,29 @@ export function createActionRunner(
     );
     if (superseded !== undefined) {
       return { close: superseded };
+    }
+    const decided: ActionRecord = {
+      key: record.key,
+      state: record.state,
+      status: payload.status,
+      stateHash: record.hash,
+      decidedAt: new Date(payload.decidedAt),
+    };
+    if (entry === undefined) {
+      // A notification: its channel is named in its settings, which hold no variable.
+      return sendNotification({
+        host: deps.host,
+        hosted,
+        env: deps.env,
+        deps: deps.notify,
+        signal,
+        source: source.name,
+        position: row.position,
+        record: decided,
+        decisions,
+        settings: payload.settings,
+        condition,
+      });
     }
 
     // Parsed again here, so the plugin gets what its schema makes of them (a default, a transform),
@@ -671,18 +743,7 @@ export function createActionRunner(
       source: { name: source.name, settings: own?.settings ?? null },
     };
     try {
-      await entry.run(
-        ctx,
-        {
-          key: record.key,
-          state: record.state,
-          status: payload.status,
-          stateHash: record.hash,
-          decidedAt: new Date(payload.decidedAt),
-        },
-        decisions,
-        checked.data,
-      );
+      await entry.run(ctx, decided, decisions, checked.data);
     } catch (error) {
       // A plugin that throws an `ActionFailed` of its own would have its words kept: they are
       // dropped, as any other error of the plugin's is.

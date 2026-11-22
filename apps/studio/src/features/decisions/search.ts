@@ -35,6 +35,12 @@ export type DecisionsSearch = {
   readonly status?: StatusChoice | undefined;
   /** Absent: today. */
   readonly time?: Exclude<TimeChoice, "today"> | undefined;
+  /**
+   * A range of decision times instead of a choice, as a notification's digest links it: ISO 8601,
+   * `from` included and `to` not, both or neither, `from` before `to`.
+   */
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
   readonly question?: string | undefined;
   readonly reviewer?: string | undefined;
   /** The run log's page from 1; absent: the first. */
@@ -63,6 +69,21 @@ function text(value: unknown): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
+/** An ISO 8601 time with its zone, as the server takes one; anything else is no time. */
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** A range of two times, from before to; undefined unless both are times in that order. */
+function timeRange(from: unknown, to: unknown): { from: string; to: string } | undefined {
+  if (typeof from !== "string" || typeof to !== "string") {
+    return undefined;
+  }
+  const start = ISO_TIME.test(from) ? Date.parse(from) : Number.NaN;
+  const end = ISO_TIME.test(to) ? Date.parse(to) : Number.NaN;
+  return Number.isFinite(start) && Number.isFinite(end) && start < end
+    ? { from: new Date(start).toISOString(), to: new Date(end).toISOString() }
+    : undefined;
+}
+
 function pageNumber(value: unknown): number | undefined {
   const page = typeof value === "string" ? Number(value) : value;
   return typeof page === "number" && Number.isInteger(page) && page >= 2 && page <= MAX_RUNS_PAGE
@@ -79,6 +100,7 @@ export function decisionsSearch(raw: Record<string, unknown>): DecisionsSearch {
   const question = text(raw["question"]);
   const reviewer = text(raw["reviewer"]);
   const page = pageNumber(raw["page"]);
+  const range = timeRange(raw["from"], raw["to"]);
   // Every key is named, `undefined` when it is the default: the router keeps the raw value of a
   // key the validator leaves out (as sign-in.tsx does), and a refused value must not survive.
   const runs = raw["tab"] === "runs";
@@ -87,7 +109,10 @@ export function decisionsSearch(raw: Record<string, unknown>): DecisionsSearch {
     source: source !== undefined && SOURCE_NAME.test(source) ? source : undefined,
     q,
     status,
-    time: time === "today" ? undefined : time,
+    // A range sets the choice aside: one time filter at a time.
+    time: time === "today" || range !== undefined ? undefined : time,
+    from: range?.from,
+    to: range?.to,
     question,
     reviewer,
     // Only the run log has pages, and only the ones after the first need saying.
@@ -121,6 +146,7 @@ export function narrowed(search: DecisionsSearch): boolean {
     search.status !== undefined ||
     search.question !== undefined ||
     search.reviewer !== undefined ||
+    search.from !== undefined ||
     (search.time ?? "today") !== "all"
   );
 }
