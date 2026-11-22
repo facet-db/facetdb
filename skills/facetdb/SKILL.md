@@ -255,6 +255,42 @@ model call; a changed record asks again. When the model is unreachable the call 
 `retry-after` header, the record is queued, and the answer arrives by webhook. Webhooks carry an
 HMAC signature header (`facetdb-signature`), so verify it before you trust the body.
 
+## Webhooks: getting each decision pushed
+
+`webhook({ url })` in a source's `actions` is the way to get a push. It is built into `facetdb`, so
+there is nothing to add: every decision of the source, the worker's and a reviewer's alike, is sent
+to `url` as a signed POST, retried with backoff for 24 hours.
+
+```ts
+import { env, facetdb, webhook } from "facetdb";
+
+export default facetdb({
+  model: "jev-1.14.0",
+  plugins: { webhook: { secret: env("FACETDB_WEBHOOK_SECRET") } },   // the variable's name, never its value
+  sources: [{ name: "support_tickets", api: true, /* … */ actions: [webhook({ url: "https://app.example.com/facetdb" })] }],
+});
+```
+
+- The signing secret is always `env("NAME")`; the worker refuses to start when the variable is not
+  set. `url` is https (http only for a receiver on this machine), with no password and no `#`.
+- The body is `{ event: "record.decided", delivery, source, id, status, decidedAt, answers }`. In the
+  receiver, read the raw body and check it with `verifyWebhook(secret, headers, body)` from `facetdb`.
+- Deliveries can arrive out of order, and a retry can repeat one: key them by `delivery`, and per
+  `id` keep the one with the latest `decidedAt` (the signed time of the decision, not of the send).
+  A threshold change re-decides a record from the same answer, so two decisions can share a
+  `decidedAt`: between those, keep the larger `delivery`, compared as a whole number (it is the
+  outbox's sequence number, taken when the delivery is queued).
+- The worker does not queue a decision again while it is the record's latest delivery, however
+  often it writes it again; two processes at the same instant can still queue it twice, so the
+  rule above, not a count of deliveries, is what a receiver relies on.
+- `url` and `endpoints` are written in the file as addresses, never `env(…)`. A worker sends a
+  queued delivery only to an endpoint its config still names, and `facetdb review` queues none to an
+  address that is not https (or http on this machine) or that holds a password or a `#`.
+- For alerts, name endpoints under the plugin and address them as channels:
+  `plugins: { webhook: { secret: env(…), endpoints: { ops: "https://…" } } }` with
+  `alerts: { channels: ["webhook:ops"] }`; an alert's body is `{ event: "alert", delivery, severity,
+  text, link }`, signed the same way.
+
 ## Plugins
 
 Five extension points: **source** (a place records come from), **action** (what happens after a

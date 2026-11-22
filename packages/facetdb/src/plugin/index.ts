@@ -25,6 +25,23 @@ export {
   SUPERSEDED,
   WAITS_FOR_PERSON,
 } from "./action-host.ts";
+export type {
+  SourceWebhooks,
+  WebhookAlertPayload,
+  WebhookOutbox,
+} from "./builtin/webhook.ts";
+export {
+  BUILTIN_WEBHOOK,
+  endpointProblem,
+  WEBHOOK_ACTION,
+  WEBHOOK_CHANNEL,
+  WEBHOOK_ENDPOINT_GONE,
+  WEBHOOK_PLUGIN,
+  WEBHOOK_SECRET_VARIABLE,
+  webhookRefusal,
+  webhookSecret,
+  withOutbox,
+} from "./builtin/webhook.ts";
 export type { ChannelBinding, ChannelHostDeps } from "./channel-host.ts";
 export {
   bindChannels,

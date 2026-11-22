@@ -41,6 +41,7 @@ export type {
   SourceConfig,
   SourceInput,
   StorageMode,
+  WebhookOptions,
 } from "./dsl.ts";
 export {
   actionCall,
@@ -53,6 +54,7 @@ export {
   noul,
   score,
   sourceCall,
+  webhook,
 } from "./dsl.ts";
 export type { ProjectJson, SourceJson } from "./json.ts";
 export { configFileSource, fromProjectJson, toProjectJson } from "./json.ts";

@@ -74,8 +74,10 @@ export class FacetdbApiError extends Error {
 
 /**
  * The 503 of the check API: the model could not be asked (or the answer is not ready yet). The
- * record is stored and queued, and the answer arrives by webhook. `retryAfterMs` is the server's
- * `retry-after` header in milliseconds, or undefined when the server sent none.
+ * record is stored and queued, and the answer arrives by webhook: `webhook({ url })` in the
+ * source's `actions` in facetdb.config.ts is the way to get it pushed, with every later decision on
+ * the record (a reviewer's too). `retryAfterMs` is the server's `retry-after` header in
+ * milliseconds, or undefined when the server sent none.
  */
 export class ModelUnavailableError extends FacetdbApiError {
   readonly retryAfterMs: number | undefined;
@@ -109,6 +111,14 @@ const errorBody = z.object({
   error: z.object({ code: z.string(), message: z.string(), fix: z.string() }),
 });
 
+/**
+ * The SDK client of the check API: `check` asks for one record and answers in about a second. A
+ * decision made later (the model was down, a reviewer decided) is not polled for: `webhook({ url
+ * })` in the source's `actions` in facetdb.config.ts is the way to get each decision pushed, as a
+ * POST signed with `facetdb-signature` that `verifyWebhook` checks; key the deliveries by
+ * `delivery` and keep, per record `id`, the one with the latest `decidedAt`, and between two with
+ * the same `decidedAt` the one with the larger `delivery` compared as a whole number.
+ */
 export function createClient<Sources extends AnySources = AnySources>(
   options: ClientOptions,
 ): FacetdbClient<Sources> {

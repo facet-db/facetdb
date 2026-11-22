@@ -32,6 +32,14 @@ import {
   type SourceConfig,
   suggestedVariable,
 } from "../config/index.ts";
+import {
+  isWebhookSend,
+  type SourceWebhooks,
+  WEBHOOK_ACTION,
+  WEBHOOK_CHANNEL,
+  WEBHOOK_PLUGIN,
+  webhookStep,
+} from "./builtin/webhook.ts";
 import { shortName } from "./define.ts";
 import { type PluginHost, PluginHostError, resolved, secretPlaces, startsWith } from "./host.ts";
 import type { ActionContext, ActionDefinition } from "./kinds.ts";
@@ -222,6 +230,16 @@ export function schemaSecrets(
 function checkAction(host: PluginHost, call: ActionCall, where: string, env: Env): void {
   const entry = entryOf(host, call, where);
   const { own, otherwise } = splitSettings(call);
+  // The built-in webhook's step queues its endpoint row at the decision, its address in the row
+  // (`actionSteps`), so the address is written in the file: a variable would be queued unread.
+  const fed = isWebhookSend(call) ? [...variablesIn(own), ...variablesIn(otherwise ?? {})] : [];
+  if (fed.length > 0) {
+    throw new PluginHostError(
+      "action-settings",
+      `${where} (${call.plugin} ${call.action}) reads ${listed(fed)} from the environment, but ${ADDRESS_WORDS}`,
+      `write the address in ${where}: webhook({ url: "https://hooks.example.com/facetdb" })`,
+    );
+  }
   const patterns = secretsOf(entry, call, where);
   for (const [base, settings] of [
     [where, own],
@@ -300,8 +318,37 @@ export function checkSourceActions(
   });
 }
 
+/** Why a webhook's address is written in the file, never read from a variable. */
+const ADDRESS_WORDS =
+  "a webhook's address is written in the file as text: it is where deliveries are sent, not a secret (the signing secret is plugins.webhook.secret), and the outbox row stores it as written";
+
+/**
+ * The built-in webhook's `endpoints` follow its `url`'s rule: each is an address written in the
+ * file, since the outbox row stores it as written; one read from a variable is refused, naming
+ * where and the variable, never its value.
+ */
+function checkWebhookEndpoints(config: ProjectConfig, host: PluginHost): void {
+  const hosted = host.plugin(WEBHOOK_PLUGIN);
+  const [fed] = (hosted?.variables ?? []).filter(({ path }) => /^endpoints(?:$|[.[])/.test(path));
+  if (fed === undefined) {
+    return;
+  }
+  const key =
+    Object.keys(config.plugins ?? {}).find(
+      (name) => host.plugin(name)?.packageName === WEBHOOK_PLUGIN,
+    ) ?? "webhook";
+  const where = `${formatPath(["plugins", key])}.${fed.path}`;
+  const name = fed.path.startsWith("endpoints.") ? fed.path.slice("endpoints.".length) : "ops";
+  throw new PluginHostError(
+    "plugin-settings",
+    `${where} reads ${fed.variable} from the environment, but ${ADDRESS_WORDS}`,
+    `write the address in ${where}: ${name}: "https://hooks.example.com/facetdb"`,
+  );
+}
+
 /** Checks every action of every source: `facetdb worker`, `studio`, `dev` and doctor, at load. */
 export function checkActions(config: ProjectConfig, host: PluginHost, env: Env): void {
+  checkWebhookEndpoints(config, host);
   for (const source of config.sources) {
     checkSourceActions(config, source, host, env);
   }
@@ -314,12 +361,32 @@ export function checkActions(config: ProjectConfig, host: PluginHost, env: Env):
  * releases the record's job and its next pass queues the row again. The worker's loop and a
  * person's decision (the studio, `facetdb review`) run these same steps; the plugin runs later,
  * from the outbox.
+ *
+ * One rule for a built-in: the built-in webhook's `send` is no action row. Its step queues the
+ * endpoint row itself, in `webhooks`, at the decision (`webhookStep`), so a caller's code receives
+ * every decision as a signed delivery and none is superseded by a later one; the same decision
+ * queued again is the one delivery it already has. The worker and `facetdb review` always pass
+ * `webhooks`; given none, such a step queues nothing and says so (`ActionNotQueued`).
  */
 export function actionSteps(
   source: SourceConfig,
   queue: (row: QueuedAction) => Promise<unknown>,
+  webhooks?: SourceWebhooks,
 ): readonly ActionStep[] {
   return source.actions.map((call, position) => {
+    if (isWebhookSend(call)) {
+      return webhooks === undefined
+        ? {
+            name: `${WEBHOOK_CHANNEL}.${WEBHOOK_ACTION}`,
+            run: () =>
+              Promise.reject(
+                new ActionNotQueued(
+                  "the webhook was not queued: this process was given no outbox to queue it in",
+                ),
+              ),
+          }
+        : webhookStep(source, call, position, webhooks);
+    }
     const name = `${shortName(call.plugin) ?? call.plugin}.${call.action}`;
     return configureAction<Settings>(
       name,

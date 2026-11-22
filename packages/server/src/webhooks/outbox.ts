@@ -166,7 +166,11 @@ export type OutboxDeps = {
   abortAfter(ms: number): AbortSignal;
   /** Names this loop on the rows it claims; defaults to a fresh UUID per outbox. */
   readonly loopId?: string;
-  /** The signing secret of the project's endpoint, from the encrypted credential store. */
+  /**
+   * The signing secret of a project's webhook, read at each attempt: the worker answers its own
+   * project's from the built-in webhook plugin's settings (a variable the config names) and refuses
+   * any other. A rejection is a failed attempt in fixed words; its text is not kept.
+   */
   secretFor(projectId: string, endpoint: string): Promise<string>;
   /**
    * Raises the alert event for a webhook or an action given up on, within the send timeout
@@ -188,15 +192,63 @@ export type OutboxDeps = {
   /**
    * With `runAction`, the one project whose action rows this loop takes: a worker runs the plugins
    * of its own project's config, and a row of another project sharing the store waits for that
-   * project's worker, never closed or given up on here. Absent, every project's.
+   * project's worker, never closed or given up on here. The same holds for a webhook a plugin
+   * queued (`WebhookOrigin`), which only its own project's worker can sign. Absent, every
+   * project's.
    */
   readonly actionProject?: string;
+  /**
+   * Asked before each attempt of a webhook a plugin queued (`WebhookOrigin`): why the row must not
+   * be sent now, in fixed words that carry no address and no secret (the worker: its endpoint is no
+   * longer one its config names), or undefined to send it. A refused row is closed untried as an
+   * action row its runner closes is (`closed` in the report, `gave_up_at` set, no alert), never
+   * sent. A webhook queued by no plugin is not asked.
+   */
+  readonly refuseWebhook?: (row: {
+    readonly projectId: string;
+    readonly plugin: string;
+    readonly endpoint: string;
+  }) => string | undefined;
+};
+
+/**
+ * The plugin entry that queued a webhook (the built-in `@facetdb/webhook`, its action `send` or its
+ * channel `webhook`). Its row is still a webhook, sent and signed to its endpoint, but it is that
+ * plugin's as an action row is: only a loop that runs its project's plugins claims it, and signs it
+ * with that project's secret (`secretFor`), never another project's worker.
+ */
+export type WebhookOrigin = {
+  /** As the config names it: `@facetdb/webhook`. */
+  readonly plugin: string;
+  /** The action or the channel that queued it: `send`, `webhook`. */
+  readonly entry: string;
+  /**
+   * For an action's delivery, the decision's record and the action's place in the source's
+   * `actions`. It is compared with the LATEST row queued for that record and place, whatever its
+   * endpoint: when that row waits or was delivered, goes to the same endpoint and carries the same
+   * payload (its delivery id aside), it is the delivery of this very decision and nothing new is
+   * queued; in every other case the row is queued. A job released and run again, a lost ack, or a
+   * record queued again at the same state hands the worker the logged decision with its logged
+   * time, which is that latest row. A decision that changed since and changed back (a threshold
+   * moved and moved back, re-deciding one answer: the same `decidedAt` each time) is compared with
+   * the row of the change, not with an older equal one, so it is queued again and the receiver ends
+   * on the record's decision.
+   */
+  readonly record?: {
+    /** The store's id of the source: `sourceIdOf(project, name)`. */
+    readonly sourceId: string;
+    readonly recordKey: string;
+    /** Its place in the source's `actions`, from 0. */
+    readonly position: number;
+  };
 };
 
 export type NewWebhook = {
   readonly projectId: string;
   /** The URL to POST to (https, or http for a receiver on the same machine). */
   readonly endpoint: string;
+  /** The plugin entry that queued it, when one did; a webhook queued by none is any loop's to send. */
+  readonly origin?: WebhookOrigin;
 } & (
   | {
       /** Serialised once here: the bytes stored are the bytes signed and sent, on every attempt. */
@@ -221,7 +273,10 @@ export type DeliveryReport = {
    * exists: a later decision's action replaces this one.
    */
   readonly superseded: readonly string[];
-  /** Action rows their runner closed with a reason (`ActionClose`). */
+  /**
+   * Action rows their runner closed with a reason (`ActionClose`), and webhooks a plugin queued
+   * that `refuseWebhook` closed.
+   */
   readonly closed: readonly string[];
   /** Action rows their runner put back to wait (`ActionDefer`), no attempt spent. */
   readonly deferred: readonly string[];
@@ -270,7 +325,12 @@ export type Outbox = {
 
 /** What a row delivers: a signed POST to an endpoint, or a plugin's action through the runner. */
 type Target =
-  | { readonly kind: "webhook"; readonly endpoint: string }
+  | {
+      readonly kind: "webhook";
+      readonly endpoint: string;
+      /** The plugin that queued it (`WebhookOrigin`), or undefined for a webhook no plugin queued. */
+      readonly plugin: string | undefined;
+    }
   | {
       readonly kind: "action";
       readonly sourceId: string;
@@ -303,9 +363,15 @@ function optionalText(value: unknown): string | undefined {
 }
 
 function targetOf(row: SqlRow): Target {
-  // The store's check (`webhook_outbox_endpoint_or_plugin`) holds an endpoint or a plugin.
-  if (row["plugin"] === null || row["plugin"] === undefined) {
-    return { kind: "webhook", endpoint: String(row["endpoint"]) };
+  // The store's check (`webhook_outbox_endpoint_or_plugin`) holds an endpoint or a plugin. A row
+  // with an endpoint is a webhook, whether or not a plugin queued it (`WebhookOrigin`): it is sent
+  // and signed, never handed to a runner, and never superseded.
+  if (row["endpoint"] !== null && row["endpoint"] !== undefined) {
+    return {
+      kind: "webhook",
+      endpoint: String(row["endpoint"]),
+      plugin: optionalText(row["plugin"]),
+    };
   }
   return {
     kind: "action",
@@ -346,7 +412,10 @@ type Tried =
   | Exclude<Attempted, { readonly outcome: "closed" }>
   | { readonly outcome: "closed"; readonly reason: string; readonly list: string[] };
 
-/** Closes an action row untried, as the row says: `superseded_at` and `gave_up_at` set, the reason in `last_error`. */
+/**
+ * Closes a row untried (an action row, or a webhook a plugin queued that `refuseWebhook` refused),
+ * as the row says: `superseded_at` and `gave_up_at` set, the reason in `last_error`.
+ */
 const CLOSE_UNTRIED = "superseded_at = $4::bigint, gave_up_at = $4::bigint, last_error = $5";
 
 /** The reason a superseded row keeps: which later row replaced it. */
@@ -384,6 +453,109 @@ export async function queueAction(
   return String(rows[0]?.["id"]);
 }
 
+/**
+ * A webhook an action queued (`origin.record`), unless the latest row queued for the same record
+ * and place (whatever its endpoint) is this very delivery: waiting or delivered, to the same
+ * endpoint, with the same payload. Then it is that row's id, and nothing is written; otherwise the
+ * row is queued. Only the latest row is compared: an older equal one says nothing of what the
+ * receiver holds now (a decision changed and changed back is queued again, `WebhookOrigin`). One
+ * statement, the latest row read through the record's index (`webhook_outbox_action`, partial on
+ * `plugin`, which such a row names), newest first, one row; the payloads are compared as JSON
+ * without their `delivery`, so key order or a re-serialisation never splits one decision in two.
+ * A latest row given up on does not count: the decision queued again gets another 24 hours. Two
+ * processes queueing at the same instant can still both write the same decision (read committed,
+ * no unique index without a store migration): the receiver keys deliveries by `delivery`.
+ * Exported for the real-Postgres test that reads its plan.
+ */
+export const QUEUE_DECISION = `with latest as (
+  select id, endpoint, payload, gave_up_at from facetdb.webhook_outbox
+   where project_id = $2 and source_id = $6 and record_key = $7 and plugin = $8 and action = $9
+     and position = $10::integer
+   order by id desc
+   limit 1
+), earlier as (
+  select id from latest
+   where gave_up_at is null and endpoint = $3
+     and (payload::jsonb - 'delivery') = ($4::text::jsonb - 'delivery')
+), queued as (
+  insert into facetdb.webhook_outbox
+    (id, project_id, endpoint, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position)
+  select $1::bigint, $2, $3, $4::text, $5::bigint, $5::bigint, $6, $7, $8, $9, $10::integer
+   where not exists (select 1 from earlier)
+  returning id
+)
+select id::text as id from queued
+union all
+select id::text as id from earlier`;
+
+/**
+ * Queues a webhook for delivery now; returns its delivery id. Its id is taken first, so a payload
+ * can name it and the bytes signed include their own delivery id; the bytes stored are the bytes
+ * signed and sent on every attempt. The outbox's `enqueue` does this, and so does a process that
+ * only queues (`outboxQueue`: the worker's steps and channels, `facetdb review`).
+ */
+export async function queueWebhook(
+  client: OutboxDatabase,
+  clock: Pick<Clock, "now">,
+  webhook: NewWebhook,
+): Promise<string> {
+  const url = new URL(webhook.endpoint);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("a webhook endpoint must be an http or https URL");
+  }
+  const now = clock.now();
+  const reserved = await client.query(
+    "select nextval(pg_get_serial_sequence('facetdb.webhook_outbox', 'id'))::text as id",
+  );
+  const id = String(reserved[0]?.["id"]);
+  const payload = JSON.stringify("payloadOf" in webhook ? webhook.payloadOf(id) : webhook.payload);
+  const { origin } = webhook;
+  if (origin === undefined) {
+    await client.query(
+      `insert into facetdb.webhook_outbox (id, project_id, endpoint, payload, created_at, next_attempt_at)
+       values ($1::bigint, $2, $3, $4, $5::bigint, $5::bigint)`,
+      [id, webhook.projectId, webhook.endpoint, payload, now],
+    );
+    return id;
+  }
+  if (origin.record === undefined) {
+    await client.query(
+      `insert into facetdb.webhook_outbox (id, project_id, endpoint, payload, created_at, next_attempt_at, plugin, action)
+       values ($1::bigint, $2, $3, $4, $5::bigint, $5::bigint, $6, $7)`,
+      [id, webhook.projectId, webhook.endpoint, payload, now, origin.plugin, origin.entry],
+    );
+    return id;
+  }
+  const rows = await client.query(QUEUE_DECISION, [
+    id,
+    webhook.projectId,
+    webhook.endpoint,
+    payload,
+    now,
+    origin.record.sourceId,
+    origin.record.recordKey,
+    origin.plugin,
+    origin.entry,
+    origin.record.position,
+  ]);
+  return String(rows[0]?.["id"]);
+}
+
+/**
+ * The outbox's `enqueue` alone, over the store's database: what a process queues through when it
+ * delivers nothing itself (`facetdb review`), or before its outbox loop runs (the worker's steps,
+ * built as its sources open, and its alert channels).
+ */
+export function outboxQueue(
+  client: OutboxDatabase,
+  clock: Pick<Clock, "now">,
+): Pick<Outbox, "enqueue"> {
+  return {
+    enqueue: (entry) =>
+      "plugin" in entry ? queueAction(client, clock, entry) : queueWebhook(client, clock, entry),
+  };
+}
+
 export function createOutbox(deps: OutboxDeps): Outbox {
   const { client, clock } = deps;
   const timeoutMs = deps.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
@@ -402,7 +574,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   /**
    * Takes the due rows and pushes their `next_attempt_at` past the lease, so no other loop sends
    * them. A loop without an action runner takes webhooks only, and one with a runner for a project
-   * takes that project's action rows only.
+   * takes that project's action rows only. A row that names a plugin is taken as an action row is,
+   * whether it is an action or a webhook a plugin queued: that webhook is signed with its own
+   * project's secret, which only that project's worker holds.
    */
   async function claim(now: number): Promise<Claimed[]> {
     const rows = await client.query(
@@ -431,7 +605,8 @@ export function createOutbox(deps: OutboxDeps): Outbox {
 
   /**
    * The latest row queued after this one for the same record, plugin, action and place in the
-   * pipeline (the partial index `webhook_outbox_action` finds it): a later decision's action.
+   * pipeline (the partial index `webhook_outbox_action` finds it): a later decision's action. A
+   * webhook a plugin queued is never one: it supersedes nothing and is never superseded.
    */
   async function laterRow(
     row: Claimed,
@@ -440,7 +615,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     const rows = await client.query(
       `select id::text as id from facetdb.webhook_outbox
         where project_id = $1 and source_id = $2 and record_key = $3 and plugin = $4 and action = $5
-          and position = $6::integer and id > $7::bigint
+          and position = $6::integer and id > $7::bigint and endpoint is null
         order by id desc
         limit 1`,
       [
@@ -671,28 +846,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   }
 
   return {
-    async enqueue(webhook) {
-      if ("plugin" in webhook) {
-        return queueAction(client, clock, webhook);
-      }
-      const url = new URL(webhook.endpoint);
-      if (url.protocol !== "https:" && url.protocol !== "http:") {
-        throw new Error("a webhook endpoint must be an http or https URL");
-      }
-      const now = clock.now();
-      // The id is taken first so a payload can name it: the bytes signed include their own delivery id.
-      const reserved = await client.query(
-        "select nextval(pg_get_serial_sequence('facetdb.webhook_outbox', 'id'))::text as id",
-      );
-      const id = String(reserved[0]?.["id"]);
-      const payload = "payloadOf" in webhook ? webhook.payloadOf(id) : webhook.payload;
-      await client.query(
-        `insert into facetdb.webhook_outbox (id, project_id, endpoint, payload, created_at, next_attempt_at)
-         values ($1::bigint, $2, $3, $4, $5::bigint, $5::bigint)`,
-        [id, webhook.projectId, webhook.endpoint, JSON.stringify(payload), now],
-      );
-      return id;
-    },
+    ...outboxQueue(client, clock),
 
     async deliverDue(now) {
       const delivered: string[] = [];
@@ -710,6 +864,18 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       async function tryRow(row: Claimed): Promise<Tried> {
         const { target } = row;
         if (target.kind === "webhook") {
+          // A webhook a plugin queued is sent only while its process still allows its endpoint.
+          const refused =
+            target.plugin === undefined
+              ? undefined
+              : deps.refuseWebhook?.({
+                  projectId: row.projectId,
+                  plugin: target.plugin,
+                  endpoint: target.endpoint,
+                });
+          if (refused !== undefined) {
+            return { outcome: "closed", reason: refused, list: closed };
+          }
           const failure = await attempt(row, target.endpoint, now);
           return failure === undefined ? { outcome: "done" } : { outcome: "failed", failure };
         }

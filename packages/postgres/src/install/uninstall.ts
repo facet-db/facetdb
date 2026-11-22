@@ -136,7 +136,7 @@ export type ProjectKeptBy =
 /** The command that deletes a log left behind by a plain uninstall, once nothing uses its source. */
 export type LogOnlyPurge = { readonly source: string; readonly command: string };
 
-/** A plugin's action still to be delivered from the outbox (a row that names a plugin), counted. */
+/** A plugin's action still to be delivered from the outbox (a row that names a plugin and no endpoint), counted. */
 export type PendingAction = {
   readonly plugin: string;
   readonly action: string;
@@ -909,9 +909,10 @@ async function storeRows(
 }
 
 /**
- * The project's pending plugin actions, named by their plugin and action where a webhook is
- * counted by its endpoint: a row that names a plugin is an action, as the outbox reads it. None
- * while the outbox has no `plugin` column (a store from before migration 9).
+ * The project's pending plugin actions, named by their plugin and action where a webhook is counted
+ * by its endpoint: a row that names a plugin and no endpoint is an action, as the outbox reads it
+ * (the built-in webhook's rows name their plugin and an endpoint: webhooks). None while the outbox
+ * has no `plugin` column (a store from before migration 9).
  */
 async function pendingActionsOf(query: SqlQuery, project: string): Promise<PendingAction[]> {
   const hasPlugin = flag(
@@ -926,7 +927,7 @@ async function pendingActionsOf(query: SqlQuery, project: string): Promise<Pendi
   }
   const rows = await query(
     `select plugin, action, count(*)::int as n from facetdb.webhook_outbox
-      where project_id = $1 and ${PENDING_DELIVERY} and plugin is not null
+      where project_id = $1 and ${PENDING_DELIVERY} and plugin is not null and endpoint is null
       group by plugin, action
       order by plugin, action`,
     [project],

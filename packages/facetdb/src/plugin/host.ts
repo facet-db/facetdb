@@ -14,6 +14,7 @@ import {
   pluginVariables,
   suggestedVariable,
 } from "../config/index.ts";
+import { BUILTIN_WEBHOOK, WEBHOOK_PLUGIN } from "./builtin/webhook.ts";
 import { type Plugin, PluginError, shortName } from "./define.ts";
 import type { PluginContext } from "./kinds.ts";
 import {
@@ -33,8 +34,13 @@ import { satisfies } from "./semver.ts";
  * `PluginHostError` whose words carry a variable's name and never its value.
  */
 
-/** Plugins shipped inside facetdb, by package name; a name found here is imported from nowhere (142 fills it). */
-export const BUILTIN_PLUGINS: Readonly<Record<string, Plugin>> = {};
+/**
+ * Plugins shipped inside facetdb, by package name; a name found here is imported from nowhere, so
+ * it needs no install (the webhook).
+ */
+export const BUILTIN_PLUGINS: Readonly<Record<string, Plugin>> = {
+  [WEBHOOK_PLUGIN]: BUILTIN_WEBHOOK,
+};
 
 export type PluginHostOptions = {
   readonly config: ProjectConfig;

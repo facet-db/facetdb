@@ -165,6 +165,7 @@ export type {
   OutboxDeps,
   WebhookFetch,
   WebhookGaveUp,
+  WebhookOrigin,
 } from "./webhooks/outbox.ts";
 export {
   ACTION_DEFER_MS,
@@ -173,7 +174,9 @@ export {
   createOutbox,
   DEFAULT_FETCH_TIMEOUT_MS,
   GIVE_UP_AFTER_MS,
+  outboxQueue,
   queueAction,
+  queueWebhook,
   RETRY_FIRST_MS,
   RETRY_MAX_MS,
   retryDelayMs,

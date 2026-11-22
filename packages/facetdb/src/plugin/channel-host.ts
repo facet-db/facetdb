@@ -21,10 +21,11 @@ import type { ChannelDefinition } from "./kinds.ts";
 /**
  * The channel host: every address `alerts.channels` names, bound when the config loads to its
  * plugin's channel through the plugin host. The kind before the colon is a plugin's short name
- * (`webhook` is the built-in once 142 registers it in `BUILTIN_PLUGINS`; until then it is refused
- * as any plugin not installed is); the channel entry is the one named like the kind, or the
- * plugin's only one; its settings are `{ where }`, parsed by the entry's own schema, then judged by
- * the entry's `check` when it has one. Each refusal says what to do, and stops the worker at load.
+ * (`webhook` is the built-in registered in `BUILTIN_PLUGINS`, whose channel queues a signed
+ * delivery in the outbox once a process hands it one through `withOutbox`); the channel entry is
+ * the one named like the kind, or the plugin's only one; its settings are `{ where }`, parsed by
+ * the entry's own schema, then judged by the entry's `check` when it has one. Each refusal says
+ * what to do, and stops the worker at load.
  *
  * A bound channel delivers through the plugin's `deliver` with the plugin's context, its signal
  * firing at `DELIVERY_BOUND_MS` or when the worker stops, the call raced against both on the

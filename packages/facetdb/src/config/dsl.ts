@@ -1,4 +1,5 @@
 import type {
+  ActionCondition,
   ChoiceOption,
   ChoiceQuestion,
   NoulCriteria,
@@ -44,6 +45,40 @@ export function actionCall(
   config: { readonly [key: string]: JsonValue } = {},
 ): ActionCall {
   return { plugin, action, config };
+}
+
+/** What `webhook` takes: where to send, and when (`when` and `else` as every action has them). */
+export type WebhookOptions = {
+  /**
+   * Where each decision is sent: https, or http for a receiver on this machine; written here as
+   * the address itself, which is no secret (the signing secret is `plugins.webhook.secret`).
+   */
+  readonly url: string;
+  /** Send only when this holds: a decision value, the status, or `{ atLeast }` on a number. */
+  readonly when?: ActionCondition;
+  /** Where to send instead when `when` does not hold; without it nothing is sent then. */
+  readonly else?: { readonly url: string };
+};
+
+/**
+ * `webhook({ url })` in a source's `actions` is the way to get each decision pushed to your code:
+ * the built-in `@facetdb/webhook`, shipped inside facetdb, with nothing to add. Every decision of
+ * the source, the worker's and a person's alike, is sent as a signed POST (`facetdb-signature`,
+ * HMAC-SHA256 over `<t>.<body>`), retried with backoff for 24 hours; the signing secret is a
+ * variable the config names, `plugins: { webhook: { secret: env("FACETDB_WEBHOOK_SECRET") } }`, and
+ * your receiver checks it with `verifyWebhook`. Deliveries may arrive out of order, and a retry, or
+ * rarely the same decision queued twice, may repeat one: key them by `delivery` and keep, per `id`,
+ * the one with the latest `decidedAt`; between two with the same `decidedAt` (a threshold change
+ * re-decided the record from the same answer), the one with the larger `delivery` as a whole
+ * number, the outbox's sequence number taken when queued.
+ */
+export function webhook(options: WebhookOptions): ActionCall {
+  const { url, when, else: otherwise } = options;
+  return actionCall("@facetdb/webhook", "send", {
+    url,
+    ...(when === undefined ? {} : { when }),
+    ...(otherwise === undefined ? {} : { else: { url: otherwise.url } }),
+  });
 }
 
 /**

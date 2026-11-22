@@ -13,7 +13,11 @@ export type WebhookConfig = {
  */
 export type WebhookPayload = {
   readonly event: "record.decided";
-  /** The delivery id: the same on every retry of this webhook, and in the `facetdb-delivery` header. */
+  /**
+   * The delivery id: the same on every retry of this webhook, and in the `facetdb-delivery` header.
+   * It is the outbox's sequence number, a whole number written in decimal, taken when the webhook
+   * is queued: within one FacetDB store, a webhook queued later has a larger one.
+   */
   readonly delivery: string;
   readonly source: string;
   readonly id: string;
@@ -22,7 +26,10 @@ export type WebhookPayload = {
    * When the decision this webhook reports was made (ISO 8601, UTC): the decision log entry's time,
    * the same however late or often the action runs. A retried `needs_review` webhook can arrive
    * after the `done` one a person's decision produced: apply the payload with the later `decidedAt`
-   * and ignore the other.
+   * and ignore the other. Two payloads of one record can share a `decidedAt`: a threshold change
+   * re-decides the record from the same logged answer (and can change it back). Between those, the
+   * one with the larger `delivery`, compared as a whole number, was queued later and is the
+   * record's decision.
    */
   readonly decidedAt: string;
   /** Decided questions only, in the shape `POST /v1/check` answers with; a question left to a person is absent. */
@@ -39,7 +46,20 @@ export function createWebhookAction(deps: {
   readonly projectId: string;
   /** The source's name, as callers know it. */
   readonly source: string;
+  /**
+   * The configured action this is (`@facetdb/webhook`'s `send`), by its plugin, its name, the
+   * source's store id and its place in the source's `actions`. With it each row names the
+   * decision's record (`WebhookOrigin`): the same decision queued twice is one delivery, and only
+   * the project's own worker sends it. The payload is the same either way.
+   */
+  readonly queuedBy?: {
+    readonly plugin: string;
+    readonly action: string;
+    readonly sourceId: string;
+    readonly position: number;
+  };
 }): Action<WebhookConfig> {
+  const { queuedBy } = deps;
   return {
     async run(record, decisions, config) {
       const answers: Record<string, CheckedAnswer> = {};
@@ -55,6 +75,19 @@ export function createWebhookAction(deps: {
       await deps.outbox.enqueue({
         projectId: deps.projectId,
         endpoint: config.url,
+        ...(queuedBy === undefined
+          ? {}
+          : {
+              origin: {
+                plugin: queuedBy.plugin,
+                entry: queuedBy.action,
+                record: {
+                  sourceId: queuedBy.sourceId,
+                  recordKey: record.key,
+                  position: queuedBy.position,
+                },
+              },
+            }),
         payloadOf: (delivery): WebhookPayload => ({
           event: "record.decided",
           delivery,

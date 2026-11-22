@@ -6,12 +6,15 @@ const SECRET_META = "secret";
 /**
  * `z.secret()`: a non-empty string the plugin needs but that never belongs in the config file. The
  * manifest lists such fields under `secrets`; the dashboard draws them as password inputs and the
- * CLI reads them from the environment.
+ * CLI reads them from the environment. `error` is the refusal when it is missing or empty, in words
+ * that name the variable to set (`z.secret({ error: 'write secret: env("MY_SECRET")' })`); the
+ * value itself is never part of a refusal the host prints.
  */
-function secret() {
+function secret(params?: { readonly error?: string }) {
+  const error = params?.error;
   return zod
-    .string()
-    .min(1)
+    .string(error === undefined ? undefined : { error })
+    .min(1, error)
     .meta({ [SECRET_META]: true });
 }
 

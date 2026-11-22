@@ -18,7 +18,7 @@ import {
   type ReviewQueue,
   type ReviewService,
 } from "@facetdb/core";
-import { OS_REVIEWER_PREFIX, queueAction } from "@facetdb/server";
+import { OS_REVIEWER_PREFIX, outboxQueue, queueAction } from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { actionSteps } from "../../plugin/index.ts";
 import { keyWords, openConnector, tableKeyText } from "../engines.ts";
@@ -480,12 +480,20 @@ export const projectDoor: ReviewDoor = {
         }
         actions.set(
           view.id,
-          actionSteps(source, (row) =>
-            queueAction(opened.client, deps.clock, {
+          actionSteps(
+            source,
+            (row) =>
+              queueAction(opened.client, deps.clock, {
+                projectId: opened.project.id,
+                sourceId: view.id,
+                ...row,
+              }),
+            // A webhook's delivery too: signed and sent by the running worker.
+            {
               projectId: opened.project.id,
               sourceId: view.id,
-              ...row,
-            }),
+              outbox: outboxQueue(opened.client, deps.clock),
+            },
           ),
         );
         const table = opened.tables.get(source.name);

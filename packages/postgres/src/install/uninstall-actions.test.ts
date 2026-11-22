@@ -58,6 +58,22 @@ describe("uninstall and the outbox's plugin actions", () => {
     expect(await count(`select 1 from facetdb.webhook_outbox`)).toBe(6);
   });
 
+  it("counts the built-in webhook's rows as webhooks: they name their plugin, and an endpoint", async () => {
+    await freshWorld();
+    await install();
+    await q(
+      `insert into facetdb.webhook_outbox (project_id, endpoint, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position)
+       values ($1, 'https://hooks.example.com/f', '{}', 1, 1, 'src', '1', '@facetdb/webhook', 'send', 0),
+              ($1, 'https://ops.example.com/f', '{}', 1, 1, null, null, '@facetdb/webhook', 'webhook', null)`,
+      [project.id],
+    );
+    const { result } = await runUninstall();
+    expect(result.ok && result.plan).toMatchObject({ pendingDeliveries: 2, pendingActions: [] });
+    expect(result.ok && result.notes).toContain(
+      `2 webhook deliveries of project ${project.id} still pending: the project and the webhook outbox stay until each is delivered or given up (retried for 24 hours).`,
+    );
+  });
+
   it("drops the outbox with the project once every action is delivered or closed untried", async () => {
     await freshWorld();
     await install();

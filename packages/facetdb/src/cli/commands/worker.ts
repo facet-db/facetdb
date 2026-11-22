@@ -40,6 +40,7 @@ import {
   OpenSurfaceError,
   onlyRecord,
   openStudioBuild,
+  outboxQueue,
   queueAction,
   requireAccountToServe,
   type StudioBuild,
@@ -70,6 +71,10 @@ import {
   PluginHostError,
   PluginProviderError,
   printableKey,
+  type WebhookOutbox,
+  webhookRefusal,
+  webhookSecret,
+  withOutbox,
 } from "../../plugin/index.ts";
 import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
@@ -418,6 +423,12 @@ export async function runWorkers(
     backoff: createBackoff({ clock, random: deps.random }),
     limiter: createInFlightLimiter({ clock }),
   });
+  // The built-in webhook's deliveries, a decision's and an alert's, are queued in the store's
+  // outbox for this project; the outbox's loop below signs and sends them.
+  const webhooks: WebhookOutbox = {
+    projectId: project.id,
+    outbox: outboxQueue(parts.storeClient, clock),
+  };
   // Every alert of this process goes to the channels the config names, bound to their plugins when
   // the config loaded (`loadWorkerConfig` refused any it could not bind). A channel that fails is a
   // printed line and a line of the alert's history, never a stopped pass. A reload keeps these
@@ -427,7 +438,7 @@ export async function runWorkers(
     clock,
     channels: bindChannels({
       config,
-      host: parts.plugins,
+      host: withOutbox(parts.plugins, webhooks),
       env: deps.env,
       clock,
       stop: deps.stopSignal,
@@ -469,15 +480,19 @@ export async function runWorkers(
    * the write is the connector's, on the source's own database, and the outbox is the store's. The
    * job is acked only once every step queued its row: a crash in between, or a row the store did
    * not take (core's `ActionNotQueued`), leaves the job queued, and the next pass, a poll later,
-   * writes the logged decision again with no model call and queues the rows again.
+   * writes the logged decision again with no model call and queues the rows again. A built-in
+   * webhook's row names its decision, so that second queueing adds no second delivery.
    */
   function actionsOf(source: SourceConfig): readonly ActionStep[] {
-    return actionSteps(source, (row) =>
-      queueAction(parts.storeClient, clock, {
-        projectId: project.id,
-        sourceId: idOf(source),
-        ...row,
-      }),
+    return actionSteps(
+      source,
+      (row) =>
+        queueAction(parts.storeClient, clock, {
+          projectId: project.id,
+          sourceId: idOf(source),
+          ...row,
+        }),
+      { ...webhooks, sourceId: idOf(source) },
     );
   }
 
@@ -834,13 +849,18 @@ export async function runWorkers(
       clock,
       fetch: deps.webhookFetch,
       abortAfter: deps.abortAfter,
-      secretFor: async (projectId, endpoint) => {
-        const secret = await store.credentials.get(projectId, `webhook:${endpoint}`);
-        if (secret === undefined) {
-          throw new Error(`no signing secret is stored for the webhook ${new URL(endpoint).host}`);
-        }
-        return secret;
+      // Every webhook is signed with the built-in webhook's secret, read when the worker started
+      // from the variable the config names; never another project's row with it. A refusal is the
+      // outbox's fixed "the signing secret could not be read": its text goes nowhere.
+      secretFor: (projectId) => {
+        const secret = projectId === project.id ? webhookSecret(parts.plugins) : undefined;
+        return secret === undefined
+          ? Promise.reject(new Error("this worker holds no signing secret for that webhook"))
+          : Promise.resolve(secret);
       },
+      // A webhook the built-in queued is sent only to an endpoint the config in force still names;
+      // one queued under an older config, or by a review from a stale copy, is closed.
+      refuseWebhook: (row) => webhookRefusal(fleet.config(), parts.plugins, row),
       // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
       // worker's other alerts are; one that cannot be raised is the outbox's to retry.
       onGiveUp: async (event, _signal, lastError) => {
