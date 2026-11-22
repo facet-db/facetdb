@@ -6,6 +6,9 @@ import {
   type ChannelMessage,
   type Clock,
   deliveryWords,
+  knownZone,
+  processZone,
+  type QuietWindow,
 } from "@facetdb/core";
 import {
   type AlertChannel,
@@ -35,9 +38,12 @@ import type { ChannelDefinition } from "./kinds.ts";
  * What a channel plugin says is a boundary. A delivery's error is never kept, printed or shown: the
  * host rejects with fixed words of its own (`ChannelFailed`), with no cause, as the plugin and
  * action hosts do for a plugin that holds secrets: a community plugin's message can hold its token
- * or a URL, in forms no search can rule out. The words a `check` returns are meant to be read at
- * load, so they are shown, cleaned and held to a length, unless they repeat any form of a secret
- * the plugin's settings read (`revealsSecret`): then only fixed words are.
+ * or a URL, in forms no search can rule out. One exception (so a test message's failure says what
+ * to fix): a first-party plugin's own delivery error (`FIRST_PARTY_DELIVERY_ERRORS`), whose words
+ * the plugin builds from fixed words, a reason code and its settings that are not secret, is kept,
+ * cleaned, unless it repeats a secret its settings read. The words a `check` returns are meant to
+ * be read at load, so they are shown, cleaned and held to a length, unless they repeat any form of
+ * a secret the plugin's settings read (`revealsSecret`): then only fixed words are.
  */
 
 /**
@@ -66,6 +72,57 @@ export function deliveryFailedWords(plugin: string): string {
   return `the channel plugin ${plugin} did not deliver the alert; its own error is not kept, as it may hold a secret`;
 }
 
+/**
+ * The delivery errors of FacetDB's own channel plugins, by package: each is built fresh from fixed
+ * words, the channel's address, the service's reason code or reply, and no cause, and the plugin
+ * leaves out a reply that repeats its secret (Telegram's token, the SMTP password). Only an error
+ * of this name thrown by that package is kept, and only while its words repeat no secret the
+ * plugin's settings read; every other error is the fixed words above.
+ */
+export const FIRST_PARTY_DELIVERY_ERRORS: Readonly<Record<string, string>> = {
+  "@facetdb/slack": "SlackDeliveryError",
+  "@facetdb/telegram": "TelegramDeliveryError",
+  "@facetdb/email": "EmailDeliveryError",
+};
+
+/** Reads the machine's time zone as Node names it, unjudged (core's `processZone`); a test passes its own. */
+export type ZoneReader = () => string | undefined;
+
+/**
+ * A channel's quiet hours as the worker runs them: in the zone the file names, else this machine's;
+ * undefined when it has none. The machine's zone comes from the environment (`TZ`), a boundary, so
+ * it is judged here, at load: when Node cannot read it (an empty `TZ` reads as `Etc/Unknown`, one
+ * it does not know as no zone at all), the channel is refused in words with the fix. A fall back to
+ * UTC was not taken: hours read in a zone nobody chose would hold alerts by day and send them by
+ * night, with nothing but a line in a long log to say so.
+ */
+export function quietWindowFor(
+  binding: ChannelBinding,
+  index: number,
+  machine: ZoneReader,
+): QuietWindow | undefined {
+  const { quiet } = binding;
+  if (quiet === undefined) {
+    return undefined;
+  }
+  const zone = knownZone(quiet.zone ?? machine());
+  if (zone !== undefined) {
+    return { from: quiet.from, to: quiet.to, zone };
+  }
+  const at = `alerts.channels[${index}] (${binding.address})`;
+  throw quiet.zone === undefined
+    ? new PluginHostError(
+        "channel-quiet-zone",
+        `${at} has quiet hours with no zone, and the time zone of this machine cannot be read (TZ is empty, or names a zone Node does not know), so FacetDB cannot tell when they start and end`,
+        `give its quiet hours a zone, such as quiet: { from: "${quiet.from}", to: "${quiet.to}", zone: "Europe/Berlin" }, or start FacetDB with TZ set to an IANA time zone name such as "Europe/Berlin" or "UTC"`,
+      )
+    : new PluginHostError(
+        "channel-quiet-zone",
+        `${at} has quiet hours in the zone "${quiet.zone}", which this machine does not know`,
+        'write an IANA time zone name this machine knows in quiet.zone, such as "Europe/Berlin" or "UTC"',
+      );
+}
+
 /** One channel of the config as the worker runs it: its address, what it sends, its quiet hours. */
 export type ChannelBinding = {
   /** `slack:#ops`, as the file writes it. */
@@ -75,7 +132,7 @@ export type ChannelBinding = {
   /** What the channel's `where` setting is given: `#ops`. */
   readonly where: string;
   readonly sends: AlertSends;
-  /** Carried for 156; absent when the file gives none. */
+  /** Its quiet hours as the file writes them (messages are held in them); absent when it gives none. */
   readonly quiet?: QuietHours;
 };
 
@@ -114,6 +171,8 @@ type Resolved = {
   readonly entry: ChannelDefinition<unknown>;
   /** `{ where }` as the entry's schema made it. */
   readonly settings: unknown;
+  /** Every value the plugin was handed from the environment: no words kept may repeat one. */
+  readonly values: readonly string[];
 };
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -295,20 +354,26 @@ function resolve(host: PluginHost, binding: ChannelBinding, index: number, env: 
       );
     }
   }
-  return { binding, hosted, entry, settings: parsed.data };
+  return { binding, hosted, entry, settings: parsed.data, values };
 }
 
 /**
  * Checks every channel the config names against the plugins the host loaded, as `facetdb worker`,
- * `studio`, `dev` and doctor load the config: the first refusal is thrown, in words with its fix,
- * never a secret's value. Answers the channels as bound.
+ * `studio`, `dev` and doctor load the config, and its quiet hours against the zone they are read in
+ * (`quietWindowFor`; `machine` reads this machine's, a test passes its own): the first refusal is
+ * thrown, in words with its fix, never a secret's value. Answers the channels as bound.
  */
 export function checkChannels(
   config: ProjectConfig,
   host: PluginHost,
   env: Env,
+  machine: ZoneReader = processZone,
 ): readonly ChannelBinding[] {
-  return channelsOf(config).map((binding, index) => resolve(host, binding, index, env).binding);
+  return channelsOf(config).map((binding, index) => {
+    const resolved = resolve(host, binding, index, env).binding;
+    quietWindowFor(binding, index, machine);
+    return resolved;
+  });
 }
 
 export type ChannelHostDeps = {
@@ -324,10 +389,29 @@ export type ChannelHostDeps = {
    * as the provider reads it, so a command that never delivers never asks for it.
    */
   readonly stop: () => AbortSignal;
+  /**
+   * Reads this machine's time zone, which quiet hours with no `zone` are read in; absent, the
+   * process's own (`processZone`). Judged at binding, as `checkChannels` judges it.
+   */
+  readonly machineZone?: ZoneReader;
 };
 
 /** A cut-off delivery, told apart from what a plugin rejected with. */
 type Cut = { readonly cut: string };
+
+/**
+ * A first-party plugin's own delivery error in words that may be kept (`FIRST_PARTY_DELIVERY_ERRORS`),
+ * cleaned and held to a length; undefined for anything else, for empty words, and for words that
+ * repeat any form of a value the plugin read from the environment.
+ */
+function firstPartyWords(resolved: Resolved, error: unknown): string | undefined {
+  const name = FIRST_PARTY_DELIVERY_ERRORS[resolved.hosted.packageName];
+  if (name === undefined || !(error instanceof Error) || error.name !== name) {
+    return undefined;
+  }
+  const words = deliveryWords(error.message);
+  return words === "" || revealsSecret(error.message, resolved.values) ? undefined : words;
+}
 
 /** Delivers one message through a resolved channel, raced against the bound and the stop. */
 async function deliverThrough(
@@ -377,10 +461,12 @@ async function deliverThrough(
   let outcome: Cut | undefined;
   try {
     outcome = await Promise.race([call.then(() => undefined), cut]);
-  } catch {
-    // Whatever the plugin threw (a `ChannelFailed` of its own included), its words, cause and
-    // properties go nowhere.
-    throw new ChannelFailed(deliveryFailedWords(resolved.hosted.packageName));
+  } catch (error) {
+    // Whatever the plugin threw (a `ChannelFailed` of its own included), its cause and properties
+    // go nowhere, and its words too unless it is a first-party plugin's own delivery error.
+    throw new ChannelFailed(
+      firstPartyWords(resolved, error) ?? deliveryFailedWords(resolved.hosted.packageName),
+    );
   } finally {
     settled.abort();
     stop.removeEventListener("abort", onStop);
@@ -399,15 +485,33 @@ export function deliveryFailureLine(failure: ChannelFailure): string {
 }
 
 /**
+ * The line the worker prints for a quiet-hours summary a channel did not take: the address and the
+ * kept words, and what happens next.
+ */
+export function summaryFailureLine(failure: ChannelFailure): string {
+  return `alert channel ${failure.channel}: ${failure.error}. Its summary of the alerts quiet hours held was not sent; FacetDB tries again in 5 minutes, and each alert is on the Alerts page.`;
+}
+
+/**
+ * The line the worker prints for a quiet-hours summary a channel took that could not be marked sent
+ * in the store: a summary is delivered at least once, and this one may come twice.
+ */
+export function summaryUnmarkedLine(channel: string): string {
+  return `alert channel ${channel}: its summary of the alerts quiet hours held was sent, but could not be marked sent in the store, so a worker may send it again in 5 minutes.`;
+}
+
+/**
  * The channels the config names, bound to their plugins: what each `createAlerts` of the process is
  * given. Throws the same refusals as `checkChannels`. A config with no `alerts` binds none.
  */
 export function bindChannels(deps: ChannelHostDeps): readonly BoundChannel[] {
   return channelsOf(deps.config).map((binding, index) => {
     const resolved = resolve(deps.host, binding, index, deps.env);
+    const quiet = quietWindowFor(binding, index, deps.machineZone ?? processZone);
     return {
       name: binding.address,
       takes: (severity: AlertSeverity) => sendsSeverity(binding.sends, severity),
+      ...(quiet === undefined ? {} : { quiet }),
       deliver: (message: ChannelMessage) => deliverThrough(deps, resolved, message),
     };
   });

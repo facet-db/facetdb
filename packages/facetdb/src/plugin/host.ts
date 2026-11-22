@@ -106,6 +106,8 @@ export type PluginRefusal =
   | "plugin-no-channel"
   /** An alert channel's `where` that the channel's own schema, or its `check`, refuses (channel-host.ts). */
   | "channel-where"
+  /** An alert channel's quiet hours with no zone on a machine whose time zone Node cannot read. */
+  | "channel-quiet-zone"
   /** An action the config names that its plugin does not provide (action-host.ts). */
   | "plugin-no-action"
   /** An action's settings, or its `else`, that the action's own schema refuses (action-host.ts). */

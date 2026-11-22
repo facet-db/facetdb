@@ -4,6 +4,7 @@ import type { AppEnv } from "../auth/middleware.ts";
 import { ApiError } from "../errors.ts";
 import type { AccessService } from "./access.ts";
 import type { AlertsService } from "./alerts.ts";
+import { type AlertTestDoor, alertTestRoutes, NO_ALERT_TEST } from "./alerts-test.ts";
 import { decisionsRoutes } from "./decisions.ts";
 import type { DecisionsService } from "./decisions-service.ts";
 import { type HomeService, homeRoutes } from "./home.ts";
@@ -25,6 +26,8 @@ export type DataServices = {
   /** The Alerts page's channels and history, and Settings' studio access. */
   readonly alerts: AlertsService;
   readonly access: AccessService;
+  /** The Alerts page's test button; absent, the route says this worker sends none. */
+  readonly alertTest?: AlertTestDoor;
 };
 
 /** A source as the config names one; anything else could never match, so it is refused plainly. */
@@ -92,6 +95,8 @@ export function dataRoutes(services: DataServices): Hono<AppEnv> {
     }
     return c.json(outcome.alerts);
   });
+  // A test message through one channel, now.
+  route.route("/", alertTestRoutes(services.alertTest ?? NO_ALERT_TEST));
   route.get("/studio", async (c) => c.json(await services.access.access()));
 
   return route;

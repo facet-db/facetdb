@@ -1,9 +1,10 @@
-import { DEFAULT_WORKER_LIMITS, monthOf } from "@facetdb/core";
+import { DEFAULT_WORKER_LIMITS, monthOf, type SummaryReport } from "@facetdb/core";
 import { FakeClock, FakeDatabase, FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { DEFAULT_FETCH_TIMEOUT_MS, GIVE_UP_AFTER_MS, RETRY_FIRST_MS } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
+import { summaryFailureLine, summaryUnmarkedLine } from "../../plugin/index.ts";
 import { engineFor, lazyEngine, openConnector } from "../engines.ts";
 import { runEnding } from "../pipe.ts";
 import { sharePools } from "../pools.ts";
@@ -31,6 +32,9 @@ import {
   deliverUntil,
   installMissing,
   limitsFor,
+  OUTBOX_EVERY_MS,
+  OUTBOX_PASS_FAILED,
+  SUMMARY_PASS_FAILED,
   WORKER_CONNECTIONS,
 } from "./worker.ts";
 
@@ -1116,6 +1120,79 @@ describe("facetdb worker", () => {
 });
 
 describe("the worker's outbox loop", () => {
+  it("@timing starts the quiet-hours summaries off the outbox's path, one tick at a time, prints what each came to in fixed words, and waits for the one on its way at the stop", async () => {
+    const driver = new Error(`connect ECONNREFUSED: ${WORKER_URL}`);
+    const clock = new SteppedClock(START);
+    const stop = new AbortController();
+    const printed: string[] = [];
+    let passes = 0;
+    const ticks: {
+      readonly resolve: (report: SummaryReport) => void;
+      readonly reject: (error: unknown) => void;
+    }[] = [];
+
+    const looping = deliverUntil(
+      stop.signal,
+      () => {
+        passes += 1;
+        return passes === 1 ? Promise.reject(driver) : Promise.resolve({ alertFailures: [] });
+      },
+      clock,
+      (text) => printed.push(text),
+      () =>
+        new Promise<SummaryReport>((resolve, reject) => {
+          ticks.push({ resolve, reject });
+        }),
+    );
+
+    // The first pass: the outbox failed in fixed words, and a tick started.
+    await vi.waitFor(() => expect(ticks).toHaveLength(1));
+    // The tick hangs on a channel: the outbox goes on every 2 seconds, and no second tick starts.
+    for (let pass = 2; pass <= 4; pass += 1) {
+      clock.advance(OUTBOX_EVERY_MS);
+      await vi.waitFor(() => expect(passes).toBe(pass));
+    }
+    expect(ticks).toHaveLength(1);
+    ticks[0]?.resolve({
+      failures: [{ channel: "slack:#ops", error: "the channel refused it" }],
+      unmarked: ["slack:#data"],
+      storeFailed: true,
+    });
+    await vi.waitFor(() => expect(printed).toHaveLength(4));
+    clock.advance(OUTBOX_EVERY_MS);
+    await vi.waitFor(() => expect(ticks).toHaveLength(2));
+    ticks[1]?.reject(driver);
+    await vi.waitFor(() => expect(printed).toHaveLength(5));
+
+    // A tick on its way when the worker stops is waited for.
+    clock.advance(OUTBOX_EVERY_MS);
+    await vi.waitFor(() => expect(ticks).toHaveLength(3));
+    stop.abort();
+    let ended = false;
+    void looping.then(() => {
+      ended = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ended).toBe(false);
+    ticks[2]?.resolve({ failures: [], unmarked: [], storeFailed: false });
+    await looping;
+
+    expect(printed).toEqual([
+      OUTBOX_PASS_FAILED,
+      summaryFailureLine({ channel: "slack:#ops", error: "the channel refused it" }),
+      summaryUnmarkedLine("slack:#data"),
+      SUMMARY_PASS_FAILED,
+      SUMMARY_PASS_FAILED,
+    ]);
+    expect(printed.slice(1, 3)).toEqual([
+      "alert channel slack:#ops: the channel refused it. Its summary of the alerts quiet hours held was not sent; FacetDB tries again in 5 minutes, and each alert is on the Alerts page.",
+      "alert channel slack:#data: its summary of the alerts quiet hours held was sent, but could not be marked sent in the store, so a worker may send it again in 5 minutes.",
+    ]);
+    // The driver's words name the connection string: none of them is printed.
+    expect(printed.join("\n")).not.toContain("worker-password");
+    expect(printed.join("\n")).not.toContain("ECONNREFUSED");
+  });
+
   it("prints every give-up alert that could not be raised, and drops none", async () => {
     const event = (deliveryId: string) => ({
       projectId: "p",

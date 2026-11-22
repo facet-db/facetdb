@@ -38,6 +38,11 @@ export type Links = {
    * and last error (the studio shows no outbox of its own), else the docs page of that kind.
    */
   readonly gaveUp: (kind: "action" | "webhook") => string;
+  /**
+   * The summary of what a channel's quiet hours held, and a test message: the Alerts page, else the
+   * docs page on alerts.
+   */
+  readonly alerts: () => string;
   /** The spending cap: Settings, else the docs page. */
   readonly spendingCap: () => string;
   /** A question set changed: Questions, on that source, else the docs page. */
@@ -105,6 +110,7 @@ export function createLinks(base: StudioBase): Links {
     backfill: () => page("/sources", "backfill"),
     access: () => page("/sources", "worker-login"),
     gaveUp: (kind) => page("/alerts", kind === "action" ? "actions" : "webhooks"),
+    alerts: () => page("/alerts", "alerts"),
     spendingCap: () => page("/settings", "spending-cap"),
     questionSet: (source) => page(`/questions?source=${encode(source)}`, "question-set"),
     record: (source, key) => {

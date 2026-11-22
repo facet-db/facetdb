@@ -63,6 +63,8 @@ export type {
 } from "./config/versions.ts";
 export { VERSION_HISTORY_SHOWN } from "./config/versions.ts";
 export type {
+  AlertTestDoor,
+  AlertTestOutcome,
   Capture,
   DashboardDatabase,
   DashboardDoor,

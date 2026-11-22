@@ -270,7 +270,11 @@ describe("GET /v1/alerts", () => {
     });
     const t = rig({
       history: [
-        record("raised", NOW, finished, { severity: "information" }),
+        // Held for a channel in its quiet hours; an address that is not a name is not repeated.
+        record("raised", NOW, finished, {
+          severity: "information",
+          held: ["slack:#ops", "hook:https://hooks.example.com/T0?token=s3cret"],
+        }),
         record("resolved", NOW - 15 * HOUR, failing),
         record("raised", NOW - 16 * HOUR, failing),
       ],
@@ -295,6 +299,10 @@ describe("GET /v1/alerts", () => {
         raisedBeforeHistory: false,
         delivered: true,
         pending: false,
+        held: [
+          { kind: "slack", name: "#ops", address: "slack:#ops" },
+          { kind: "hook", name: null, address: null },
+        ],
       },
       {
         at: "2026-11-04T22:10:00.000Z",
@@ -311,8 +319,10 @@ describe("GET /v1/alerts", () => {
         raisedBeforeHistory: false,
         delivered: true,
         pending: false,
+        held: [],
       },
     ]);
+    expect(JSON.stringify(json)).not.toContain("s3cret");
   });
 
   it("counts an alert raised again every 30 minutes as sent each time, resolved once", async () => {

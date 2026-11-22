@@ -17,6 +17,7 @@ import {
   type QuestionSet,
   reviewsOf,
   type SpendingGate,
+  type SummaryReport,
   type Worker,
   type WorkerWatchStep,
 } from "@facetdb/core";
@@ -71,6 +72,8 @@ import {
   PluginHostError,
   PluginProviderError,
   printableKey,
+  summaryFailureLine,
+  summaryUnmarkedLine,
   type WebhookOutbox,
   webhookRefusal,
   webhookSecret,
@@ -995,6 +998,16 @@ export async function runWorkers(
         host: options.host,
         alertChannels: () => channelsOf(config).map((channel) => ({ ...channel, bound: true })),
         fileAlertChannels: () => channelsOf(fleet.config()),
+        // The test button sends through the channels this worker runs; none under --once.
+        ...(options.once
+          ? {}
+          : {
+              alertTest: {
+                available: true,
+                send: (address: string) =>
+                  alerts.test(address, { project: project.id, link: links.alerts() }),
+              },
+            }),
         // The review endpoints: the store's queue, the sources the fleet runs now, and per source
         // the log, the connector, the actions and the question set and version of the loop in
         // force, all read on every call (config-reload.ts, `reviewLookups`).
@@ -1237,7 +1250,14 @@ export async function runWorkers(
           stopAll.abort();
           throw error;
         }),
-        deliverUntil(signal, () => outbox.deliverDue(clock.now()), clock, print),
+        // Beside the outbox, each channel whose quiet hours ended is sent its summary.
+        deliverUntil(
+          signal,
+          () => outbox.deliverDue(clock.now()),
+          clock,
+          print,
+          () => alerts.summarize({ project: project.id, link: links.alerts() }),
+        ),
         // This worker's row every 15 seconds, a look at the others' every 30; on the clock, beside
         // the passes and never inside one, ended by the signal like the loops.
         watch.run(signal),
@@ -1289,15 +1309,44 @@ export async function runWorkers(
 }
 
 /**
- * The outbox's own loop: deliver what is due, wait, again, until the signal aborts. A give-up
- * alert that could not be raised is printed, every one: once real alert channels exist, this line
- * is the only trace of an alert that never went out.
+ * What the loop prints when a pass of the outbox fails (in fixed text): a driver's message can name
+ * the store's connection string, so it is not printed.
+ */
+export const OUTBOX_PASS_FAILED =
+  "webhook delivery failed: the outbox in the store could not be worked through (the database's own words are not printed, as they can name its connection string); FacetDB tries again in 2 seconds, and nothing queued is lost";
+
+/** What the loop prints when the quiet-hours summaries could not read or write the store. */
+export const SUMMARY_PASS_FAILED =
+  "quiet hours: the summaries of the alerts they held could not be read or written in the store (the database's own words are not printed, as they can name its connection string); FacetDB tries again in 2 seconds";
+
+/** Prints what one tick of the quiet-hours summaries came to: a line for each part. */
+function printSummaries(report: SummaryReport, print: (text: string) => void): void {
+  for (const failure of report.failures) {
+    print(summaryFailureLine(failure));
+  }
+  for (const channel of report.unmarked) {
+    print(summaryUnmarkedLine(channel));
+  }
+  if (report.storeFailed) {
+    print(SUMMARY_PASS_FAILED);
+  }
+}
+
+/**
+ * The outbox's own loop: deliver what is due, wait, again, until the signal aborts. A give-up alert
+ * that could not be raised is printed, every one: once real alert channels exist, this line is the
+ * only trace of an alert that never went out. Each pass also starts the quiet-hours summaries that
+ * are due (`summarize`) when none is on its way, off the outbox's path (a channel that hangs to its
+ * bound holds no webhook), prints what each came to, and waits for the one on its way before it
+ * returns (the stop has cut its deliveries off by then).
  */
 export async function deliverUntil(
   signal: AbortSignal,
   deliver: () => Promise<Pick<DeliveryReport, "alertFailures">>,
   clock: { sleep(ms: number): Promise<void> },
   print: (text: string) => void,
+  summarize: () => Promise<SummaryReport> = () =>
+    Promise.resolve({ failures: [], unmarked: [], storeFailed: false }),
 ): Promise<void> {
   const aborted = new Promise<void>((resolve) => {
     if (signal.aborted) {
@@ -1306,14 +1355,25 @@ export async function deliverUntil(
       signal.addEventListener("abort", () => resolve(), { once: true });
     }
   });
+  let summarizing: Promise<void> | undefined;
   while (!signal.aborted) {
     try {
       printAlertFailures(await deliver(), print);
-    } catch (error) {
-      print(`webhook delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+    } catch {
+      print(OUTBOX_PASS_FAILED);
     }
+    summarizing ??= Promise.resolve()
+      .then(summarize)
+      .then(
+        (report) => printSummaries(report, print),
+        () => print(SUMMARY_PASS_FAILED),
+      )
+      .finally(() => {
+        summarizing = undefined;
+      });
     await Promise.race([clock.sleep(OUTBOX_EVERY_MS), aborted]);
   }
+  await summarizing;
 }
 
 /** Every give-up alert of a delivery pass that could not be raised, one line each, none dropped. */

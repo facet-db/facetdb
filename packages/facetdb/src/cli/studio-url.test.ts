@@ -427,6 +427,9 @@ function recordingAlertStore(): AlertStore & { readonly history: AlertRecord[] }
     saveWorkerBeat: () => Promise.resolve(0),
     removeWorkerBeat: () => Promise.resolve(),
     takeDeadWorkers: () => Promise.resolve({ taken: [], beating: 0 }),
+    quietState: () => Promise.resolve(undefined),
+    swapQuietState: () => Promise.resolve(true),
+    heldFor: () => Promise.resolve([]),
   };
 }
 

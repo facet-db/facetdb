@@ -102,6 +102,8 @@ const alertRecord = z.object({
   event: alertEvent,
   delivered: z.boolean(),
   deliveries: z.array(alertDelivery).exactOptional(),
+  // The channels whose quiet hours held the message; absent when none did.
+  held: z.array(z.string()).exactOptional(),
   pending: z.literal(true).exactOptional(),
 });
 

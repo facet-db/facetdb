@@ -670,3 +670,99 @@ describe("the alert history's deliveries on a real Postgres", () => {
     });
   });
 });
+
+describe("a channel's quiet-hours summary on a real Postgres", () => {
+  const KEY = "quiet|proj_listings|slack:#ops";
+  const CLAIMED = { until: 2_000, since: 1_000, triedAt: 2_060, sentAt: null };
+
+  it("lets one of two connections swapping the same state at the very same moment write", async () => {
+    const [first, second] = await Promise.all([newStore(), newStore()]);
+    expect(await first.alerts.swapQuietState(KEY, undefined, CLAIMED)).toBe(true);
+    // A third connection holds the row, so both swaps reach it and wait there with the same
+    // condition: the race the claim settles.
+    const lock = holdLock("select 1 from facetdb.alerts where key = $1 for update", [KEY]);
+    await lock.holding;
+    const byA = first.alerts.swapQuietState(KEY, CLAIMED, { ...CLAIMED, sentAt: 1 });
+    const byB = second.alerts.swapQuietState(KEY, CLAIMED, { ...CLAIMED, sentAt: 2 });
+    try {
+      await lockWaiters(open(), 2);
+    } finally {
+      lock.release();
+      await lock.done;
+    }
+    const answers = await Promise.all([byA, byB]);
+    expect([...answers].sort()).toEqual([false, true]);
+    expect(await first.alerts.quietState(KEY)).toEqual({
+      ...CLAIMED,
+      sentAt: answers[0] === true ? 1 : 2,
+    });
+  });
+
+  it("lets one of two connections claiming from nothing at once write, the row inserted under them rolled back", async () => {
+    const [first, second] = await Promise.all([newStore(), newStore()]);
+    // A third connection inserts the key and holds it uncommitted: both claims wait on the key, and
+    // when it rolls back exactly one of them inserts.
+    const holding = deferred();
+    const release = deferred();
+    const done = open()
+      .transaction(async (query) => {
+        await query(`insert into facetdb.alerts (key, state) values ($1, '{}'::jsonb)`, [KEY]);
+        holding.resolve();
+        await release.promise;
+        throw new Error("rolled back on purpose");
+      })
+      .catch(() => undefined);
+    await holding.promise;
+    const byA = first.alerts.swapQuietState(KEY, undefined, { ...CLAIMED, triedAt: 1 });
+    const byB = second.alerts.swapQuietState(KEY, undefined, { ...CLAIMED, triedAt: 2 });
+    try {
+      await lockWaiters(open(), 2);
+    } finally {
+      release.resolve();
+      await done;
+    }
+    const answers = await Promise.all([byA, byB]);
+    expect([...answers].sort()).toEqual([false, true]);
+    expect((await second.alerts.quietState(KEY))?.triedAt).toBe(answers[0] === true ? 1 : 2);
+  });
+
+  it("reads what was held for a channel through postgres.js's bindings: its project, its address, its span", async () => {
+    const { alerts } = await newStore();
+    const event = {
+      kind: "backfill_failed" as const,
+      what: "w",
+      project: "proj_listings",
+      source: "listings",
+      question: null,
+      did: "d",
+      link: "l",
+    };
+    const lines: readonly [number, readonly string[] | undefined, string][] = [
+      [1_000, ["slack:#ops"], "proj_listings"],
+      [1_500, ["email:ops@example.com"], "proj_listings"],
+      [1_600, ["slack:#ops"], "another"],
+      [1_700, undefined, "proj_listings"],
+      [2_000, ["slack:#ops"], "proj_listings"],
+    ];
+    for (const [at, held, project] of lines) {
+      await alerts.append({
+        at,
+        key: `k${at}`,
+        phase: "raised",
+        severity: "warning",
+        event: { ...event, project },
+        delivered: true,
+        ...(held === undefined ? {} : { held }),
+      });
+    }
+    expect(await alerts.heldFor("proj_listings", "slack:#ops", 1_000, 2_000)).toEqual([
+      {
+        key: "k1000",
+        phase: "raised",
+        severity: "warning",
+        kind: "backfill_failed",
+        source: "listings",
+      },
+    ]);
+  });
+});

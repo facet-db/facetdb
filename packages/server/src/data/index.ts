@@ -18,9 +18,12 @@ export type {
   ChannelQuietHours,
   ChannelSends,
   ConfiguredChannel,
+  HeldChannelView,
   RunningChannel,
 } from "./alerts.ts";
 export { ALERT_HISTORY_LINES, channelOf, createAlertsService, eventsOf } from "./alerts.ts";
+export type { AlertTestDoor, AlertTestOutcome } from "./alerts-test.ts";
+export { NO_ALERT_TEST } from "./alerts-test.ts";
 export { decisionsRoutes } from "./decisions.ts";
 export type {
   DecisionRow,

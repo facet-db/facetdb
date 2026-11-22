@@ -42,7 +42,7 @@ export {
   webhookSecret,
   withOutbox,
 } from "./builtin/webhook.ts";
-export type { ChannelBinding, ChannelHostDeps } from "./channel-host.ts";
+export type { ChannelBinding, ChannelHostDeps, ZoneReader } from "./channel-host.ts";
 export {
   bindChannels,
   channelsOf,
@@ -52,8 +52,12 @@ export {
   DELIVERY_TIMED_OUT,
   deliveryFailedWords,
   deliveryFailureLine,
+  FIRST_PARTY_DELIVERY_ERRORS,
+  quietWindowFor,
   revealsSecret,
   sendsSeverity,
+  summaryFailureLine,
+  summaryUnmarkedLine,
 } from "./channel-host.ts";
 export type { Plugin, PluginDefinition, PluginIssue } from "./define.ts";
 export { definePlugin, isPlugin, PluginError, packageNames, shortName } from "./define.ts";

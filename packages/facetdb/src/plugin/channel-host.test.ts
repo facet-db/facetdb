@@ -7,6 +7,7 @@ import {
   type Clock,
   createAlerts,
   eventKey,
+  machineZone,
   RETRY_EVERY_MS,
 } from "@facetdb/core";
 import { FakeAlertStore } from "@facetdb/core/testing";
@@ -33,6 +34,7 @@ import {
   definePlugin,
   deliveryFailedWords,
   deliveryFailureLine,
+  FIRST_PARTY_DELIVERY_ERRORS,
   type Plugin,
   type PluginContext,
   type PluginHost,
@@ -54,9 +56,10 @@ import {
 const SLACK_TOKEN = "xoxb-1234567890-s3cretSlackTokenValue";
 const HOSTILE_TOKEN = "hst_9f8e7d6c5b4a3210-TOPSECRETVALUE";
 const HOSTILE_HOOK = "https://hooks.example.com/services/T0/B0/s3cretHookPath";
-const ENV = { SLACK_TOKEN, HOSTILE_TOKEN, HOSTILE_HOOK };
+const TELEGRAM_TOKEN = "7301928374:AAF-q9Zr4Wx2Lm8Tn5Vb0Kd";
+const ENV = { SLACK_TOKEN, HOSTILE_TOKEN, HOSTILE_HOOK, TELEGRAM_TOKEN };
 // The hook's scheme is in every alert's own link: the rest of the URL is the secret.
-const SECRETS = [SLACK_TOKEN, HOSTILE_TOKEN, HOSTILE_HOOK.slice("https://".length)];
+const SECRETS = [SLACK_TOKEN, HOSTILE_TOKEN, HOSTILE_HOOK.slice("https://".length), TELEGRAM_TOKEN];
 const START = Date.UTC(2026, 10, 14, 9, 0, 0);
 
 /** Every 8 characters in a row of each secret: none may appear in a word FacetDB keeps or shows. */
@@ -289,6 +292,58 @@ function pluginsOf(rig: Rig): Readonly<Record<string, Plugin>> {
       }),
     },
   });
+  /** An error with the name a first-party plugin gives its own, holding `words`. */
+  const named = (name: string, words: string) => Object.assign(new Error(words), { name });
+  // Stands in for FacetDB's own Telegram plugin: its delivery error is built from fixed words and
+  // Telegram's reason, unless `where` asks for one that repeats the token, or for another error
+  // altogether (what `fetch` throws holds the URL, and the token is in its path).
+  const telegram = definePlugin({
+    name: "telegram",
+    version: "1.0.0",
+    facetdb: "*",
+    config: z.object({ token: z.secret() }),
+    channels: {
+      telegram: channel({
+        config: z.object({ where: z.string() }),
+        deliver: async (ctx, message, settings: { where: string }) => {
+          rig.sent.push({
+            plugin: "telegram",
+            entry: "telegram",
+            ctx,
+            message,
+            settings,
+            historyAtCall: rig.history(),
+          });
+          const token = ctx.secrets["token"] ?? "";
+          if (settings.where === "echo") {
+            throw named("TelegramDeliveryError", `sendMessage was refused for bot${token}`);
+          }
+          if (settings.where === "raw") {
+            throw new TypeError(`fetch failed: https://api.telegram.org/bot${token}/sendMessage`);
+          }
+          throw named(
+            "TelegramDeliveryError",
+            "sendMessage was refused: Telegram answered 400 (chat not found).\nCheck the chat id",
+          );
+        },
+      }),
+    },
+  });
+  // A community plugin that names its error like a first-party one: its words are not kept.
+  const spoof = definePlugin({
+    name: "spoof",
+    version: "1.0.0",
+    facetdb: "*",
+    config: z.object({}),
+    channels: {
+      spoof: channel({
+        config: z.object({ where: z.string() }),
+        deliver: async () => {
+          throw named("SlackDeliveryError", `refused with ${HOSTILE_TOKEN}`);
+        },
+      }),
+    },
+  });
   const ends: ((error?: Error) => void)[] = [];
   Object.assign(rig.hanging, {
     end: (error?: Error) => {
@@ -302,8 +357,10 @@ function pluginsOf(rig: Rig): Readonly<Record<string, Plugin>> {
     "@facetdb/mailer": mailer,
     "@facetdb/hollow": hollow,
     "@facetdb/multi": multi,
+    "@facetdb/telegram": telegram,
     "facetdb-plugin-hostile": hostile,
     "facetdb-plugin-hangs": hangs,
+    "facetdb-plugin-spoof": spoof,
   };
 }
 
@@ -437,7 +494,7 @@ describe("binding a channel", () => {
     expect(w.rig.checked[0]?.ctx.secrets).toEqual({ token: SLACK_TOKEN });
   });
 
-  it("carries sends and quiet hours on the binding, quiet acted on by no one yet", async () => {
+  it("carries sends and quiet hours on the binding", async () => {
     const w = world();
     const config = project([
       { to: "slack:#ops", sends: "warnings", quiet: { from: "22:00", to: "07:00", zone: "UTC" } },
@@ -847,6 +904,131 @@ describe("the bound on a delivery", () => {
     expect(w.store.history[0]?.deliveries).toEqual([
       { channel: "slack:#ops", ok: true },
       { channel: "hangs:quick", ok: true },
+    ]);
+  });
+});
+
+describe("a channel's quiet hours and a first-party plugin's words", () => {
+  it("binds quiet hours as core reads them: in the zone the file names, else this machine's", async () => {
+    const w = world();
+    const config = project([
+      { to: "slack:#ops", quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" } },
+      { to: "slack:#data", quiet: { from: "23:00", to: "06:00" } },
+      "slack:#all",
+    ]);
+    const bound = bindChannels({
+      config,
+      host: await w.hostFor(config),
+      env: ENV,
+      clock: w.clock,
+      stop: () => w.stop.signal,
+      machineZone: () => "Asia/Tokyo",
+    });
+    expect(bound.map((channel) => channel.quiet)).toEqual([
+      { from: "22:00", to: "07:00", zone: "Europe/Berlin" },
+      { from: "23:00", to: "06:00", zone: "Asia/Tokyo" },
+      undefined,
+    ]);
+    // With no reader given, the process's own zone, when Node can read it.
+    const machine = machineZone();
+    if (machine !== undefined) {
+      const [, data] = bindChannels({
+        config,
+        host: await w.hostFor(config),
+        env: ENV,
+        clock: w.clock,
+        stop: () => w.stop.signal,
+      });
+      expect(data?.quiet?.zone).toBe(machine);
+    }
+  });
+
+  it("refuses at load quiet hours with no zone on a machine whose zone Node cannot read: an empty TZ (Etc/Unknown) or an unknown one (none)", async () => {
+    const w = world();
+    const config = project([
+      "slack:#all",
+      { to: "slack:#berlin", quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" } },
+      { to: "slack:#ops", quiet: { from: "22:00", to: "07:00" } },
+    ]);
+    const host = await w.hostFor(config);
+    for (const unread of [() => "Etc/Unknown", () => undefined, () => "Foo/Bar"]) {
+      const refusals = [
+        () => checkChannels(config, host, ENV, unread),
+        () =>
+          bindChannels({
+            config,
+            host,
+            env: ENV,
+            clock: w.clock,
+            stop: () => w.stop.signal,
+            machineZone: unread,
+          }),
+      ];
+      for (const refuse of refusals) {
+        let refusal: unknown;
+        try {
+          refuse();
+        } catch (error) {
+          refusal = error;
+        }
+        expect(refusal).toBeInstanceOf(PluginHostError);
+        expect(refusal).toMatchObject({
+          code: "channel-quiet-zone",
+          message:
+            "alerts.channels[2] (slack:#ops) has quiet hours with no zone, and the time zone of this machine cannot be read (TZ is empty, or names a zone Node does not know), so FacetDB cannot tell when they start and end",
+          fix: 'give its quiet hours a zone, such as quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" }, or start FacetDB with TZ set to an IANA time zone name such as "Europe/Berlin" or "UTC"',
+        });
+      }
+    }
+    // A channel that names its zone, and one with no quiet hours, need no machine zone.
+    const named = project([
+      "slack:#all",
+      { to: "slack:#berlin", quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" } },
+    ]);
+    expect(
+      checkChannels(named, await w.hostFor(named), ENV, () => undefined).map((c) => c.address),
+    ).toEqual(["slack:#all", "slack:#berlin"]);
+  });
+
+  it("holds a warning for a channel inside its hours, the plugin never called, and delivers a critical alert", async () => {
+    const w = world();
+    // The world's clock reads 09:00Z.
+    const { alerts } = await w.alertsFor(
+      project([{ to: "slack:#ops", quiet: { from: "08:00", to: "10:00", zone: "UTC" } }]),
+    );
+    await alerts.raise(BY_SEVERITY.warning);
+    expect(w.rig.sent).toEqual([]);
+    expect(w.store.history).toEqual([
+      expect.objectContaining({ severity: "warning", held: ["slack:#ops"] }),
+    ]);
+    await alerts.raise(BY_SEVERITY.critical);
+    expect(w.rig.sent.map((sent) => sent.message.severity)).toEqual(["critical"]);
+  });
+
+  it("keeps a first-party plugin's own delivery error, cleaned, and not one that repeats its secret, another error of it, or a community plugin's of the same name", async () => {
+    const w = world();
+    const { alerts } = await w.alertsFor(
+      project(["telegram:ops", "telegram:echo", "telegram:raw", "spoof:ops"], {
+        telegram: { token: env("TELEGRAM_TOKEN") },
+        spoof: {},
+      }),
+    );
+    const outcome = await alerts.raise(BY_SEVERITY.critical);
+    expect(outcome.failures).toEqual([
+      {
+        channel: "telegram:ops",
+        error: "sendMessage was refused: Telegram answered 400 (chat not found). Check the chat id",
+      },
+      { channel: "telegram:echo", error: deliveryFailedWords("@facetdb/telegram") },
+      { channel: "telegram:raw", error: deliveryFailedWords("@facetdb/telegram") },
+      { channel: "spoof:ops", error: deliveryFailedWords("facetdb-plugin-spoof") },
+    ]);
+    expect(leaks(JSON.stringify(w.store.history))).toEqual([]);
+    expect(leaks(w.printed.join("\n"))).toEqual([]);
+    expect(Object.keys(FIRST_PARTY_DELIVERY_ERRORS)).toEqual([
+      "@facetdb/slack",
+      "@facetdb/telegram",
+      "@facetdb/email",
     ]);
   });
 });

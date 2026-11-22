@@ -14,6 +14,7 @@ import {
   type ProjectConfigDoor,
 } from "./config/service.ts";
 import {
+  type AlertTestDoor,
   type ConfiguredChannel,
   createAccessService,
   createAlertsService,
@@ -92,6 +93,12 @@ export type ServerDeps = {
   readonly alertChannels: () => readonly RunningChannel[];
   readonly fileAlertChannels: () => readonly ConfiguredChannel[];
   /**
+   * The Alerts page's test button: a test message through one channel the worker runs, now, as only
+   * the CLI can send one (the channels are bound to their plugins there). Absent, a stub, as under
+   * `facetdb worker --once`: the route says this worker sends none.
+   */
+  readonly alertTest?: AlertTestDoor;
+  /**
    * What the review endpoints decide with: the store's queue, and per source, keyed by its store
    * id, the decision log, the connector, the actions and the question set in force; the source
    * names are the config's, those the worker runs now, read on every call. The project is
@@ -166,6 +173,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
         reads: dashboard.reads,
       }),
       access: createAccessService({ host: deps.host, reviewers }),
+      ...(deps.alertTest === undefined ? {} : { alertTest: deps.alertTest }),
     },
     review: createReviewEndpointService({ ...deps.review, projectId: deps.config.projectId }),
     ...(deps.setup === undefined

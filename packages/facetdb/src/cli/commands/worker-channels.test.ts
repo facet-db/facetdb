@@ -1,6 +1,6 @@
 import type { ChannelMessage } from "@facetdb/core";
 import { createFakeProvider } from "@facetdb/model";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type AlertChannel, env, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
 import {
@@ -149,7 +149,7 @@ afterEach(async () => {
   await resetPgliteWorld(world);
 });
 
-function run(argv: readonly string[], config: ProjectConfig) {
+function run(argv: readonly string[], config: ProjectConfig, stop?: AbortSignal) {
   const connect = sharePools(world.connect);
   return runInProcess(
     argv,
@@ -167,7 +167,7 @@ function run(argv: readonly string[], config: ProjectConfig) {
       random: () => 0.5,
       webhookFetch: () => Promise.reject(new Error("no webhook is queued in these tests")),
       abortAfter: () => new AbortController().signal,
-      stopSignal: () => new AbortController().signal,
+      stopSignal: () => stop ?? new AbortController().signal,
       pluginHost: (loaded) =>
         createPluginHost({
           config: loaded,
@@ -225,7 +225,9 @@ describe("the worker delivers its alerts to the configured channels (channel-hos
       heard.filter((entry) => entry.where === where).map((entry) => entry.message.severity);
     expect(severities("everything").sort()).toEqual(["critical", "warning"]);
     expect(severities("critical-only")).toEqual(["critical"]);
-    expect(severities("broken").sort()).toEqual(["critical", "warning"]);
+    // START is 23:13 in Berlin, inside the broken channel's quiet hours: the warning is held for
+    // it, the critical alert is not.
+    expect(severities("broken")).toEqual(["critical"]);
 
     // The broken channel: a printed line in fixed words, the pass not stopped, the record answered.
     const words = deliveryFailedWords("facetdb-plugin-pager");
@@ -235,6 +237,7 @@ describe("the worker delivers its alerts to the configured channels (channel-hos
 
     const history = await historyText();
     expect(history).toContain(`{"ok": false, "error": "${words}", "channel": "pager:broken"}`);
+    expect(history).toContain(`"held": ["pager:broken"]`);
     printsNoSecret(result.stdout, result.stderr, history);
 
     const [handler] = served;
@@ -321,5 +324,110 @@ describe("the worker delivers its alerts to the configured channels (channel-hos
     );
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((row) => row["delivered"] === true && row["listed"] === false)).toBe(true);
+  });
+});
+
+describe("a channel's quiet hours and its test button in the running worker", () => {
+  /** POST /v1/alerts/test on the surface the worker served, from this machine. */
+  async function testSend(channel: string) {
+    const [handler] = served;
+    if (handler === undefined) {
+      throw new Error("the worker served no surface");
+    }
+    const response = await handler(
+      new Request("http://127.0.0.1:4040/v1/alerts/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ channel }),
+      }),
+      THIS_MACHINE,
+    );
+    const text = await response.text();
+    return { status: response.status, text, json: JSON.parse(text) as Record<string, unknown> };
+  }
+
+  const heardBy = (where: string) => heard.filter((entry) => entry.where === where);
+
+  it("@timing holds the warning for the quiet channel, sends it one summary from the 2-second loop when the hours end, and sends a test through one channel", async () => {
+    const stop = new AbortController();
+    const running = run(
+      ["worker"],
+      configWith([
+        "pager:everything",
+        {
+          to: "pager:night",
+          sends: "critical",
+          quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" },
+        },
+        { to: "pager:broken", quiet: { from: "22:00", to: "07:00", zone: "Europe/Berlin" } },
+      ]),
+      stop.signal,
+    );
+    // START is 23:13 in Berlin. The cap of one token: a warning at 80% and a critical alert.
+    await vi.waitFor(() => expect(heardBy("everything")).toHaveLength(2), { timeout: 10_000 });
+    expect(heardBy("night").map((entry) => entry.message.severity)).toEqual(["critical"]);
+    expect(heardBy("broken").map((entry) => entry.message.severity)).toEqual(["critical"]);
+
+    // The test button: through the quiet channel that sends only critical alerts, now.
+    expect(await testSend("pager:night")).toMatchObject({ status: 200, json: { sent: true } });
+    expect(heardBy("night").at(-1)?.message).toMatchObject({
+      severity: "information",
+      text: expect.stringMatching(/^Test message from FacetDB/),
+    });
+    expect(await testSend("pager:nowhere")).toMatchObject({
+      status: 404,
+      json: { error: { code: "unknown_channel" } },
+    });
+    const failed = await testSend("pager:broken");
+    expect(failed).toMatchObject({
+      status: 502,
+      json: {
+        error: {
+          code: "channel_failed",
+          message: `The channel did not take the test message: ${deliveryFailedWords("facetdb-plugin-pager")}.`,
+        },
+      },
+    });
+    printsNoSecret(failed.text);
+
+    // 07:00 in Berlin is 06:00Z on 15 November 2023; a minute's grace, then the loop's next pass.
+    clock.advance(Date.UTC(2023, 10, 15, 6, 1, 0) - clock.now());
+    const summaries = (where: string) =>
+      heardBy(where).filter((entry) => entry.message.text.startsWith("Quiet hours are over"));
+    await vi.waitFor(() => expect(summaries("broken")).toHaveLength(1), { timeout: 10_000 });
+    expect(summaries("broken")[0]?.message.text).toMatch(
+      /^Quiet hours are over\. 1 alert was held for this channel while they lasted, in project .*: Spending at 80% of the cap \(all sources\)\./,
+    );
+    // The night channel sends only critical alerts: nothing was held for it, and the same pass
+    // (which looks at it first) sent it nothing.
+    expect(summaries("night")).toEqual([]);
+    expect(summaries("everything")).toEqual([]);
+
+    stop.abort();
+    const result = await running;
+    expect(result.code, result.stderr).toBe(0);
+    // The broken channel refused its summary: a printed line in its kept words, tried again later.
+    expect(result.stdout).toContain(
+      "alert channel pager:broken: the channel plugin facetdb-plugin-pager did not deliver the alert; its own error is not kept, as it may hold a secret. Its summary of the alerts quiet hours held was not sent",
+    );
+    // The history holds the cap's alerts alone (the pause raised again past its 30 minutes): no
+    // test message and no summary is an alert.
+    const rows = await world.client.query(
+      "select record->'event'->>'kind' as kind from facetdb.alert_history order by id",
+    );
+    expect([...new Set(rows.map((row) => row["kind"]))].sort()).toEqual([
+      "spending_80",
+      "spending_paused",
+    ]);
+    printsNoSecret(result.stdout, result.stderr, await historyText());
+  });
+
+  it("answers that a worker run with --once sends no test message", async () => {
+    const result = await run(["worker", "--once"], configWith(["pager:everything"]));
+    expect(result.code, result.stderr).toBe(0);
+    expect(await testSend("pager:everything")).toMatchObject({
+      status: 409,
+      json: { error: { code: "alert_test_unavailable" } },
+    });
   });
 });

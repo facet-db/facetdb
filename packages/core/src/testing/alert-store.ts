@@ -1,9 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
   ActiveAlert,
   AlertRecord,
   AlertSettlement,
   AlertStore,
   DeadWorkers,
+  HeldMessage,
+  QuietSummaryState,
   WorkerBeat,
 } from "../alerts/index.ts";
 import { FakeStore } from "./store.ts";
@@ -31,8 +34,12 @@ export class FakeAlertStore implements AlertStore {
   readonly history: AlertRecord[] = [];
   /** `project|worker` to the worker's last beat. */
   readonly workers = new Map<string, number>();
+  /** The quiet-hours summary states, by `quietKey`. */
+  readonly quiet = new Map<string, QuietSummaryState>();
   /** How many times the take ran. */
   takes = 0;
+  /** How many store calls the quiet-hours summaries made: a tick that costs none adds none. */
+  quietCalls = 0;
   failing: Operation | undefined;
   after: (operation: Operation) => void = () => undefined;
   readonly #beats = new Map<string, number>();
@@ -115,6 +122,51 @@ export class FakeAlertStore implements AlertStore {
     }
     await this.#leave("take");
     return { taken, beating };
+  }
+
+  quietState(key: string): Promise<QuietSummaryState | undefined> {
+    this.quietCalls += 1;
+    return Promise.resolve(this.quiet.get(key));
+  }
+
+  /** Compares and writes in one synchronous step, as the real store's single statement does. */
+  swapQuietState(
+    key: string,
+    expected: QuietSummaryState | undefined,
+    next: QuietSummaryState,
+  ): Promise<boolean> {
+    this.quietCalls += 1;
+    if (!isDeepStrictEqual(this.quiet.get(key), expected)) {
+      return Promise.resolve(false);
+    }
+    this.quiet.set(key, next);
+    return Promise.resolve(true);
+  }
+
+  heldFor(
+    project: string,
+    channel: string,
+    since: number,
+    until: number,
+  ): Promise<readonly HeldMessage[]> {
+    this.quietCalls += 1;
+    return Promise.resolve(
+      this.history
+        .filter(
+          (line) =>
+            line.event.project === project &&
+            line.held?.includes(channel) === true &&
+            line.at >= since &&
+            line.at < until,
+        )
+        .map((line) => ({
+          key: line.key,
+          phase: line.phase,
+          severity: line.severity,
+          kind: line.event.kind,
+          source: line.event.source,
+        })),
+    );
   }
 
   #enter(operation: Operation): void {

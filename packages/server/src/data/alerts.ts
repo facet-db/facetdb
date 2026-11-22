@@ -124,7 +124,16 @@ export type AlertEventView = {
    * for every line written by an earlier version and for every settled one.
    */
   readonly pending: boolean;
+  /**
+   * The channels whose quiet hours held the message, in the config's order, each as the channels
+   * are answered (an address that must not be repeated has a null name and address); they hear of
+   * it in the summary sent when their hours end. Empty when none held it.
+   */
+  readonly held: readonly HeldChannelView[];
 };
+
+/** A channel that held a message, named as the channel list names it. */
+export type HeldChannelView = Pick<AlertChannelView, "kind" | "name" | "address">;
 
 export type AlertsView = {
   /** The channels the worker runs with: the config as it started. */
@@ -231,8 +240,15 @@ export function eventsOf(records: readonly AlertRecord[]): readonly AlertEventVi
         raisedBeforeHistory: record.phase === "resolved",
         delivered: record.delivered,
         pending: record.pending === true,
+        held: (record.held ?? []).map(heldChannelView),
       };
     });
+}
+
+/** A held channel's address from the history, a boundary, named only as the channel list would. */
+function heldChannelView(address: string): HeldChannelView {
+  const { kind, name } = channelOf(address);
+  return { kind, name, address: name === null ? null : `${kind}:${name}` };
 }
 
 /** A channel as one comparable text: its address, what it sends and its quiet hours. */

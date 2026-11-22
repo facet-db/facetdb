@@ -1,14 +1,19 @@
-import type {
-  ActiveAlert,
-  AlertRecord,
-  AlertSettlement,
-  AlertStore,
-  BackfillProgress,
-  CursorStore,
-  UsageStore,
+import {
+  type ActiveAlert,
+  ALERT_KINDS,
+  type AlertKind,
+  type AlertRecord,
+  type AlertSettlement,
+  type AlertSeverity,
+  type AlertStore,
+  type BackfillProgress,
+  type CursorStore,
+  type HeldMessage,
+  type QuietSummaryState,
+  type UsageStore,
 } from "@facetdb/core";
-import type { SqlClient } from "../sql/index.ts";
-import { flag, integer, json, text, textOrNull } from "./rows.ts";
+import type { SqlClient, SqlRow } from "../sql/index.ts";
+import { flag, integer, json, jsonObject, text, textOrNull } from "./rows.ts";
 import { RESERVE_USAGE_FUNCTION } from "./schema.ts";
 
 /**
@@ -111,6 +116,48 @@ export function createUsageStore(client: SqlClient): UsageStore {
 
 /** The database's own clock as the milliseconds since the epoch a `bigint` beat column holds. */
 const DATABASE_NOW_MS = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+
+/** A whole number of ms in a stored quiet-hours state; the row is a boundary. */
+function stateTime(state: Record<string, unknown>, field: string): number {
+  const value = state[field];
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new Error(`the quiet-hours state's "${field}" is ${JSON.stringify(value)}, expected ms`);
+  }
+  return value;
+}
+
+/** A quiet-hours summary state as `swapQuietState` wrote it. */
+function quietStateOf(row: SqlRow): QuietSummaryState {
+  const state = jsonObject(row, "state");
+  return {
+    until: stateTime(state, "until"),
+    since: stateTime(state, "since"),
+    triedAt: stateTime(state, "triedAt"),
+    sentAt: state["sentAt"] === null ? null : stateTime(state, "sentAt"),
+  };
+}
+
+function oneOf<T extends string>(row: SqlRow, column: string, allowed: readonly T[]): T {
+  const value = text(row, column);
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`column "${column}" holds "${value}", expected one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+const PHASES = ["raised", "resolved"] as const;
+const SEVERITIES: readonly AlertSeverity[] = ["information", "warning", "critical"];
+
+/** A held history line as the summary names it. */
+function heldOf(row: SqlRow): HeldMessage {
+  return {
+    key: text(row, "key"),
+    phase: oneOf(row, "phase", PHASES),
+    severity: oneOf(row, "severity", SEVERITIES),
+    kind: oneOf<AlertKind>(row, "kind", ALERT_KINDS),
+    source: text(row, "source"),
+  };
+}
 
 /** `facetdb.alerts`, `alert_history` and `heartbeats` as core's `AlertStore`. */
 export function createAlertStore(client: SqlClient): AlertStore {
@@ -225,6 +272,53 @@ export function createAlertStore(client: SqlClient): AlertStore {
         taken: rows.map((row) => ({ worker: text(row, "worker"), at: integer(row, "at") })),
         beating: rows[0] === undefined ? 0 : integer(rows[0], "beating"),
       };
+    },
+
+    // A channel's quiet-hours summary is standing state under a key no event has
+    // (`quiet|<project>|<channel>`), in the same table as the active alerts: no migration.
+    async quietState(key) {
+      const rows = await client.query(
+        "select state::text as state from facetdb.alerts where key = $1",
+        [key],
+      );
+      const row = rows[0];
+      return row === undefined ? undefined : quietStateOf(row);
+    },
+
+    /**
+     * One statement that claims: an insert that a row already there turns into nothing, or an
+     * update whose condition is the state read. A second update of the same row waits for the
+     * first's commit, reads the condition again against what it wrote, and changes nothing, so of
+     * two workers swapping the same state exactly one gets a row back. jsonb compares by value.
+     */
+    async swapQuietState(key, expected, next) {
+      const rows =
+        expected === undefined
+          ? await client.query(
+              `insert into facetdb.alerts (key, state) values ($1, $2::jsonb)
+               on conflict (key) do nothing returning key`,
+              [key, JSON.stringify(next)],
+            )
+          : await client.query(
+              `update facetdb.alerts set state = $3::jsonb
+                where key = $1 and state = $2::jsonb returning key`,
+              [key, JSON.stringify(expected), JSON.stringify(next)],
+            );
+      return rows.length > 0;
+    },
+
+    async heldFor(project, channel, since, until) {
+      const rows = await client.query(
+        `select record->>'key' as key, record->>'phase' as phase, record->>'severity' as severity,
+                record->'event'->>'kind' as kind, record->'event'->>'source' as source
+           from facetdb.alert_history
+          where record->'event'->>'project' = $1
+            and record->'held' @> jsonb_build_array($2::text)
+            and (record->>'at')::bigint >= $3::bigint and (record->>'at')::bigint < $4::bigint
+          order by id`,
+        [project, channel, since, until],
+      );
+      return rows.map(heldOf);
     },
   };
 }

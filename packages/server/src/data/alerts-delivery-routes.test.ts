@@ -263,6 +263,36 @@ describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
     });
   });
 
+  it("answers which channels' quiet hours held a line, read from the store, none of them a delivery", async () => {
+    const t = await rig([running("slack:#ops"), running("slack:#data")]);
+    // 03:00Z, inside slack:#ops's quiet hours of 22:00 to 07:00.
+    t.clock.advance(Date.UTC(2026, 10, 15, 3, 0) - NOW);
+    const alerts = createAlerts({
+      store: t.store.alerts,
+      clock: t.clock,
+      channels: [
+        {
+          name: "slack:#ops",
+          quiet: { from: "22:00", to: "07:00", zone: "UTC" },
+          deliver: () => Promise.resolve(),
+        },
+        { name: "slack:#data", deliver: () => Promise.resolve() },
+      ],
+    });
+    await alerts.raise(event("backfill_failed"));
+    const body = (await t.get()).json as unknown as Body;
+    expect(body.events).toEqual([
+      expect.objectContaining({
+        kind: "backfill_failed",
+        delivered: true,
+        pending: false,
+        held: [{ kind: "slack", name: "#ops", address: "slack:#ops" }],
+      }),
+    ]);
+    // Held is not a delivery: the quiet channel has none, the other its own.
+    expect(body.channels.map((channel) => channel["delivering"])).toEqual([null, true]);
+  });
+
   it("reads a line written before deliveries existed as before, and finds no delivery in it", async () => {
     const t = await rig([running("slack:#ops")]);
     const old: AlertRecord = {

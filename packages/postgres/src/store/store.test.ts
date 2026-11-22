@@ -755,6 +755,87 @@ describe("alerts, cursors and question-set versions", () => {
     expect(await store.alerts.lastHeartbeat("p")).toBe(1_700_000_000_000);
   });
 
+  it("keep a channel's quiet-hours summary state, swapped only from the state read, and read back what was held for it", async () => {
+    const { store, db } = await newStore();
+    const key = "quiet|p|slack:#ops";
+    const claimed = { until: 2_000, since: 1_000, triedAt: 2_060, sentAt: null };
+    expect(await store.alerts.quietState(key)).toBeUndefined();
+    expect(await store.alerts.swapQuietState(key, undefined, claimed)).toBe(true);
+    // A second claim from nothing finds the row there.
+    expect(await store.alerts.swapQuietState(key, undefined, { ...claimed, triedAt: 9 })).toBe(
+      false,
+    );
+    expect(await store.alerts.quietState(key)).toEqual(claimed);
+    const sent = { ...claimed, sentAt: 2_070 };
+    // A swap from a state that is no longer there changes nothing; from the one there, it writes.
+    expect(await store.alerts.swapQuietState(key, sent, { ...sent, until: 5 })).toBe(false);
+    expect(await store.alerts.swapQuietState(key, claimed, sent)).toBe(true);
+    expect(await store.alerts.quietState(key)).toEqual(sent);
+    // A row that is not a state is refused by name, not taken for one.
+    await db.exec(`update facetdb.alerts set state = '{"until": "soon"}'::jsonb`);
+    await expect(store.alerts.quietState(key)).rejects.toThrow(/"until"/);
+
+    const event = {
+      kind: "backfill_failed" as const,
+      what: "w",
+      project: "p",
+      source: "listings",
+      question: null,
+      did: "d",
+      link: "l",
+    };
+    const line = (at: number, held: readonly string[] | undefined, project = "p") =>
+      store.alerts.append({
+        at,
+        key: `k${at}`,
+        phase: "raised",
+        severity: "warning",
+        event: { ...event, project },
+        delivered: true,
+        ...(held === undefined ? {} : { held }),
+      });
+    await line(999, ["slack:#ops"]);
+    await line(1_000, ["slack:#ops", "email:ops@example.com"]);
+    await line(1_500, undefined);
+    await line(1_600, ["slack:#data"]);
+    await line(1_700, ["slack:#ops"], "q");
+    await line(1_999, ["slack:#ops"]);
+    await line(2_000, ["slack:#ops"]);
+    await store.alerts.append({
+      at: 1_800,
+      key: "k1800",
+      phase: "resolved",
+      severity: "information",
+      event: { ...event, kind: "spending_80", source: "all sources" },
+      delivered: true,
+      held: ["slack:#ops"],
+    });
+    expect(await store.alerts.heldFor("p", "slack:#ops", 1_000, 2_000)).toEqual([
+      {
+        key: "k1000",
+        phase: "raised",
+        severity: "warning",
+        kind: "backfill_failed",
+        source: "listings",
+      },
+      {
+        key: "k1999",
+        phase: "raised",
+        severity: "warning",
+        kind: "backfill_failed",
+        source: "listings",
+      },
+      {
+        key: "k1800",
+        phase: "resolved",
+        severity: "information",
+        kind: "spending_80",
+        source: "all sources",
+      },
+    ]);
+    expect(await store.alerts.heldFor("p", "slack:#nowhere", 0, 10_000)).toEqual([]);
+  });
+
   it("resume a backfill run from its saved cursor", async () => {
     const { store } = await newStore();
     expect(await store.cursors.load("run")).toBeUndefined();
