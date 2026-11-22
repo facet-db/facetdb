@@ -19,8 +19,9 @@ const galleryQuery = z.strictObject({ q: z.string().trim().max(MAX_SEARCH).optio
 export function pluginsRoutes(door: PluginsDoor): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
 
-  // The plugins the config names: their settings as a schema, the values, each variable's state.
-  route.get("/plugins", (c) => c.json({ plugins: door.installed() }));
+  // The plugins the config names: their settings as a schema, the values, each variable's state;
+  // and the FacetDB they run on, which a core range that no longer holds is told against.
+  route.get("/plugins", (c) => c.json({ facetdb: door.facetdb, plugins: door.installed() }));
 
   // The registry's entries, searched. A registry that cannot be read is an answer, not an error:
   // the page says so beside the installed plugins, which do not need it.

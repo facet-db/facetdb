@@ -4,6 +4,7 @@ import { env, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
 import {
   action,
+  BUILTIN_PLUGINS,
   createPluginHost,
   definePlugin,
   type Plugin,
@@ -98,9 +99,12 @@ function project(): ProjectConfig {
   });
 }
 
-async function hostFor(environment: Readonly<Record<string, string | undefined>>) {
+async function hostFor(
+  environment: Readonly<Record<string, string | undefined>>,
+  config: ProjectConfig = project(),
+) {
   return createPluginHost({
-    config: project(),
+    config,
     env: environment,
     projectDir: PROJECT_DIR,
     coreVersion: VERSION,
@@ -113,7 +117,7 @@ async function hostFor(environment: Readonly<Record<string, string | undefined>>
         code: "ERR_MODULE_NOT_FOUND",
       });
     },
-    builtins: {},
+    builtins: BUILTIN_PLUGINS,
   });
 }
 
@@ -151,6 +155,8 @@ function network(respond: (url: string) => Promise<Response> | Response) {
 
 type Setup = {
   readonly environment?: Record<string, string | undefined>;
+  /** The config in force, which the host is made from unless one is given. */
+  readonly config?: ProjectConfig;
   readonly host?: PluginHost;
   readonly registry?: string;
   readonly clock?: FakeClock;
@@ -163,8 +169,10 @@ async function doorWith(net: ReturnType<typeof network>, setup: Setup = {}) {
   const environment = setup.environment ?? { GITHUB_TOKEN: TOKEN, HOOK_SECRET };
   const clock = setup.clock ?? new FakeClock(0);
   const timeouts: number[] = [];
+  const config = setup.config ?? project();
   const door = createPluginsDoor({
-    host: setup.host ?? (await hostFor(environment)),
+    host: setup.host ?? (await hostFor(environment, config)),
+    config: () => config,
     env: environment,
     coreVersion: VERSION,
     registry: setup.registry ?? REGISTRY,
@@ -215,11 +223,14 @@ describe("the installed plugins", () => {
     const { door } = await doorWith(NO_NETWORK);
 
     const [first, second] = door.installed();
+    expect(door.facetdb).toBe(VERSION);
     expect(door.installed().map((plugin) => plugin.name)).toEqual(["github", "slack"]);
     expect(first).toMatchObject({
       name: "github",
+      key: "github",
       package: "@facetdb/github",
       version: "1.2.0",
+      builtIn: false,
       kinds: ["action", "pack"],
       provides: {
         source: [],
@@ -233,9 +244,121 @@ describe("the installed plugins", () => {
     expect(second).toMatchObject({
       name: "slack",
       package: "@facetdb/slack",
-      settings: { values: {}, variables: [] },
+      settings: { values: {}, variables: [], hostOnly: [] },
     });
     expect(NO_NETWORK.asked).toEqual([]);
+  });
+
+  it("names each plugin by the key the file writes its settings under, else by its short name", async () => {
+    const config = facetdb({
+      model: "jev-1.14.0",
+      plugins: { "@facetdb/github": { repo: REPO_URL, auth: { token: env("GITHUB_TOKEN") } } },
+      sources: [
+        {
+          name: "tickets",
+          api: true,
+          read: ["body"],
+          questions: { urgent: noul("Is this urgent?") },
+          actions: [{ plugin: "slack", action: "post", config: {} }],
+        },
+      ],
+    });
+    const { door } = await doorWith(NO_NETWORK, { config });
+
+    expect(door.installed().map(({ name, key }) => ({ name, key }))).toEqual([
+      { name: "github", key: "@facetdb/github" },
+      { name: "slack", key: "slack" },
+    ]);
+  });
+
+  it("marks in the schema each setting the plugin lets a studio draft change (z.editable())", async () => {
+    const labels = definePlugin({
+      name: "labels",
+      version: "0.1.0",
+      facetdb: "*",
+      config: z.object({
+        endpoint: z.string(),
+        greeting: z.editable(z.string().default("Hello")),
+        roles: z.editable(z.array(z.string())).optional(),
+      }),
+      actions: { tag: action({ config: z.object({}), run: noop }) },
+    });
+    const config = facetdb({
+      model: "jev-1.14.0",
+      plugins: { labels: { endpoint: "https://labels.example.com" } },
+      sources: [
+        {
+          name: "tickets",
+          api: true,
+          read: ["body"],
+          questions: { urgent: noul("Is this urgent?") },
+        },
+      ],
+    });
+    const host = await createPluginHost({
+      config,
+      env: {},
+      projectDir: PROJECT_DIR,
+      coreVersion: VERSION,
+      importModule: async () => ({ default: labels }),
+      builtins: {},
+    });
+    const { door } = await doorWith(NO_NETWORK, { config, host });
+
+    const schema = door.installed()[0]?.settings.schema as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties["endpoint"]).not.toHaveProperty("editable");
+    expect(schema.properties["greeting"]).toMatchObject({ type: "string", editable: true });
+    expect(schema.properties["roles"]).toMatchObject({ type: "array", editable: true });
+  });
+
+  it("shows the built-in webhook's endpoints by their hosts alone, never the rest of an address", async () => {
+    const config = facetdb({
+      model: "jev-1.14.0",
+      plugins: {
+        webhook: {
+          secret: env("FACETDB_WEBHOOK_SECRET"),
+          endpoints: {
+            ops: "https://hooks.example.com/facetdb?token=s3cret-endpoint-token",
+            local: "http://localhost:8080/s3cret-path/hook",
+            pager: env("PAGER_URL"),
+          },
+        },
+      },
+      sources: [
+        {
+          name: "tickets",
+          api: true,
+          read: ["body"],
+          questions: { urgent: noul("Is this urgent?") },
+        },
+      ],
+    });
+    const environment = {
+      FACETDB_WEBHOOK_SECRET: HOOK_SECRET,
+      PAGER_URL: "https://pager.example.com/s3cret-pager",
+    };
+    const { door } = await doorWith(NO_NETWORK, { config, environment });
+
+    const [webhook] = door.installed();
+    expect(webhook).toMatchObject({ name: "webhook", key: "webhook", builtIn: true });
+    expect(webhook?.settings).toMatchObject({
+      values: {
+        secret: { env: "FACETDB_WEBHOOK_SECRET" },
+        endpoints: {
+          ops: "hooks.example.com",
+          local: "localhost:8080",
+          pager: { env: "PAGER_URL" },
+        },
+      },
+      hostOnly: ["endpoints.ops", "endpoints.local"],
+      variables: [
+        { path: "secret", variable: "FACETDB_WEBHOOK_SECRET", secret: true, set: true },
+        { path: "endpoints.pager", variable: "PAGER_URL", secret: false, set: true },
+      ],
+    });
+    expect(JSON.stringify(door.installed())).not.toMatch(/s3cret|token=|\/facetdb|\/hook/);
   });
 
   it("draws the form from the one schema: a secret field says so, a default makes a field optional", async () => {
@@ -351,6 +474,7 @@ describe("the gallery", () => {
           description: "Does what github does.",
           kinds: ["action", "source"],
           facetdb: ">=0.0.0 <1.0.0",
+          holds: true,
           verified: true,
           downloads: 4200,
           homepage: null,
@@ -363,6 +487,7 @@ describe("the gallery", () => {
           description: "Post alerts to a Slack channel.",
           kinds: ["channel"],
           facetdb: ">=0.0.0 <1.0.0",
+          holds: true,
           verified: false,
           downloads: 10,
           homepage: null,
@@ -375,6 +500,7 @@ describe("the gallery", () => {
           description: "Read tickets.",
           kinds: ["source"],
           facetdb: ">=0.0.0 <1.0.0",
+          holds: true,
           verified: false,
           downloads: 10,
           homepage: "https://example.com/zendesk",
@@ -386,6 +512,29 @@ describe("the gallery", () => {
     // The one address it was given, and a timeout on the read.
     expect(net.asked.map((call) => call.url)).toEqual([REGISTRY]);
     expect(timeouts).toHaveLength(1);
+  });
+
+  it("says of each entry whether its range holds for the FacetDB this worker runs", async () => {
+    const net = network(
+      () =>
+        new Response(
+          indexText([
+            entry("github"),
+            entry("intercom", { facetdb: ">=9.0.0" }),
+            entry("linear", { facetdb: `>=${VERSION} <=${VERSION}` }),
+          ]),
+        ),
+    );
+    const { door } = await doorWith(net);
+
+    const answer = await door.gallery(undefined);
+    expect(
+      answer.reachable ? answer.plugins.map(({ name, holds }) => ({ name, holds })) : answer,
+    ).toEqual([
+      { name: "github", holds: true },
+      { name: "intercom", holds: false },
+      { name: "linear", holds: true },
+    ]);
   });
 
   it("searches by every word, in the name, package, description and kinds, in any case", async () => {

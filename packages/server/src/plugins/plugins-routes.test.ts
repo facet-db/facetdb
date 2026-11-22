@@ -72,8 +72,10 @@ const NO_DATA: DataServices = {
 
 const GITHUB: InstalledPlugin = {
   name: "github",
+  key: "github",
   package: "@facetdb/github",
   version: "1.2.0",
+  builtIn: false,
   kinds: ["source", "action", "pack"],
   provides: {
     source: ["issues"],
@@ -94,6 +96,7 @@ const GITHUB: InstalledPlugin = {
     },
     values: { repo: "acme/web", token: { env: "GITHUB_TOKEN" } },
     variables: [{ path: "token", variable: "GITHUB_TOKEN", secret: true, set: true }],
+    hostOnly: [],
   },
 };
 
@@ -122,6 +125,7 @@ const REACHABLE: Gallery = {
       description: HOSTILE,
       kinds: ["source", "action"],
       facetdb: "^0.0.0",
+      holds: true,
       verified: true,
       downloads: 1200,
       homepage: "https://example.com/github",
@@ -147,6 +151,7 @@ function pluginsDoor(
 ) {
   const calls: unknown[][] = [];
   const door: PluginsDoor = {
+    facetdb: "0.4.0",
     installed: () => {
       calls.push(["installed"]);
       return answers.installed ?? [GITHUB];
@@ -233,12 +238,12 @@ describe("who may reach the plugin routes", () => {
 });
 
 describe("GET /v1/plugins", () => {
-  it("answers the hosted plugins with their settings schema, values and each variable's name and state", async () => {
+  it("answers the hosted plugins with their settings schema, values and each variable's name and state, and the FacetDB they run on", async () => {
     const t = pluginsDoor();
 
     expect(await rig(t.door).get("/v1/plugins")).toMatchObject({
       status: 200,
-      json: { plugins: [GITHUB] },
+      json: { facetdb: "0.4.0", plugins: [GITHUB] },
     });
     expect(t.calls).toEqual([["installed"]]);
   });
@@ -253,7 +258,7 @@ describe("GET /v1/plugins", () => {
     };
     const answer = await rig(pluginsDoor({ installed: [unset] }).door).get("/v1/plugins");
 
-    expect(answer.json).toEqual({ plugins: [unset] });
+    expect(answer.json).toEqual({ facetdb: "0.4.0", plugins: [unset] });
     expect(answer.text).toContain("GITHUB_TOKEN");
   });
 });

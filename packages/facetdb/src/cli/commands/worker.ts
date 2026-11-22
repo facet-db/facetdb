@@ -1125,6 +1125,7 @@ export async function runWorkers(
         // The Plugins page: the hosted plugins, the registry's gallery, the packs.
         plugins: createPluginsDoor({
           host: plugins,
+          config: () => fleet.config(),
           env: deps.env,
           coreVersion: VERSION,
           registry: registryAddress(deps.env),

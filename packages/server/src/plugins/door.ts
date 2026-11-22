@@ -28,9 +28,17 @@ export type PluginVariableView = {
 export type InstalledPlugin = {
   /** The short name: `github`. */
   readonly name: string;
+  /**
+   * The key the config writes its settings under in `plugins` (`github`, or `@facetdb/github` where
+   * the file names it so): what a studio draft names it by. Its short name when the config gives it
+   * no settings.
+   */
+  readonly key: string;
   /** The package it came from: `@facetdb/github`. */
   readonly package: string;
   readonly version: string;
+  /** Shipped inside facetdb (the webhook), so its version is facetdb's own. */
+  readonly builtIn: boolean;
   readonly kinds: readonly PluginKind[];
   /** The names of what it provides, by kind: `{ source: ["issues"], action: ["label"], ... }`. */
   readonly provides: { readonly [kind in PluginKind]: readonly string[] };
@@ -38,13 +46,25 @@ export type InstalledPlugin = {
   readonly core: { readonly range: string; readonly holds: boolean };
   readonly settings: {
     /**
-     * The settings schema as a JSON schema (zod's own conversion of the manifest's one schema;
-     * a secret field carries `"secret": true`), or null when zod cannot write it as one.
+     * The settings schema as a JSON schema (zod's own conversion of the manifest's one schema; a
+     * secret field carries `"secret": true`, and one the plugin marks `z.editable()` carries
+     * `"editable": true`, the only settings a studio draft may change), or null when zod cannot
+     * write it as one.
      */
     readonly schema: JsonObject | null;
-    /** The settings as the config file writes them: a variable is `{ "env": "NAME" }`. */
+    /**
+     * The settings as the config file writes them: a variable is `{ "env": "NAME" }`, and an
+     * address at a `hostOnly` path is its host alone.
+     */
     readonly values: JsonObject;
     readonly variables: readonly PluginVariableView[];
+    /**
+     * Where `values` holds an address cut to its host, in `variables`' path form: the built-in
+     * webhook's endpoints, whose path or query can carry a token, so this answer never carries the
+     * rest of such an address. (`GET /v1/config`'s project JSON still holds
+     * `plugins.webhook.endpoints` whole: a follow-up.)
+     */
+    readonly hostOnly: readonly string[];
   };
 };
 
@@ -57,6 +77,8 @@ export type GalleryEntry = {
   readonly kinds: readonly PluginKind[];
   /** The range of FacetDB core versions the entry says it supports. */
   readonly facetdb: string;
+  /** Whether that range holds for the FacetDB this worker runs: `facetdb add` refuses it where not. */
+  readonly holds: boolean;
   readonly verified: boolean;
   readonly downloads: number;
   readonly homepage: string | null;
@@ -95,6 +117,8 @@ export type PackView = {
 };
 
 export type PluginsDoor = {
+  /** The FacetDB this worker runs, which each plugin's core range is held against. */
+  readonly facetdb: string;
   /** Every plugin the worker hosts, in the order the config first names each. */
   installed(): readonly InstalledPlugin[];
   /** The registry's entries that match `search` (every word of it, anywhere in an entry); all when absent. */
@@ -103,8 +127,12 @@ export type PluginsDoor = {
   packs(): readonly PackView[];
 };
 
-/** A surface with no plugin host (a test's app): every list is empty and the registry is not asked. */
+/**
+ * A surface with no plugin host (a test's app): every list is empty, the registry is not asked, and
+ * no FacetDB version is named, there being no range to hold against one.
+ */
 export const NO_PLUGINS: PluginsDoor = {
+  facetdb: "",
   installed: () => [],
   gallery: () => Promise.resolve({ reachable: true, address: "", plugins: [] }),
   packs: () => [],

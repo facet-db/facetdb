@@ -1016,6 +1016,82 @@ export type BackfillStatus = z.infer<typeof backfillStatusSchema>;
 export type BackfillState = BackfillStatus["state"];
 export type BackfillEstimate = z.infer<typeof backfillEstimateSchema>;
 
+/*
+ * The Plugins page: GET /v1/plugins and GET /v1/plugins/gallery, and a plugin's settings saved
+ * through Apply as a project draft. A setting's schema and its values are JSON the page reads with
+ * its own narrow questions; a variable is its name and whether it is set, never a value.
+ */
+
+/** A JSON object the page reads without trusting its shape: a settings schema, a plugin's values. */
+const jsonObjectSchema = z.record(z.string(), z.json());
+
+const pluginKindSchema = z.enum(["source", "action", "channel", "provider", "pack"]);
+export type PluginKind = z.infer<typeof pluginKindSchema>;
+
+const installedPluginSchema = z.object({
+  name: z.string().min(1),
+  /** Its key in the config's `plugins`: what a draft names it by. */
+  key: z.string().min(1),
+  version: z.string(),
+  builtIn: z.boolean(),
+  /** The names of what it provides, by kind. */
+  provides: z.record(pluginKindSchema, z.array(z.string())),
+  core: z.object({ range: z.string(), holds: z.boolean() }),
+  settings: z.object({
+    /** The JSON schema of its settings (`secret` and `editable` marks on fields), or null. */
+    schema: jsonObjectSchema.nullable(),
+    /** As the file writes them: a variable is `{ "env": "NAME" }`. */
+    values: jsonObjectSchema,
+    variables: z.array(
+      z.object({
+        path: z.string(),
+        variable: z.string(),
+        secret: z.boolean(),
+        set: z.boolean(),
+      }),
+    ),
+    /** Where `values` holds an address cut to its host. */
+    hostOnly: z.array(z.string()),
+  }),
+});
+export type InstalledPlugin = z.infer<typeof installedPluginSchema>;
+
+const pluginsSchema = z.object({
+  /** The FacetDB the worker runs; empty when the surface hosts no plugin. */
+  facetdb: z.string(),
+  plugins: z.array(installedPluginSchema),
+});
+export type InstalledPlugins = z.infer<typeof pluginsSchema>;
+
+const galleryEntrySchema = z.object({
+  name: z.string().min(1),
+  description: z.string(),
+  kinds: z.array(pluginKindSchema),
+  /** Whether its core range holds for the FacetDB the worker runs. */
+  holds: z.boolean(),
+  verified: z.boolean(),
+  downloads: z.number().int().min(0),
+  installed: z.boolean(),
+  // The answer's `command` is not read: the page builds `facetdb add <name>` from a short name.
+});
+export type GalleryEntry = z.infer<typeof galleryEntrySchema>;
+
+const gallerySchema = z.discriminatedUnion("reachable", [
+  z.object({
+    reachable: z.literal(true),
+    address: z.string(),
+    plugins: z.array(galleryEntrySchema),
+  }),
+  z.object({ reachable: z.literal(false), address: z.string(), why: z.string() }),
+]);
+export type Gallery = z.infer<typeof gallerySchema>;
+
+/**
+ * Plugin settings saved through Apply, by the plugin's key in `plugins`: each entry replaces that
+ * plugin's settings whole, and only what its schema marks editable may differ from the file's.
+ */
+export type PluginsDraft = { readonly [key: string]: { readonly [setting: string]: unknown } };
+
 export type ApiClient = {
   readonly project: () => Promise<Project>;
   readonly reviewQueue: (
@@ -1126,6 +1202,18 @@ export type ApiClient = {
   readonly backfillStart: (source: string, token: string) => Promise<BackfillStatus>;
   /** Stops the job after the page in hand (at once, when nothing was asked yet). */
   readonly backfillStop: (source: string) => Promise<BackfillStatus>;
+  // The Plugins page.
+  /** The plugins the worker hosts, each with its settings schema, values and variables. */
+  readonly plugins: () => Promise<InstalledPlugins>;
+  /** The registry's entries matching every word of `search` (all without one), or why it cannot be read. */
+  readonly gallery: (search?: string) => Promise<Gallery>;
+  /** The diff the plugin settings make to facetdb.config.ts and its plan; nothing is written. */
+  readonly applyPluginsDiff: (draft: PluginsDraft) => Promise<ApplyDiff>;
+  /** Writes the settings the plan names; the worker reloads and puts them in force with no restart. */
+  readonly applyPluginsWrite: (
+    draft: PluginsDraft,
+    confirm: { readonly plan: string; readonly force: boolean },
+  ) => Promise<ApplyWritten>;
 };
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
@@ -1332,5 +1420,21 @@ export function createApiClient(fetch: Fetch): ApiClient {
         `/sources/${encodeURIComponent(source)}/backfill/stop`,
         {},
       ),
+    plugins: () => call(pluginsSchema, "GET", "/plugins"),
+    gallery: (search) =>
+      call(
+        gallerySchema,
+        "GET",
+        `/plugins/gallery${search === undefined || search.trim() === "" ? "" : `?q=${encodeURIComponent(search.trim())}`}`,
+      ),
+    // A plugin's settings ride in the project draft's `plugins`, as the spending cap rides beside them.
+    applyPluginsDiff: (draft) =>
+      call(applyDiffSchema, "POST", "/apply", { project: { plugins: draft } }),
+    applyPluginsWrite: (draft, { plan, force }) =>
+      call(applyWrittenSchema, "POST", "/apply", {
+        project: { plugins: draft },
+        confirm: plan,
+        force,
+      }),
   };
 }

@@ -1,0 +1,386 @@
+{
+  "facetdb": "0.0.0",
+  "plugins": [
+    {
+      "name": "github",
+      "key": "github",
+      "package": "@facetdb/github",
+      "version": "0.0.0",
+      "builtIn": false,
+      "kinds": [
+        "source",
+        "action",
+        "pack"
+      ],
+      "provides": {
+        "source": [
+          "issues"
+        ],
+        "action": [
+          "label",
+          "comment",
+          "assign"
+        ],
+        "channel": [],
+        "provider": [],
+        "pack": [
+          "triage"
+        ]
+      },
+      "core": {
+        "range": ">=0.0.0 <1.0.0",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_]{20,255}$",
+              "secret": true
+            },
+            "webhookSecret": {
+              "type": "string",
+              "minLength": 1,
+              "secret": true
+            },
+            "apiUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "token"
+          ]
+        },
+        "values": {
+          "token": {
+            "env": "GITHUB_TOKEN"
+          },
+          "webhookSecret": {
+            "env": "GITHUB_WEBHOOK_SECRET"
+          }
+        },
+        "variables": [
+          {
+            "path": "token",
+            "variable": "GITHUB_TOKEN",
+            "secret": true,
+            "set": true
+          },
+          {
+            "path": "webhookSecret",
+            "variable": "GITHUB_WEBHOOK_SECRET",
+            "secret": true,
+            "set": true
+          }
+        ],
+        "hostOnly": []
+      }
+    },
+    {
+      "name": "slack",
+      "key": "slack",
+      "package": "@facetdb/slack",
+      "version": "0.0.0",
+      "builtIn": false,
+      "kinds": [
+        "channel"
+      ],
+      "provides": {
+        "source": [],
+        "action": [],
+        "channel": [
+          "slack"
+        ],
+        "provider": [],
+        "pack": []
+      },
+      "core": {
+        "range": ">=0.0.0 <1.0.0",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^xox[a-z]-[\\x21-\\x7e]+$",
+              "secret": true
+            },
+            "webhooks": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^(?:#[\\p{Ll}\\p{Lo}\\p{Lm}\\p{M}\\p{N}_-]{1,80}|[CGD][A-Z0-9]{8,20})$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1,
+                "secret": true
+              }
+            }
+          }
+        },
+        "values": {
+          "token": {
+            "env": "SLACK_BOT_TOKEN"
+          }
+        },
+        "variables": [
+          {
+            "path": "token",
+            "variable": "SLACK_BOT_TOKEN",
+            "secret": true,
+            "set": true
+          }
+        ],
+        "hostOnly": []
+      }
+    },
+    {
+      "name": "email",
+      "key": "email",
+      "package": "@facetdb/email",
+      "version": "0.0.0",
+      "builtIn": false,
+      "kinds": [
+        "channel"
+      ],
+      "provides": {
+        "source": [],
+        "action": [],
+        "channel": [
+          "email"
+        ],
+        "provider": [],
+        "pack": []
+      },
+      "core": {
+        "range": ">=0.0.0 <1.0.0",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "secure": {
+              "default": false,
+              "type": "boolean"
+            },
+            "user": {
+              "type": "string",
+              "minLength": 1
+            },
+            "password": {
+              "type": "string",
+              "minLength": 1,
+              "secret": true
+            },
+            "from": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "from"
+          ],
+          "additionalProperties": false
+        },
+        "values": {
+          "host": "smtp.example.com",
+          "port": 587,
+          "user": "alerts@example.com",
+          "password": {
+            "env": "EMAIL_PASSWORD"
+          },
+          "from": "alerts@example.com"
+        },
+        "variables": [
+          {
+            "path": "password",
+            "variable": "EMAIL_PASSWORD",
+            "secret": true,
+            "set": true
+          }
+        ],
+        "hostOnly": []
+      }
+    },
+    {
+      "name": "telegram",
+      "key": "telegram",
+      "package": "@facetdb/telegram",
+      "version": "0.0.0",
+      "builtIn": false,
+      "kinds": [
+        "channel"
+      ],
+      "provides": {
+        "source": [],
+        "action": [],
+        "channel": [
+          "telegram"
+        ],
+        "provider": [],
+        "pack": []
+      },
+      "core": {
+        "range": ">=0.0.0 <1.0.0",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[0-9]{1,20}:[A-Za-z0-9_-]{1,200}$",
+              "secret": true
+            }
+          },
+          "required": [
+            "token"
+          ]
+        },
+        "values": {
+          "token": {
+            "env": "TELEGRAM_BOT_TOKEN"
+          }
+        },
+        "variables": [
+          {
+            "path": "token",
+            "variable": "TELEGRAM_BOT_TOKEN",
+            "secret": true,
+            "set": true
+          }
+        ],
+        "hostOnly": []
+      }
+    },
+    {
+      "name": "packs",
+      "key": "packs",
+      "package": "@facetdb/packs",
+      "version": "0.0.0",
+      "builtIn": false,
+      "kinds": [
+        "pack"
+      ],
+      "provides": {
+        "source": [],
+        "action": [],
+        "channel": [],
+        "provider": [],
+        "pack": [
+          "marketplace"
+        ]
+      },
+      "core": {
+        "range": ">=0.0.0 <1.0.0",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "values": {},
+        "variables": [],
+        "hostOnly": []
+      }
+    },
+    {
+      "name": "webhook",
+      "key": "webhook",
+      "package": "@facetdb/webhook",
+      "version": "0.0.0",
+      "builtIn": true,
+      "kinds": [
+        "action",
+        "channel"
+      ],
+      "provides": {
+        "source": [],
+        "action": [
+          "send"
+        ],
+        "channel": [
+          "webhook"
+        ],
+        "provider": [],
+        "pack": []
+      },
+      "core": {
+        "range": "*",
+        "holds": true
+      },
+      "settings": {
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "secret": {
+              "type": "string",
+              "minLength": 1,
+              "secret": true
+            },
+            "endpoints": {
+              "default": {},
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "secret"
+          ],
+          "additionalProperties": false
+        },
+        "values": {
+          "secret": {
+            "env": "FACETDB_WEBHOOK_SECRET"
+          },
+          "endpoints": {
+            "ops": "hooks.example.com"
+          }
+        },
+        "variables": [
+          {
+            "path": "secret",
+            "variable": "FACETDB_WEBHOOK_SECRET",
+            "secret": true,
+            "set": true
+          }
+        ],
+        "hostOnly": [
+          "endpoints.ops"
+        ]
+      }
+    }
+  ]
+}

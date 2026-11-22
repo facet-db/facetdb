@@ -1,6 +1,14 @@
 import { Button, DitherStrip, focusBrackets } from "@facetdb/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import {
+  type FormEvent,
+  type ReactNode,
+  type Ref,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import {
   ApiError,
   homeQuery,
@@ -89,9 +97,12 @@ function Choice({
 function CapForm({
   file,
   onSave,
+  saveRef,
 }: {
   readonly file: SpendingConfig;
   readonly onSave: (draft: SpendingDraft) => void;
+  /** Save, which takes the focus back when the dialog it opened closes. */
+  readonly saveRef: Ref<HTMLButtonElement>;
 }) {
   const atCapName = useId();
   const [noCap, setNoCap] = useState(file.tokens === null);
@@ -160,7 +171,9 @@ function CapForm({
         </fieldset>
       </div>
       <div>
-        <Button type="submit">Save</Button>
+        <Button ref={saveRef} type="submit">
+          Save
+        </Button>
       </div>
     </form>
   );
@@ -219,6 +232,16 @@ export function SpendingSection() {
   /** The draft the open dialog shows; null while it is closed. */
   const [draft, setDraft] = useState<SpendingDraft | null>(null);
   const [opened, setOpened] = useState(0);
+  // The dialog has no trigger of its own, so Radix gives the focus back to nothing when it closes:
+  // once it is gone, Save takes it back (the form's new Save, when the write started it anew).
+  const save = useRef<HTMLButtonElement>(null);
+  const closing = useRef(false);
+  useEffect(() => {
+    if (draft === null && closing.current) {
+      closing.current = false;
+      save.current?.focus();
+    }
+  }, [draft]);
   const now = new Date(schedule.now());
   const spending = home.data?.spending;
   const inForce = spending?.cap;
@@ -301,6 +324,7 @@ export function SpendingSection() {
         <CapForm
           key={`${String(file.data.tokens)} ${file.data.onCapReached}`}
           file={file.data}
+          saveRef={save}
           onSave={(saved) => {
             setDraft(saved);
             setOpened((count) => count + 1);
@@ -314,6 +338,7 @@ export function SpendingSection() {
           opened={opened}
           onOpenChange={(open) => {
             if (!open) {
+              closing.current = true;
               setDraft(null);
             }
           }}

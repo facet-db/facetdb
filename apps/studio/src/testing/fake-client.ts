@@ -9,8 +9,11 @@ import {
   type DecisionsPage,
   type DraftPreview,
   type DraftValidation,
+  type Gallery,
+  type GalleryEntry,
   type Home,
   type Inspection,
+  type InstalledPlugins,
   type Migrated,
   type MigratePlan,
   type Project,
@@ -1135,6 +1138,308 @@ export const SAMPLE_BACKFILL_IDLE: BackfillStatus = {
   words: "No backfill is running. Estimate one to see its cost first.",
 };
 
+/*
+ * The Plugins page: the mockup's plugins. GitHub with a secret not set, Slack, email with its
+ * default, a community `discord` that marks three settings editable and has one the form cannot
+ * draw, `linear` made for an older FacetDB, the packs with no settings, and the built-in webhook
+ * whose endpoint is its host alone. Then the registry's gallery, and discord's settings through
+ * Apply.
+ */
+
+const secretText = { type: "string", minLength: 1, secret: true } as const;
+
+export const SAMPLE_PLUGINS: InstalledPlugins = {
+  facetdb: "0.4.0",
+  plugins: [
+    {
+      name: "github",
+      key: "github",
+      version: "0.4.0",
+      builtIn: false,
+      provides: {
+        source: ["issues"],
+        action: ["label", "comment", "assign"],
+        channel: [],
+        provider: [],
+        pack: ["triage"],
+      },
+      core: { range: ">=0.4.0 <0.5.0", holds: true },
+      settings: {
+        schema: {
+          type: "object",
+          properties: { token: secretText, webhookSecret: secretText, apiUrl: { type: "string" } },
+          required: ["token"],
+        },
+        values: {
+          token: { env: "GITHUB_TOKEN" },
+          webhookSecret: { env: "GITHUB_WEBHOOK_SECRET" },
+        },
+        variables: [
+          { path: "token", variable: "GITHUB_TOKEN", secret: true, set: true },
+          { path: "webhookSecret", variable: "GITHUB_WEBHOOK_SECRET", secret: true, set: false },
+        ],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "slack",
+      key: "slack",
+      version: "0.4.0",
+      builtIn: false,
+      provides: { source: [], action: [], channel: ["slack"], provider: [], pack: [] },
+      core: { range: ">=0.4.0 <0.5.0", holds: true },
+      settings: {
+        schema: {
+          type: "object",
+          properties: {
+            token: secretText,
+            webhooks: {
+              type: "object",
+              propertyNames: { type: "string" },
+              additionalProperties: secretText,
+            },
+          },
+        },
+        values: { token: { env: "SLACK_BOT_TOKEN" } },
+        variables: [{ path: "token", variable: "SLACK_BOT_TOKEN", secret: true, set: true }],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "email",
+      key: "email",
+      version: "0.4.0",
+      builtIn: false,
+      provides: { source: [], action: [], channel: ["email"], provider: [], pack: [] },
+      core: { range: ">=0.4.0 <0.5.0", holds: true },
+      settings: {
+        schema: {
+          type: "object",
+          properties: {
+            host: { type: "string" },
+            port: { type: "integer", minimum: 1, maximum: 65535 },
+            secure: { default: false, type: "boolean" },
+            user: { type: "string", minLength: 1 },
+            password: secretText,
+            from: { type: "string" },
+          },
+          required: ["host", "from"],
+          additionalProperties: false,
+        },
+        values: {
+          host: "smtp.example.com",
+          port: 587,
+          user: "alerts@example.com",
+          password: { env: "EMAIL_PASSWORD" },
+          from: "FacetDB <alerts@example.com>",
+        },
+        variables: [{ path: "password", variable: "EMAIL_PASSWORD", secret: true, set: true }],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "discord",
+      key: "discord",
+      version: "0.6.2",
+      builtIn: false,
+      provides: { source: [], action: [], channel: ["discord"], provider: [], pack: [] },
+      core: { range: ">=0.4.0 <0.5.0", holds: true },
+      settings: {
+        schema: {
+          type: "object",
+          properties: {
+            webhooks: {
+              type: "object",
+              propertyNames: { type: "string" },
+              additionalProperties: secretText,
+            },
+            username: { default: "FacetDB", editable: true, type: "string" },
+            style: { type: "string", enum: ["compact", "full"], editable: true },
+            mentionRoles: { type: "array", items: { type: "string" }, editable: true },
+            embeds: {
+              type: "array",
+              items: { type: "object", properties: { title: { type: "string" } } },
+            },
+          },
+          required: ["webhooks"],
+        },
+        values: {
+          webhooks: { "#alerts": { env: "DISCORD_WEBHOOK_ALERTS" } },
+          username: "FacetDB",
+          style: "compact",
+          mentionRoles: ["oncall"],
+          embeds: [{ title: "FacetDB" }],
+        },
+        variables: [
+          {
+            path: "webhooks.#alerts",
+            variable: "DISCORD_WEBHOOK_ALERTS",
+            secret: true,
+            set: true,
+          },
+        ],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "linear",
+      key: "linear",
+      version: "0.1.4",
+      builtIn: false,
+      provides: { source: [], action: ["label"], channel: [], provider: [], pack: [] },
+      core: { range: ">=0.2.0 <0.4.0", holds: false },
+      settings: {
+        schema: {
+          type: "object",
+          properties: { apiKey: secretText, team: { type: "string" } },
+          required: ["apiKey", "team"],
+        },
+        values: { apiKey: { env: "LINEAR_API_KEY" }, team: "MKT" },
+        variables: [{ path: "apiKey", variable: "LINEAR_API_KEY", secret: true, set: true }],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "packs",
+      key: "packs",
+      version: "0.4.0",
+      builtIn: false,
+      provides: { source: [], action: [], channel: [], provider: [], pack: ["marketplace"] },
+      core: { range: ">=0.4.0 <0.5.0", holds: true },
+      settings: {
+        schema: { type: "object", properties: {}, additionalProperties: false },
+        values: {},
+        variables: [],
+        hostOnly: [],
+      },
+    },
+    {
+      name: "webhook",
+      key: "webhook",
+      version: "0.4.0",
+      builtIn: true,
+      provides: { source: [], action: ["send"], channel: ["webhook"], provider: [], pack: [] },
+      core: { range: "*", holds: true },
+      settings: {
+        schema: {
+          type: "object",
+          properties: {
+            secret: secretText,
+            endpoints: {
+              default: {},
+              type: "object",
+              propertyNames: { type: "string" },
+              additionalProperties: { type: "string" },
+            },
+          },
+          required: ["secret"],
+          additionalProperties: false,
+        },
+        values: {
+          secret: { env: "FACETDB_WEBHOOK_SECRET" },
+          endpoints: { ops: "hooks.example.com" },
+        },
+        variables: [
+          { path: "secret", variable: "FACETDB_WEBHOOK_SECRET", secret: true, set: true },
+        ],
+        hostOnly: ["endpoints.ops"],
+      },
+    },
+  ],
+};
+
+/** One registry entry as the gallery endpoint answers it. */
+function galleryEntry(
+  name: string,
+  more: Omit<GalleryEntry, "name" | "holds"> & { readonly holds?: boolean },
+): GalleryEntry {
+  return { name, holds: true, ...more };
+}
+
+export const SAMPLE_GALLERY: Gallery = {
+  reachable: true,
+  address: "https://registry.facetdb.dev/index.json",
+  plugins: [
+    galleryEntry("github", {
+      description:
+        "Issues and pull requests as a source; labels, comments and assignees as actions; the issue triage pack.",
+      kinds: ["source", "action", "pack"],
+      verified: true,
+      downloads: 4210,
+      installed: true,
+    }),
+    galleryEntry("slack", {
+      description:
+        "Alerts and record notifications in Slack, through a bot token or a channel's incoming webhook.",
+      kinds: ["channel"],
+      verified: true,
+      downloads: 3880,
+      installed: true,
+    }),
+    galleryEntry("telegram", {
+      description: "Alerts and record notifications in a Telegram chat, through your own bot.",
+      kinds: ["channel"],
+      verified: true,
+      downloads: 1630,
+      installed: false,
+    }),
+    galleryEntry("zendesk", {
+      description: "Zendesk tickets as a source, and a tag on the ticket as an action.",
+      kinds: ["source", "action"],
+      verified: false,
+      downloads: 520,
+      installed: false,
+    }),
+    galleryEntry("intercom", {
+      description: "Intercom conversations as a source.",
+      kinds: ["source"],
+      verified: false,
+      downloads: 240,
+      installed: false,
+      holds: false,
+    }),
+  ],
+};
+
+/** Discord's username and a second role to mention, through Apply: the diff it shows. */
+export const SAMPLE_PLUGINS_DIFF: ApplyDiff = {
+  written: false,
+  path: "facetdb.config.ts",
+  diff: [
+    "--- a/facetdb.config.ts",
+    "+++ b/facetdb.config.ts",
+    "@@ -4,9 +4,9 @@",
+    "   plugins: {",
+    "     discord: {",
+    '       webhooks: { "#alerts": env("DISCORD_WEBHOOK_ALERTS") },',
+    '-      username: "FacetDB",',
+    '+      username: "Marketplace alerts",',
+    '       style: "compact",',
+    '-      mentionRoles: ["oncall"],',
+    '+      mentionRoles: ["oncall", "trust-and-safety"],',
+    "",
+  ].join("\n"),
+  changed: true,
+  plan: "plan-plugins",
+  uncommitted: null,
+  dropsOwnText: false,
+  warnings: [],
+};
+
+/** The settings written: the reload put them in force with no restart, in its own words. */
+export const SAMPLE_PLUGINS_APPLIED: ApplyWritten = {
+  written: true,
+  path: "facetdb.config.ts",
+  diff: SAMPLE_PLUGINS_DIFF.diff,
+  reload: {
+    loaded: true,
+    sources: [{ source: "listings", outcome: "unchanged", version: 3, message: null }],
+    notes: [
+      "The settings of the plugin facetdb-plugin-discord in facetdb.config.ts are in force now, with no restart: each action and notification run from now on is handed them.",
+    ],
+  },
+};
+
 /** What the worker answers a browser on another machine with no session. */
 export function signInRequired(): ApiError {
   return new ApiError(
@@ -1236,6 +1541,11 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
       ),
     backfillStart: (source) => Promise.resolve(sampleBackfill("running", { source })),
     backfillStop: (source) => Promise.resolve(sampleBackfill("stopping", { source })),
+    // The Plugins page.
+    plugins: () => Promise.resolve(SAMPLE_PLUGINS),
+    gallery: () => Promise.resolve(SAMPLE_GALLERY),
+    applyPluginsDiff: () => Promise.resolve(SAMPLE_PLUGINS_DIFF),
+    applyPluginsWrite: () => Promise.resolve(SAMPLE_PLUGINS_APPLIED),
     ...answers,
   };
   const admins: string[] = [];
@@ -1431,6 +1741,23 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     reload: () => {
       calls.push("reload");
       return answer.reload();
+    },
+    // The Plugins page's: the search and the draft ride in the note.
+    plugins: () => {
+      calls.push("plugins");
+      return answer.plugins();
+    },
+    gallery: (search) => {
+      calls.push(`gallery${search === undefined ? "" : ` ${search}`}`);
+      return answer.gallery(search);
+    },
+    applyPluginsDiff: (draft) => {
+      calls.push(`applyPluginsDiff ${JSON.stringify(draft)}`);
+      return answer.applyPluginsDiff(draft);
+    },
+    applyPluginsWrite: (draft, confirm) => {
+      calls.push(`applyPluginsWrite ${JSON.stringify({ ...confirm, draft })}`);
+      return answer.applyPluginsWrite(draft, confirm);
     },
   };
 }

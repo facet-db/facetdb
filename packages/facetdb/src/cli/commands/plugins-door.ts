@@ -8,11 +8,14 @@ import type {
   PluginsDoor,
 } from "@facetdb/server";
 import { toJSONSchema } from "zod";
+import { formatPath, type PluginSettings, type ProjectConfig } from "../../config/index.ts";
 import {
+  BUILTIN_PLUGINS,
   type HostedPlugin,
   type PluginHost,
   type RegistryIndex,
   satisfies,
+  WEBHOOK_PLUGIN,
 } from "../../plugin/index.ts";
 import type { CliDeps } from "../program.ts";
 import {
@@ -30,7 +33,9 @@ import {
  * add`), and the packs of the hosted plugins. What leaves is data for the page: a variable is its
  * name and whether the environment has it, never its value; the registry's text is from outside and
  * is handed on as text, and the command beside an entry is built from its checked short name alone
- * (nothing is installed from a page).
+ * (nothing is installed from a page). It also carries what the page draws and drafts with: each
+ * plugin's key in `plugins`, whether it is built in, each entry's range held against this FacetDB,
+ * and the built-in webhook's endpoints as their hosts alone, since an address can carry a token.
  */
 
 export { DEFAULT_REGISTRY, REGISTRY_TIMEOUT_MS, registryAddress };
@@ -41,6 +46,11 @@ export const REGISTRY_CACHE_MS = 10 * 60 * 1000;
 export type PluginsDoorOptions = {
   /** The plugins the config names, loaded and checked (`loadWorkerConfig`). */
   readonly host: PluginHost;
+  /**
+   * The config in force (`fleet.config()`): the key each plugin's settings are written under in
+   * `plugins`, which a studio draft names them by, as Apply judges a draft against it.
+   */
+  readonly config: () => ProjectConfig;
   /** The worker's environment: only whether a variable is set is read from it, never shown. */
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The running FacetDB, checked against each plugin's range as the host did. */
@@ -76,9 +86,58 @@ function schemaOf(hosted: HostedPlugin): JsonObject | null {
   }
 }
 
+/**
+ * The key `config` writes `hosted`'s settings under in `plugins`: the one the host reads as that
+ * plugin (`github` or `@facetdb/github`), else its short name, which a draft then adds.
+ */
+function keyOf(hosted: HostedPlugin, options: PluginsDoorOptions): string {
+  const keys = Object.keys(options.config().plugins ?? {});
+  return (
+    keys.find((key) => options.host.plugin(key)?.packageName === hosted.packageName) ?? hosted.name
+  );
+}
+
+/** What a page may see of an address: its host, never the path or query a token can ride in. */
+function hostOf(address: string): string {
+  return URL.canParse(address) ? new URL(address).host : "an address that is not a URL";
+}
+
+/**
+ * The settings as the page sees them: as the file writes them, but each of the built-in webhook's
+ * endpoint addresses cut to its host, since the rest of an address can hold a token; an endpoint
+ * read from a variable stays the variable's name. `hostOnly` says where a cut was made.
+ */
+function shownSettings(hosted: HostedPlugin): {
+  readonly values: PluginSettings;
+  readonly hostOnly: readonly string[];
+} {
+  const { settings } = hosted;
+  const endpoints = settings["endpoints"];
+  if (
+    hosted.packageName !== WEBHOOK_PLUGIN ||
+    typeof endpoints !== "object" ||
+    endpoints === null ||
+    Array.isArray(endpoints)
+  ) {
+    return { values: settings, hostOnly: [] };
+  }
+  const hostOnly: string[] = [];
+  const cut = Object.fromEntries(
+    Object.entries(endpoints).map(([name, address]) => {
+      if (typeof address !== "string") {
+        return [name, address];
+      }
+      hostOnly.push(formatPath(["endpoints", name]));
+      return [name, hostOf(address)];
+    }),
+  );
+  return { values: { ...settings, endpoints: cut }, hostOnly };
+}
+
 function installedOf(hosted: HostedPlugin, options: PluginsDoorOptions): InstalledPlugin {
   const { plugin } = hosted;
   const { manifest } = plugin;
+  const shown = shownSettings(hosted);
   const provides: Record<PluginKind, readonly string[]> = {
     source: Object.keys(plugin.sources),
     action: Object.keys(plugin.actions),
@@ -88,8 +147,10 @@ function installedOf(hosted: HostedPlugin, options: PluginsDoorOptions): Install
   };
   return {
     name: hosted.name,
+    key: keyOf(hosted, options),
     package: hosted.packageName,
     version: manifest.version,
+    builtIn: Object.hasOwn(BUILTIN_PLUGINS, hosted.packageName),
     kinds: manifest.kinds,
     provides,
     core: {
@@ -98,13 +159,14 @@ function installedOf(hosted: HostedPlugin, options: PluginsDoorOptions): Install
     },
     settings: {
       schema: schemaOf(hosted),
-      values: hosted.settings,
+      values: shown.values,
       variables: hosted.variables.map(({ path, variable, secret }) => ({
         path,
         variable,
         secret,
         set: isSet(options.env, variable),
       })),
+      hostOnly: shown.hostOnly,
     },
   };
 }
@@ -150,6 +212,7 @@ export function createPluginsDoor(options: PluginsDoorOptions): PluginsDoor {
   };
 
   return {
+    facetdb: options.coreVersion,
     installed: () => options.host.all().map((hosted) => installedOf(hosted, options)),
     packs: () => options.host.all().flatMap(packsOf),
     gallery: async (search): Promise<Gallery> => {
@@ -171,6 +234,7 @@ export function createPluginsDoor(options: PluginsDoorOptions): PluginsDoor {
           description: entry.description,
           kinds: entry.kinds,
           facetdb: entry.facetdb,
+          holds: satisfies(options.coreVersion, entry.facetdb),
           verified: entry.verified,
           downloads: entry.downloads,
           homepage: entry.homepage ?? null,

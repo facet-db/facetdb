@@ -22,11 +22,11 @@ import { Unreachable } from "./index.ts";
 
 /**
  * The Plugins, Alerts and Settings pages on happy-dom with the fake API client: the Plugins page's
- * honest empty state, the channels as the config names them and the events in the same shape, the
- * reviewers and the form that adds one (the password's whole life), the spending cap as the worker
- * runs it, studio access in words and the way out, and the Cloud tag on the parts that are Cloud's.
- * Times are built in the machine's zone (the fake's own), and "now" is a local afternoon, so the
- * words of a time do not depend on where a test runs.
+ * two parts (plugins-page.test.tsx holds the rest), the channels as the config names them and the
+ * events in the same shape, the reviewers and the form that adds one (the password's whole life),
+ * the spending cap as the worker runs it, studio access in words and the way out, and the Cloud tag
+ * on the parts that are Cloud's. Times are built in the machine's zone (the fake's own), and "now"
+ * is a local afternoon, so the words of a time do not depend on where a test runs.
  */
 
 /** The afternoon the pages are opened in: Friday 6 November 2026, 3 pm on this machine. */
@@ -37,34 +37,22 @@ afterEach(() => {
 });
 
 describe("the Plugins page", () => {
-  it("says plainly that nothing is installed and that plugins arrive in a later version", async () => {
+  // The placeholder is gone: features/plugins/plugins-page.test.tsx holds the page.
+  it("lists the installed plugins and the gallery, and reads nothing the other pages show", async () => {
     const api = fakeApi();
     renderStudio({ path: "/plugins", api, now: NOW });
 
     expect(await screen.findByRole("heading", { level: 1, name: "Plugins" })).toBeInTheDocument();
     expect(document.title).toBe("Plugins · FacetDB");
-    expect(screen.getByRole("heading", { level: 2, name: "Nothing installed yet" })).toBeVisible();
-    expect(
-      screen.getByText(
-        /Plugins arrive in a later version, and nothing can be installed before then/,
-      ),
-    ).toBeInTheDocument();
-    // It promises no date, and it reads nothing from the worker beyond the rail's own figures.
-    expect(document.body.textContent).not.toMatch(/\b20\d\d\b|\bQ[1-4]\b|\bweeks?\b/);
-    expect(api.calls.filter((call) => /alerts|reviewers|studioAccess/.test(call))).toEqual([]);
-  });
-
-  it("has one action, which says what the gallery will be and when it opens", async () => {
-    const { user } = renderStudio({ path: "/plugins", now: NOW });
-    const browse = await screen.findByRole("button", { name: "Browse the gallery" });
-    expect(screen.getAllByRole("button", { name: "Browse the gallery" })).toHaveLength(1);
-    expect(screen.queryByText(/The gallery opens in a later version/)).toBeNull();
-
-    await user.click(browse);
-
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "The gallery opens in a later version: the registry's index with search, a verified badge and install counts.",
+    expect(await screen.findByRole("article", { name: "github" })).toBeVisible();
+    expect(await screen.findByText(/^Settings are changed in facetdb\.config\.ts/)).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "Installed" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "Gallery" })).toBeVisible();
+    // The placeholder's promise is gone: nothing arrives "in a later version" any more.
+    expect(document.body.textContent).not.toMatch(
+      /later version|Nothing installed yet|Browse the gallery/,
     );
+    expect(api.calls.filter((call) => /alerts|reviewers|studioAccess/.test(call))).toEqual([]);
   });
 });
 
@@ -737,6 +725,28 @@ describe("the Settings page", () => {
       expect(section.getByText(/the worker enforces the new cap at once/)).toHaveTextContent(
         "facetdb.config.ts",
       );
+    });
+
+    it("gives the focus back to Save when the dialog closes (it has no trigger for Radix to return to)", async () => {
+      const { user } = renderStudio({ path: "/settings", now: NOW });
+      const section = within(await screen.findByRole("region", { name: "Spending cap" }));
+      const box = await section.findByRole("textbox", {
+        name: "Monthly cap, in billable input tokens",
+      });
+      await user.clear(box);
+      await user.type(box, "40,000,000");
+      const save = section.getByRole("button", { name: "Save" });
+      await user.click(save);
+
+      const dialog = within(await screen.findByRole("dialog", { name: "Save the spending cap" }));
+      await user.click(dialog.getByRole("button", { name: "Cancel" }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+      await waitFor(() => {
+        expect(save).toHaveFocus();
+      });
     });
 
     it("Save opens the diff and nothing is written before confirm; the write puts the cap in force, and the figures show it", async () => {
