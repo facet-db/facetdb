@@ -28,6 +28,7 @@ import {
   type RunningChannel,
 } from "./data/index.ts";
 import { createRunsService } from "./data/runs.ts";
+import type { HooksDoor } from "./hooks/index.ts";
 import type { PluginsDoor } from "./plugins/index.ts";
 import { createReviewEndpointService, type ReviewEndpointDeps } from "./review/service.ts";
 import type { BackfillJobsDoor } from "./sources/backfill-door.ts";
@@ -123,6 +124,12 @@ export type ServerDeps = {
    * only the CLI builds them. Absent, the endpoints answer empty lists.
    */
   readonly plugins?: PluginsDoor;
+  /**
+   * The plugin sources' webhooks: a delivery handed to the running source a URL names by its
+   * plugin's short name and its own, as only the CLI's fleet knows them. Absent, every hook is
+   * unknown.
+   */
+  readonly hooks?: HooksDoor;
 };
 
 /**
@@ -173,6 +180,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
         }),
     ...(deps.backfill === undefined ? {} : { backfill: deps.backfill }),
     ...(deps.plugins === undefined ? {} : { plugins: deps.plugins }),
+    ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
     studio: {
       sessions: createSessions({
         secret: deps.sessionSecret,

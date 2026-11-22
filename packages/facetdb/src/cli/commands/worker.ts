@@ -121,6 +121,7 @@ import {
   sourceUrlOf,
   splitTable,
 } from "./database.ts";
+import { createHooksDoor, hooklessNotes } from "./hooks-door.ts";
 import { installRuns, readInstall } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
 import { presetKeyOf } from "./model-provider.ts";
@@ -678,6 +679,8 @@ export async function runWorkers(
         // Its store answers a pass whatever its plugin does: only a read through the plugin that
         // answered starts its backoff over after a failure.
         proven: (heard) => connector.onWorking(heard),
+        // A webhook delivery the HTTP surface hands this source (hooks-door.ts).
+        receive: (request, caller) => connector.receive(request, caller),
         close: () => connector.close(),
       });
     } catch (error) {
@@ -1019,6 +1022,8 @@ export async function runWorkers(
           workspace: deps.workspace,
           clock,
         }),
+        // A plugin source's webhook, handed to the loop in force of the source it names.
+        hooks: createHooksDoor({ fleet, plugins: parts.plugins, clock, print }),
         // The model's backoff ceiling: by then the next attempt has been made.
         retryAfterSeconds: Math.ceil(DEFAULT_MAX_MS / 1000),
         // The studio's door to the configuration: the loader's export and judgement of the file as
@@ -1167,6 +1172,11 @@ export async function runWorkers(
           : `Serving the studio, its endpoints and the check API on ${address}.`,
       );
       await parts.listening?.(options.host, listener.port);
+    } else if (!options.once) {
+      // No route under --no-http; a source whose plugin takes webhooks relies on its poll.
+      for (const line of hooklessNotes(config, parts.plugins)) {
+        print(line);
+      }
     }
 
     // The first beat, once the sources are open and the surface is up; under --once too, which

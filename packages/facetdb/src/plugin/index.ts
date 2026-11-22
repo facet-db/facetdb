@@ -123,6 +123,7 @@ export {
   MAX_STATE_BYTES,
   PluginSourceFailed,
   printableKey,
+  ReceiveAbandoned,
 } from "./source-connector.ts";
 export type { HostedSource } from "./source-host.ts";
 export { checkSources, hostedSource } from "./source-host.ts";

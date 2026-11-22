@@ -3,7 +3,8 @@
  * signed webhooks and the review endpoints. Routes parse,
  * authenticate, call one service and map the result; they never touch the database.
  */
-export { API_VERSION, type StudioAccess } from "./app.ts";
+export { API_VERSION } from "./api-version.ts";
+export { REQUEST_ID_HEADER, type StudioAccess } from "./app.ts";
 export type { ApiKeys } from "./auth/api-keys.ts";
 export { createApiKeys } from "./auth/api-keys.ts";
 export { isLoopbackAddress, isLoopbackHost } from "./auth/loopback.ts";
@@ -87,6 +88,16 @@ export type { RunsPage, RunsService, RunView } from "./data/runs.ts";
 export { createRunsService, RUNS_PER_PAGE } from "./data/runs.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
+export type { HookDelivery, HookOutcome, HooksDoor } from "./hooks/index.ts";
+export {
+  HOOK_BODY_MAX_BYTES,
+  HOOK_RETRY_AFTER_SECONDS,
+  HOOK_TIMEOUT_MS,
+  HOOKS_PATH,
+  hookBodyTooLarge,
+  isHookUrl,
+  NO_HOOKS,
+} from "./hooks/index.ts";
 export type { ServerDeps } from "./main.ts";
 export { createServer } from "./main.ts";
 export type {

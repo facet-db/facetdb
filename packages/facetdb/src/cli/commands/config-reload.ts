@@ -36,6 +36,7 @@ import {
   toProjectJson,
   uncommittedWords,
 } from "../../config/index.ts";
+import type { ReceiveOutcome } from "../../plugin/index.ts";
 import { CliError } from "../program.ts";
 import { hasUrl, variableOf } from "./database.ts";
 
@@ -133,6 +134,12 @@ export type SourceLoop = {
    * plugin that answered): only that starts a failed source's backoff over. Absent, a pass does.
    */
   readonly proven?: (heard: () => void) => void;
+  /**
+   * A plugin source's inbound event: its plugin's `receive` on a webhook delivery, the keys it
+   * names taken into the store's queue, all abandoned when `caller` aborts first. Absent for a
+   * table or an API source.
+   */
+  readonly receive?: (request: Request, caller: AbortSignal) => Promise<ReceiveOutcome>;
   close(): Promise<void>;
 };
 

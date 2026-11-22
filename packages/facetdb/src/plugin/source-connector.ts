@@ -31,7 +31,8 @@ import type { HostedSource } from "./source-host.ts";
  * - the pump runs the plugin's `watch` into `intake` from the first `watch()` until `close()`, under
  *   the source's own signal; a batch is taken in before the next is asked for, and the cursor the
  *   plugin saves is written only once every key it yielded before has been taken in.
- * - `receive(request)` runs the plugin's `receive` on an inbound HTTP event and takes its keys in.
+ * - `receive(request)` runs the plugin's `receive` on an inbound HTTP event and takes its keys in:
+ *   only when it answered a 2xx, and never a key `eventKeyProblem` refuses.
  * - a backfill's own adapter (`createPluginBackfillConnector`; never the worker's, whose
  *   `scan` and `enqueue` stay the store's) pages through the plugin's own `scan`: `scan(cursor)`
  *   hands core one page of it, in the plugin's order (newest first by the SDK's rule), each row
@@ -87,6 +88,19 @@ export function keyProblem(key: unknown): string | undefined {
     return `it is ${size} bytes, more than the ${MAX_KEY_BYTES} a key may hold`;
   }
   return undefined;
+}
+
+/**
+ * Why a key an inbound event named is not taken in, beyond `keyProblem`, or undefined when it is:
+ * an invisible formatting character (a bidirectional override, a zero-width joiner) or a line or
+ * paragraph separator. The store keeps such a key from `watch` and every page shows it raw, where
+ * it can pass for another key; a webhook is the one way in a stranger reaches, so there it is
+ * refused, and the source's own poll still finds the record if it is real.
+ */
+function eventKeyProblem(key: string): string | undefined {
+  return /[\p{Cf}\p{Zl}\p{Zp}]/u.test(key)
+    ? "it holds an invisible formatting character (a direction override, a zero-width character) or a line separator"
+    : undefined;
 }
 
 /** The most characters of a plugin source's key a line prints. */
@@ -145,10 +159,13 @@ export type ReceiveOutcome = {
 export type PluginSourceConnector = Connector & {
   intake(keys: readonly RecordKey[]): Promise<IntakeReport>;
   /**
-   * Runs the plugin's `receive` on an inbound event (the route that calls it is not built yet). A
-   * source without `receive` answers 404, and a stopped one 503, with nothing taken in.
+   * Runs the plugin's `receive` on an inbound event (`POST /v1/hooks/:plugin/:source`). A source
+   * without `receive` answers 404, and a stopped one 503, with nothing taken in; so does any status
+   * but a 2xx the plugin answers, whatever keys it named beside it. When `caller` aborts first, the
+   * plugin's `receive` and the reads of the keys it named are abandoned (their signal aborted) and
+   * it rejects with `ReceiveAbandoned`; what was stored before stays stored.
    */
-  receive(request: Request): Promise<ReceiveOutcome>;
+  receive(request: Request, caller?: AbortSignal): Promise<ReceiveOutcome>;
   /**
    * Tells `heard` each time the plugin is seen working: a read through it that answered. A pass of
    * the store's queue says nothing of the plugin, so the worker's backoff after a failure starts
@@ -184,6 +201,18 @@ export class PluginSourceFailed extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PluginSourceFailed";
+  }
+}
+
+/**
+ * An inbound event's caller gave up on it (the webhook route's time ran out) while one of its
+ * plugin calls was in hand: the call's signal is aborted and its outcome is not used. The words are
+ * FacetDB's: they name the plugin and the step, never anything the plugin said.
+ */
+export class ReceiveAbandoned extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReceiveAbandoned";
   }
 }
 
@@ -229,6 +258,9 @@ function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
 
 const EMPTY: IntakeReport = { queued: [], unchanged: [], skipped: [], refused: [], strangers: 0 };
 
+/** What a plugin call's race resolves to when its caller gave up first. */
+const ABANDONED = Symbol("abandoned");
+
 /**
  * The worker's adapter of a plugin source: `scan` and `enqueue` are the store's, as for every other
  * connector over it, so a preview reads the records the store holds and a record queued again (an
@@ -272,28 +304,61 @@ function adapterOf(
     stop.signal.addEventListener("abort", () => resolve(stop), { once: true });
   });
 
-  /** A plugin call, abandoned when the source stops, its failure worded by FacetDB. */
-  async function call<Result>(step: Step, work: () => Promise<Result>): Promise<Result> {
+  /**
+   * A plugin call, abandoned when the source stops, or when `caller` aborts (an inbound event whose
+   * caller gave up), its failure worded by FacetDB.
+   */
+  async function call<Result>(
+    step: Step,
+    work: () => Promise<Result>,
+    caller?: AbortSignal,
+  ): Promise<Result> {
+    /** Read afresh every time, as `stopped`: the caller may give up during any wait. */
+    const gaveUp = (): boolean => caller?.aborted === true;
     if (stopped()) {
       throw new Stopped();
+    }
+    if (gaveUp()) {
+      throw abandoned(step);
     }
     // Started a turn later, so a function that throws at once is caught as one that rejects; and
     // its failure after a stop, when nobody waits for it any more, is dropped, never unhandled.
     const pending = Promise.resolve().then(work);
     pending.catch(() => undefined);
-    let outcome: Result | typeof stop;
+    const racing: Promise<Result | typeof stop | typeof ABANDONED>[] = [pending, aborted];
+    if (caller !== undefined) {
+      racing.push(
+        new Promise((resolve) => {
+          caller.addEventListener("abort", () => resolve(ABANDONED), { once: true });
+        }),
+      );
+    }
+    let outcome: Result | typeof stop | typeof ABANDONED;
     try {
-      outcome = await Promise.race([pending, aborted]);
+      outcome = await Promise.race(racing);
     } catch (error) {
       if (stopped()) {
         throw new Stopped();
+      }
+      // A plugin that gave up on its own aborted signal is the caller's giving up, not its failure.
+      if (gaveUp()) {
+        throw abandoned(step);
       }
       throw worded(step, error);
     }
     if (outcome === stop) {
       throw new Stopped();
     }
+    if (outcome === ABANDONED) {
+      throw abandoned(step);
+    }
     return outcome as Result;
+  }
+
+  function abandoned(step: Step): ReceiveAbandoned {
+    return new ReceiveAbandoned(
+      `${about} had not answered in ${step} when the event's time ran out; its work there is abandoned`,
+    );
   }
 
   /** What a plugin's failure says, in fixed words: its own message is never kept. */
@@ -445,7 +510,8 @@ function adapterOf(
     return { asked: [...asked], badKeys: [...badKeys].map(([key, why]) => ({ key, why })) };
   }
 
-  async function intake(named: readonly unknown[]): Promise<IntakeReport> {
+  /** `caller`: an inbound event's own signal, which abandons the read when it aborts. */
+  async function intake(named: readonly unknown[], caller?: AbortSignal): Promise<IntakeReport> {
     const { asked, badKeys } = keysOf(named);
     for (const { key, why } of badKeys) {
       note(
@@ -455,8 +521,11 @@ function adapterOf(
     if (asked.length === 0 || stopped()) {
       return { ...EMPTY, refused: badKeys };
     }
-    const returned: unknown = await call("read", () =>
-      hosted.definition.read(contextOf(stop.signal), asked),
+    const signal = caller === undefined ? stop.signal : AbortSignal.any([stop.signal, caller]);
+    const returned: unknown = await call(
+      "read",
+      () => hosted.definition.read(contextOf(signal), asked),
+      caller,
     );
     const judged = judge(asked, returned);
     // The plugin answered a read: it works, whatever the store does next.
@@ -909,7 +978,7 @@ function adapterOf(
     onWorking(heard) {
       working.push(heard);
     },
-    async receive(request) {
+    async receive(request, caller) {
       const receive = hosted.definition.receive;
       if (receive === undefined) {
         return { status: 404, intake: EMPTY };
@@ -917,11 +986,46 @@ function adapterOf(
       if (stopped()) {
         return { status: 503, intake: EMPTY };
       }
+      // The plugin is told of a caller that gave up through its own signal, as of a stop.
+      const signal = caller === undefined ? stop.signal : AbortSignal.any([stop.signal, caller]);
       try {
         const receipt = receiptOf(
-          await call("receive", () => receive(contextOf(stop.signal), request)),
+          await call("receive", () => receive(contextOf(signal), request), caller),
         );
-        return { status: receipt.status, intake: await intake(receipt.keys) };
+        // Only a delivery the plugin took names keys. One it refused (a bad signature is a 401)
+        // queues nothing whatever keys came with it, so a plugin that returns keys beside a refusal
+        // cannot queue a record for a sender it did not believe.
+        if (receipt.status < 200 || receipt.status > 299) {
+          if (receipt.keys.length > 0) {
+            note(
+              `${about} refused an event (HTTP ${receipt.status}) and still named keys with it; none is read or queued`,
+            );
+          }
+          return { status: receipt.status, intake: EMPTY };
+        }
+        const formatted = new Map<RecordKey, string>();
+        for (const key of receipt.keys) {
+          const why = typeof key === "string" ? eventKeyProblem(key) : undefined;
+          if (why !== undefined) {
+            formatted.set(key as RecordKey, why);
+          }
+        }
+        for (const [key, why] of formatted) {
+          note(
+            `${about} named a key in an event that a webhook may not name (${why}), so it is not read or queued: ${printableKey(key)}`,
+          );
+        }
+        const taken = await intake(
+          receipt.keys.filter((key) => typeof key !== "string" || !formatted.has(key)),
+          caller,
+        );
+        return {
+          status: receipt.status,
+          intake: {
+            ...taken,
+            refused: [...[...formatted].map(([key, why]) => ({ key, why })), ...taken.refused],
+          },
+        };
       } catch (error) {
         if (error instanceof Stopped) {
           return { status: 503, intake: EMPTY };

@@ -25,6 +25,7 @@ import {
   type PluginSourceConnector,
   PluginSourceFailed,
   printableKey,
+  ReceiveAbandoned,
   type RecordStore,
   SourceAccessLost,
   type SourceContext,
@@ -746,6 +747,167 @@ describe("the plugin source's receive (plugin-source)", () => {
     expect((await made.adapter(tracker).receive(request())).status).toBe(404);
     await adapter.close();
     expect((await adapter.receive(request())).status).toBe(503);
+  });
+
+  it("takes in no key of an event the plugin refused, whatever keys it named beside its refusal", async () => {
+    const service = new IssueTracker();
+    service.edit("k1", state("one"));
+    const tracker = trackerSource(service);
+    let answer: { status: number; keys: string[] } = { status: 401, keys: ["k1"] };
+    const reads: (readonly string[])[] = [];
+    const made = await worldOf();
+    const adapter = made.adapter(
+      source<{ pageSize: number }>({
+        ...tracker,
+        read: (ctx, keys) => {
+          reads.push(keys);
+          return tracker.read(ctx, keys);
+        },
+        receive: async () => answer,
+      }),
+    );
+    const request = () =>
+      new Request("http://127.0.0.1:4040/v1/hooks/tracker/issues", { method: "POST", body: "{}" });
+
+    for (const status of [401, 400, 413, 422, 500, 302]) {
+      answer = { status, keys: ["k1"] };
+      expect(await adapter.receive(request())).toEqual({
+        status,
+        intake: { queued: [], unchanged: [], skipped: [], refused: [], strangers: 0 },
+      });
+    }
+    expect(await adapter.claim(10)).toEqual([]);
+    expect(reads).toEqual([]);
+    // Said in FacetDB's words with the status alone: no key of the event is printed.
+    expect(made.notes).toContain(
+      "the plugin @facetdb/tracker (source issues of issues) refused an event (HTTP 401) and still named keys with it; none is read or queued",
+    );
+    expect(made.notes.join("\n")).not.toContain("k1");
+
+    // A refusal with no key says nothing.
+    const before = made.notes.length;
+    answer = { status: 401, keys: [] };
+    expect((await adapter.receive(request())).status).toBe(401);
+    expect(made.notes).toHaveLength(before);
+  });
+
+  it("abandons a receive, or a read of the keys it named, when its caller gives up, telling the plugin through its signal", async () => {
+    const service = new IssueTracker();
+    service.edit("k1", state("one"));
+    service.edit("slow", state("slow"));
+    const tracker = trackerSource(service);
+    /** Each plugin call that waits for its signal, by step: when it began, and once told to stop. */
+    const waiting: string[] = [];
+    const toldToStop: string[] = [];
+    const untilAborted = (signal: AbortSignal, step: string) =>
+      new Promise<void>((resolve) => {
+        waiting.push(step);
+        if (signal.aborted) {
+          toldToStop.push(step);
+          resolve();
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            toldToStop.push(step);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+    let event: { hang: boolean; keys: string[] } = { hang: true, keys: ["k1"] };
+    const made = await worldOf();
+    const adapter = made.adapter(
+      source<{ pageSize: number }>({
+        ...tracker,
+        read: async (ctx, keys) => {
+          if (keys.includes("slow")) {
+            await untilAborted(ctx.signal, "read");
+          }
+          return tracker.read(ctx, keys);
+        },
+        receive: async (ctx) => {
+          if (event.hang) {
+            await untilAborted(ctx.signal, "receive");
+          }
+          return { status: 202, keys: event.keys };
+        },
+      }),
+    );
+    const request = () =>
+      new Request("http://127.0.0.1:4040/v1/hooks/tracker/issues", { method: "POST", body: "{}" });
+
+    // A receive that never answers: given up when its caller is, nothing taken in.
+    const first = new AbortController();
+    const hanging = adapter.receive(request(), first.signal);
+    await vi.waitFor(() => expect(waiting).toEqual(["receive"]));
+    first.abort();
+    await expect(hanging).rejects.toThrow(ReceiveAbandoned);
+    await expect(hanging).rejects.toThrow(
+      "the plugin @facetdb/tracker (source issues of issues) had not answered in receive when the event's time ran out; its work there is abandoned",
+    );
+    // A receive that answers, but whose read of a key it named never does: given up the same way.
+    event = { hang: false, keys: ["slow"] };
+    const second = new AbortController();
+    const reading = adapter.receive(request(), second.signal);
+    await vi.waitFor(() => expect(waiting).toEqual(["receive", "read"]));
+    second.abort();
+    await expect(reading).rejects.toThrow("had not answered in read");
+    await vi.waitFor(() => expect(toldToStop).toEqual(["receive", "read"]));
+    expect(await adapter.claim(10)).toEqual([]);
+
+    // An event whose caller already gave up never reaches the plugin; one whose caller waits is
+    // taken in as before, and the source's own work is untouched by the callers that gave up.
+    const gone = new AbortController();
+    gone.abort();
+    await expect(adapter.receive(request(), gone.signal)).rejects.toThrow(ReceiveAbandoned);
+    expect(toldToStop).toEqual(["receive", "read"]);
+    event = { hang: false, keys: ["k1"] };
+    expect(await adapter.receive(request(), new AbortController().signal)).toMatchObject({
+      status: 202,
+      intake: { queued: ["k1"] },
+    });
+    expect(await adapter.claim(10)).toEqual(["k1"]);
+  });
+
+  it("refuses a key an event names that holds a direction override, a zero-width character or a line separator", async () => {
+    const service = new IssueTracker();
+    const formatted = ["k‮evil", "k‍zw", "k line", "﻿k"];
+    for (const key of [...formatted, "k1"]) {
+      service.edit(key, state(key));
+    }
+    const tracker = trackerSource(service);
+    const reads: (readonly string[])[] = [];
+    const made = await worldOf();
+    const adapter = made.adapter(
+      source<{ pageSize: number }>({
+        ...tracker,
+        read: (ctx, keys) => {
+          reads.push(keys);
+          return tracker.read(ctx, keys);
+        },
+        receive: async () => ({ status: 202, keys: [...formatted, "k1", formatted[0] as string] }),
+      }),
+    );
+
+    const outcome = await adapter.receive(
+      new Request("http://127.0.0.1:4040/v1/hooks/tracker/issues", { method: "POST", body: "{}" }),
+    );
+
+    expect(outcome.status).toBe(202);
+    expect(outcome.intake.queued).toEqual(["k1"]);
+    expect(outcome.intake.refused.map((entry) => entry.key)).toEqual(formatted);
+    expect(await adapter.claim(10)).toEqual(["k1"]);
+    // Each is said once, printed with no formatting character, and never read through the plugin.
+    const said = made.notes.filter((line) => line.includes("a webhook may not name"));
+    expect(said).toHaveLength(formatted.length);
+    for (const line of said) {
+      expect(line).not.toMatch(/[\p{Cf}\p{Zl}\p{Zp}]/u);
+    }
+    expect(reads.flat()).toEqual(["k1"]);
+    // From watch the store keeps such a key as before: the rule is the webhook's alone.
+    expect((await adapter.intake(["k‮evil"])).queued).toEqual(["k‮evil"]);
   });
 });
 
