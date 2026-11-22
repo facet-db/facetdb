@@ -4,6 +4,7 @@ import { loadPlugin, type PackDefinition } from "facetdb/plugin";
 import { describe, expect, it } from "vitest";
 import { github, triage } from "../index.ts";
 import { type ChangedFiles, stateOf } from "../issues-state.ts";
+import { managedLabels } from "../managed-labels.ts";
 
 /**
  * The GitHub issue triage pack: it parses through the SDK's own checks applied to the GitHub
@@ -318,6 +319,13 @@ describe("the triage pack's sample", () => {
           ...(files === undefined ? {} : { pull_request: {} }),
         },
         files,
+        // The labels the worked example's label actions manage: none is in the sample.
+        managedLabels([
+          {
+            action: "label",
+            config: { add: ["Not Priority", "Impacts only OSS", "needs-triage"] },
+          },
+        ]),
       );
       expect(state, issue.id).toEqual({
         title: issue.title,

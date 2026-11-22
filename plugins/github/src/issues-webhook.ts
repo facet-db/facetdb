@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { type Infer, type SourceReceipt, z } from "facetdb/plugin";
 import { issueNumber, type Kind } from "./issues-state.ts";
+import type { ManagedLabels } from "./managed-labels.ts";
 import type { Repo } from "./settings.ts";
 
 /**
@@ -19,7 +20,11 @@ import type { Repo } from "./settings.ts";
  *    included) is accepted with no key, its body never parsed; an `issues` or `pull_request` body
  *    is parsed (JSON, or the `payload` field of a form-encoded delivery, GitHub's two content
  *    types) and judged by shape (400 when it is not one), and its repository compared with the
- *    source's (422 for another); its number is the key, when `include` takes its kind.
+ *    source's (422 for another); its number is the key, when `include` takes its kind, except for
+ *    a `labeled` or `unlabeled` event of a label the source's own label actions manage
+ *    (managed-labels.ts): accepted with no key, whoever sent it, as that label is not state. Every
+ *    other event of the issue names it, the token's own login's included (with a personal access
+ *    token that login is a maintainer, whose own edits must ask again).
  *
  * The answer's `reason` is fixed words: nothing of the body, a header or the secret is in any
  * answer, and nothing here throws or logs. The SDK's receipt carries `status` and `keys` only;
@@ -63,6 +68,8 @@ export type WebhookTarget = {
   /** The repository's numeric id, once a signed event of it said it; it stays the same across a rename. */
   readonly knownId: number | undefined;
   readonly learn: (id: number) => void;
+  /** The labels the source's own label actions manage: their label events name no key. */
+  readonly managed: ManagedLabels;
 };
 
 function refused(status: number, reason: string): Receipt {
@@ -157,6 +164,21 @@ const pullRequestEvent = z.object({
 });
 
 /**
+ * What a label event adds to an issues or pull_request event: the label added or removed. Judged
+ * apart from the event's shape, so an event that is not one is handled exactly as before.
+ */
+const labelEvent = z.object({
+  action: z.enum(["labeled", "unlabeled"]),
+  label: z.object({ name: z.string() }),
+});
+
+/** Whether the event only adds or removes a label the source manages: no state moves for it. */
+function managedLabelEvent(target: WebhookTarget, payload: unknown): boolean {
+  const event = labelEvent.safeParse(payload);
+  return event.success && target.managed.has(event.data.label.name);
+}
+
+/**
  * Whether the event's repository is the source's: by its numeric id once known (a name can pass to
  * another repository after a rename or a transfer, an id never does), else by its full name in any
  * case, as GitHub compares names; the first match teaches the id.
@@ -230,6 +252,9 @@ export async function receiveEvent(target: WebhookTarget, request: Request): Pro
   if (!sameRepository(target, repository)) {
     return refused(422, OTHER_REPOSITORY);
   }
+  if (!target.include.has(kind) || managedLabelEvent(target, payload)) {
+    return { status: ACCEPTED, keys: [] };
+  }
   // The key is the number written as GitHub numbers issues: decimal digits, nothing else.
-  return { status: ACCEPTED, keys: target.include.has(kind) ? [String(number)] : [] };
+  return { status: ACCEPTED, keys: [String(number)] };
 }

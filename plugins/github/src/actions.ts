@@ -41,9 +41,10 @@ export type ActionDeps = {
 /**
  * A label's name as GitHub takes one: one line, at most 50 characters, not blank, and never only
  * dots: `.` or `..` is a step in the URL's path, so `labels/..` would reach the repository and
- * `issues/7/labels/.` GitHub's route that removes every label (`urlOf` refuses them too).
+ * `issues/7/labels/.` GitHub's route that removes every label (`urlOf` refuses them too). The
+ * issues source reads a label action's names through it too (managed-labels.ts), trimmed as here.
  */
-const labelName = z
+export const labelName = z
   .string()
   .trim()
   .min(1, { error: "a label's name is not blank" })

@@ -20,6 +20,7 @@ import {
   stateOf,
 } from "./issues-state.ts";
 import { type Receipt, receiveEvent } from "./issues-webhook.ts";
+import { managedLabels } from "./managed-labels.ts";
 import { POLL_INTERVAL_MS, POLL_INTERVAL_NO_WEBHOOK_MS, reconcile } from "./reconcile.ts";
 import { GithubActionError, type GithubFetch, type Session } from "./rest.ts";
 import {
@@ -34,7 +35,8 @@ import {
 /**
  * The GitHub plugin's `issues` source: a record per issue or pull request of one repository, its
  * key the number, its state the title, the body, the labels and the changed files
- * (issues-state.ts).
+ * (issues-state.ts); a label the source's own label actions manage is no state, and its label
+ * events name no key (managed-labels.ts).
  *
  * - `receive`: GitHub's signed webhook deliveries name the numbers that changed (issues-webhook.ts).
  * - `read`: one `GET /repos/{o}/{r}/issues/{n}` a key, and for a pull request its first page of
@@ -141,6 +143,7 @@ async function confirmRepository(session: Session, repo: Repo): Promise<void> {
  * this source writes one (decimal digits, no leading zero), a number GitHub answers 404 or 410 for
  * or redirects (deleted, transferred), and one of a kind `include` leaves out, are left out, as the
  * SDK's `read` says. A failure of any request fails the whole read (the worker reads them again).
+ * The labels the source's own label actions manage are left out of each state (managed-labels.ts).
  */
 async function readIssues(
   deps: SourceDeps,
@@ -149,6 +152,7 @@ async function readIssues(
 ): Promise<SourceRow[]> {
   const repo = repoOf(ctx);
   const include = new Set<Kind>(ctx.source.settings.include);
+  const managed = managedLabels(ctx.source.actions);
   const session = sessionOf(deps, ctx, repo);
   const rows: SourceRow[] = [];
   let missing = false;
@@ -189,7 +193,7 @@ async function readIssues(
         continue;
       }
     }
-    rows.push({ key, state: stateOf(item.data, files) });
+    rows.push({ key, state: stateOf(item.data, files, managed) });
   }
   if (missing) {
     await confirmRepository(session, repo);
@@ -230,6 +234,7 @@ export function issuesSource(
         sessionOf(deps, ctx, repo),
         repo,
         new Set<Kind>(ctx.source.settings.include),
+        managedLabels(ctx.source.actions),
         cursor,
       );
     },
@@ -243,6 +248,7 @@ export function issuesSource(
           include: new Set<Kind>(ctx.source.settings.include),
           knownId: ids.get(known),
           learn: (id) => ids.set(known, id),
+          managed: managedLabels(ctx.source.actions),
         },
         request,
       );

@@ -1,4 +1,5 @@
 import { type Infer, SourceAccessLost, z } from "facetdb/plugin";
+import type { ManagedLabels } from "./managed-labels.ts";
 import {
   GithubActionError,
   type Request as GithubRequest,
@@ -28,15 +29,17 @@ import { ISSUE_MAX, type Repo } from "./settings.ts";
  * - `title`: at most `TITLE_MAX` characters (GitHub allows 256);
  * - `body`: at most `BODY_MAX` characters (GitHub's own limit for an issue's body, so a body GitHub
  *   wrote is never cut), or null for an issue with no description;
- * - `labels`: the label names, sorted, one a line, at most `LABELS_MAX` names (GitHub allows 100 on
- *   an issue) of at most `LABEL_MAX` characters (GitHub allows 50);
+ * - `labels`: the label names but those the source's own label actions manage (managed-labels.ts),
+ *   sorted, one a line, at most `LABELS_MAX` names (GitHub allows 100 on an issue) of at most
+ *   `LABEL_MAX` characters (GitHub allows 50);
  * - `changed_files`: for a pull request, a first line with the count of changed files, then the
  *   first `FILES_SHOWN` paths in GitHub's order, one a line, each at most `PATH_MAX` characters;
  *   for an issue, empty.
  * A text cut at its bound ends with "…", never in the middle of a surrogate pair.
  *
- * The labels FacetDB's own label actions manage are kept here like any other: leaving them out is
- * not built yet, through `ctx.source.actions`.
+ * A label FacetDB's own label actions manage is left out, so the state, and its hash, do not move
+ * when FacetDB labels an issue: `read` and `scan` both build the state here, so a record stored by
+ * either has the same state.
  */
 
 /** What the source reads: `include` takes these, both by default. */
@@ -117,14 +120,17 @@ function filesText(files: ChangedFiles): string {
 
 /**
  * The record's state: every field text (or null for a missing body), made storable, then held to
- * its bound.
+ * its bound; a label `managed` names is left out before the bound, compared as GitHub names it.
  */
 export function stateOf(
   item: IssueFields,
   files: ChangedFiles | undefined,
+  managed: ManagedLabels,
 ): Readonly<Record<string, string | null>> {
   const names = item.labels
-    .map((label) => cut(storable(typeof label === "string" ? label : label.name), LABEL_MAX))
+    .map((label) => (typeof label === "string" ? label : label.name))
+    .filter((name) => !managed.has(name))
+    .map((name) => cut(storable(name), LABEL_MAX))
     .sort(byName)
     .slice(0, LABELS_MAX);
   return {

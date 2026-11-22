@@ -11,6 +11,7 @@ import {
   SOURCE_FIX,
   stateOf,
 } from "./issues-state.ts";
+import type { ManagedLabels } from "./managed-labels.ts";
 import { GithubActionError, type Session } from "./rest.ts";
 import type { Repo } from "./settings.ts";
 
@@ -35,7 +36,8 @@ import type { Repo } from "./settings.ts";
  * a search that reads the bound otherwise than written never repeats pages nor goes round.
  *
  * A row's state is built as `read` builds it (issues-state.ts): the search answer carries the
- * title, the body and the labels, and a pull request's changed files are read for it.
+ * title, the body and the labels, the source's managed labels left out as `read` leaves them
+ * (managed-labels.ts), and a pull request's changed files are read for it.
  */
 
 /** One page's rows, GitHub's largest page. */
@@ -221,6 +223,7 @@ async function pageOf(
   session: Session,
   repo: Repo,
   include: ReadonlySet<Kind>,
+  managed: ManagedLabels,
   place: Place | undefined,
 ): Promise<{ readonly rows: readonly SourceRow[]; readonly next: Place | undefined }> {
   const searches: { readonly items: readonly SearchItem[]; readonly full: boolean }[] = [];
@@ -274,7 +277,7 @@ async function pageOf(
         continue;
       }
     }
-    rows.push({ key: String(item.number), state: stateOf(item, files) });
+    rows.push({ key: String(item.number), state: stateOf(item, files, managed) });
   }
   return { rows, next };
 }
@@ -284,11 +287,12 @@ export async function* scanIssues(
   session: Session,
   repo: Repo,
   include: ReadonlySet<Kind>,
+  managed: ManagedLabels,
   cursor: string | null,
 ): AsyncGenerator<SourcePage, void, undefined> {
   let place = cursor === null ? undefined : placeOf(session, cursor);
   for (;;) {
-    const page = await pageOf(session, repo, include, place);
+    const page = await pageOf(session, repo, include, managed, place);
     yield { rows: page.rows, next: page.next === undefined ? null : JSON.stringify(page.next) };
     if (page.next === undefined) {
       return;
