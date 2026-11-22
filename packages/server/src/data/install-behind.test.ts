@@ -22,6 +22,7 @@ const reads: DashboardReads = {
   modelFailing: () => Promise.resolve([]),
   recentAlerts: () => Promise.resolve([]),
   lastDeliveries: () => Promise.resolve(new Map()),
+  quietSummaries: () => Promise.resolve(new Map()),
   answered: () => Promise.resolve(0),
   decided: () => Promise.resolve({ records: 0, reviewers: 0 }),
   queue: () => Promise.resolve({ waiting: 0, oldestSince: undefined }),

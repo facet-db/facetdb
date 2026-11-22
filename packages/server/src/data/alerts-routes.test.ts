@@ -103,6 +103,7 @@ const UNTRIED = {
   bound: true,
   delivering: null,
   last: null,
+  summary: null,
 } as const;
 
 const ACCOUNTS: readonly ReviewerAccount[] = [
@@ -150,12 +151,14 @@ function rig(
             address,
             sends: "everything" as const,
           })),
+        machineZone: () => "Europe/Berlin",
         reads: {
           recentAlerts: (_project, limit) => {
             asked.push(limit);
             return Promise.resolve(history.slice(0, limit));
           },
           lastDeliveries: () => Promise.resolve(new Map()),
+          quietSummaries: () => Promise.resolve(new Map()),
         },
       }),
       access: createAccessService({
@@ -449,6 +452,7 @@ describe("GET /v1/alerts", () => {
     expect(json).toEqual({
       channels: [],
       fileChannelsDiffer: false,
+      workerZone: "Europe/Berlin",
       events: [],
       limit: ALERT_HISTORY_LINES,
       capped: false,

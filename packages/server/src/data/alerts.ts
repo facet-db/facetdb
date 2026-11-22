@@ -6,8 +6,11 @@ import {
   type AlertSeverity,
   DELIVERY_ERROR_NOT_KEPT,
   deliveryWords,
+  type QuietSummaryState,
   RESOLVABLE_ALERT_KINDS,
+  RETRY_EVERY_MS,
   readableTokenCounts,
+  SUMMARY_GRACE_MS,
 } from "@facetdb/core";
 import type { DashboardReads } from "./reads.ts";
 
@@ -15,12 +18,13 @@ import type { DashboardReads } from "./reads.ts";
  * `GET /v1/alerts`: the channels the config names and the alert history, newest first. Reads only.
  *
  * The channels are answered as a kind and a name ("slack", "#ops"), what each sends, its quiet
- * hours, whether it was bound, and its newest delivery, and nothing else: the address in the config
- * is `<channel>:<where>`, and the config refuses a webhook URL or a credential in it, but this
- * surface does not rely on that: a "where" that reads as a URL or carries credentials is answered
- * with no name and no address, and no setting of a channel plugin (its webhook, token or headers)
- * is ever handed to this module, which receives the config's channels alone. A delivery's words are
- * the history's, which never keeps what a plugin threw.
+ * hours, whether it was bound, its newest delivery and its latest quiet-hours summary, with the
+ * worker machine's time zone beside them, and nothing else: the address in the config is
+ * `<channel>:<where>`, and the config refuses a webhook URL or a credential in it, but this surface
+ * does not rely on that: a "where" that reads as a URL or carries credentials is answered with no
+ * name and no address, and no setting of a channel plugin (its webhook, token or headers) is ever
+ * handed to this module, which receives the config's channels alone. A delivery's words are the
+ * history's, which never keeps what a plugin threw.
  */
 
 /** The history is capped, not paged: the newest lines, because the page answers "what has happened lately". */
@@ -83,6 +87,28 @@ export type AlertChannelView = {
   readonly delivering: boolean | null;
   /** Its newest delivery; null when the history holds none. */
   readonly last: ChannelDeliveryView | null;
+  /**
+   * Its latest quiet-hours summary that had something to say: sent, or tried and not taken yet.
+   * Null when it has none, or when the latest held nothing and so was never sent. The summary is no
+   * history line, so `last` never holds it.
+   */
+  readonly summary: QuietSummaryView | null;
+};
+
+/**
+ * A channel's latest quiet-hours summary: `sent` with when the channel took it, or not sent yet
+ * with when a worker last tried it (it failed, is on its way, or its worker stopped first; a worker
+ * tries again 5 minutes after the try). The channel's words for a failure are not kept for it.
+ */
+export type QuietSummaryView = {
+  /** ISO 8601. */
+  readonly at: string;
+  readonly sent: boolean;
+  /**
+   * Not sent, and tried past its retry: the channel did not take the first try, and the try again
+   * 5 minutes later is not taken either. False for a first try, which may still be on its way.
+   */
+  readonly failing: boolean;
 };
 
 /**
@@ -136,13 +162,20 @@ export type AlertEventView = {
 export type HeldChannelView = Pick<AlertChannelView, "kind" | "name" | "address">;
 
 export type AlertsView = {
-  /** The channels the worker runs with: the config as it started. */
+  /** The channels the worker runs with: the config as it started, then as each reload bound it. */
   readonly channels: readonly AlertChannelView[];
   /**
    * True when facetdb.config.ts now names other channels, or gives one other `sends` or quiet
-   * hours, which apply at the next restart.
+   * hours, than the ones in force: the worker has not reloaded the file since, or a reload could
+   * not put them in force.
    */
   readonly fileChannelsDiffer: boolean;
+  /**
+   * The time zone of the worker's machine, which quiet hours with no zone are read in; null when it
+   * cannot be read (an empty or unknown `TZ`): such quiet hours are refused then, so a channel's
+   * quiet hours need a zone of their own.
+   */
+  readonly workerZone: string | null;
   readonly events: readonly AlertEventView[];
   /** How many history lines were read at most. */
   readonly limit: number;
@@ -171,7 +204,12 @@ export type AlertsDeps = {
    * force only while a reload could not bind them (or a worker that never reloads runs).
    */
   readonly fileChannels: () => readonly ConfiguredChannel[];
-  readonly reads: Pick<DashboardReads, "recentAlerts" | "lastDeliveries">;
+  /**
+   * The machine's time zone as the worker binds quiet hours with no zone in it, judged (core's
+   * `machineZone`): undefined when it cannot be read. Read on each request.
+   */
+  readonly machineZone: () => string | undefined;
+  readonly reads: Pick<DashboardReads, "recentAlerts" | "lastDeliveries" | "quietSummaries">;
 };
 
 const ADDRESS = /^([a-z][a-z0-9-]*):(\S.*)$/;
@@ -297,8 +335,35 @@ function lastOf(address: string, record: AlertRecord | undefined): ChannelDelive
   };
 }
 
+/**
+ * A channel's latest summary from its stored state, the history never read: one that held nothing
+ * (`held`, written with the claim) was marked sent with nothing sent, so it is no summary; a claim
+ * still unmarked was tried and not taken yet.
+ */
+function summaryOf(state: QuietSummaryState | undefined): QuietSummaryView | null {
+  // A state written by an earlier version has no `held`: it is read as no summary, as one that held
+  // nothing.
+  if (state === undefined || state.held !== true) {
+    return null;
+  }
+  const { sentAt, triedAt, until } = state;
+  return sentAt === null
+    ? {
+        at: new Date(triedAt).toISOString(),
+        sent: false,
+        // The first try comes once the period's grace has passed; one a retry later or more is a
+        // try again after one the channel did not take (or a first try made that late).
+        failing: triedAt - until >= SUMMARY_GRACE_MS + RETRY_EVERY_MS,
+      }
+    : { at: new Date(sentAt).toISOString(), sent: true, failing: false };
+}
+
 /** A running channel as the endpoint answers it: nothing but the config's own words and the history's. */
-function channelView(channel: RunningChannel, record: AlertRecord | undefined): AlertChannelView {
+function channelView(
+  channel: RunningChannel,
+  record: AlertRecord | undefined,
+  summary: QuietSummaryState | undefined,
+): AlertChannelView {
   const { kind, name } = channelOf(channel.address);
   const last = lastOf(channel.address, record);
   return {
@@ -313,6 +378,7 @@ function channelView(channel: RunningChannel, record: AlertRecord | undefined): 
     bound: channel.bound,
     delivering: last === null ? null : last.ok,
     last,
+    summary: summaryOf(summary),
   };
 }
 
@@ -323,21 +389,27 @@ export function createAlertsService(deps: AlertsDeps): AlertsService {
         return { kind: "unknown_project" };
       }
       const channels = deps.channels();
+      const addresses = channels.map((channel) => channel.address);
       // One line more than the limit tells whether older ones exist.
-      const [records, lastLines] = await Promise.all([
+      const [records, lastLines, summaries] = await Promise.all([
         deps.reads.recentAlerts(projectId, ALERT_HISTORY_LINES + 1),
         channels.length === 0
           ? Promise.resolve(new Map<string, AlertRecord>())
-          : deps.reads.lastDeliveries(
-              projectId,
-              channels.map((channel) => channel.address),
-            ),
+          : deps.reads.lastDeliveries(projectId, addresses),
+        // Every channel's, not only those with quiet hours now: one whose hours a reload took away
+        // still sent its last summary (its window is kept until that summary is sent).
+        channels.length === 0
+          ? Promise.resolve(new Map<string, QuietSummaryState>())
+          : deps.reads.quietSummaries(projectId, addresses),
       ]);
       return {
         kind: "alerts",
         alerts: {
-          channels: channels.map((channel) => channelView(channel, lastLines.get(channel.address))),
+          channels: channels.map((channel) =>
+            channelView(channel, lastLines.get(channel.address), summaries.get(channel.address)),
+          ),
           fileChannelsDiffer: !sameChannels(channels, deps.fileChannels()),
+          workerZone: deps.machineZone() ?? null,
           events: eventsOf(records.slice(0, ALERT_HISTORY_LINES)),
           limit: ALERT_HISTORY_LINES,
           capped: records.length > ALERT_HISTORY_LINES,

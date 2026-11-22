@@ -158,6 +158,7 @@ function readsOf(world: World): DashboardReads {
     modelFailing: () => Promise.resolve(world.failing),
     recentAlerts: (_project, limit) => Promise.resolve(world.history.slice(0, limit)),
     lastDeliveries: () => Promise.resolve(new Map()),
+    quietSummaries: () => Promise.resolve(new Map()),
     answered: (ids, day: Day) => {
       scoped(ids);
       expect(day.to - day.from).toBe(DAY_MS);

@@ -385,6 +385,7 @@ describe("the summary when a channel's quiet hours end", () => {
       since: utc(2026, 11, 13, 22, 0),
       triedAt: MORNING,
       sentAt: MORNING,
+      held: true,
     });
 
     const restarted = worker();
@@ -409,6 +410,54 @@ describe("the summary when a channel's quiet hours end", () => {
     expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
     expect(ops.sent).toEqual([]);
     expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))?.sentAt).toBe(MORNING);
+    // The state says the summary had nothing to say, so the Alerts page shows none.
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))?.held).toBe(false);
+  });
+
+  it("writes whether anything was held with the claim, so a summary not taken says it too", async () => {
+    const ops = recording("slack:#ops");
+    const { clock, store, alerts } = rig([ops.channel], utc(2026, 11, 14, 2, 0));
+    await alerts.raise(eventOf("backfill_failed"));
+    clock.advance(MORNING - clock.now());
+    ops.state.failing = true;
+    await alerts.summarize(PAGE);
+    // The claim stands, not taken, and says the span held something.
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))).toEqual({
+      until: utc(2026, 11, 14, 7, 0),
+      since: utc(2026, 11, 13, 22, 0),
+      triedAt: MORNING,
+      sentAt: null,
+      held: true,
+    });
+    // The try again 5 minutes later is a claim of its own, with the field written again.
+    ops.state.failing = false;
+    clock.advance(RETRY_EVERY_MS);
+    await alerts.summarize(PAGE);
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))).toMatchObject({
+      triedAt: MORNING + RETRY_EVERY_MS,
+      sentAt: MORNING + RETRY_EVERY_MS,
+      held: true,
+    });
+  });
+
+  it("swaps from a state written by an earlier version, which carries no held, as from any other", async () => {
+    const ops = recording("slack:#ops");
+    const { clock, store, alerts } = rig([ops.channel], utc(2026, 11, 14, 2, 0));
+    await alerts.raise(eventOf("backfill_failed"));
+    // Yesterday's summary, marked sent by a worker before the field existed.
+    store.quiet.set(quietKey(PROJECT, "slack:#ops"), {
+      until: utc(2026, 11, 13, 7, 0),
+      since: utc(2026, 11, 12, 22, 0),
+      triedAt: utc(2026, 11, 13, 7, 1),
+      sentAt: utc(2026, 11, 13, 7, 1),
+    });
+    clock.advance(MORNING - clock.now());
+    expect(await alerts.summarize(PAGE)).toEqual(NOTHING);
+    expect(ops.sent).toHaveLength(1);
+    expect(store.quiet.get(quietKey(PROJECT, "slack:#ops"))).toMatchObject({
+      since: utc(2026, 11, 13, 7, 0),
+      held: true,
+    });
   });
 
   it("names only what was held for that channel, of that project, in that period", async () => {

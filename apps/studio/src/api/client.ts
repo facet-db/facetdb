@@ -431,10 +431,20 @@ const alertsSchema = z.object({
           error: z.string().nullable(),
         })
         .nullable(),
+      /**
+       * Its latest quiet-hours summary that had something to say: sent at `at`, or tried at `at`
+       * and not taken yet, `failing` once a try past its retry was not taken either. Never a
+       * history line, so `last` never holds it.
+       */
+      summary: z
+        .object({ at: z.iso.datetime(), sent: z.boolean(), failing: z.boolean() })
+        .nullable(),
     }),
   ),
-  /** True when facetdb.config.ts now names other channels, which apply at the next restart. */
+  /** True when facetdb.config.ts names other channels than the ones in force (not reloaded, or not bindable). */
   fileChannelsDiffer: z.boolean(),
+  /** The worker machine's time zone, which quiet hours with no zone are read in; null when unreadable. */
+  workerZone: z.string().nullable(),
   events: z.array(
     z.object({
       at: z.iso.datetime(),
@@ -458,6 +468,10 @@ const alertsSchema = z.object({
       delivered: z.boolean(),
       /** Its channels were still being tried, or the worker stopped first: not known whether any took it. */
       pending: z.boolean(),
+      /** The channels whose quiet hours held it, named as `channels` names them. */
+      held: z.array(
+        z.object({ kind: z.string(), name: z.string().nullable(), address: z.string().nullable() }),
+      ),
     }),
   ),
   /** The most history lines the worker reads; `capped` says older ones exist. */
@@ -467,6 +481,39 @@ const alertsSchema = z.object({
 export type Alerts = z.infer<typeof alertsSchema>;
 export type AlertEvent = Alerts["events"][number];
 export type AlertChannel = Alerts["channels"][number];
+
+/*
+ * The Alerts page's channels: the test button, the channels as the config in force writes them, and
+ * Apply of a project draft's `alerts`. The channel plugins a channel can be added with are the
+ * Plugins page's reads (`plugins`, `gallery`).
+ */
+
+/** `POST /v1/alerts/test`: the channel took the test message. */
+const alertTestSentSchema = z.object({ sent: z.literal(true) });
+
+const sendsSchema = z.enum(["critical", "warnings", "everything"]);
+export type ChannelSends = z.infer<typeof sendsSchema>;
+
+/** One channel as the project JSON writes it: an address, or the address under `to` with its settings. */
+const channelEntrySchema = z.union([
+  z.string(),
+  z.object({
+    to: z.string(),
+    sends: sendsSchema.exactOptional(),
+    quiet: z
+      .object({ from: z.string(), to: z.string(), zone: z.string().exactOptional() })
+      .exactOptional(),
+  }),
+]);
+export type AlertChannelEntry = z.infer<typeof channelEntrySchema>;
+
+/** `GET /v1/config`, `alerts` only: the channels in the file's own form, which a draft is built over. */
+const alertsConfigSchema = z.object({
+  alerts: z.object({ channels: z.array(channelEntrySchema) }).exactOptional(),
+});
+
+/** A project draft's `alerts`: the whole list, or null for no channel at all. */
+export type AlertsDraft = { readonly channels: readonly AlertChannelEntry[] } | null;
 
 /** `GET /v1/studio`: the host the studio listens on, whether only this machine can reach it, and the accounts. */
 const studioAccessSchema = z.object({
@@ -1129,6 +1176,18 @@ export type ApiClient = {
   }) => Promise<RunsPage>;
   // The Alerts and Settings pages.
   readonly alerts: () => Promise<Alerts>;
+  // The Alerts page's channels.
+  /** Sends one test message through the channel at `address` now; resolves when the channel took it. */
+  readonly testAlertChannel: (address: string) => Promise<void>;
+  /** The channels as facetdb.config.ts writes them (the worker's config in force); empty for none. */
+  readonly alertChannelsInFile: () => Promise<readonly AlertChannelEntry[]>;
+  /** The diff the channels draft makes to facetdb.config.ts, and its plan; nothing is written. */
+  readonly applyAlertsDiff: (alerts: AlertsDraft) => Promise<ApplyDiff>;
+  /** Writes the channels draft the plan names; the worker's reload puts them in force at once. */
+  readonly applyAlertsWrite: (
+    alerts: AlertsDraft,
+    confirm: { readonly plan: string; readonly force: boolean },
+  ) => Promise<ApplyWritten>;
   readonly studioAccess: () => Promise<StudioAccess>;
   readonly reviewers: () => Promise<ReviewerAccounts>;
   /**
@@ -1344,6 +1403,15 @@ export function createApiClient(fetch: Fetch): ApiClient {
         `/runs?${source === undefined ? "" : `source=${encodeURIComponent(source)}&`}page=${String(page)}`,
       ),
     alerts: () => call(alertsSchema, "GET", "/alerts"),
+    testAlertChannel: async (address) => {
+      await call(alertTestSentSchema, "POST", "/alerts/test", { channel: address });
+    },
+    alertChannelsInFile: async () =>
+      (await call(alertsConfigSchema, "GET", "/config")).alerts?.channels ?? [],
+    // The channels ride as the project draft's `alerts`, the whole list, null for none.
+    applyAlertsDiff: (alerts) => call(applyDiffSchema, "POST", "/apply", { project: { alerts } }),
+    applyAlertsWrite: (alerts, { plan, force }) =>
+      call(applyWrittenSchema, "POST", "/apply", { project: { alerts }, confirm: plan, force }),
     studioAccess: () => call(studioAccessSchema, "GET", "/studio"),
     reviewers: async () => (await call(reviewersSchema, "GET", "/reviewers")).reviewers,
     addReviewer: async (name, password) => {

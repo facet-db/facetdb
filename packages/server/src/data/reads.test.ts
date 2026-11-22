@@ -203,4 +203,39 @@ describe("the dashboard's reads of the store", () => {
       { run: `backfill:${PROJECT}:listings:all@v3`, done: false },
     ]);
   });
+
+  it("read each channel's quiet-hours summary state by its key, the history never", async () => {
+    const { store, client } = await rig();
+    const asked: string[] = [];
+    const reads = createDashboardReads({
+      query: (text, params) => {
+        asked.push(text);
+        return client.query(text, params);
+      },
+    });
+    const sent = { until: 2_000, since: 1_000, triedAt: 2_060, sentAt: 2_070, held: true };
+    const before169 = { until: 2_000, since: 1_000, triedAt: 2_060, sentAt: 2_070 };
+    await store.alerts.swapQuietState(`quiet|${PROJECT}|slack:#ops`, undefined, sent);
+    await store.alerts.swapQuietState(
+      `quiet|${PROJECT}|email:ops@example.com`,
+      undefined,
+      before169,
+    );
+    // Another project's state under the same address is not this one's.
+    await store.alerts.swapQuietState("quiet|another|telegram:-100123", undefined, sent);
+
+    const states = await reads.quietSummaries(PROJECT, [
+      "slack:#ops",
+      "email:ops@example.com",
+      "telegram:-100123",
+    ]);
+    expect(states).toEqual(
+      new Map<string, unknown>([
+        ["slack:#ops", sent],
+        ["email:ops@example.com", before169],
+      ]),
+    );
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).not.toContain("alert_history");
+  });
 });

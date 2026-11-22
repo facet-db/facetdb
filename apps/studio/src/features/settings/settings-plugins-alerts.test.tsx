@@ -57,24 +57,23 @@ describe("the Plugins page", () => {
 });
 
 describe("the Alerts page", () => {
-  it("names the channels of the config and says they do not deliver yet", async () => {
-    const { user } = renderStudio({ path: "/alerts", now: NOW });
+  it("names the channels in force, each with its state, and sends a test through one", async () => {
+    const api = fakeApi();
+    const { user } = renderStudio({ path: "/alerts", api, now: NOW });
 
     expect(await screen.findByRole("heading", { level: 1, name: "Alerts" })).toBeInTheDocument();
     const slack = within(await screen.findByRole("article", { name: "Slack #ops" }));
-    expect(slack.getByText("Not delivering yet")).toBeInTheDocument();
-    expect(slack.getByText(/delivery to a channel arrives in a later version/)).toBeInTheDocument();
+    expect(slack.getByText("Delivering")).toBeInTheDocument();
+    expect(slack.getByText("Critical and warnings")).toBeInTheDocument();
     expect(
-      slack.getByText("Arrive in a later version, with the channel plugins."),
+      slack.getByText("22:00 to 07:00, the worker's zone (Africa/Addis_Ababa)"),
     ).toBeInTheDocument();
     expect(screen.getByRole("article", { name: "Email ops@example.com" })).toBeInTheDocument();
 
-    // The test button is there, operable, and says it arrives in a later version and that nothing
-    // was sent.
-    await user.click(slack.getByRole("button", { name: "Send a test" }));
-    expect(slack.getByRole("status")).toHaveTextContent(
-      "Test messages arrive in a later version, with the channel plugins. Nothing was sent.",
-    );
+    // The test button sends one, and the row says the channel took it.
+    await user.click(slack.getByRole("button", { name: /^Send a test/ }));
+    expect(await slack.findByText("Test sent")).toBeInTheDocument();
+    expect(api.calls).toContain("testAlertChannel slack:#ops");
   });
 
   it("lists the events newest first in the same shape, in a table with a full grid", async () => {
@@ -163,14 +162,19 @@ describe("the Alerts page", () => {
     const empty: Alerts = {
       channels: [],
       fileChannelsDiffer: false,
+      workerZone: "Africa/Addis_Ababa",
       events: [],
       limit: 100,
       capped: false,
     };
     renderStudio({ path: "/alerts", api: fakeApi({ alerts: () => Promise.resolve(empty) }) });
 
-    expect(await screen.findByRole("heading", { name: "No channel is named" })).toBeVisible();
-    expect(screen.getByText(/add it to alerts.channels in facetdb.config.ts/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "No channel yet" })).toBeVisible();
+    expect(
+      screen.getByText("Alerts are only recorded below until a channel tells someone."),
+    ).toBeInTheDocument();
+    // The empty state holds the page's one primary action.
+    expect(screen.getAllByRole("button", { name: "Add a channel" })).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "No alerts yet" })).toBeVisible();
     expect(screen.queryByRole("table")).toBeNull();
   });
@@ -188,6 +192,7 @@ describe("the Alerts page", () => {
           bound: true,
           delivering: null,
           last: null,
+          summary: null,
         },
       ],
     };
@@ -251,16 +256,21 @@ describe("the Alerts page", () => {
     expect(within(table).getByText("resolved yesterday 11:09 pm")).toBeInTheDocument();
   });
 
-  it("says when the file names other channels than the worker runs with, and which it lists", async () => {
+  it("says when the file names other channels than the ones in force, and asks for no restart", async () => {
     const differ: Alerts = { ...SAMPLE_ALERTS, fileChannelsDiffer: true };
-    renderStudio({ path: "/alerts", api: fakeApi({ alerts: () => Promise.resolve(differ) }) });
+    const api = fakeApi({ alerts: () => Promise.resolve(differ) });
+    const { user } = renderStudio({ path: "/alerts", api });
 
     const note = await screen.findByText(/^facetdb\.config\.ts names other channels/);
     expect(note).toHaveTextContent(
-      "facetdb.config.ts names other channels than the ones listed, which are the ones the worker runs with. Restart the worker to apply the file's.",
+      "facetdb.config.ts names other channels than the ones in force.",
     );
-    // The channels listed are still the worker's.
+    expect(document.body.textContent).not.toMatch(/[Rr]estart/);
+    // The channels listed are still the worker's; Check again asks it to read the file.
     expect(screen.getByRole("article", { name: "Slack #ops" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByText("The file's channels are in force now.")).toBeInTheDocument();
+    expect(api.calls).toContain("reload");
   });
 
   it("says nothing of the file when it names the channels the worker runs with", async () => {
@@ -320,7 +330,7 @@ describe("the Alerts page", () => {
     const { user } = renderStudio({ path: "/alerts", api, now: NOW });
 
     const notice = await screen.findByRole("alert");
-    expect(notice).toHaveTextContent("The alerts could not be read.");
+    expect(notice).toHaveTextContent("The channels and the alert history could not be read.");
     expect(notice).toHaveTextContent("Something went wrong. Try again.");
     await user.click(within(notice).getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("table", { name: "Alerts, newest first" })).toBeVisible();

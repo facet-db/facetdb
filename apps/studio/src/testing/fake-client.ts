@@ -1,4 +1,5 @@
 import {
+  type AlertChannelEntry,
   type Alerts,
   type ApiClient,
   ApiError,
@@ -350,6 +351,11 @@ function local(month: number, day: number, hour: number, minute: number): string
   return new Date(2026, month - 1, day, hour, minute).toISOString();
 }
 
+/**
+ * The mockup's channels: Slack #ops quiet at night in the worker's zone, its summary the newest
+ * thing it was sent; Email delivering everything; Slack #oncall failing, in the Slack plugin's own
+ * words; a webhook endpoint with quiet hours in its own zone that was sent nothing yet.
+ */
 export const SAMPLE_ALERTS: Alerts = {
   channels: [
     {
@@ -368,6 +374,7 @@ export const SAMPLE_ALERTS: Alerts = {
         ok: true,
         error: null,
       },
+      summary: { at: local(11, 6, 7, 0), sent: true, failing: false },
     },
     {
       kind: "email",
@@ -385,8 +392,40 @@ export const SAMPLE_ALERTS: Alerts = {
         ok: true,
         error: null,
       },
+      summary: null,
+    },
+    {
+      kind: "slack",
+      name: "#oncall",
+      address: "slack:#oncall",
+      sends: "critical",
+      quiet: null,
+      bound: true,
+      delivering: false,
+      last: {
+        at: local(11, 2, 8, 15),
+        kind: "worker_not_running",
+        title: "Worker not running",
+        phase: "raised",
+        ok: false,
+        error:
+          "slack:#oncall was not delivered: the app is not in #oncall; invite it with /invite @your-app",
+      },
+      summary: null,
+    },
+    {
+      kind: "webhook",
+      name: "ops",
+      address: "webhook:ops",
+      sends: "warnings",
+      quiet: { from: "23:00", to: "08:00", zone: "Europe/Berlin" },
+      bound: true,
+      delivering: null,
+      last: null,
+      summary: null,
     },
   ],
+  workerZone: "Africa/Addis_Ababa",
   events: [
     {
       at: local(11, 6, 11, 10),
@@ -403,6 +442,7 @@ export const SAMPLE_ALERTS: Alerts = {
       raisedBeforeHistory: false,
       delivered: true,
       pending: false,
+      held: [],
     },
     {
       at: local(11, 5, 23, 2),
@@ -419,6 +459,7 @@ export const SAMPLE_ALERTS: Alerts = {
       raisedBeforeHistory: false,
       delivered: true,
       pending: false,
+      held: [],
     },
     {
       at: local(11, 2, 8, 15),
@@ -436,6 +477,7 @@ export const SAMPLE_ALERTS: Alerts = {
       raisedBeforeHistory: false,
       delivered: true,
       pending: false,
+      held: [],
     },
     {
       at: local(10, 29, 16, 2),
@@ -452,11 +494,66 @@ export const SAMPLE_ALERTS: Alerts = {
       raisedBeforeHistory: false,
       delivered: true,
       pending: false,
+      // Raised at 4:02 pm, outside the quiet hours: held for none. The Alerts page's tests hold
+      // one.
+      held: [],
     },
   ],
   fileChannelsDiffer: false,
   limit: 100,
   capped: false,
+};
+
+/** The mockup's channels as facetdb.config.ts writes them, in the order `SAMPLE_ALERTS` lists them. */
+export const SAMPLE_ALERT_CHANNELS_IN_FILE: readonly AlertChannelEntry[] = [
+  { to: "slack:#ops", sends: "warnings", quiet: { from: "22:00", to: "07:00" } },
+  "email:ops@example.com",
+  { to: "slack:#oncall", sends: "critical" },
+  {
+    to: "webhook:ops",
+    sends: "warnings",
+    quiet: { from: "23:00", to: "08:00", zone: "Europe/Berlin" },
+  },
+];
+
+/** The diff adding Slack #trust-and-safety makes (the mockup's). */
+export const SAMPLE_ALERTS_DIFF: ApplyDiff = {
+  written: false,
+  path: "facetdb.config.ts",
+  diff: [
+    "--- a/facetdb.config.ts",
+    "+++ b/facetdb.config.ts",
+    "@@ -9,6 +9,7 @@",
+    "   alerts: {",
+    "     channels: [",
+    '       { to: "slack:#ops", sends: "warnings", quiet: { from: "22:00", to: "07:00" } },',
+    '       "email:ops@example.com",',
+    '+      { to: "slack:#trust-and-safety", sends: "warnings" },',
+    "     ],",
+    "   },",
+  ].join("\n"),
+  changed: true,
+  plan: "plan-alerts",
+  uncommitted: null,
+  dropsOwnText: false,
+  warnings: [],
+};
+
+/** The channels written, and the reload put them in force with no restart. */
+export const SAMPLE_ALERTS_APPLIED: ApplyWritten = {
+  written: true,
+  path: "facetdb.config.ts",
+  diff: SAMPLE_ALERTS_DIFF.diff,
+  reload: {
+    loaded: true,
+    sources: [
+      { source: "listings", outcome: "unchanged", version: 3, message: null },
+      { source: "support_messages", outcome: "unchanged", version: 1, message: null },
+    ],
+    notes: [
+      "The alert channels facetdb.config.ts names are in force now, with no restart: each alert from now on goes to the 5 channels it names.",
+    ],
+  },
 };
 
 export const SAMPLE_ACCESS: StudioAccess = {
@@ -1501,6 +1598,11 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     decisionHistory: (source, key) => Promise.resolve(sampleHistory(source, key)),
     runs: () => Promise.resolve(SAMPLE_RUNS),
     alerts: () => Promise.resolve(SAMPLE_ALERTS),
+    // The Alerts page's channels; its channel kinds are `plugins` and `gallery` below.
+    testAlertChannel: () => Promise.resolve(),
+    alertChannelsInFile: () => Promise.resolve(SAMPLE_ALERT_CHANNELS_IN_FILE),
+    applyAlertsDiff: () => Promise.resolve(SAMPLE_ALERTS_DIFF),
+    applyAlertsWrite: () => Promise.resolve(SAMPLE_ALERTS_APPLIED),
     studioAccess: () => Promise.resolve(SAMPLE_ACCESS),
     reviewers: () => Promise.resolve(SAMPLE_REVIEWERS),
     addReviewer: () => Promise.resolve(),
@@ -1679,6 +1781,23 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
     alerts: () => {
       calls.push("alerts");
       return answer.alerts();
+    },
+    // The Alerts page's channels: the address and each draft ride in the note.
+    testAlertChannel: (address) => {
+      calls.push(`testAlertChannel ${address}`);
+      return answer.testAlertChannel(address);
+    },
+    alertChannelsInFile: () => {
+      calls.push("alertChannelsInFile");
+      return answer.alertChannelsInFile();
+    },
+    applyAlertsDiff: (alerts) => {
+      calls.push(`applyAlertsDiff ${JSON.stringify(alerts)}`);
+      return answer.applyAlertsDiff(alerts);
+    },
+    applyAlertsWrite: (alerts, confirm) => {
+      calls.push(`applyAlertsWrite ${JSON.stringify({ ...confirm, alerts })}`);
+      return answer.applyAlertsWrite(alerts, confirm);
     },
     studioAccess: () => {
       calls.push("studioAccess");

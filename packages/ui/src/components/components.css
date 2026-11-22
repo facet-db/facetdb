@@ -164,6 +164,9 @@
 .fdb-listbox[data-state="open"] {
   border-color: var(--facet);
 }
+.fdb-listbox[aria-invalid="true"] {
+  border-color: var(--no);
+}
 .fdb-listbox[data-disabled] {
   color: var(--text-3);
   cursor: not-allowed;

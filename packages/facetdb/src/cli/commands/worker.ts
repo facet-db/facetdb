@@ -11,6 +11,7 @@ import {
   createWorkerWatch,
   DEFAULT_WORKER_LIMITS,
   type KeyText,
+  knownZone,
   type ModelProvider,
   type OpenConnector,
   type PassReport,
@@ -1096,6 +1097,9 @@ export async function runWorkers(
         host: options.host,
         alertChannels: () => settings.channels().map((channel) => ({ ...channel, bound: true })),
         fileAlertChannels: () => channelsOf(fleet.config()),
+        // The zone quiet hours with none are bound in, judged as the channel host judges the same
+        // reader (`quietWindowFor`): the page names it, or asks for a zone without one.
+        machineZone: () => knownZone(processZone()),
         // The test button sends through the channels this worker runs; none under --once.
         ...(options.once
           ? {}

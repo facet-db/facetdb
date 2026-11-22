@@ -93,6 +93,12 @@ export type ServerDeps = {
   readonly alertChannels: () => readonly RunningChannel[];
   readonly fileAlertChannels: () => readonly ConfiguredChannel[];
   /**
+   * The time zone of the machine the worker runs on, judged as the channel host judges it when it
+   * binds quiet hours with no zone (core's `machineZone`): undefined when it cannot be read. The
+   * Alerts page names it beside such hours, and asks for a zone when there is none.
+   */
+  readonly machineZone: () => string | undefined;
+  /**
    * The Alerts page's test button: a test message through one channel the worker runs, now, as only
    * the CLI can send one (the channels are bound to their plugins there). Absent, a stub, as under
    * `facetdb worker --once`: the route says this worker sends none.
@@ -170,6 +176,7 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
         projectId: deps.config.projectId,
         channels: deps.alertChannels,
         fileChannels: deps.fileAlertChannels,
+        machineZone: deps.machineZone,
         reads: dashboard.reads,
       }),
       access: createAccessService({ host: deps.host, reviewers }),

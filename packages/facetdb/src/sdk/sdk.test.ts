@@ -175,6 +175,7 @@ async function rig() {
     host: "127.0.0.1",
     alertChannels: () => [],
     fileAlertChannels: () => [],
+    machineZone: () => "UTC",
     // Nor does it review: no source is open to a reviewer here.
     review: {
       sources: () => [],

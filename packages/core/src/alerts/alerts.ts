@@ -118,6 +118,13 @@ export type QuietSummaryState = {
   readonly triedAt: number;
   /** When the channel took it (or it was found to hold nothing); null while it has not. */
   readonly sentAt: number | null;
+  /**
+   * Whether the history held a message for the channel from `since` to `until`, so the summary had
+   * something to say: read before the claim and written with it, so the Alerts page reads it here
+   * and never scans the history. Absent from a state written by an earlier version, which the page
+   * reads as no summary.
+   */
+  readonly held?: boolean;
 };
 
 /** A message quiet hours held for a channel, as its summary names it. */
@@ -864,14 +871,15 @@ export function createAlerts(deps: AlertsDeps): Alerts {
 
   /**
    * One channel's summary of its latest ended quiet period, claimed before it is sent: the claim is
-   * a swap of the stored state that only one worker wins, written with the time of the try, and
-   * marked sent once the channel takes it (or once the history shows nothing was held, when nothing
-   * is sent). A try no channel took, or a claim another worker holds, waits `RETRY_EVERY_MS` from
-   * its time, in this process and any other. A summary whose channel never took it is carried into
-   * the next one: its `since` stays where it was. At least once, not exactly once: a worker that
-   * stops, or a store that fails, between the send and the mark leaves the claim standing, and a
-   * worker sends it again `RETRY_EVERY_MS` after the claim; a mark that fails is said (`unmarked`).
-   * Rejects only when the store fails before the channel was sent anything.
+   * a swap of the stored state that only one worker wins, written with the time of the try and
+   * whether the history held anything for it, and marked sent once the channel takes it (or at once
+   * when nothing was held, when nothing is sent). A try no channel took, or a claim another worker
+   * holds, waits `RETRY_EVERY_MS` from its time, in this process and any other. A summary whose
+   * channel never took it is carried into the next one: its `since` stays where it was. At least
+   * once, not exactly once: a worker that stops, or a store that fails, between the send and the
+   * mark leaves the claim standing, and a worker sends it again `RETRY_EVERY_MS` after the claim; a
+   * mark that fails is said (`unmarked`). Rejects only when the store fails before the channel was
+   * sent anything.
    */
   async function summarizeFor(
     channel: BoundChannel,
@@ -903,7 +911,17 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     // held: their period may start before the new one's.
     const first = Math.min(period.start, carried.get(channel.name) ?? period.start);
     const since = state === undefined ? first : state.sentAt === null ? state.since : state.until;
-    const claim: QuietSummaryState = { until: period.end, since, triedAt: now, sentAt: null };
+    // What the span held is read before the claim and written with it: the period ended
+    // `SUMMARY_GRACE_MS` ago, so every line it holds is recorded, and the Alerts page reads whether
+    // the summary had anything to say from the state alone.
+    const held = await store.heldFor(page.project, channel.name, since, period.end);
+    const claim: QuietSummaryState = {
+      until: period.end,
+      since,
+      triedAt: now,
+      sentAt: null,
+      held: held.length > 0,
+    };
     if (!(await store.swapQuietState(key, state, claim))) {
       // Another worker claimed it between the read and the swap: that worker sends it.
       summaryPacedUntil.set(key, now + RETRY_EVERY_MS);
@@ -911,7 +929,6 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     }
     // The claim holds `since` from now on: the next summary starts from it, or from its end.
     carried.delete(channel.name);
-    const held = await store.heldFor(page.project, channel.name, since, period.end);
     const sent: QuietSummaryState = { ...claim, sentAt: now };
     if (held.length === 0) {
       // Nothing was sent: a mark that fails only lets a later claim find nothing again.

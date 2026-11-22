@@ -118,6 +118,7 @@ describe("the alert history's deliveries on a real Postgres (alerts-delivery)", 
         { address: "telegram:-100123", sends: "everything", bound: true },
       ],
       fileChannels: () => [],
+      machineZone: () => "UTC",
       reads: createDashboardReads(admin),
     });
     const outcome = await service.alerts(PROJECT);
@@ -147,6 +148,64 @@ describe("the alert history's deliveries on a real Postgres (alerts-delivery)", 
       [null, false],
       ["array", false],
       ["array", false],
+    ]);
+  });
+
+  it("reads each channel's quiet-hours summary state as the store writes it", async () => {
+    const quiet = { from: "22:00", to: "07:00", zone: "UTC" } as const;
+    // 03:00Z on a day: inside the quiet hours.
+    const night = Date.UTC(2026, 10, 15, 3, 0);
+    const clock = new FakeClock(night);
+    const store = await createStore({
+      url: scratch.url,
+      pgHost: undefined,
+      secret: SECRET,
+      clock,
+      allowInsecure: true,
+    });
+    stores.push(store);
+    const alerts = createAlerts({
+      store: store.alerts,
+      clock,
+      channels: [
+        { name: "slack:#ops", quiet, deliver: () => Promise.resolve() },
+        { name: "email:ops@example.com", quiet, deliver: () => Promise.reject(new Error("down")) },
+        // Sent critical alerts alone, and a critical one is never held: it has nothing to sum up.
+        {
+          name: "telegram:-100123",
+          quiet,
+          takes: (severity) => severity === "critical",
+          deliver: () => Promise.resolve(),
+        },
+      ],
+    });
+    await alerts.raise(event("backfill_failed"));
+    // 07:02Z: the hours are over and the summary's minute of grace has passed.
+    clock.advance(Date.UTC(2026, 10, 15, 7, 2) - night);
+    await alerts.summarize({ project: PROJECT, link: "http://127.0.0.1:4040/alerts" });
+
+    const service = createAlertsService({
+      projectId: PROJECT,
+      channels: () =>
+        ["slack:#ops", "email:ops@example.com", "telegram:-100123"].map((address) => ({
+          address,
+          sends: "everything" as const,
+          quiet,
+          bound: true,
+        })),
+      fileChannels: () => [],
+      machineZone: () => "UTC",
+      reads: createDashboardReads(open()),
+    });
+    const outcome = await service.alerts(PROJECT);
+    if (outcome.kind !== "alerts") {
+      throw new Error("expected the project's alerts");
+    }
+    const at = new Date(clock.now()).toISOString();
+    expect(outcome.alerts.channels.map((channel) => channel.summary)).toEqual([
+      { at, sent: true, failing: false },
+      { at, sent: false, failing: false },
+      null,
     ]);
   });
 });

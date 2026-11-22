@@ -21,6 +21,10 @@ export type ListboxProps = {
   hint?: string;
   disabled?: boolean;
   required?: boolean;
+  // A form's refusal of the choice: the trigger is marked invalid (an `aria-invalid` the form can
+  // move the focus to) and described by the element that says why, beside any hint.
+  invalid?: boolean;
+  describedBy?: string;
   // For a form post and a visible <label htmlFor>.
   id?: string;
   name?: string;
@@ -46,12 +50,17 @@ export function Listbox({
   hint,
   disabled,
   required,
+  invalid = false,
+  describedBy,
   id,
   name,
   width = "fit",
   variant = "box",
 }: ListboxProps) {
   const hintId = useId();
+  const described = [hint === undefined ? undefined : hintId, describedBy]
+    .filter((one) => one !== undefined)
+    .join(" ");
   const root = {
     ...(value === undefined ? {} : { value }),
     ...(defaultValue === undefined ? {} : { defaultValue }),
@@ -62,7 +71,8 @@ export function Listbox({
   };
   const trigger = {
     ...(id === undefined ? {} : { id }),
-    ...(hint === undefined ? {} : { "aria-describedby": hintId }),
+    ...(described === "" ? {} : { "aria-describedby": described }),
+    ...(invalid ? { "aria-invalid": true } : {}),
   };
   return (
     <Select.Root {...root}>

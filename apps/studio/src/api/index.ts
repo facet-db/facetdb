@@ -3,8 +3,10 @@
 export type {
   AgreementSide,
   AlertChannel,
+  AlertChannelEntry,
   AlertEvent,
   Alerts,
+  AlertsDraft,
   ApiClient,
   ApplyDiff,
   ApplyReload,
@@ -12,6 +14,7 @@ export type {
   BackfillEstimate,
   BackfillState,
   BackfillStatus,
+  ChannelSends,
   ConfigSource,
   Cost,
   DecisionFilters,

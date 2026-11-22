@@ -4,6 +4,7 @@ import {
   createAlerts,
   DELIVERY_ERROR_NOT_KEPT,
   eventKey,
+  RETRY_EVERY_MS,
 } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { pgliteClient } from "@facetdb/postgres";
@@ -117,6 +118,7 @@ const running = (address: string, extra: Partial<RunningChannel> = {}): RunningC
 async function rig(
   channels: readonly RunningChannel[],
   fileChannels: readonly ConfiguredChannel[] = channels,
+  machineZone: () => string | undefined = () => "Africa/Addis_Ababa",
 ) {
   const clock = new FakeClock(NOW);
   const memory = await createMemoryStore(clock, pglite);
@@ -138,6 +140,7 @@ async function rig(
         projectId: PROJECT,
         channels: () => channels,
         fileChannels: () => fileChannels,
+        machineZone,
         reads: createDashboardReads(client),
       }),
       access: createAccessService({
@@ -161,6 +164,7 @@ type Body = {
   readonly channels: readonly Record<string, unknown>[];
   readonly events: readonly Record<string, unknown>[];
   readonly fileChannelsDiffer: boolean;
+  readonly workerZone: string | null;
 };
 
 describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
@@ -211,6 +215,7 @@ describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
           ok: true,
           error: null,
         },
+        summary: null,
       },
       {
         kind: "email",
@@ -228,6 +233,7 @@ describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
           ok: false,
           error: DELIVERY_ERROR_NOT_KEPT,
         },
+        summary: null,
       },
       {
         kind: "telegram",
@@ -238,6 +244,7 @@ describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
         bound: true,
         delivering: null,
         last: null,
+        summary: null,
       },
     ]);
     expect(body.events.map((entry) => entry["delivered"])).toEqual([true, true]);
@@ -406,5 +413,128 @@ describe("GET /v1/alerts with deliveries (alerts-delivery)", () => {
     await other.raise(event("model_failing", { project: "another" }));
     const body = (await t.get()).json as unknown as Body;
     expect(body.channels[0]).toMatchObject({ delivering: null, last: null });
+  });
+});
+
+describe("GET /v1/alerts with quiet-hours summaries and the worker's zone", () => {
+  const QUIET = { from: "22:00", to: "07:00", zone: "UTC" } as const;
+  const PAGE = { project: PROJECT, link: "http://127.0.0.1:4040/alerts" };
+
+  it("answers each channel's latest summary: sent, tried and not taken yet, or none when it held nothing", async () => {
+    const t = await rig([
+      running("slack:#ops", { quiet: QUIET }),
+      running("email:ops@example.com", { quiet: QUIET }),
+      running("slack:#data", { quiet: QUIET }),
+      running("telegram:-100123"),
+    ]);
+    // 03:00Z: inside the quiet hours of the three quiet channels.
+    t.clock.advance(Date.UTC(2026, 10, 15, 3, 0) - NOW);
+    const alerts = createAlerts({
+      store: t.store.alerts,
+      clock: t.clock,
+      channels: [
+        { name: "slack:#ops", quiet: QUIET, deliver: () => Promise.resolve() },
+        {
+          name: "email:ops@example.com",
+          quiet: QUIET,
+          deliver: () => Promise.reject(new Error("smtp down")),
+        },
+        // Sent warnings alone: an information message is never held for it, so it has nothing to say.
+        {
+          name: "slack:#data",
+          quiet: QUIET,
+          takes: (severity) => severity !== "information",
+          deliver: () => Promise.resolve(),
+        },
+        { name: "telegram:-100123", deliver: () => Promise.resolve() },
+      ],
+    });
+    await alerts.raise(event("backfill_finished"));
+    // 07:02Z: the hours ended, and the summary's minute of grace has passed.
+    t.clock.advance(Date.UTC(2026, 10, 15, 7, 2) - t.clock.now());
+    const report = await alerts.summarize(PAGE);
+    expect(report.failures.map((failure) => failure.channel)).toEqual(["email:ops@example.com"]);
+    const at = new Date(t.clock.now()).toISOString();
+
+    const body = (await t.get()).json as unknown as Body;
+    expect(body.channels.map((channel) => channel["summary"])).toEqual([
+      { at, sent: true, failing: false },
+      { at, sent: false, failing: false },
+      null,
+      null,
+    ]);
+    // The summary is no history line: the last delivery stays the alert's, which was held.
+    expect(body.channels[0]?.["last"]).toBeNull();
+    expect(body.events).toHaveLength(1);
+  });
+
+  it("answers the latest summary of this project alone", async () => {
+    const t = await rig([running("slack:#ops", { quiet: QUIET })]);
+    t.clock.advance(Date.UTC(2026, 10, 15, 3, 0) - NOW);
+    const other = createAlerts({
+      store: t.store.alerts,
+      clock: t.clock,
+      channels: [{ name: "slack:#ops", quiet: QUIET, deliver: () => Promise.resolve() }],
+    });
+    await other.raise(event("backfill_finished", { project: "another" }));
+    t.clock.advance(Date.UTC(2026, 10, 15, 7, 2) - t.clock.now());
+    await other.summarize({ ...PAGE, project: "another" });
+    const body = (await t.get()).json as unknown as Body;
+    expect(body.channels[0]?.["summary"]).toBeNull();
+  });
+
+  it("says a summary the channel did not take on its try again is failing, not on its first try", async () => {
+    const t = await rig([running("slack:#ops", { quiet: QUIET })]);
+    t.clock.advance(Date.UTC(2026, 10, 15, 3, 0) - NOW);
+    const alerts = createAlerts({
+      store: t.store.alerts,
+      clock: t.clock,
+      channels: [
+        {
+          name: "slack:#ops",
+          quiet: QUIET,
+          deliver: () => Promise.reject(new Error("slack down")),
+        },
+      ],
+    });
+    await alerts.raise(event("backfill_finished"));
+    t.clock.advance(Date.UTC(2026, 10, 15, 7, 2) - t.clock.now());
+    await alerts.summarize(PAGE);
+    const first = new Date(t.clock.now()).toISOString();
+    expect(((await t.get()).json as unknown as Body).channels[0]?.["summary"]).toEqual({
+      at: first,
+      sent: false,
+      failing: false,
+    });
+    t.clock.advance(RETRY_EVERY_MS);
+    await alerts.summarize(PAGE);
+    expect(((await t.get()).json as unknown as Body).channels[0]?.["summary"]).toEqual({
+      at: new Date(t.clock.now()).toISOString(),
+      sent: false,
+      failing: true,
+    });
+  });
+
+  it("reads a state written before the worker recorded what it held as no summary", async () => {
+    const t = await rig([running("slack:#ops", { quiet: QUIET })]);
+    const until = Date.UTC(2026, 10, 15, 7, 0);
+    await t.store.alerts.swapQuietState(`quiet|${PROJECT}|slack:#ops`, undefined, {
+      until,
+      since: Date.UTC(2026, 10, 14, 22, 0),
+      triedAt: until + 60_000,
+      sentAt: until + 61_000,
+    });
+    const body = (await t.get()).json as unknown as Body;
+    expect(body.channels[0]?.["summary"]).toBeNull();
+  });
+
+  it("names the worker machine's zone, and none when it cannot be read", async () => {
+    const t = await rig([running("slack:#ops", { quiet: { from: "22:00", to: "07:00" } })]);
+    expect(((await t.get()).json as unknown as Body).workerZone).toBe("Africa/Addis_Ababa");
+    await closers.splice(0)[0]?.();
+    await resetPglite(pglite);
+
+    const unread = await rig([running("slack:#ops")], undefined, () => undefined);
+    expect(((await unread.get()).json as unknown as Body).workerZone).toBeNull();
   });
 });

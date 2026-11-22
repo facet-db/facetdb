@@ -236,6 +236,25 @@ describe("<Listbox>", () => {
     );
   });
 
+  it("is marked invalid and described by the words of a form's refusal, beside its hint", () => {
+    render(
+      <>
+        <Listbox
+          label="Time zone"
+          options={options}
+          hint="Every zone."
+          invalid
+          describedBy="zone-problem"
+        />
+        <p id="zone-problem">Choose a zone.</p>
+      </>,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Time zone" });
+    expect(trigger.getAttribute("aria-invalid")).toBe("true");
+    expect(trigger.getAttribute("aria-describedby")?.split(" ")).toHaveLength(2);
+    expect(trigger.getAttribute("aria-describedby")).toContain("zone-problem");
+  });
+
   it("does not open when disabled", async () => {
     const user = userEvent.setup();
     render(<Listbox label="Status" options={options} defaultValue="done" disabled />);

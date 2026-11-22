@@ -129,11 +129,20 @@ function stateTime(state: Record<string, unknown>, field: string): number {
 /** A quiet-hours summary state as `swapQuietState` wrote it. */
 function quietStateOf(row: SqlRow): QuietSummaryState {
   const state = jsonObject(row, "state");
+  const held = state["held"];
+  if (held !== undefined && typeof held !== "boolean") {
+    throw new Error(
+      `the quiet-hours state's "held" is ${JSON.stringify(held)}, expected true or false`,
+    );
+  }
   return {
     until: stateTime(state, "until"),
     since: stateTime(state, "since"),
     triedAt: stateTime(state, "triedAt"),
     sentAt: state["sentAt"] === null ? null : stateTime(state, "sentAt"),
+    // Absent from a state written by an earlier version. Kept as read: the next swap compares the
+    // whole row with what was read, so a field dropped here would never match again.
+    ...(held === undefined ? {} : { held }),
   };
 }
 

@@ -79,7 +79,7 @@ export function alertTestRoutes(door: AlertTestDoor): Hono<AppEnv> {
           404,
           "unknown_channel",
           "This worker runs no alert channel at that address, so no test message was sent.",
-          "Send the address of a channel GET /v1/alerts lists, as alerts.channels in facetdb.config.ts writes it; a channel added to the file is sent to after the worker restarts.",
+          "Send the address of a channel GET /v1/alerts lists, as alerts.channels in facetdb.config.ts writes it; a channel added to the file is sent to once Apply, or Check again after a hand edit, puts it in force.",
         );
       case "failed":
         throw new ApiError(

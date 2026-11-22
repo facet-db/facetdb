@@ -1,4 +1,10 @@
-import { ALERT_KINDS, type AlertEvent, type AlertRecord } from "@facetdb/core";
+import {
+  ALERT_KINDS,
+  type AlertEvent,
+  type AlertRecord,
+  type QuietSummaryState,
+  quietKey,
+} from "@facetdb/core";
 import { z } from "zod";
 
 type SqlRow = Readonly<Record<string, unknown>>;
@@ -39,6 +45,15 @@ export type DashboardReads = {
     projectId: string,
     channels: readonly string[],
   ): Promise<ReadonlyMap<string, AlertRecord>>;
+  /**
+   * Per channel address, its quiet-hours summary state as the worker keeps it (under core's
+   * `quietKey`), with whether the summary had anything to say (`held`). Read by key alone, never
+   * from the history. An address with no state is left out.
+   */
+  quietSummaries(
+    projectId: string,
+    channels: readonly string[],
+  ): Promise<ReadonlyMap<string, QuietSummaryState>>;
   /** Model answers logged for these sources within the day. */
   answered(sourceIds: readonly string[], day: Day): Promise<number>;
   /** People's decisions logged for these sources within the day: records decided, and by how many people. */
@@ -108,6 +123,16 @@ const alertRecord = z.object({
 });
 
 const activeAlert = z.object({ event: alertEvent });
+
+// The summary state (core's `QuietSummaryState`), a row the worker wrote: a boundary.
+const quietSummaryState = z.object({
+  until: z.number(),
+  since: z.number(),
+  triedAt: z.number(),
+  sentAt: z.number().nullable(),
+  // Absent from a state written before it, which reads as no summary.
+  held: z.boolean().exactOptional(),
+});
 
 const cursorRow = z.object({ run: z.string(), done: z.boolean() });
 
@@ -191,6 +216,31 @@ export function createDashboardReads(database: DashboardDatabase): DashboardRead
         lines.set(channel, parsedJson(alertRecord, row, "record"));
       }
       return lines;
+    },
+
+    async quietSummaries(projectId, channels) {
+      // One row per channel by its primary key (core's `quietKey`, made here and sent beside its
+      // address: the SQL never builds one). The history is never read: whether the summary had
+      // anything to say is the state's own `held`, written by the worker with its claim.
+      const rows = await query(
+        `select c.channel, a.state::text as state
+           from jsonb_to_recordset($1::jsonb) as c(channel text, key text)
+           join facetdb.alerts a on a.key = c.key`,
+        [
+          JSON.stringify(
+            channels.map((channel) => ({ channel, key: quietKey(projectId, channel) })),
+          ),
+        ],
+      );
+      const summaries = new Map<string, QuietSummaryState>();
+      for (const row of rows) {
+        const { channel } = row;
+        if (typeof channel !== "string") {
+          throw new Error(`column "channel" came back as ${typeof channel}, expected text`);
+        }
+        summaries.set(channel, parsedJson(quietSummaryState, row, "state"));
+      }
+      return summaries;
     },
 
     async answered(sourceIds, day) {

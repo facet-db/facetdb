@@ -771,6 +771,15 @@ describe("alerts, cursors and question-set versions", () => {
     expect(await store.alerts.swapQuietState(key, sent, { ...sent, until: 5 })).toBe(false);
     expect(await store.alerts.swapQuietState(key, claimed, sent)).toBe(true);
     expect(await store.alerts.quietState(key)).toEqual(sent);
+    // Whether the span held anything is read back as written, and a swap from the state as read
+    // still matches the row (a state without it, above, reads without it).
+    const held = { ...sent, held: true };
+    expect(await store.alerts.swapQuietState(key, sent, held)).toBe(true);
+    expect(await store.alerts.quietState(key)).toEqual(held);
+    const read = await store.alerts.quietState(key);
+    expect(await store.alerts.swapQuietState(key, read, { ...held, triedAt: 3_000 })).toBe(true);
+    await db.exec(`update facetdb.alerts set state = state || '{"held": "yes"}'::jsonb`);
+    await expect(store.alerts.quietState(key)).rejects.toThrow(/"held"/);
     // A row that is not a state is refused by name, not taken for one.
     await db.exec(`update facetdb.alerts set state = '{"until": "soon"}'::jsonb`);
     await expect(store.alerts.quietState(key)).rejects.toThrow(/"until"/);
