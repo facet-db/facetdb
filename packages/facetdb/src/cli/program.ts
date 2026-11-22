@@ -249,8 +249,13 @@ export type CliDeps = {
     mode: {
       readonly dryRun: boolean;
       readonly allowInsecure?: boolean;
-      /** The plugin host of a config whose `provider` is a plugin's; the setup builds the provider from it. */
+      /**
+       * The plugin host of a config whose `provider` is a plugin's; the setup builds the provider
+       * from it. A plugin source's backfill reads its records through its plugin here.
+       */
       readonly plugins?: PluginHost;
+      /** Where a plugin source's backfill says a row its plugin returned that the store does not take. */
+      readonly note?: (line: string) => void;
     },
   ) => Promise<BackfillSetup>;
   /**

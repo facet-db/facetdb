@@ -36,7 +36,7 @@ import {
   importFromProject,
   type PluginHost,
 } from "../plugin/index.ts";
-import { wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
+import { pluginBackfillConnector, wireBackfill, wireBackfillDryRun } from "./backfill-wiring.ts";
 import { systemBrowser } from "./browser.ts";
 import { engineTarget, projectRef, sourceUrlOf, splitTable } from "./commands/database.ts";
 import { COMMANDS } from "./commands/index.ts";
@@ -52,6 +52,7 @@ import {
   CliError,
   type CliIo,
   formatError,
+  type OpenStore,
   runProgram,
   type Workspace,
 } from "./program.ts";
@@ -594,9 +595,32 @@ export function processDeps(
     studio: { defaultDir: studioDistDir(), files: diskStudioFiles },
     openBrowser: systemBrowser(process.platform, spawn),
     backfill: async (config, source, mode) => {
+      // A table's records are read through its engine; a plugin source's through its plugin's scan,
+      // over the store's queue of the source under the backfill's own worker id.
+      const open = (opened: OpenStore | undefined): Promise<OpenConnector> => {
+        if (source.source === undefined) {
+          return sourceConnector(deps, config, source, mode.allowInsecure === true);
+        }
+        if (mode.plugins === undefined) {
+          return Promise.reject(new Error("a plugin source's backfill needs its plugin host"));
+        }
+        return Promise.resolve(
+          pluginBackfillConnector({
+            config,
+            source,
+            project: projectRef(projectDir),
+            host: mode.plugins,
+            env,
+            clock,
+            workerId: `backfill-${randomUUID()}`,
+            store: opened,
+            note: mode.note ?? (() => undefined),
+          }),
+        );
+      };
       if (mode.dryRun) {
         // The store's schema and rows are made on open: a dry run reads the source and nothing else.
-        const connector = await sourceConnector(deps, config, source, mode.allowInsecure === true);
+        const connector = await open(undefined);
         return {
           deps: wireBackfillDryRun({
             config,
@@ -611,7 +635,7 @@ export function processDeps(
       const store = await deps.store({ allowInsecure: mode.allowInsecure === true });
       let connector: OpenConnector | undefined;
       try {
-        connector = await sourceConnector(deps, config, source, mode.allowInsecure === true);
+        connector = await open(store);
         const wired = await wireBackfill({
           config,
           source,

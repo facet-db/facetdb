@@ -65,23 +65,25 @@ export type BackfillJobsDeps = {
   readonly loop: (name: string) => JobLoop | undefined;
   /**
    * Opens a connector of the job's own on the source's table, under the loop's question set and
-   * under `workerId`, which is the job's alone (`newWorkerId`). Never a loop's: SQLite acks and
-   * releases a claim by the worker id and nothing else, and lets go of the table's lock by it on
-   * close, so a job under the loop's id would settle the loop's claim of a record that changed
-   * meanwhile (asked twice, or its queue entry gone) and drop the loop's lock.
+   * under `workerId`, which is the job's alone (`newWorkerId`); for a plugin source, an adapter of
+   * the job's own over the store's queue of the source, paging through the plugin's scan. Never a
+   * loop's: SQLite acks and releases a claim by the worker id and nothing else, and lets go of the
+   * table's lock by it on close, so a job under the loop's id would settle the loop's claim of a
+   * record that changed meanwhile (asked twice, or its queue entry gone) and drop the loop's lock.
    */
   readonly open: (loop: JobLoop, workerId: string) => Promise<OpenConnector>;
   /** Makes a job's worker id; random in the process, a counter in a test. */
   readonly newWorkerId: () => string;
   /**
    * Where the loop in force of a source takes the records it is to ask (its own connector's
-   * `enqueue`, through `Fleet.connector`), or undefined when the worker runs no such source. A
-   * whole set's records are handed there: the polling engine's connector keeps a memory of its
-   * queue, a cache over the stored state hash its `enqueue` marks (the old hash written in
-   * capitals, so an edit made meanwhile still reads as a change), so records queued through the
-   * job's connector would wait for a poll that reads the whole table (the loop's next start, or
-   * its hourly scan without a last-changed column) to be found, where the loop's own connector
-   * asks them at once.
+   * `enqueue`, through `Fleet.connector`), or undefined when the worker runs no such source, and
+   * for a plugin source, whose records the job's own connector takes into the store as it queues
+   * them, into the store's one queue of the source that the loop claims from. A whole set's records
+   * are handed there: the polling engine's connector keeps a memory of its queue, a cache over the
+   * stored state hash its `enqueue` marks (the old hash written in capitals, so an edit made
+   * meanwhile still reads as a change), so records queued through the job's connector would wait
+   * for a poll that reads the whole table (the loop's next start, or its hourly scan without a
+   * last-changed column) to be found, where the loop's own connector asks them at once.
    */
   readonly queue: (name: string) => Pick<Connector, "enqueue"> | undefined;
   /** The workers' provider: backoff and the in-flight limit around the model, shared with the loops. */
@@ -556,7 +558,9 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       if (existing !== undefined && LIVING.has(existing.state)) {
         return Promise.resolve({ kind: "busy", status: statusOf(existing) });
       }
-      if (loop.source.table === undefined) {
+      // An API source's records arrive one by one: nothing to page through. A plugin source pages
+      // through its plugin's scan.
+      if (loop.source.table === undefined && loop.source.source === undefined) {
         return Promise.resolve({ kind: "not_a_table" });
       }
       const named = questions === undefined ? null : [...new Set(questions)];

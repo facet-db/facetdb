@@ -116,6 +116,13 @@ export type StoreConnector = Connector & {
    * false. The stored decision stays until a new one is written over it.
    */
   upsertRecord(key: RecordKey, state: Readonly<Record<string, StateValue>>): Promise<boolean>;
+  /**
+   * Stores a record the store does not hold yet, pending, and queues it, in one transaction (true);
+   * a key it holds already is left exactly as it is, whatever its state (false). A plugin source's
+   * backfill takes a record in with it: the plugin's page may be older than a change stored since
+   * it was read, which `upsertRecord` would write over.
+   */
+  insertRecord(key: RecordKey, state: Readonly<Record<string, StateValue>>): Promise<boolean>;
   getRecord(key: RecordKey): Promise<StoredRecord | undefined>;
   /**
    * Claims the one queued job of `key` (true), and nothing else: false when the key is not queued or
@@ -329,6 +336,30 @@ export function createStoreConnector(
     });
   }
 
+  async function insertRecord(
+    key: RecordKey,
+    values: Readonly<Record<string, StateValue>>,
+  ): Promise<boolean> {
+    const hash = stateHash(fields, values);
+    const stored = Object.fromEntries(fields.map((field) => [field, values[field]]));
+    return client.transaction(async (query) => {
+      const inserted = await query(
+        `insert into facetdb.records (source_id, record_key, state, hash, status)
+         values ($1, $2, $3::jsonb, $4, 'pending')
+         on conflict (source_id, record_key) do nothing
+         returning record_key`,
+        [sourceId, key, JSON.stringify(stored), hash],
+      );
+      if (inserted.length === 0) {
+        return false;
+      }
+      // As `upsertRecord` queues a new record: a claim held on a job of the key (a worker that found
+      // no record and is about to ack it as gone) is taken away, so the new record keeps its job.
+      await query(jobsQueries.requeue, [[queued(key)]]);
+      return true;
+    });
+  }
+
   async function getRecord(key: RecordKey): Promise<StoredRecord | undefined> {
     const rows = await client.query(
       `select ${recordColumns} from facetdb.records where source_id = $1 and record_key = $2`,
@@ -370,6 +401,7 @@ export function createStoreConnector(
     current,
     scan,
     upsertRecord,
+    insertRecord,
     getRecord,
     // One key per statement, pipelined, as on the customer's database: `upsertRecord` holds a job
     // row in its transaction while it writes that record.

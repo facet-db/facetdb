@@ -99,6 +99,23 @@ describe("the store connector", () => {
     expect(await other.claim(5)).toEqual(["r1"]);
   });
 
+  it("inserts and queues a record it does not hold, and leaves one it holds exactly as it is", async () => {
+    const { store, db } = await newStore();
+    const connector = store.connector({ sourceId: "src", fields: FIELDS, workerId: "w" });
+    expect(await connector.insertRecord("r1", state("x"))).toBe(true);
+    expect((await connector.getRecord("r1"))?.state).toEqual(state("x"));
+    expect(await connector.claim(5)).toEqual(["r1"]);
+    await connector.ack(["r1"]);
+
+    // A newer state stored since (a change the plugin delivered): an older page never replaces it.
+    await connector.upsertRecord("r1", state("newer"));
+    await connector.ack(await connector.claim(5));
+    expect(await connector.insertRecord("r1", state("x"))).toBe(false);
+    expect((await connector.getRecord("r1"))?.state).toEqual(state("newer"));
+    expect(await scalar(db, "select count(*)::int from facetdb.jobs")).toBe(0);
+    await expect(connector.insertRecord("r2", { title: "only" })).rejects.toThrow(/"body"/);
+  });
+
   it("refuses a state that lacks a field", async () => {
     const { store } = await newStore();
     const connector = store.connector({ sourceId: "src", fields: FIELDS, workerId: "w" });

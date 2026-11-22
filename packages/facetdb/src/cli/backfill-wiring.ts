@@ -15,6 +15,13 @@ import {
 } from "@facetdb/core";
 import { type ProjectRef, type Store, sourceIdOf } from "@facetdb/postgres";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
+import {
+  type BackfillStore,
+  createPluginBackfillConnector,
+  hostedSource,
+  type PluginHost,
+  type PluginSourceConnector,
+} from "../plugin/index.ts";
 import { questionSetOf } from "./commands/database.ts";
 import { alertScope, createLinks, type Links } from "./links.ts";
 
@@ -100,14 +107,98 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
   };
 }
 
+/**
+ * The store a plugin source's dry run hands its adapter: never opened, and never reached, since the
+ * adapter's `scan` stores nothing and a dry run queues nothing. Every call throws.
+ */
+const DRY_RUN_STORE: BackfillStore = {
+  capabilities: {
+    inlineColumns: false,
+    pushWakeup: false,
+    transactions: true,
+    sideTable: false,
+    multipleWorkers: true,
+  },
+  install: () => neverDoes("installs anything"),
+  uninstall: () => neverDoes("uninstalls anything"),
+  watch: () => neverDoes("watches a source"),
+  read: () => neverDoes("reads the store"),
+  write: () => neverDoes("writes a decision"),
+  current: () => neverDoes("reads the store"),
+  scan: () => neverDoes("pages through the store"),
+  enqueue: () => neverDoes("queues a record"),
+  claim: () => neverDoes("claims a record"),
+  claimKey: () => neverDoes("claims a record"),
+  ack: () => neverDoes("settles a claim"),
+  release: () => neverDoes("settles a claim"),
+  upsertRecord: () => neverDoes("stores a record"),
+  insertRecord: () => neverDoes("stores a record"),
+};
+
+/** What a plugin source's backfill reads its records through. */
+export type PluginBackfillWiring = {
+  readonly config: ProjectConfig;
+  readonly source: SourceConfig;
+  readonly project: ProjectRef;
+  /** The plugins loaded for the config: the source's own plugin among them. */
+  readonly host: PluginHost;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly clock: Clock;
+  /** The backfill's own worker id in the store's queue: never a worker loop's. */
+  readonly workerId: string;
+  /** The store; undefined for a dry run, which opens none. */
+  readonly store: Pick<Store, "connector" | "cursors"> | undefined;
+  /** Where a row the plugin returned that the store does not take is said. */
+  readonly note: (line: string) => void;
+};
+
+/**
+ * A plugin source's connector for a backfill, `facetdb backfill`'s and the worker's job's alike: an
+ * adapter of its own over the store's records and queue of the source, under the backfill's own
+ * worker id, whose `scan` pages through the plugin's `scan` and whose `enqueue` takes each record
+ * in by what the store holds of it as it queues it (`createPluginBackfillConnector`). The plugin's
+ * `watch` never runs in it, and the worker's loop never pages or queues through it. For a dry run
+ * it stands over a store that refuses every call, which its estimate never makes. Throws the host's
+ * refusal when the source's plugin, its settings or a variable they read are not as they must be.
+ */
+export function pluginBackfillConnector(wiring: PluginBackfillWiring): PluginSourceConnector {
+  const { config, source, host, clock, store } = wiring;
+  const hosted = hostedSource(host, config, source, wiring.env);
+  const sourceId = sourceIdOf(wiring.project.id, source.name);
+  return createPluginBackfillConnector({
+    store:
+      store === undefined
+        ? DRY_RUN_STORE
+        : store.connector({ sourceId, fields: source.read, workerId: wiring.workerId }),
+    name: source.name,
+    hosted,
+    context: (signal) => host.contextFor(hosted.packageName, signal),
+    fields: source.read,
+    clock,
+    // The plugin's one saved cursor, which its scan may read: a dry run has no store, so none.
+    cursors:
+      store === undefined
+        ? { load: () => Promise.resolve(undefined), save: () => neverDoes("saves a cursor") }
+        : store.cursors,
+    cursorRun: `plugin-source:${sourceId}`,
+    note: wiring.note,
+  });
+}
+
 export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps> {
   const { config, source, project, store, clock } = wiring;
   const questionSet = questionSetOf(config, source);
   await store.ensureProject(project);
   // A table source keeps its answers in the customer's database; the store holds its log and
   // versions under `sourceIdOf(project, name)`, registered as a plugin-kind source (the store has
-  // no third kind).
-  await store.ensureSource({ projectId: project.id, name: source.name, kind: "plugin" });
+  // no third kind). A plugin source is registered as the worker registers it, since the store keeps
+  // a source's first kind: a backfill run before the worker's first start must not make it a
+  // table's.
+  await store.ensureSource({
+    projectId: project.id,
+    name: source.name,
+    kind: source.source === undefined ? "plugin" : "plugin-source",
+  });
   const sourceId = sourceIdOf(project.id, source.name);
   const version = await store.questionSets.record(sourceId, questionSet);
   const alerts = createAlerts({

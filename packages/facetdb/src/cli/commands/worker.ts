@@ -76,7 +76,12 @@ import {
   webhookSecret,
   withOutbox,
 } from "../../plugin/index.ts";
-import { capOf, type ProjectSpendingSettings, spendingUnder } from "../backfill-wiring.ts";
+import {
+  capOf,
+  type ProjectSpendingSettings,
+  pluginBackfillConnector,
+  spendingUnder,
+} from "../backfill-wiring.ts";
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import { alertScope, createLinks, hostInUrl, servedStudioUrl } from "../links.ts";
 import {
@@ -803,14 +808,35 @@ export async function runWorkers(
         projectId: project.id,
         loop: (name) => fleet.loop(name),
         open: (loop, backfillId) =>
-          parts.openTable(
-            loop.source,
-            { workerId: backfillId, maxConnections: connections },
-            // The loop's own question set: the file's model may have moved on since it opened.
-            { ...fleet.config(), model: loop.questionSet.model },
-          ),
+          loop.source.source === undefined
+            ? parts.openTable(
+                loop.source,
+                { workerId: backfillId, maxConnections: connections },
+                // The loop's own question set: the file's model may have moved on since it opened.
+                { ...fleet.config(), model: loop.questionSet.model },
+              )
+            : // A plugin source's job pages through its plugin's scan, over the store's
+              // queue of the source under the job's own id; the loop's watch is never touched.
+              Promise.resolve(
+                pluginBackfillConnector({
+                  config: fleet.config(),
+                  source: loop.source,
+                  project,
+                  host: parts.plugins,
+                  env: deps.env,
+                  clock,
+                  workerId: backfillId,
+                  store,
+                  note: (line) => print(`${loop.source.name}: ${line}`),
+                }),
+              ),
         newWorkerId: () => `backfill-${randomUUID()}`,
-        queue: (name) => (fleet.loop(name) === undefined ? undefined : fleet.connector(name)),
+        // A plugin source's records are taken into the store by the job's own connector as it
+        // queues them, into the store's one queue of the source the loop claims from.
+        queue: (name) =>
+          fleet.loop(name) === undefined || fleet.loop(name)?.source.source !== undefined
+            ? undefined
+            : fleet.connector(name),
         provider,
         spending,
         maxInFlight: limitsFor(connections).maxInFlight,

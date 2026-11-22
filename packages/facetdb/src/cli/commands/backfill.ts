@@ -5,15 +5,24 @@ import {
   createBackfill,
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
+import type { ProjectConfig, SourceCall, SourceConfig } from "../../config/index.ts";
+import {
+  hostedSource,
+  type PluginHost,
+  PluginHostError,
+  PluginSourceFailed,
+} from "../../plugin/index.ts";
 import { requireUsableUrl } from "../engines.ts";
-import { CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
+import { type CliDeps, CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
+  loadPluginHost,
   loadProjectConfig,
   pluginHostForAlerts,
   singleTarget,
   sourceTable,
+  type TableTarget,
 } from "./database.ts";
 import { pluginHostForProvider } from "./model-provider.ts";
 
@@ -21,8 +30,81 @@ import { pluginHostForProvider } from "./model-provider.ts";
  * `facetdb backfill`: answers every existing row of a source, newest first, at a pace, resumable.
  * The cost is shown before anything is asked and nothing starts without a yes (or `--yes`). The
  * engine is core's `createBackfill`: it saves its place after every page, so a run that stops is
- * continued by running the command again.
+ * continued by running the command again. A plugin source is paged through its plugin's own `scan`,
+ * in the plugin's order: "`facetdb backfill` labels every open issue once".
  */
+
+/** What a backfill pages through: a source's table, or a plugin source's own scan. */
+type BackfillTarget =
+  | { readonly kind: "table"; readonly target: TableTarget }
+  | { readonly kind: "plugin"; readonly source: SourceConfig; readonly call: SourceCall };
+
+/**
+ * The source `--source` names, or the config's one source a backfill can page through: one that
+ * reads a table (`singleTarget`'s rule, so a config of tables reads as it always has) or one a
+ * plugin reads. An API source's records arrive one by one: it has nothing to page through.
+ */
+function backfillTarget(config: ProjectConfig, only: string | undefined): BackfillTarget {
+  const plugins = config.sources.flatMap((source) =>
+    source.source !== undefined && (only === undefined || source.name === only)
+      ? [{ kind: "plugin" as const, source, call: source.source }]
+      : [],
+  );
+  if (plugins.length === 0) {
+    return { kind: "table", target: singleTarget(config, only) };
+  }
+  const [first] = plugins;
+  const tables =
+    only === undefined ? config.sources.filter((source) => source.table !== undefined) : [];
+  if (first !== undefined && plugins.length === 1 && tables.length === 0) {
+    return first;
+  }
+  const names = config.sources
+    .filter((source) => source.table !== undefined || source.source !== undefined)
+    .map((source) => source.name);
+  throw new CliError(
+    "which-source",
+    `the config has ${names.length} sources a backfill can page through (a table, or a plugin's scan), and this command works on one`,
+    `pass --source with one of: ${names.join(", ")}`,
+    EXIT_USAGE,
+  );
+}
+
+/** The plugin source checked against the plugins loaded, as the worker checks it at its start. */
+function checkPluginSource(
+  deps: CliDeps,
+  config: ProjectConfig,
+  source: SourceConfig,
+  host: PluginHost,
+): void {
+  try {
+    hostedSource(host, config, source, deps.env);
+  } catch (error) {
+    if (error instanceof PluginHostError) {
+      throw new CliError(error.code, error.message, error.fix);
+    }
+    throw error;
+  }
+}
+
+/**
+ * A plugin source's scan that failed, as the command's refusal: the words are FacetDB's, since a
+ * plugin's own are never kept, and the saved place is where the next run starts.
+ */
+function scanFailure(error: unknown): CliError | undefined {
+  if (
+    !(error instanceof PluginSourceFailed) &&
+    !(error instanceof Error && error.name === "SourceAccessLost")
+  ) {
+    return undefined;
+  }
+  return new CliError(
+    "backfill-plugin",
+    `${error.message}, so the backfill stopped; the pages queued before it are saved`,
+    "once the plugin pages again (for a refused credential, set the variable named above where this command runs), run facetdb backfill again: it resumes from the saved place and skips what is answered",
+    EXIT_SETUP,
+  );
+}
 
 type BackfillOptions = {
   readonly config: string;
@@ -121,37 +203,48 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
   run: async ({ options, deps, print }) => {
     const pace = parsePace(options.pace);
     const config = await loadProjectConfig(deps, options.config);
-    const target = singleTarget(config, options.source);
-    const source = target.source;
+    const picked = backfillTarget(config, options.source);
+    const source = picked.kind === "table" ? picked.target.source : picked.source;
     const onlyQuestions = parseQuestions(
       options.question,
       source.questions.map((question) => question.name),
     );
-    // The table as its engine names it, as migrate's header does.
-    const table = await sourceTable(deps, config, target);
-    const name = table.label;
-    // Before anything connects, a dry run included (it reads the source): no password in the clear,
-    // by the source's engine for its connection string and by the store door for the store's.
     const allowInsecure = options.allowInsecure === true;
-    if (table.reached !== undefined) {
-      requireUsableUrl(table.reached.engine, table.own, table.reached.url, allowInsecure);
+    let name: string;
+    if (picked.kind === "table") {
+      // The table as its engine names it, as migrate's header does.
+      const table = await sourceTable(deps, config, picked.target);
+      name = table.label;
+      // Before anything connects, a dry run included (it reads the source): no password in the
+      // clear, by the source's engine for its connection string and by the store door for the store's.
+      if (table.reached !== undefined) {
+        requireUsableUrl(table.reached.engine, table.own, table.reached.url, allowInsecure);
+      }
+    } else {
+      // The source as the Sources page names its connector: the plugin and its source.
+      name = `${picked.call.plugin} ${picked.call.source}`;
     }
     const storeUrl = storeUrlOf(deps.env);
     if (!options.dryRun && storeUrl !== undefined) {
       requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
     }
     // A plugin's provider needs its plugin host, built as the worker builds it, and so do the alert
-    // channels the backfill's alerts go to; a config with neither builds none.
-    const plugins = await pluginHostForAlerts(
-      deps,
-      config,
-      options.config,
-      await pluginHostForProvider(deps, config, options.config),
-    );
+    // channels the backfill's alerts go to; a config with neither builds none. A plugin source is
+    // read through its plugin, so it always has one, its source checked as the worker's.
+    let host: PluginHost | undefined;
+    if (picked.kind === "plugin") {
+      const loaded = await loadPluginHost(deps, config, options.config);
+      checkPluginSource(deps, config, source, loaded);
+      host = loaded;
+    } else {
+      host = await pluginHostForProvider(deps, config, options.config);
+    }
+    const plugins = await pluginHostForAlerts(deps, config, options.config, host);
     const setup = await deps.backfill(config, source, {
       dryRun: options.dryRun,
       ...(options.allowInsecure === true ? { allowInsecure: true } : {}),
       ...(plugins === undefined ? {} : { plugins }),
+      ...(picked.kind === "plugin" ? { note: print } : {}),
     });
     try {
       const backfill = createBackfill(setup.deps);
@@ -168,9 +261,19 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
           print(
             `Pace: at most ${pace} records per second, so about ${whole.format(seconds)} ${seconds === 1 ? "second" : "seconds"} on a database close to the worker.`,
           );
+          if (picked.kind === "plugin") {
+            // What the estimate cost the plugin, and what the run costs it: said before the yes.
+            print(
+              options.dryRun
+                ? "Counting them paged once through the plugin's scan, one call to the plugin per page."
+                : "Counting them paged once through the plugin's scan from the saved place, one call to the plugin per page, and stored and queued nothing. The run pages through it again, each page once, and takes each record into FacetDB's store as it queues it.",
+            );
+          }
           if (options.dryRun) {
             print(
-              "The estimate counts every row of the table: a dry run does not open FacetDB's store, so it cannot see a saved resume point or rows already answered.",
+              picked.kind === "plugin"
+                ? "The estimate counts every record the plugin's scan returns: a dry run does not open FacetDB's store, so it cannot see a saved resume point or records already answered."
+                : "The estimate counts every row of the table: a dry run does not open FacetDB's store, so it cannot see a saved resume point or rows already answered.",
             );
             print("Dry run: nothing was asked and nothing was changed.");
             return false;
@@ -186,7 +289,10 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
           print(
             page.cursor === null
               ? `${whole.format(answeredRecords)} records done. That was the last page.`
-              : `${whole.format(answeredRecords)} records done. Resume point saved: ${page.cursor}`,
+              : picked.kind === "plugin"
+                ? // A plugin's cursor is its own text, never printed: it could hold a line break.
+                  `${whole.format(answeredRecords)} records done. Resume point saved.`
+                : `${whole.format(answeredRecords)} records done. Resume point saved: ${page.cursor}`,
           );
         },
       });
@@ -223,6 +329,9 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
           : `Done: ${whole.format(report.answered.length)} records answered, ${whole.format(report.alreadyAnswered.length)} already had these answers, ${whole.format(report.deferred.length)} left for the worker.`,
       );
       return { ok: true, ...summary(report) };
+    } catch (error) {
+      // A plugin's scan that failed: said in FacetDB's words, with where the next run starts.
+      throw scanFailure(error) ?? error;
     } finally {
       await setup.close();
     }

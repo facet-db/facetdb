@@ -1,4 +1,15 @@
-import type { Clock, Connector, CursorStore, RecordKey, StateValue } from "@facetdb/core";
+import { createHash } from "node:crypto";
+import {
+  type Clock,
+  type Connector,
+  type CursorStore,
+  type ReadRow,
+  type RecordKey,
+  type ScanCursor,
+  type ScanPage,
+  type StateValue,
+  stateHash,
+} from "@facetdb/core";
 import { type PluginContext, SourceAccessLost, type SourceContext } from "./kinds.ts";
 import type { HostedSource } from "./source-host.ts";
 
@@ -21,6 +32,16 @@ import type { HostedSource } from "./source-host.ts";
  *   the source's own signal; a batch is taken in before the next is asked for, and the cursor the
  *   plugin saves is written only once every key it yielded before has been taken in.
  * - `receive(request)` runs the plugin's `receive` on an inbound HTTP event and takes its keys in.
+ * - a backfill's own adapter (`createPluginBackfillConnector`; never the worker's, whose
+ *   `scan` and `enqueue` stay the store's) pages through the plugin's own `scan`: `scan(cursor)`
+ *   hands core one page of it, in the plugin's order (newest first by the SDK's rule), each row
+ *   judged at the boundary as `read`'s are and its hash the store's, and stores nothing;
+ *   `enqueue(keys)` then takes each key of that page in by what the store holds of it now: stored
+ *   if the store holds nothing, queued if it holds the page's state, read again through the
+ *   plugin's `read` if it holds another, so an older page never overwrites a newer change. Core's
+ *   backfill calls `enqueue` at its pace, after its estimate, and saves its cursor only after every
+ *   key of the page is queued, so an estimate stores and queues nothing, and a crash repeats a
+ *   page, never skips one.
  *
  * A plugin's own error never reaches a line, the store, an alert or the dashboard: what it threw
  * could quote a secret it was handed (the rule the plugin and action hosts follow). The worker
@@ -90,6 +111,12 @@ export function printableKey(key: string): string {
 export type RecordStore = Connector & {
   /** Stores a record's state; a changed or new state is queued, the same state changes nothing (false). */
   upsertRecord(key: RecordKey, state: Readonly<Record<string, StateValue>>): Promise<boolean>;
+};
+
+/** What a backfill's own adapter needs of the store besides `RecordStore`. */
+export type BackfillStore = RecordStore & {
+  /** Stores a record the store does not hold yet and queues it (true); one it holds is left as it is (false). */
+  insertRecord(key: RecordKey, state: Readonly<Record<string, StateValue>>): Promise<boolean>;
 };
 
 /** What one `intake` did with each key it was given. */
@@ -168,7 +195,33 @@ class Stopped extends Error {
   }
 }
 
-type Step = "watch" | "read" | "receive";
+type Step = "watch" | "read" | "receive" | "scan";
+
+/**
+ * One pass of a plugin's scan: a digest of each cursor its pages gave, so one given again is caught
+ * at a fixed cost per page whatever the cursor's length; the rows it refused; and its empty pages
+ * in a row.
+ */
+type ScanPass = { readonly cursors: Set<string>; refused: number; empty: number };
+
+/**
+ * The most empty pages in a row a plugin's scan may yield, each naming a next cursor, before the
+ * scan is taken to never end: a filter that leaves pages empty (pull requests left out of issues)
+ * passes far below it, and a plugin whose fresh cursors lead nowhere stops the backfill in words.
+ */
+export const MAX_EMPTY_PAGES = 1_000;
+
+/** A cursor's digest: what a pass keeps of each cursor its pages gave. */
+function digestOf(cursor: ScanCursor): string {
+  return createHash("sha256").update(cursor, "utf8").digest("base64");
+}
+
+/** A row of a scanned page the store does not take: not a row at all, its key, or its state. */
+type ScanRefusal = {
+  readonly kind: "row" | "key" | "state";
+  readonly key: string;
+  readonly why: string;
+};
 
 function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -176,7 +229,30 @@ function isObject(value: unknown): value is Readonly<Record<string, unknown>> {
 
 const EMPTY: IntakeReport = { queued: [], unchanged: [], skipped: [], refused: [], strangers: 0 };
 
+/**
+ * The worker's adapter of a plugin source: `scan` and `enqueue` are the store's, as for every other
+ * connector over it, so a preview reads the records the store holds and a record queued again (an
+ * outage's retry) is queued at the state the store holds.
+ */
 export function createPluginSourceConnector(deps: PluginSourceDeps): PluginSourceConnector {
+  return adapterOf(deps, undefined);
+}
+
+/**
+ * A backfill's own adapter of a plugin source, never a worker loop's: `scan` pages through the
+ * plugin's own `scan`, and `enqueue` takes each record of the page last scanned into the store by
+ * what the store holds of it now, never writing the page's state over a newer one.
+ */
+export function createPluginBackfillConnector(
+  deps: PluginSourceDeps & { readonly store: BackfillStore },
+): PluginSourceConnector {
+  return adapterOf(deps, deps.store);
+}
+
+function adapterOf(
+  deps: PluginSourceDeps,
+  backfill: BackfillStore | undefined,
+): PluginSourceConnector {
   const { store, hosted, fields, clock, cursors, cursorRun, note } = deps;
   const about = `the plugin ${hosted.packageName} (source ${hosted.entry} of ${deps.name})`;
   /** The source's own signal: aborted by `close`, it ends the pump, the plugin's waits and its calls. */
@@ -530,6 +606,286 @@ export function createPluginSourceConnector(deps: PluginSourceDeps): PluginSourc
     return { status, keys: keys as readonly unknown[] };
   }
 
+  // --- the backfill's scan -------------------------------------------------------------
+
+  /**
+   * The plugin's scan in hand between two pages: its iterator, the `next` of the page it yielded
+   * last, and the pass it belongs to. A `scan` from exactly that cursor takes the iterator's next
+   * page, so a pass pages through one call of the plugin's `scan` and fetches each page once; any
+   * other cursor (a new pass, a resume) starts the plugin's scan again from there.
+   */
+  let scanning:
+    | {
+        readonly iterator: AsyncIterator<unknown>;
+        readonly after: ScanCursor;
+        readonly pass: ScanPass;
+      }
+    | undefined;
+  /**
+   * The rows of the page `scan` returned last, by key, each until `enqueue` takes it in: the state
+   * the page read and its hash.
+   */
+  let scanned = new Map<RecordKey, ReadRow>();
+
+  /** Asks a plugin's iterator to end, never waiting for it: a generator may be parked on a fetch. */
+  function letGo(iterator: AsyncIterator<unknown>): void {
+    void Promise.resolve()
+      .then(() => iterator.return?.())
+      .catch(() => undefined);
+  }
+
+  /**
+   * The context a plugin's scan is handed: its cursor reads the source's one saved cursor but never
+   * saves it, since that cursor is where `watch` resumes, and a backfill's place is FacetDB's own.
+   */
+  function scanContext(): SourceContext<unknown> {
+    return {
+      ...contextOf(stop.signal),
+      cursor: {
+        load: () => cursor.load(),
+        save: () =>
+          Promise.reject(
+            new TypeError(
+              "a source's scan saves no cursor: the one saved cursor is where watch resumes, and a backfill's place is kept by FacetDB",
+            ),
+          ),
+      },
+    };
+  }
+
+  /** The plugin's scan started from `from`; one that throws at once fails in FacetDB's words. */
+  function started(from: ScanCursor | null): AsyncIterator<unknown> {
+    if (stopped()) {
+      throw new Stopped();
+    }
+    try {
+      return hosted.definition.scan(scanContext(), from)[Symbol.asyncIterator]();
+    } catch (error) {
+      throw worded("scan", error);
+    }
+  }
+
+  /** The iterator's next step; on a failure the iterator is let go, and nothing is kept of it. */
+  async function stepOf(iterator: AsyncIterator<unknown>): Promise<IteratorResult<unknown>> {
+    try {
+      return await call("scan", () => iterator.next());
+    } catch (error) {
+      letGo(iterator);
+      throw error;
+    }
+  }
+
+  /**
+   * A page the plugin yielded, judged: a list of rows and a `next` that is a cursor the store can
+   * keep, or null. A `next` the pass has given before (a fault in the plugin) would page forever,
+   * and so might more than `MAX_EMPTY_PAGES` empty pages in a row: either fails the page in words,
+   * before anything of it is used.
+   */
+  function pageOf(
+    value: unknown,
+    pass: ScanPass,
+  ): { readonly rows: readonly unknown[]; readonly next: ScanCursor | null } {
+    const rows = isObject(value) ? value["rows"] : undefined;
+    const next = isObject(value) ? value["next"] : undefined;
+    if (!Array.isArray(rows) || (next !== null && typeof next !== "string")) {
+      throw new PluginSourceFailed(
+        `${about} yielded something other than a page of { rows, next } from scan`,
+      );
+    }
+    if (next === null) {
+      return { rows: rows as readonly unknown[], next };
+    }
+    if (next.length > MAX_CURSOR_LENGTH || next.includes("\u0000") || !next.isWellFormed()) {
+      throw new PluginSourceFailed(
+        `${about} returned a page from scan whose next cursor the store cannot keep (longer than ${MAX_CURSOR_LENGTH} characters, or holding a NUL or a lone surrogate)`,
+      );
+    }
+    const digest = digestOf(next);
+    if (pass.cursors.has(digest)) {
+      throw new PluginSourceFailed(
+        `${about} returned a page from scan whose next cursor repeats one it gave earlier in the same scan, so its pages would never end; nothing of the page is taken in, and the backfill's saved place stays at the page before it`,
+      );
+    }
+    pass.empty = rows.length === 0 ? pass.empty + 1 : 0;
+    if (pass.empty > MAX_EMPTY_PAGES) {
+      throw new PluginSourceFailed(
+        `${about} returned more than ${MAX_EMPTY_PAGES} empty pages in a row from scan, each naming a next cursor, so its pages may never end; nothing more is taken in, and the next backfill resumes from the last page saved`,
+      );
+    }
+    pass.cursors.add(digest);
+    return { rows: rows as readonly unknown[], next };
+  }
+
+  /**
+   * A page's rows judged at the boundary as `read`'s are, in the plugin's order: the rows the store
+   * keeps (only the fields the source reads, hashed as the store hashes them), and the others with
+   * why. A refused row is left out and the page goes on with the rest.
+   */
+  function judgeScanned(rows: readonly unknown[]): {
+    readonly kept: readonly ReadRow[];
+    readonly refused: readonly ScanRefusal[];
+  } {
+    const times = new Map<unknown, number>();
+    for (const row of rows) {
+      const key = isObject(row) ? row["key"] : undefined;
+      times.set(key, (times.get(key) ?? 0) + 1);
+    }
+    const kept: ReadRow[] = [];
+    const refused: ScanRefusal[] = [];
+    for (const row of rows) {
+      if (!isObject(row)) {
+        refused.push({ kind: "row", key: "", why: "it is not a row of { key, state }" });
+        continue;
+      }
+      const named = row["key"];
+      const badKey = keyProblem(named);
+      if (badKey !== undefined) {
+        refused.push({ kind: "key", key: String(named), why: badKey });
+        continue;
+      }
+      const key = named as RecordKey;
+      if ((times.get(key) ?? 0) > 1) {
+        // Which of two states is the record's cannot be told: neither is taken in.
+        if (!refused.some((entry) => entry.kind === "state" && entry.key === key)) {
+          refused.push({ kind: "state", key, why: "scan returned it more than once in one page" });
+        }
+        continue;
+      }
+      const why = stateProblem(row["state"]);
+      if (why !== undefined) {
+        refused.push({ kind: "state", key, why });
+        continue;
+      }
+      const state = row["state"] as Readonly<Record<string, StateValue>>;
+      const picked = Object.fromEntries(fields.map((field) => [field, state[field] ?? null]));
+      kept.push({ key, state: picked, hash: stateHash(fields, picked), excluded: false });
+    }
+    return { kept, refused };
+  }
+
+  /** Says each refused row, and counts it in its pass. */
+  function noteRefused(refused: readonly ScanRefusal[], pass: ScanPass): void {
+    for (const entry of refused) {
+      pass.refused += 1;
+      switch (entry.kind) {
+        case "row":
+          note(
+            `${about} yielded a row from scan that is not { key, state }; it is left out of the backfill`,
+          );
+          break;
+        case "key":
+          note(
+            `${about} returned a record from scan whose key the store cannot keep (${entry.why}), so it is left out of the backfill: ${printableKey(entry.key)}`,
+          );
+          break;
+        case "state":
+          note(
+            `${about} returned the record ${printableKey(entry.key)} from scan in a shape the store does not take (${entry.why}), so it is left out of the backfill`,
+          );
+          break;
+      }
+    }
+  }
+
+  /** The end of a pass: what it left out, counted, when it left anything out. */
+  function passEnded(pass: ScanPass): void {
+    if (pass.refused > 0) {
+      note(
+        `${about} returned ${pass.refused === 1 ? "1 row" : `${pass.refused} rows`} in this pass of its scan that the store does not take, each named above: left out of the backfill, its count and its estimate`,
+      );
+    }
+  }
+
+  /**
+   * One page of the plugin's scan, as core's backfill reads a connector's: from the iterator in
+   * hand when `from` is where its last page left off, else from the plugin's scan started at
+   * `from`. Nothing is stored here: the page's rows are held until `enqueue` takes them in, so a
+   * backfill's estimate, which pages through `scan` too, stores and queues nothing.
+   */
+  async function scan(from: ScanCursor | null): Promise<ScanPage> {
+    const held = scanning;
+    scanning = undefined;
+    const goesOn = held !== undefined && from !== null && held.after === from;
+    if (held !== undefined && !goesOn) {
+      letGo(held.iterator);
+    }
+    const pass: ScanPass = goesOn
+      ? held.pass
+      : { cursors: new Set(from === null ? [] : [digestOf(from)]), refused: 0, empty: 0 };
+    let iterator = goesOn ? held.iterator : started(from);
+    let step = await stepOf(iterator);
+    if (step.done === true && goesOn) {
+      // Its scan ended although its last page named a next one (a plugin that yields one page a
+      // call): it is started again from that cursor, as a resume would start it.
+      iterator = started(from);
+      step = await stepOf(iterator);
+    }
+    if (step.done === true) {
+      // Nothing more from here: the last page, empty.
+      scanned = new Map();
+      passEnded(pass);
+      return { rows: [], next: null };
+    }
+    let page: { readonly rows: readonly unknown[]; readonly next: ScanCursor | null };
+    try {
+      page = pageOf(step.value, pass);
+    } catch (error) {
+      letGo(iterator);
+      throw error;
+    }
+    const judged = judgeScanned(page.rows);
+    noteRefused(judged.refused, pass);
+    scanned = new Map(judged.kept.map((row) => [row.key, row]));
+    if (page.next === null) {
+      letGo(iterator);
+      passEnded(pass);
+    } else {
+      scanning = { iterator, after: page.next, pass };
+    }
+    return { rows: judged.kept, next: page.next };
+  }
+
+  /**
+   * A backfill's queueing, at its pace and after its estimate: each key of the page `scan` returned
+   * last is taken in by what the store holds of it now, never by writing the page's state over a
+   * newer one (the page may be seconds old, and a change stored since is newer):
+   * - nothing: the page's state is stored and queued in one transaction, if the store still holds
+   *   nothing (`insertRecord`);
+   * - the page's state (the same hash): queued as it is;
+   * - another state, or one stored since the look: read again through the plugin's `read` and
+   *   taken in by `intake`, which stores and queues a state that changed; a key it finds unchanged
+   *   is queued as it is, one it leaves out or refuses is not queued.
+   * A key of no page is queued as it is. Each key leaves the kept page as it is taken in.
+   */
+  async function takeIn(into: BackfillStore, keys: readonly RecordKey[]): Promise<void> {
+    const unique = [...new Set(keys)];
+    const kept = unique.flatMap((key) => {
+      const row = scanned.get(key);
+      return row === undefined ? [] : [row];
+    });
+    const waiting = unique.filter((key) => !scanned.has(key));
+    if (kept.length > 0) {
+      const { rows } = await into.read(kept.map((row) => row.key));
+      const held = new Map(rows.map((row) => [row.key, row.hash]));
+      const readAgain: RecordKey[] = [];
+      for (const row of kept) {
+        const hash = held.get(row.key);
+        if (hash === row.hash) {
+          waiting.push(row.key);
+        } else if (hash !== undefined || !(await into.insertRecord(row.key, row.state))) {
+          readAgain.push(row.key);
+        }
+        scanned.delete(row.key);
+      }
+      if (readAgain.length > 0) {
+        waiting.push(...(await intake(readAgain)).unchanged);
+      }
+    }
+    if (waiting.length > 0) {
+      await into.enqueue(waiting);
+    }
+  }
+
   return {
     capabilities: store.capabilities,
     // The store's tables, brought up to date; a plugin source adds nothing of its own anywhere, so
@@ -540,8 +896,11 @@ export function createPluginSourceConnector(deps: PluginSourceDeps): PluginSourc
     read: (keys) => store.read(keys),
     write: (key, decision, expectedHash) => store.write(key, decision, expectedHash),
     current: (keys) => store.current(keys),
-    scan: (from) => store.scan(from),
-    enqueue: (keys) => store.enqueue(keys),
+    // The worker's adapter pages and queues through the store; only a backfill's own pages through
+    // the plugin's scan and takes records in as it queues them.
+    scan: backfill === undefined ? (from) => store.scan(from) : scan,
+    enqueue:
+      backfill === undefined ? (keys) => store.enqueue(keys) : (keys) => takeIn(backfill, keys),
     claim: (limit) => store.claim(limit),
     claimKey: (key) => store.claimKey(key),
     ack: (keys) => store.ack(keys),
@@ -572,6 +931,10 @@ export function createPluginSourceConnector(deps: PluginSourceDeps): PluginSourc
     },
     async close() {
       stop.abort();
+      if (scanning !== undefined) {
+        letGo(scanning.iterator);
+        scanning = undefined;
+      }
       for (const listener of listeners) {
         listener.wake();
       }

@@ -106,6 +106,7 @@ export type { RegistryIndex, RegistryListing } from "./registry.ts";
 export { RegistryError, readRegistryIndex } from "./registry.ts";
 export { satisfies } from "./semver.ts";
 export type {
+  BackfillStore,
   IntakeReport,
   PluginSourceConnector,
   PluginSourceDeps,
@@ -113,9 +114,11 @@ export type {
   RecordStore,
 } from "./source-connector.ts";
 export {
+  createPluginBackfillConnector,
   createPluginSourceConnector,
   keyProblem,
   MAX_CURSOR_LENGTH,
+  MAX_EMPTY_PAGES,
   MAX_KEY_BYTES,
   MAX_STATE_BYTES,
   PluginSourceFailed,
