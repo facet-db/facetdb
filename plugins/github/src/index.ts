@@ -32,6 +32,7 @@ import { definePlugin, type Plugin } from "facetdb/plugin";
 import { type ActionDeps, githubActions } from "./actions.ts";
 import { issuesSource } from "./issues-source.ts";
 import type { Kind } from "./issues-state.ts";
+import { triage } from "./packs/triage.ts";
 import { type GithubConfig, pluginConfig } from "./settings.ts";
 
 export type { ActionDeps as GithubPluginOptions } from "./actions.ts";
@@ -58,6 +59,7 @@ export {
   WEBHOOK_BODY_MAX_BYTES,
   WEBHOOKS_OFF,
 } from "./issues-webhook.ts";
+export { triage } from "./packs/triage.ts";
 export {
   BODY_MAX_BYTES,
   GithubActionError,
@@ -78,6 +80,7 @@ export function createGithubPlugin(options: ActionDeps): Plugin<GithubConfig> {
     config: pluginConfig,
     sources: { issues: issuesSource({ fetch: options.fetch }) },
     actions: githubActions(options),
+    packs: { triage },
   });
 }
 

@@ -1,0 +1,452 @@
+{
+  "pack": "triage",
+  "fields": ["title", "body", "labels", "changed_files"],
+  "answers": ["yes", "no", "unsure"],
+  "about": "50 issues and pull requests written for this sample, of invented projects: no text from a real repository, no real person's name or handle, no address. Each record is a state as the GitHub source writes it: `body` null for an issue with no description, `labels` the label names sorted one a line, `changed_files` empty for an issue and, for a pull request, the number of files it changes and their paths. Each record carries the answer a maintainer would give to each question from the record alone: yes, no or unsure for a yes-or-no question, and for kind the name of one of its options, or unsure. \"unsure\" means that maintainer would not decide from the record alone and would send it to review. A live run counts agreement this way. For kind, an option agrees when the model's top option is that option at confidence 0.50 or above, and unsure agrees when the confidence is below 0.50. For missing_reproduction, unsure agrees with a probability strictly between 0.30 and 0.70; for not_priority, strictly between 0.20 and 0.80; yes and no agree with an automatic yes and an automatic no. The evidence reports a review on a labelled record, and an automatic answer on an unsure record, apart from the answers that are wrong. missing_reproduction is no on every record that reports no bug, every pull request included, as its criteria say, so most of its no answers come from records that are no bug at all and its figure over the whole sample can pass while real bug reports go wrong: the evidence reports its agreement on the records labelled bug_report apart from the whole, held to the same share. The criteria describe kinds of situations and share no distinctive phrase with any record.",
+  "issues": [
+    {
+      "id": "t01",
+      "title": "Build fails when a page title contains a colon",
+      "body": "Version 3.4.2, Ubuntu 24.04, Node 22.\n\nSteps:\n1. Create `content/hello.md` whose front matter has the line `title: Setup: the basics`\n2. Run `sitegen build`\n\nExpected: the site builds.\nActual: the build stops with `FrontMatterError: unexpected token ':' at line 1` and exits with code 1.\n\nPutting the title in quotes works around it.",
+      "labels": "bug",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t02",
+      "title": "Dark mode",
+      "body": "Would be cool to have a dark mode.",
+      "labels": "enhancement",
+      "changed_files": "",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t03",
+      "title": "How do I change the port of the dev server?",
+      "body": "The dev server always starts on 3000 and that port is taken on my machine. How do I pick another one?",
+      "labels": "question",
+      "changed_files": "",
+      "expected": { "kind": "usage_question", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t04",
+      "title": "Typo in the install guide",
+      "body": "The second paragraph of the install guide says \"recieve\" where it should say \"receive\".",
+      "labels": "documentation",
+      "changed_files": "",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "yes"
+      }
+    },
+    {
+      "id": "t05",
+      "title": "App crashes all the time",
+      "body": "It keeps crashing. Please fix.",
+      "labels": "bug",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t06",
+      "title": "Bump the markdown parser from 9.1.0 to 9.1.2",
+      "body": "Bumps the markdown parser from 9.1.0 to 9.1.2.",
+      "labels": "dependencies",
+      "changed_files": "2 files changed:\npackage.json\npnpm-lock.yaml",
+      "expected": {
+        "kind": "something_else",
+        "missing_reproduction": "no",
+        "not_priority": "unsure"
+      }
+    },
+    {
+      "id": "t07",
+      "title": "Search does not find words with accents",
+      "body": "Searching for `cafe` misses my notes that contain `café`, and searching for `café` misses `cafe`. Is this expected?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "unsure", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t08",
+      "title": "Export to PDF drops the last page",
+      "body": null,
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t09",
+      "title": "Allow a separate output folder for each collection",
+      "body": "We publish the blog and the documentation from one repository to two different storage buckets. Today we build twice and delete the half we don't need each time. An `outDir` setting per collection would let one build write `dist/blog` and `dist/docs` and upload each folder on its own.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t10",
+      "title": "Where do API keys go so templates can read them?",
+      "body": "My templates need a key for the maps service. Where should I put it so the build can read it without committing it to the repository? I looked through the configuration guide and couldn't find it.",
+      "labels": "bug",
+      "changed_files": "",
+      "expected": {
+        "kind": "usage_question",
+        "missing_reproduction": "no",
+        "not_priority": "unsure"
+      }
+    },
+    {
+      "id": "t11",
+      "title": "Quickstart uses a flag that no longer exists",
+      "body": "The quickstart tells you to run `sitegen new my-site --template blog`, but 3.0 removed `--template` and the command now stops with `unknown option '--template'`. Everyone who follows the quickstart hits this on the very first command.",
+      "labels": "documentation",
+      "changed_files": "",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "no"
+      }
+    },
+    {
+      "id": "t12",
+      "title": "Signed out on every click since upgrading to 2.0 behind a reverse proxy",
+      "body": "Since going from 1.9.3 to 2.0.0, signing in works and then the next click sends me back to the sign-in page.\n\nSetup: Docker image 2.0.0 behind nginx, which terminates TLS and forwards plain HTTP to the app.\n\nSteps: sign in, open any note, and you are on the sign-in page again.\n\nThe session cookie now carries the Secure flag, and I think the app drops it because it sees plain HTTP from the proxy. Going back to 1.9.3 fixes it.",
+      "labels": "regression",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t13",
+      "title": "When will the next release be out?",
+      "body": "Is there a date for the next release?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "something_else", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t14",
+      "title": "`cache: false` seems to have no effect",
+      "body": "I set `cache: false` in `site.config.json`, but the second build is still much faster than the first, and pages I deleted still show up in the output folder. Am I using the option wrong, or is this a bug?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "unsure", "missing_reproduction": "no", "not_priority": "unsure" }
+    },
+    {
+      "id": "t15",
+      "title": "All my notes are gone",
+      "body": "Opened the app this morning and every single note has disappeared. I had years of work in there. What happened??",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t16",
+      "title": "Settings icon sits lower than the other toolbar icons",
+      "body": "In 5.1.0 on macOS the gear icon in the top toolbar is about two pixels lower than the icons beside it. Open any document and look at the toolbar; it shows at 100% zoom.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t17",
+      "title": "Add a --watch flag to the export command",
+      "body": "Our editors keep the exported PDFs open while they edit the source files. With `--watch` the export command runs again whenever a source file changes, so they stop re-running it by hand after each edit. Adds the flag, a 200 ms debounce, tests, and a line in the CLI reference.",
+      "labels": "",
+      "changed_files": "4 files changed:\ndocs/cli.md\nsrc/cli/export.ts\nsrc/watch.ts\ntest/export-watch.test.ts",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t18",
+      "title": "How to install on Windows",
+      "body": "Sorry if this is obvious, I'm new to this. What's the command to install it on Windows?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "usage_question", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t19",
+      "title": "Fix typos in the configuration guide",
+      "body": "Fixes three spelling mistakes and a doubled word.",
+      "labels": "documentation",
+      "changed_files": "1 file changed:\ndocs/guide/configuration.md",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "yes"
+      }
+    },
+    {
+      "id": "t20",
+      "title": "Crash on launch on Windows 7",
+      "body": "I know Windows 7 isn't on the list of supported systems, but some of our office machines still run it. Version 5.1.0 installs fine, then crashes as soon as it opens, with error 0xc0000005 and nothing else. To see it: install 5.1.0 on Windows 7 SP1 and start it.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t21",
+      "title": "test",
+      "body": "testing 123",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "something_else", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t22",
+      "title": "Output is not minified although the guide says it is on by default",
+      "body": "The configuration guide says `minify` defaults to true. With no `minify` setting at all, my production build still keeps every space and comment in its HTML files. Version 3.4.2.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "unsure", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t23",
+      "title": "Error",
+      "body": "TypeError: Cannot read properties of undefined (reading 'map')",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "unsure" }
+    },
+    {
+      "id": "t24",
+      "title": "Support YAML config files",
+      "body": "JSON is fine but YAML is nicer to read.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t25",
+      "title": "Using the client behind a proxy that replaces TLS certificates",
+      "body": "Our company proxy re-signs every TLS connection with its own root certificate, and requests from the client fail with `CERTIFICATE_VERIFY_FAILED`. Other tools here work once we point them at the company's CA file. Is there a setting to give the client a custom CA bundle?",
+      "labels": "",
+      "changed_files": "",
+      "expected": {
+        "kind": "usage_question",
+        "missing_reproduction": "no",
+        "not_priority": "unsure"
+      }
+    },
+    {
+      "id": "t26",
+      "title": "The retry option is missing from the API reference",
+      "body": "The changelog for 2.4 mentions a new `retry` option on the client, but the reference page for the client doesn't list it, so I can't tell which values it takes.",
+      "labels": "",
+      "changed_files": "",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "no"
+      }
+    },
+    {
+      "id": "t27",
+      "title": "Live reload stops working after a while",
+      "body": "Using 3.4.0 on Windows 11. The dev server picks up my edits at first, then at some point the browser stops refreshing and I have to restart the server. Really annoying.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t28",
+      "title": "Password reset link can be used more than once",
+      "body": "Steps:\n1. Request a password reset for an account.\n2. Open the link from the email and set a new password.\n3. Open the same link again.\n\nExpected: the link is refused.\nActual: the form opens again and accepts another new password.\n\nTested on 2.3.1 with the default settings.",
+      "labels": "security",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t29",
+      "title": "Get more followers today",
+      "body": "Grow your social media audience fast with our marketing package. Thousands of happy customers. Message us for a free trial!",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "something_else", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t30",
+      "title": "Bump the image decoder to 5.0.4 for the heap overflow advisory",
+      "body": "The advisory for the image decoder reports a heap overflow when it reads crafted PNG files; 5.0.4 fixes it. Our build pipeline resizes images that users upload, so this matters for us.",
+      "labels": "dependencies\nsecurity",
+      "changed_files": "2 files changed:\npackage.json\npnpm-lock.yaml",
+      "expected": { "kind": "unsure", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t31",
+      "title": "Can't log in anymore",
+      "body": "Since the latest update I can't log in. Fix please.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t32",
+      "title": "Expose the parsed front matter to render hooks",
+      "body": "I maintain a plugin that builds a table of contents for each page. Right now the render hook only receives the HTML, so the plugin parses the Markdown file a second time just to read the front matter. Passing the parsed front matter to the hook would remove that second parse and keep the two in sync.",
+      "labels": "enhancement\nplugins",
+      "changed_files": "",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t33",
+      "title": "Which Python versions are supported?",
+      "body": "Planning to use the library in a new service. Which Python versions does it support?",
+      "labels": "question",
+      "changed_files": "",
+      "expected": { "kind": "usage_question", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t34",
+      "title": "API reference lists the arguments of `scale()` in the wrong order",
+      "body": "The reference shows `scale(range, domain)`, but the code and the examples use `scale(domain, range)`. I copied the reference and my charts came out mirrored until I noticed.",
+      "labels": "",
+      "changed_files": "",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "no"
+      }
+    },
+    {
+      "id": "t35",
+      "title": "Empty list shows \"Page 0 of 0\"",
+      "body": "Filter the task list so that nothing matches. The pager under the list then reads \"Page 0 of 0\" instead of hiding. Version 1.12.0, Firefox.",
+      "labels": "enhancement",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t36",
+      "title": "Tracking: 4.0 release",
+      "body": "Checklist for the 4.0 release:\n- [x] Drop the deprecated `render()` signature\n- [ ] Move the config loader to the new schema\n- [ ] Update the migration guide\n- [ ] Publish the release notes",
+      "labels": "release",
+      "changed_files": "",
+      "expected": { "kind": "something_else", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t37",
+      "title": "Install fails on Python 3.13",
+      "body": "`pip install` on Python 3.13 stops while building the native extension:\n\n```\nerror: implicit declaration of function 'Py_LegacyBufferView'\n```\n\nOn 3.12 it installs fine. Is 3.13 supported yet?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "unsure", "missing_reproduction": "no", "not_priority": "unsure" }
+    },
+    {
+      "id": "t38",
+      "title": "CSV export splits a field that contains a comma",
+      "body": "When a task title contains a comma, the exported CSV puts the rest of the title into the next column.\n\nInput: a task titled `Buy milk, eggs`\nExport: Tasks, then Export, then CSV\nOutput line: `12,Buy milk, eggs,open`\nExpected: `12,\"Buy milk, eggs\",open`\n\nVersion 1.12.0. Our spreadsheet import breaks on every such row.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t39",
+      "title": "Worker memory keeps growing until the container is killed",
+      "body": "On 4.2.0 in Docker on Linux, the worker's memory climbs steadily and the container is killed for running out of memory roughly once a day. We process a few thousand jobs a day, mostly image resizing. I don't know what sets it off yet. Is there a way to get more information out of it?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "unsure", "not_priority": "no" }
+    },
+    {
+      "id": "t40",
+      "title": "FreeBSD build please",
+      "body": "Would love to have this on FreeBSD too.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "feature_request", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t41",
+      "title": "How do I turn off the update check?",
+      "body": "Every start of the CLI prints a line about a newer version. Is there a way to switch that check off in CI?",
+      "labels": "",
+      "changed_files": "",
+      "expected": {
+        "kind": "usage_question",
+        "missing_reproduction": "no",
+        "not_priority": "unsure"
+      }
+    },
+    {
+      "id": "t42",
+      "title": "docs: add a guide for running behind a reverse proxy",
+      "body": "Several issues asked how to run the server behind a proxy. This adds a page with the settings for the forwarded headers and the base path, and links it from the sidebar.",
+      "labels": "documentation",
+      "changed_files": "2 files changed:\ndocs/deploy/reverse-proxy.md\ndocs/sidebar.json",
+      "expected": {
+        "kind": "documentation_problem",
+        "missing_reproduction": "no",
+        "not_priority": "no"
+      }
+    },
+    {
+      "id": "t43",
+      "title": "Fix crash when a note has an empty title",
+      "body": "Opening a note whose title was empty crashed the editor with a null reference. An empty title now falls back to the note's first line, and a test covers it.",
+      "labels": "bug",
+      "changed_files": "2 files changed:\nsrc/notes/title.test.ts\nsrc/notes/title.ts",
+      "expected": { "kind": "bug_report", "missing_reproduction": "no", "not_priority": "no" }
+    },
+    {
+      "id": "t44",
+      "title": "Split the renderer into smaller modules",
+      "body": "No behaviour change. Moves the Markdown, image and link handling out of `render.ts` into their own files, so each part can be tested by itself.",
+      "labels": "",
+      "changed_files": "5 files changed:\nsrc/render.ts\nsrc/render/images.ts\nsrc/render/links.ts\nsrc/render/markdown.ts\ntest/render.test.ts",
+      "expected": {
+        "kind": "something_else",
+        "missing_reproduction": "no",
+        "not_priority": "unsure"
+      }
+    },
+    {
+      "id": "t45",
+      "title": "Spacing looks off on the settings page",
+      "body": "The settings page looks weird on my phone, the labels are squashed together.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "unsure", "not_priority": "yes" }
+    },
+    {
+      "id": "t46",
+      "title": "Search gets slow with lots of notes",
+      "body": "Once I have lots of notes, every search takes a few seconds to show results. Can this be made faster?",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "unsure", "missing_reproduction": "unsure", "not_priority": "unsure" }
+    },
+    {
+      "id": "t47",
+      "title": "Sync is broken",
+      "body": "Sync doesn't work on my phone. I already tried reinstalling.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "yes", "not_priority": "no" }
+    },
+    {
+      "id": "t48",
+      "title": "Thank you!",
+      "body": "Just wanted to say thanks for this project. It saved our small team a lot of time.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "something_else", "missing_reproduction": "no", "not_priority": "yes" }
+    },
+    {
+      "id": "t49",
+      "title": "Some images are not resized during the build",
+      "body": "On 3.4.2 most of my images come out resized, but a handful of the JPEGs are copied at full size. I haven't found a pattern.",
+      "labels": "bug",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "unsure", "not_priority": "no" }
+    },
+    {
+      "id": "t50",
+      "title": "Importing my backup fails with \"Unexpected end of input\"",
+      "body": "Settings, then Import, then my backup file: the import stops with `Unexpected end of input`. The file is about 40 MB and holds private notes, so I can't attach it. Version 5.0.2 on Android 15.",
+      "labels": "",
+      "changed_files": "",
+      "expected": { "kind": "bug_report", "missing_reproduction": "unsure", "not_priority": "no" }
+    }
+  ]
+}

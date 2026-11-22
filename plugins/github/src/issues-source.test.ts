@@ -1167,7 +1167,7 @@ describe("issues-source: the plugin", () => {
     });
     expect(loaded.manifest).toMatchObject({
       name: "github",
-      kinds: ["source", "action"],
+      kinds: ["source", "action", "pack"],
       secrets: ["token", "webhookSecret"],
     });
     expect(satisfies(VERSION, loaded.manifest.coreVersions)).toBe(true);
