@@ -45,9 +45,9 @@ import { COMMANDS } from "./index.ts";
 
 const PROJECT_DIR = "/work/listings-app";
 const TYPESAFE_KEY = "tsk-s3cret-typesafe-key";
-const OPENROUTER_KEY = "or-s3cret-openrouter-key";
+const GATEWAY_KEY = "aig-s3cret-gateway-key";
 const ACME_TOKEN = "acme-s3cret-token";
-const SECRETS = [TYPESAFE_KEY, OPENROUTER_KEY, ACME_TOKEN];
+const SECRETS = [TYPESAFE_KEY, GATEWAY_KEY, ACME_TOKEN];
 const clock = new FakeClock(0);
 
 const QUESTIONS = { urgent: noul("Is this urgent?") };
@@ -72,7 +72,7 @@ function acmeProject(provider: string): ProjectConfig {
 }
 
 describe("the config's provider key", () => {
-  it.each(["openrouter", "vercel-ai-gateway", "ollama"])(
+  it.each(["vercel-ai-gateway", "ollama"])(
     "accepts the preset %s, which has an address of its own",
     (name) => {
       expect(parseProjectConfig(projectWith({ provider: name })).ok).toBe(true);
@@ -97,9 +97,9 @@ describe("the config's provider key", () => {
 
   it("lets modelUrl beside a preset replace the preset's address", () => {
     const result = parseProjectConfig(
-      projectWith({ provider: "openrouter", modelUrl: "https://proxy.internal/openrouter" }),
+      projectWith({ provider: "vercel-ai-gateway", modelUrl: "https://proxy.internal/gateway" }),
     );
-    expect(result.ok && result.config.modelUrl).toBe("https://proxy.internal/openrouter");
+    expect(result.ok && result.config.modelUrl).toBe("https://proxy.internal/gateway");
   });
 
   it.each(["acme/solar", "@facetdb/acme/solar", "facetdb-plugin-acme/solar-2"])(
@@ -116,17 +116,25 @@ describe("the config's provider key", () => {
     expect(!result.ok && result.issues.map((issue) => issue.path)).toEqual(["modelUrl"]);
   });
 
-  it.each(["openai", "OpenRouter", "acme/", "/solar", "acme/Solar", ""])(
+  it.each(["openai", "Ollama", "acme/", "/solar", "acme/Solar", ""])(
     "refuses %j, listing the presets and the plugin form",
     (name) => {
       const result = parseProjectConfig(projectWith({ provider: name }));
       expect(result.ok).toBe(false);
       const [issue] = result.ok ? [] : result.issues;
       expect(issue?.path).toBe("provider");
-      expect(issue?.message).toContain("openrouter, vercel-ai-gateway");
+      expect(issue?.message).toContain("vercel-ai-gateway, cloudflare-ai-gateway");
       expect(issue?.message).toContain('"<plugin>/<entry>"');
     },
   );
+
+  it("refuses openrouter, a preset no more, in the words any other name that is no preset gets", () => {
+    const removed = parseProjectConfig(projectWith({ provider: "openrouter" }));
+    const unknown = parseProjectConfig(projectWith({ provider: "openai" }));
+    expect(removed.ok).toBe(false);
+    expect(unknown.ok).toBe(false);
+    expect(!removed.ok && removed.issues).toEqual(!unknown.ok && unknown.issues);
+  });
 
   it("refuses a provider that is not text", () => {
     const result = parseProjectConfig({ ...projectWith(), provider: 7 });
@@ -135,14 +143,14 @@ describe("the config's provider key", () => {
 });
 
 describe("the export and the exporter carry the provider", () => {
-  const withProvider = projectWith({ provider: "openrouter" });
+  const withProvider = projectWith({ provider: "vercel-ai-gateway" });
   const without = projectWith();
 
   it("writes provider into the JSON and reads it back", () => {
     const json = toProjectJson(withProvider);
-    expect(json.provider).toBe("openrouter");
+    expect(json.provider).toBe("vercel-ai-gateway");
     const back = fromProjectJson(JSON.parse(JSON.stringify(json)) as unknown);
-    expect(back.provider).toBe("openrouter");
+    expect(back.provider).toBe("vercel-ai-gateway");
   });
 
   it("writes provider into the config file, after modelUrl", () => {
@@ -165,7 +173,7 @@ describe("the export and the exporter carry the provider", () => {
 describe("a draft cannot change the provider", () => {
   it("refuses it in a project draft, like modelUrl", () => {
     const result = judgeDraftProject(
-      projectWith({ provider: "openrouter" }),
+      projectWith({ provider: "vercel-ai-gateway" }),
       { provider: "ollama" },
       {},
     );
@@ -181,11 +189,11 @@ describe("a draft cannot change the provider", () => {
 
   it("keeps the file's provider when a draft changes the spending cap", () => {
     const result = judgeDraftProject(
-      projectWith({ provider: "openrouter" }),
+      projectWith({ provider: "vercel-ai-gateway" }),
       { spendingCap: 5000 },
       {},
     );
-    expect(result.ok && result.config.provider).toBe("openrouter");
+    expect(result.ok && result.config.provider).toBe("vercel-ai-gateway");
   });
 });
 
@@ -315,22 +323,22 @@ const ENV = {
 };
 
 describe("the worker names the provider and the variable it reads", () => {
-  const config = projectWith({ provider: "openrouter" });
+  const config = projectWith({ provider: "vercel-ai-gateway" });
 
   it("refuses to start without the preset's key, though the TypeSafe key is set", async () => {
     const result = await run(["worker", "--dry-run"], config, ENV);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain(
-      "error: OPENROUTER_API_KEY is not set, so the worker has no key for the openrouter provider",
+      "error: AI_GATEWAY_API_KEY is not set, so the worker has no key for the vercel-ai-gateway provider",
     );
-    expect(result.stderr).toContain("fix: set OPENROUTER_API_KEY to your openrouter key");
+    expect(result.stderr).toContain("fix: set AI_GATEWAY_API_KEY to your vercel-ai-gateway key");
     noKeyIn(result);
   });
 
   it("starts with the preset's key and no TypeSafe key at all", async () => {
     const result = await run(["worker", "--dry-run"], config, {
       FACETDB_SECRET: ENV.FACETDB_SECRET,
-      OPENROUTER_API_KEY: OPENROUTER_KEY,
+      AI_GATEWAY_API_KEY: GATEWAY_KEY,
     });
     expect(result.code, result.stderr).toBe(0);
     noKeyIn(result);
@@ -364,25 +372,25 @@ describe("doctor names the provider and the variable it checks", () => {
   const offline = ["doctor", "--offline"] as const;
 
   it("a preset with its key set: the variable's name, never its value, and the not-run note", async () => {
-    const result = await run(offline, projectWith({ provider: "openrouter" }), {
+    const result = await run(offline, projectWith({ provider: "vercel-ai-gateway" }), {
       ...ENV,
-      OPENROUTER_API_KEY: OPENROUTER_KEY,
+      AI_GATEWAY_API_KEY: GATEWAY_KEY,
     });
     expect(lineFor(result.stdout, "model key")).toContain(
-      "the openrouter provider reads OPENROUTER_API_KEY, and it is set",
+      "the vercel-ai-gateway provider reads AI_GATEWAY_API_KEY, and it is set",
     );
     expect(lineFor(result.stdout, "model reachable")).toContain(
-      "the FacetDB team has not run the openrouter provider yet",
+      "the FacetDB team has not run the vercel-ai-gateway provider yet",
     );
     noKeyIn(result);
   });
 
   it("a preset with its key missing fails the model key check, naming the variable", async () => {
-    const result = await run(offline, projectWith({ provider: "openrouter" }), ENV);
+    const result = await run(offline, projectWith({ provider: "vercel-ai-gateway" }), ENV);
     const line = lineFor(result.stdout, "model key");
     expect(line).toMatch(/^FAIL/);
     expect(line).toContain(
-      "OPENROUTER_API_KEY is not set, so FacetDB has no key for the openrouter provider",
+      "AI_GATEWAY_API_KEY is not set, so FacetDB has no key for the vercel-ai-gateway provider",
     );
     expect(line).not.toContain("TYPESAFE_API_KEY");
     expect(lineFor(result.stdout, "model reachable")).toMatch(
@@ -395,16 +403,16 @@ describe("doctor names the provider and the variable it checks", () => {
     const { answering, calls } = vendorFetch();
     const result = await run(
       ["doctor"],
-      projectWith({ provider: "openrouter" }),
-      { ...ENV, OPENROUTER_API_KEY: OPENROUTER_KEY },
+      projectWith({ provider: "vercel-ai-gateway" }),
+      { ...ENV, AI_GATEWAY_API_KEY: GATEWAY_KEY },
       answering,
     );
     expect(lineFor(result.stdout, "model reachable")).toContain(
-      "jev-1.14.0 answered a test question; the FacetDB team has not run the openrouter provider yet",
+      "jev-1.14.0 answered a test question; the FacetDB team has not run the vercel-ai-gateway provider yet",
     );
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.url).toBe("https://openrouter.ai/api/v1/systemone");
-    expect(calls[0]?.headers["authorization"]).toBe(`Bearer ${OPENROUTER_KEY}`);
+    expect(calls[0]?.url).toBe("https://ai-gateway.vercel.sh/v1/systemone");
+    expect(calls[0]?.headers["authorization"]).toBe(`Bearer ${GATEWAY_KEY}`);
     expect(JSON.stringify(calls)).not.toContain(TYPESAFE_KEY);
     noKeyIn(result);
   });
@@ -412,15 +420,15 @@ describe("doctor names the provider and the variable it checks", () => {
   it("a key an unreachable vendor quotes is scrubbed from the failure's words", async () => {
     const result = await run(
       ["doctor"],
-      projectWith({ provider: "openrouter" }),
-      { ...ENV, OPENROUTER_API_KEY: OPENROUTER_KEY },
-      (() => Promise.reject(new Error(`refused for ${OPENROUTER_KEY}`))) as typeof fetch,
+      projectWith({ provider: "vercel-ai-gateway" }),
+      { ...ENV, AI_GATEWAY_API_KEY: GATEWAY_KEY },
+      (() => Promise.reject(new Error(`refused for ${GATEWAY_KEY}`))) as typeof fetch,
     );
     const line = lineFor(result.stdout, "model reachable");
     expect(line).toMatch(/^FAIL/);
     expect(line).toContain("refused for ***");
     expect(line).toContain(
-      "check OPENROUTER_API_KEY and that https://openrouter.ai/api is running",
+      "check AI_GATEWAY_API_KEY and that https://ai-gateway.vercel.sh is running",
     );
     noKeyIn(result);
   });

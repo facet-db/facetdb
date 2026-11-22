@@ -349,10 +349,10 @@ type ProjectSettings = {
   readonly model: string;
   readonly modelUrl?: string;
   /**
-   * Which provider answers: a built-in preset (`openrouter`, `vercel-ai-gateway`,
-   * `cloudflare-ai-gateway`, `ollama`, `strands-decider`, `solar-decide`), each reading its own key
-   * variable, or `<plugin>/<entry>` for a provider an installed plugin supplies. `modelUrl` beside
-   * a preset replaces its address. Absent: TypeSafe direct, or the server at `modelUrl`.
+   * Which provider answers: a built-in preset (`vercel-ai-gateway`, `cloudflare-ai-gateway`,
+   * `ollama`, `strands-decider`, `solar-decide`), each reading its own key variable, or
+   * `<plugin>/<entry>` for a provider an installed plugin supplies. `modelUrl` beside a preset
+   * replaces its address. Absent: TypeSafe direct, or the server at `modelUrl`.
    */
   readonly provider?: string;
   /**

@@ -12,7 +12,6 @@ export type ProviderPreset = {
 };
 
 export const PROVIDER_PRESETS = {
-  openrouter: { baseUrl: "https://openrouter.ai/api", keyHeader: "authorization" },
   "vercel-ai-gateway": { baseUrl: "https://ai-gateway.vercel.sh", keyHeader: "authorization" },
   // The gateway URL carries the account and gateway ids, so the user supplies the full base URL.
   "cloudflare-ai-gateway": { keyHeader: "cf-aig-authorization" },
@@ -34,7 +33,10 @@ export type PresetKey = {
   readonly variable: string;
   /** False for a server that may need no key (a local Ollama, a self-hosted Decider). */
   readonly required: boolean;
-  /** True once the FacetDB team has run the preset against its vendor; none has yet. */
+  /**
+   * True once a real request has gone through the preset. None has been run yet: `strands-decider`
+   * goes first, through its own server; the others stay unproven until someone runs one.
+   */
   readonly proven: boolean;
 };
 
@@ -42,21 +44,20 @@ export type PresetKey = {
  * One key variable per preset, never `TYPESAFE_API_KEY`: a preset's address never sees the
  * TypeSafe key.
  *
- * Names as the vendors document them: OpenRouter's examples read `OPENROUTER_API_KEY`; Vercel's AI
- * Gateway reads `AI_GATEWAY_API_KEY`; Cloudflare's gateway authentication examples name the gateway
- * token `CF_AIG_TOKEN` (sent as a bearer in `cf-aig-authorization`), which is deliberately not
- * `CLOUDFLARE_API_TOKEN`: that one is the broad account token wrangler and terraform read, and a
- * machine with it set for deploys would send it to whatever `modelUrl` says (recalled, not checked
- * offline); Ollama's cloud reads `OLLAMA_API_KEY` and a local server needs none; Upstage's Solar
- * API reads `UPSTAGE_API_KEY` (no page of its own for Solar Decide was found). Strands Decider is
- * an open-weight model with no vendor service, so its name is this build's own.
+ * Names as the vendors document them: Vercel's AI Gateway reads `AI_GATEWAY_API_KEY`; Cloudflare's
+ * gateway authentication examples name the gateway token `CF_AIG_TOKEN` (sent as a bearer in
+ * `cf-aig-authorization`), which is deliberately not `CLOUDFLARE_API_TOKEN`: that one is the broad
+ * account token wrangler and terraform read, and a machine with it set for deploys would send it to
+ * whatever `modelUrl` says (recalled, not checked against a live gateway); Ollama's cloud reads
+ * `OLLAMA_API_KEY` and a local server needs none; Upstage's Solar API reads `UPSTAGE_API_KEY` (no
+ * page of its own for Solar Decide was found). Strands Decider is an open-weight model with no
+ * vendor service, so its name is this build's own.
  *
  * An optional key (`required: false`) is sent only to an https address or to this machine: over
  * plain http to another host it would cross the network in the clear, so it is withheld
  * (`mayCarryKey`).
  */
 export const PRESET_KEYS = {
-  openrouter: { variable: "OPENROUTER_API_KEY", required: true, proven: false },
   "vercel-ai-gateway": { variable: "AI_GATEWAY_API_KEY", required: true, proven: false },
   "cloudflare-ai-gateway": { variable: "CF_AIG_TOKEN", required: true, proven: false },
   ollama: { variable: "OLLAMA_API_KEY", required: false, proven: false },

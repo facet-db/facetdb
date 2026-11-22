@@ -58,7 +58,6 @@ const clock = new FakeClock(0);
 
 describe("provider presets", () => {
   it.each([
-    ["openrouter", "https://openrouter.ai/api/v1/systemone", "authorization", "Bearer sk-user"],
     [
       "vercel-ai-gateway",
       "https://ai-gateway.vercel.sh/v1/systemone",
@@ -100,13 +99,13 @@ describe("provider presets", () => {
 
   it("uses a preset's own base URL when no modelUrl is given", async () => {
     const { fetchFake, seen } = fakeFetch();
-    const provider = createPresetProvider("openrouter", {
+    const provider = createPresetProvider("vercel-ai-gateway", {
       apiKey: "sk-user",
       fetch: fetchFake,
       clock,
     });
     await provider.ask(request);
-    expect(seen[0]?.url).toBe("https://openrouter.ai/api/v1/systemone");
+    expect(seen[0]?.url).toBe("https://ai-gateway.vercel.sh/v1/systemone");
   });
 
   it.each(["cloudflare-ai-gateway", "strands-decider", "solar-decide"] as const)(
@@ -129,7 +128,7 @@ describe("provider presets", () => {
 
   it("sends no key header when the caller gives no key, so no default key is ever sent", async () => {
     const { fetchFake, seen } = fakeFetch();
-    const provider = createPresetProvider("openrouter", { fetch: fetchFake, clock });
+    const provider = createPresetProvider("vercel-ai-gateway", { fetch: fetchFake, clock });
     await provider.ask(request);
     expect(seen[0]?.headers).not.toHaveProperty("authorization");
   });
@@ -140,7 +139,11 @@ describe("pinned versions in providers", () => {
     "refuses %s before any call is made",
     async (model) => {
       const { fetchFake, seen } = fakeFetch();
-      const provider = createPresetProvider("openrouter", { apiKey: "k", fetch: fetchFake, clock });
+      const provider = createPresetProvider("vercel-ai-gateway", {
+        apiKey: "k",
+        fetch: fetchFake,
+        clock,
+      });
       const error = await provider.ask({ ...request, model }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ModelNotPinnedError);
       expect(seen).toHaveLength(0);
@@ -174,10 +177,14 @@ describe("listModels", () => {
         ? json(200, { object: "list", data: [{ id: "jev-1.13.0" }, { id: "jev-1.14.0" }] })
         : json(200, answerBody("jev-1.14.0")),
     );
-    const provider = createPresetProvider("openrouter", { apiKey: "k", fetch: fetchFake, clock });
+    const provider = createPresetProvider("vercel-ai-gateway", {
+      apiKey: "k",
+      fetch: fetchFake,
+      clock,
+    });
     const list = await listModels(provider, "jev-1.14.0");
     expect(list).toEqual({ source: "server", models: ["jev-1.13.0", "jev-1.14.0"] });
-    expect(seen[0]?.url).toBe("https://openrouter.ai/api/v1/models");
+    expect(seen[0]?.url).toBe("https://ai-gateway.vercel.sh/v1/models");
     expect(seen[0]?.method).toBe("GET");
     expect(header(seen[0], "authorization")).toBe("Bearer k");
   });

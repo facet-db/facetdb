@@ -666,7 +666,9 @@ const projectSchema = strict({
     })
     .exactOptional(),
   provider: z
-    .string({ error: 'provider is text: a preset such as "openrouter", or "<plugin>/<entry>"' })
+    .string({
+      error: 'provider is text: a preset such as "vercel-ai-gateway", or "<plugin>/<entry>"',
+    })
     .exactOptional(),
   alerts: strict({ channels: alertChannels }).exactOptional(),
   spendingCap: z

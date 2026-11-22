@@ -1,8 +1,8 @@
 import { isPresetName, PRESET_NAMES, PROVIDER_PRESETS, type ProviderPreset } from "@facetdb/model";
 
 /**
- * The config's `provider`: a built-in preset's name (`openrouter`), or `<plugin>/<entry>` for a
- * provider an installed plugin supplies (`acme/solar`, `@facetdb/acme/solar`).
+ * The config's `provider`: a built-in preset's name (`vercel-ai-gateway`), or `<plugin>/<entry>`
+ * for a provider an installed plugin supplies (`acme/solar`, `@facetdb/acme/solar`).
  */
 
 /** The plugin a `provider` names and the entry of its `providers` that answers. */

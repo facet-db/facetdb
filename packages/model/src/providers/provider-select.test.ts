@@ -64,14 +64,6 @@ const TYPESAFE_KEY = "tsk-typesafe-s3cret";
 /** What each preset sends, as its vendor documents it (the base URL a test gives where this build has none). */
 const PRESETS = [
   {
-    name: "openrouter",
-    modelUrl: undefined,
-    url: "https://openrouter.ai/api/v1/systemone",
-    header: "authorization",
-    prefix: "Bearer ",
-    variable: "OPENROUTER_API_KEY",
-  },
-  {
     name: "vercel-ai-gateway",
     modelUrl: undefined,
     url: "https://ai-gateway.vercel.sh/v1/systemone",
@@ -210,7 +202,7 @@ describe("every preset", () => {
     },
   );
 
-  it("is marked as not run by the FacetDB team, all six, until the live runs", () => {
+  it("is marked not run until a live run proves it", () => {
     for (const name of PRESET_NAMES) {
       expect(PRESET_KEYS[name].proven, name).toBe(false);
     }
@@ -240,14 +232,14 @@ describe("the addresses", () => {
   it("a modelUrl beside a preset replaces the preset's address", async () => {
     const { fetchFake, seen } = recordingFetch();
     await selectProvider({
-      provider: "openrouter",
-      modelUrl: "https://proxy.internal/openrouter",
-      env: { OPENROUTER_API_KEY: "or-s3cret" },
+      provider: "vercel-ai-gateway",
+      modelUrl: "https://proxy.internal/gateway",
+      env: { AI_GATEWAY_API_KEY: "aig-s3cret" },
       fetch: fetchFake,
       clock,
     }).ask(request);
-    expect(seen[0]?.url).toBe("https://proxy.internal/openrouter/v1/systemone");
-    expect(seen[0]?.headers["authorization"]).toBe("Bearer or-s3cret");
+    expect(seen[0]?.url).toBe("https://proxy.internal/gateway/v1/systemone");
+    expect(seen[0]?.headers["authorization"]).toBe("Bearer aig-s3cret");
   });
 
   it.each(
@@ -272,7 +264,7 @@ describe("the addresses", () => {
       UnknownProviderError,
     );
     expect(isPresetName("openai")).toBe(false);
-    expect(isPresetName("openrouter")).toBe(true);
+    expect(isPresetName("vercel-ai-gateway")).toBe(true);
   });
 });
 
@@ -289,13 +281,13 @@ describe("with no provider the behavior is today's", () => {
     await selectProvider({
       modelUrl: "http://localhost:11434",
       apiKey: TYPESAFE_KEY,
-      env: { OPENROUTER_API_KEY: "or-s3cret" },
+      env: { AI_GATEWAY_API_KEY: "aig-s3cret" },
       fetch: fetchFake,
       clock,
     }).ask(request);
     expect(seen[0]?.url).toBe("http://localhost:11434/v1/systemone");
     expect(seen[0]?.headers["authorization"]).toBe(`Bearer ${TYPESAFE_KEY}`);
-    expect(JSON.stringify(seen)).not.toContain("or-s3cret");
+    expect(JSON.stringify(seen)).not.toContain("aig-s3cret");
   });
 
   it("says what to set when nothing is configured", () => {
@@ -378,7 +370,7 @@ describe("a key that is optional", () => {
   );
 
   it("never withholds a required key: those are the vendor's https addresses, or the user's own", () => {
-    expect(keyWithheld("openrouter", "http://proxy.internal")).toBe(false);
+    expect(keyWithheld("vercel-ai-gateway", "http://proxy.internal")).toBe(false);
     expect(keyWithheld("solar-decide", "http://solar.internal")).toBe(false);
   });
 });
