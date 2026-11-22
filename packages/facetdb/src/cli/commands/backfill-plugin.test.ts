@@ -218,7 +218,7 @@ describe("facetdb backfill on a plugin source", () => {
 
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain(
-      "Backfill of @facetdb/tracker issues (source issues), newest records first:",
+      "Backfill of @facetdb/tracker issues (source issues), records in the plugin's order:",
     );
     expect(result.stdout).toContain("25 records to answer");
     expect(result.stdout).toContain(

@@ -222,6 +222,13 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
   const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
   const asked = (job: Job) =>
     job.questions === null ? "" : ` of ${job.questions.map((name) => `"${name}"`).join(", ")}`;
+  /**
+   * A plugin source's job (told as the worker's `open` tells it: its loop's source names a
+   * plugin's) pages through the plugin's scan in whatever order the plugin yields, which the SDK
+   * leaves to the plugin; a table's job goes newest first.
+   */
+  const pluginOrder = (job: Job) => job.loop.source.source !== undefined;
+  const order = (job: Job) => (pluginOrder(job) ? "in the plugin's order" : "newest first");
 
   /** Stops a job after the page in hand; a waiting estimate is declined at once. */
   function halt(job: Job, cause: StopCause): void {
@@ -278,7 +285,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
           return `${job.source} restarted after a reload, so the backfill stopped ${where}. Estimate again: it runs with the source as it is now.`;
         }
         return begun
-          ? `${job.source} restarted under version ${cause.version} after a reload, so the backfill under version ${from} stopped after the page in hand. A backfill under version ${cause.version} is a new one: estimate again, and it starts from the newest record.`
+          ? `${job.source} restarted under version ${cause.version} after a reload, so the backfill under version ${from} stopped after the page in hand. A backfill under version ${cause.version} is a new one: estimate again, and it starts from ${pluginOrder(job) ? "the first record in the plugin's order" : "the newest record"}.`
           : `${job.source} restarted under version ${cause.version} after a reload, so the backfill under version ${from} stopped before it started; nothing was asked. Estimate again under version ${cause.version}.`;
       }
       case "removed":
@@ -294,13 +301,13 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       case "idle":
         return "No backfill is running. Estimate one to see its cost first.";
       case "estimating":
-        return `Counting the records of ${job.source} to price the backfill${asked(job)}: ${grouped.format(job.surveyed)} read so far, newest first. Nothing is asked until it is started.`;
+        return `Counting the records of ${job.source} to price the backfill${asked(job)}: ${grouped.format(job.surveyed)} read so far, ${order(job)}. Nothing is asked until it is started.`;
       case "waiting":
         return estimate === null
           ? "Waiting to be started."
           : `Estimated${asked(job)}: ${grouped.format(estimate.records)} records, about ${compactTokens(estimate.tokens)} input tokens, ${money(estimate.dollars)}. Nothing is asked until it is started; an estimate not started within ${ESTIMATE_KEPT_MS / 60_000} minutes is dropped.`;
       case "running":
-        return `Running${asked(job)} under version ${job.loop.version}, newest first, at most ${DEFAULT_BACKFILL_PACE} records a second: ${grouped.format(counts.records)}${estimate === null ? "" : ` of ${grouped.format(estimate.records)}`} records done.`;
+        return `Running${asked(job)} under version ${job.loop.version}, ${order(job)}, at most ${DEFAULT_BACKFILL_PACE} records a second: ${grouped.format(counts.records)}${estimate === null ? "" : ` of ${grouped.format(estimate.records)}`} records done.`;
       case "stopping":
         return "Stopping after the page in hand: that page is settled and its place saved first.";
       case "finished":

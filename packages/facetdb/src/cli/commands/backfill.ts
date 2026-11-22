@@ -31,7 +31,8 @@ import { pluginHostForProvider } from "./model-provider.ts";
  * The cost is shown before anything is asked and nothing starts without a yes (or `--yes`). The
  * engine is core's `createBackfill`: it saves its place after every page, so a run that stops is
  * continued by running the command again. A plugin source is paged through its plugin's own `scan`,
- * in the plugin's order: "`facetdb backfill` labels every open issue once".
+ * in the plugin's order: "`facetdb backfill` labels every open issue once". Its words say that
+ * order and never newest first, which the SDK does not ask of a plugin.
  */
 
 /** What a backfill pages through: a source's table, or a plugin source's own scan. */
@@ -180,7 +181,8 @@ function summary(report: BackfillReport) {
 }
 
 export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
-  description: "Answers every existing row, newest first, paced and resumable",
+  description:
+    "Answers every existing row, newest first (in the plugin's order for a plugin source), paced and resumable",
   options: [
     {
       flags: "--config <path>",
@@ -253,7 +255,9 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
         pace,
         ...(onlyQuestions === undefined ? {} : { onlyQuestions }),
         onEstimate: async (estimate) => {
-          print(`Backfill of ${name} (source ${source.name}), newest records first:`);
+          print(
+            `Backfill of ${name} (source ${source.name}), ${picked.kind === "plugin" ? "records in the plugin's order" : "newest records first"}:`,
+          );
           print(describeEstimate(estimate));
           // The pace is a ceiling: each queue call is a round trip, so a far database (about 200 ms
           // a statement) goes slower than it.

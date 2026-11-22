@@ -759,6 +759,33 @@ describe("GET /v1/sources", () => {
     });
   });
 
+  it("says a plugin source's run part way in the plugin's order, never newest first", async () => {
+    // A plugin pages its scan in its own order, which the SDK leaves to it.
+    const t = rig({
+      sources: () => [
+        {
+          name: "issues",
+          read: ["title", "body"],
+          questions: 1,
+          version: 2,
+          table: undefined,
+          plugin: { packageName: "@facetdb/github", source: "issues" },
+        },
+      ],
+    });
+    t.world.cursors = [{ run: `backfill:${PROJECT}:issues:all@v2`, done: false }];
+    t.world.answeredUnder.set(`${sourceIdOf(PROJECT, "issues")}@2`, 600);
+    const [issues] = await t.sources();
+    expect(issues).toMatchObject({
+      kind: "plugin",
+      backfill: {
+        state: "part-way",
+        words:
+          "Part way through the whole question set, in the plugin's order: 600 records answered under version 2 so far. The next run resumes where this one stopped.",
+      },
+    });
+  });
+
   it("words each engine's change capture and the reach of its login", async () => {
     const doctor = () => Promise.resolve([] as readonly DoctorCheck[]);
     const t = rig({

@@ -13,7 +13,7 @@ import type { BackfillEstimate } from "@facetdb/core";
  *  - `idle`: no job since the worker started;
  *  - `estimating`: reading the source to count and price it (the whole table, from the saved place);
  *  - `waiting`: the estimate is shown, and nothing is asked until a start carries its token;
- *  - `running`: started, paced, newest first;
+ *  - `running`: started, paced, newest first (a plugin source in the plugin's order);
  *  - `stopping`: told to stop; it settles the page in hand and saves its place first;
  *  - `stopped`: by a stop, a reload that restarted or removed the source, the worker stopping, or an
  *    estimate nobody started in time (`why` says which); the place of the last finished page is saved;

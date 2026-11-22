@@ -181,13 +181,16 @@ async function backfillOf(
   const answered = await reads.answeredUnder(id, run.version);
   const what = run.only ? "added questions" : "whole question set";
   if (!run.done) {
+    // A table's scan goes newest first; a plugin's in whatever order the plugin yields, which the
+    // SDK leaves to the plugin.
+    const order = source.plugin === undefined ? "newest first" : "in the plugin's order";
     return {
       state: "part-way",
       fraction: null,
       answered,
       version: run.version,
       finishedAt: null,
-      words: `Part way through the ${what}, newest first: ${grouped(answered)} records answered under version ${run.version} so far. The next run resumes where this one stopped.`,
+      words: `Part way through the ${what}, ${order}: ${grouped(answered)} records answered under version ${run.version} so far. The next run resumes where this one stopped.`,
     };
   }
   const finished = await reads.backfillFinishedAt(door.projectId, source.name);

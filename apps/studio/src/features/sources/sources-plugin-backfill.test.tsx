@@ -48,7 +48,7 @@ const PART_WAY: SourceRow["backfill"] = {
   state: "part-way",
   fraction: null,
   words:
-    "Part way through the whole question set, newest first: 600 records answered under version 1 so far. The next run resumes where this one stopped.",
+    "Part way through the whole question set, in the plugin's order: 600 records answered under version 1 so far. The next run resumes where this one stopped.",
 };
 
 /** What the page adds to a plugin source's estimate, after its figures. */
@@ -62,7 +62,7 @@ const ESTIMATING = sampleBackfill("estimating", {
   surveyed: 0,
   estimate: null,
   words:
-    "Counting the records of issues to price the backfill: 0 read so far, newest first. Nothing is asked until it is started.",
+    "Counting the records of issues to price the backfill: 0 read so far, in the plugin's order. Nothing is asked until it is started.",
 });
 
 /** The estimate from a saved place: the records after the last finished page. */
@@ -89,7 +89,7 @@ function running(done: number, of: number): BackfillStatus {
     token: null,
     expiresAt: null,
     counts: { records: done, queued: done, answered: 0, alreadyAnswered: 0, deferred: 0 },
-    words: `Running under version 1, newest first, at most 50 records a second: ${done.toLocaleString("en-US")} of ${of.toLocaleString("en-US")} records done.`,
+    words: `Running under version 1, in the plugin's order, at most 50 records a second: ${done.toLocaleString("en-US")} of ${of.toLocaleString("en-US")} records done.`,
   };
 }
 

@@ -35,7 +35,7 @@ import type { HostedSource } from "./source-host.ts";
  *   only when it answered a 2xx, and never a key `eventKeyProblem` refuses.
  * - a backfill's own adapter (`createPluginBackfillConnector`; never the worker's, whose
  *   `scan` and `enqueue` stay the store's) pages through the plugin's own `scan`: `scan(cursor)`
- *   hands core one page of it, in the plugin's order (newest first by the SDK's rule), each row
+ *   hands core one page of it, in the plugin's order (the SDK fixes none), each row
  *   judged at the boundary as `read`'s are and its hash the store's, and stores nothing;
  *   `enqueue(keys)` then takes each key of that page in by what the store holds of it now: stored
  *   if the store holds nothing, queued if it holds the page's state, read again through the
