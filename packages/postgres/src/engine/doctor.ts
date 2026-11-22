@@ -13,9 +13,16 @@ import { databaseLabel, plainMessage, subjectOf, urlProblem } from "./urls.ts";
 /**
  * `facetdb doctor`'s checks of one table source, moved here from the CLI's doctor.ts with the same
  * names, details, fixes and statuses: the connection, the login and the round trip (with the
- * distance as a warning of its own), the pooler, the install in the catalog, and the worker's
- * heartbeat. Nothing is changed. Where the CLI named the variable that holds the URL, these words
- * name the target's `urlVariable`, else `SOURCE_URL`.
+ * distance as a warning of its own), the pooler, the change capture and the install in the catalog,
+ * and the worker's heartbeat. Nothing is changed. Where the CLI named the variable that holds the
+ * URL, these words name the target's `urlVariable`, else `SOURCE_URL`.
+ *
+ * The catalog's facts are in two parts, read on one connection: `capture` holds what means the
+ * install is gone (the facetdb schema, the jobs table, the table, the trigger missing or disabled),
+ * which Connector lost access is raised on; `install` keeps what an install merely behind
+ * facetdb.config.ts lacks (an answer column, a trigger watching other columns than the questions
+ * read), which raises nothing. Each fact kept its words, and `capture` comes first, so a dropped
+ * trigger is the source's failure even when a question was added since.
  */
 
 /** The checks, in order, and what each looks at: what `doctor --dry-run` lists today. */
@@ -31,9 +38,14 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
       "runs one prepared statement twice on each connection the worker opens, to find a transaction-mode pooler",
   },
   {
+    name: "capture",
+    looksAt:
+      "reads that changes are still queued: the facetdb schema, the jobs table and the trigger, present and enabled",
+  },
+  {
     name: "install",
     looksAt:
-      "reads the catalog for the facetdb schema, the jobs table, the trigger and the answer columns",
+      "reads the catalog for the answer columns and the columns the trigger watches, which facetdb migrate brings forward to the config",
   },
   { name: "worker", looksAt: "reads the worker's last heartbeat from the FacetDB store" },
 ];
@@ -45,6 +57,7 @@ const fail = (name: string, detail: string, fix: string): DoctorCheck => ({
   detail,
   fix,
 });
+const skip = (name: string, detail: string): DoctorCheck => ({ name, status: "skip", detail });
 
 const WORKER_URL_SHAPE = `postgres://${WORKER_ROLE}:<a long random password>@<host>/<database>`;
 
@@ -260,34 +273,47 @@ const COLUMNS_OF = `select a.attname::text as name
 
 const REINSTALL = "run facetdb migrate: it prints the SQL first and installs what is missing";
 
-/** What the source's install is missing, as plain sentences (empty when it is whole). */
-async function installProblems(query: SqlQuery, target: EngineTarget): Promise<readonly string[]> {
+/**
+ * What the catalog says of the source, as plain sentences in two sets (each empty when it is whole):
+ * `gone`, what means changes are no longer queued, and `behind`, what migrate brings forward to the
+ * config. `table` is false when the table itself is gone, and nothing of the install was read.
+ */
+type CatalogFacts = {
+  readonly gone: readonly string[];
+  readonly behind: readonly string[];
+  readonly table: boolean;
+  /** Whether the trigger is there, so the install's words may say what it watches. */
+  readonly trigger: boolean;
+};
+
+async function catalogFacts(query: SqlQuery, target: EngineTarget): Promise<CatalogFacts> {
   const schema = target.schema ?? "public";
   const { table } = target;
   const label = `${schema}.${table}`;
   const facts = (await query(TABLE_FACTS, [schema, table]))[0];
-  const missing: string[] = [];
+  const gone: string[] = [];
+  const behind: string[] = [];
   if (facts?.["schema_present"] !== true) {
-    missing.push("the facetdb schema does not exist");
+    gone.push("the facetdb schema does not exist");
   } else if (facts["jobs_present"] !== true) {
-    missing.push("the jobs table facetdb.jobs does not exist");
+    gone.push("the jobs table facetdb.jobs does not exist");
   }
   if (facts?.["table_present"] !== true) {
-    missing.push(`the table ${label} does not exist`);
-    return missing;
+    gone.push(`the table ${label} does not exist`);
+    return { gone, behind, table: false, trigger: false };
   }
   const trigger = triggerName({ table });
   const found = (await query(TRIGGER_FACTS, [schema, table, trigger]))[0];
   if (found === undefined) {
-    missing.push(`${label} has no trigger ${trigger}, so changes are not queued`);
+    gone.push(`${label} has no trigger ${trigger}, so changes are not queued`);
   } else {
     if (found["enabled"] === "D") {
-      missing.push(`the trigger ${trigger} on ${label} is disabled`);
+      gone.push(`the trigger ${trigger} on ${label} is disabled`);
     }
     const expected = [...target.questionSet.read].sort().join(",");
     const watched = String(found["columns"]);
     if (watched !== expected) {
-      missing.push(
+      behind.push(
         `the trigger on ${label} watches ${watched === "" ? "no columns" : watched}, not the columns the questions read (${expected})`,
       );
     }
@@ -299,29 +325,51 @@ async function installProblems(query: SqlQuery, target: EngineTarget): Promise<r
   );
   const absent = installOwnedColumns(target.questionSet).filter((name) => !present.has(name));
   if (absent.length > 0) {
-    missing.push(`${answerSchema}.${answerTable} lacks the answer columns ${absent.join(", ")}`);
+    behind.push(`${answerSchema}.${answerTable} lacks the answer columns ${absent.join(", ")}`);
   }
-  return missing;
+  return { gone, behind, table: true, trigger: found !== undefined };
 }
 
-async function installCheck(
+/**
+ * The `capture` and `install` checks, from one reading of the catalog on one connection. A catalog
+ * the worker login cannot read (a right on the facetdb schema revoked, say) fails `capture`: the
+ * worker cannot reach its queue either; then, as for a table that is gone, `install` is skipped,
+ * with nothing of it read.
+ */
+async function installChecks(
   connect: SqlConnect,
   target: EngineTarget,
   url: string,
-): Promise<DoctorCheck> {
-  let problems: readonly string[];
+): Promise<readonly [capture: DoctorCheck, install: DoctorCheck]> {
+  const said = (problems: readonly string[]) =>
+    problems.map((problem) => `${target.source}: ${problem}`).join("; ");
+  let facts: CatalogFacts;
   try {
-    problems = await withConnection(connect, url, (query) => installProblems(query, target));
+    facts = await withConnection(connect, url, (query) => catalogFacts(query, target));
   } catch (error) {
-    problems = [`the catalog could not be read as ${WORKER_ROLE}: ${plainMessage(error, [url])}`];
+    const unread = `the catalog could not be read as ${WORKER_ROLE}: ${plainMessage(error, [url])}`;
+    return [
+      fail("capture", said([unread]), REINSTALL),
+      skip("install", `not checked: the catalog could not be read as ${WORKER_ROLE}`),
+    ];
   }
-  return problems.length === 0
-    ? ok("install", "facetdb schema, jobs table, trigger and answer columns are in place")
-    : fail(
-        "install",
-        problems.map((problem) => `${target.source}: ${problem}`).join("; "),
-        REINSTALL,
-      );
+  const capture =
+    facts.gone.length === 0
+      ? ok("capture", "facetdb schema, jobs table and trigger are in place, the trigger enabled")
+      : fail("capture", said(facts.gone), REINSTALL);
+  if (!facts.table) {
+    return [capture, skip("install", "not checked: the table does not exist")];
+  }
+  const install =
+    facts.behind.length === 0
+      ? ok(
+          "install",
+          facts.trigger
+            ? "answer columns are in place, and the trigger watches the columns the questions read"
+            : "answer columns are in place",
+        )
+      : fail("install", said(facts.behind), REINSTALL);
+  return [capture, install];
 }
 
 const DATABASE_URL_FIX =
@@ -417,18 +465,17 @@ export async function doctorChecks(
 ): Promise<readonly DoctorCheck[]> {
   const database = await databaseCheck(connect, target, url, deps, pgHost);
   const reached = database.check.status === "ok";
-  const skipped = (name: string): DoctorCheck => ({
-    name,
-    status: "skip",
-    detail: "not checked: the database check did not pass",
-  });
+  const skipped = (name: string): DoctorCheck =>
+    skip(name, "not checked: the database check did not pass");
   return [
     database.check,
     ...(database.warning === undefined
       ? []
       : [{ name: "distance", status: "warn", detail: database.warning } satisfies DoctorCheck]),
     reached ? await poolerCheck(connect, target, url) : skipped("pooler"),
-    reached ? await installCheck(connect, target, url) : skipped("install"),
+    ...(reached
+      ? await installChecks(connect, target, url)
+      : [skipped("capture"), skipped("install")]),
     await heartbeatCheck(connect, target, url, deps, pgHost),
   ];
 }

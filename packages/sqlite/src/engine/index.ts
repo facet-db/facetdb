@@ -1,9 +1,11 @@
 // The SQLite engine the CLI registers: the install's plans and run, the connector, doctor. The
-// install, marks and lock checks, the SQLite version check and the log-only purge are the libSQL
-// engine's too.
+// capture, install, marks and lock checks, the SQLite version check and the log-only purge are the
+// libSQL engine's too.
 export {
   atLeast,
+  CAPTURE_LOOKS_AT,
   DOCTOR_CHECKS,
+  INSTALL_LOOKS_AT,
   installChecks,
   MARKS_LOOKS_AT,
   MINIMUM_SQLITE,

@@ -1,6 +1,12 @@
 import type { DoctorCheck, EngineDeps, EngineTarget } from "@facetdb/core";
 import type { SqliteClient } from "../connector/index.ts";
-import { installChecks, MARKS_LOOKS_AT, sqliteCheck } from "../engine/index.ts";
+import {
+  CAPTURE_LOOKS_AT,
+  INSTALL_LOOKS_AT,
+  installChecks,
+  MARKS_LOOKS_AT,
+  sqliteCheck,
+} from "../engine/index.ts";
 import { textOf } from "../install/index.ts";
 import type { OpenLibsql } from "./client.ts";
 import {
@@ -15,10 +21,11 @@ import {
 
 /**
  * `facetdb doctor`'s checks of a libSQL source: the server answers, the auth token is read from the
- * environment and accepted, the SQLite under the server, the install (the jobs table, the marker
- * row, the two triggers), the marks of FacetDB's columns and the one worker's lock. One query
- * reaches the server for the first three; the install, the marks and the lock are the file's
- * checks, read through the same client. Nothing is changed. No word holds the token or the URL.
+ * environment and accepted, the SQLite under the server, the change capture (the jobs table, the
+ * two triggers) and the install (the marker row, the columns), the marks of FacetDB's columns and
+ * the one worker's lock. One query reaches the server for the first three; the capture, the
+ * install, the marks and the lock are the file's checks, read through the same client. Nothing is
+ * changed. No word holds the token or the URL.
  */
 
 export const LIBSQL_DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: string }[] =
@@ -36,11 +43,8 @@ export const LIBSQL_DOCTOR_CHECKS: readonly { readonly name: string; readonly lo
       name: "sqlite",
       looksAt: "reads the version of the SQLite the server runs (3.35 or later)",
     },
-    {
-      name: "install",
-      looksAt:
-        "reads the database for the jobs table, the project's marker row and the two triggers",
-    },
+    { name: "capture", looksAt: CAPTURE_LOOKS_AT },
+    { name: "install", looksAt: INSTALL_LOOKS_AT },
     { name: "marks", looksAt: MARKS_LOOKS_AT },
     {
       name: "lock",

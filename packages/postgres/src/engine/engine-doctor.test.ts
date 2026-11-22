@@ -118,10 +118,15 @@ const POOLER_OK = {
   status: "ok",
   detail: `prepared statements stay on one server session on "listings" (a direct connection or a session pooler)`,
 };
+const CAPTURE_OK = {
+  name: "capture",
+  status: "ok",
+  detail: "facetdb schema, jobs table and trigger are in place, the trigger enabled",
+};
 const INSTALL_OK = {
   name: "install",
   status: "ok",
-  detail: "facetdb schema, jobs table, trigger and answer columns are in place",
+  detail: "answer columns are in place, and the trigger watches the columns the questions read",
 };
 const REINSTALL = "run facetdb migrate: it prints the SQL first and installs what is missing";
 
@@ -139,9 +144,14 @@ describe("checks", () => {
           "runs one prepared statement twice on each connection the worker opens, to find a transaction-mode pooler",
       },
       {
+        name: "capture",
+        looksAt:
+          "reads that changes are still queued: the facetdb schema, the jobs table and the trigger, present and enabled",
+      },
+      {
         name: "install",
         looksAt:
-          "reads the catalog for the facetdb schema, the jobs table, the trigger and the answer columns",
+          "reads the catalog for the answer columns and the columns the trigger watches, which facetdb migrate brings forward to the config",
       },
       { name: "worker", looksAt: "reads the worker's last heartbeat from the FacetDB store" },
     ]);
@@ -154,6 +164,7 @@ describe("doctor", () => {
     expect(await worker.doctor(target(), WORKER_URL, shared)).toEqual([
       DATABASE_OK,
       POOLER_OK,
+      CAPTURE_OK,
       INSTALL_OK,
       {
         name: "worker",
@@ -192,31 +203,36 @@ describe("doctor", () => {
     });
   });
 
-  it("names what the install is missing: the trigger, an answer column", async () => {
+  it("names what the capture and the install are missing: the trigger, an answer column", async () => {
     await installed();
     await world.client.query("drop trigger facetdb_listings on public.listings");
     await world.client.query("alter table public.listings drop column is_scam_probability");
-    const install = (await worker.doctor(target(), WORKER_URL, shared))[2];
+    const [, , capture, install] = await worker.doctor(target(), WORKER_URL, shared);
+    expect(capture).toEqual({
+      name: "capture",
+      status: "fail",
+      detail:
+        "listings: public.listings has no trigger facetdb_listings, so changes are not queued",
+      fix: REINSTALL,
+    });
     expect(install).toEqual({
       name: "install",
       status: "fail",
-      detail:
-        "listings: public.listings has no trigger facetdb_listings, so changes are not queued; listings: public.listings lacks the answer columns is_scam_probability",
+      detail: "listings: public.listings lacks the answer columns is_scam_probability",
       fix: REINSTALL,
     });
   });
 
   it("checks a side-table install on the side table's columns", async () => {
     await installed({ storage: "side-table" });
-    expect((await worker.doctor(target({ storage: "side-table" }), WORKER_URL, shared))[2]).toEqual(
-      INSTALL_OK,
-    );
+    const checks = await worker.doctor(target({ storage: "side-table" }), WORKER_URL, shared);
+    expect(checks.slice(2, 4)).toEqual([CAPTURE_OK, INSTALL_OK]);
   });
 
   it("fails a login that is not the worker's, and skips what needed it", async () => {
     await installed();
     const checks = await admin.doctor(target(), WORKER_URL, shared);
-    expect(checks.slice(0, 3)).toEqual([
+    expect(checks.slice(0, 4)).toEqual([
       {
         name: "database",
         status: "fail",
@@ -224,6 +240,7 @@ describe("doctor", () => {
         fix: "set the source's connection string to postgres://facetdb_worker:<a long random password>@<host>/<database>; facetdb migrate creates that login with the password in it, and it is the only login the worker needs",
       },
       { name: "pooler", status: "skip", detail: "not checked: the database check did not pass" },
+      { name: "capture", status: "skip", detail: "not checked: the database check did not pass" },
       { name: "install", status: "skip", detail: "not checked: the database check did not pass" },
     ]);
   });
@@ -272,6 +289,7 @@ describe("doctor", () => {
         fix: "add ?sslmode=require to the source's connection string, or pass --allow-insecure if that network is trusted",
       },
       { name: "pooler", status: "skip", detail: "not checked: the database check did not pass" },
+      { name: "capture", status: "skip", detail: "not checked: the database check did not pass" },
       { name: "install", status: "skip", detail: "not checked: the database check did not pass" },
       {
         name: "worker",

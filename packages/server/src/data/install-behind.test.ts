@@ -5,6 +5,7 @@ import { createDoctors } from "./doctor.ts";
 import type { DashboardDoor, SourceFacts } from "./door.ts";
 import { createHomeService, type Home } from "./home.ts";
 import type { DashboardReads } from "./reads.ts";
+import { createSourcesService } from "./sources.ts";
 
 /**
  * Home's sentence for a source whose database answers but lacks what facetdb.config.ts asks for:
@@ -145,6 +146,75 @@ describe("Home when a source's install is behind facetdb.config.ts", () => {
     expect(sourcesLine(home)?.words).toBe(
       `Connector lost access. orders: orders cannot connect The install is behind facetdb.config.ts. listings: ${LACKS}. Run facetdb migrate --source listings, then restart facetdb worker.`,
     );
+  });
+
+  it("says a dropped trigger is Connector lost access in the capture check's words, never an install behind", async () => {
+    const dropped =
+      "listings: public.listings has no trigger facetdb_listings, so changes are not queued";
+    const home = await homeOf(
+      source("listings", [
+        ok("database", "connected"),
+        fail("capture", dropped),
+        ok("install", "answer columns are in place"),
+      ]),
+    );
+
+    expect(home.health.words).toBe("Connector lost access");
+    expect(sourcesLine(home)?.words).toBe(`Connector lost access. listings: ${dropped}`);
+    expect(JSON.stringify(home)).not.toContain("The install is behind");
+
+    // A question added on top: the capture fails first, so the source has still lost access.
+    const both = await homeOf(
+      source("listings", [
+        ok("database", "connected"),
+        fail("capture", dropped),
+        fail("install", `listings: ${LACKS}`),
+      ]),
+    );
+    expect(both.health.words).toBe("Connector lost access");
+    expect(sourcesLine(both)?.words).toBe(`Connector lost access. listings: ${dropped}`);
+  });
+
+  it("shows the capture's failure on the Sources page's install line, and the install's otherwise", async () => {
+    const dropped =
+      "listings: public.listings has no trigger facetdb_listings, so changes are not queued";
+    const clock = new FakeClock(NOW);
+    const sourcesOf = async (...facts: SourceFacts[]) => {
+      const outcome = await createSourcesService({
+        door: { projectId: PROJECT, cap: undefined, sources: facts, stopped: [] },
+        reads,
+        doctors: createDoctors(clock),
+        clock,
+      }).sources(PROJECT);
+      if (outcome.kind !== "sources") {
+        throw new Error("the project is the door's own");
+      }
+      return outcome.sources.map((row) => [row.name, row.verdict, row.install]);
+    };
+
+    expect(
+      await sourcesOf(
+        source("listings", [
+          ok("database", "connected"),
+          fail("capture", dropped),
+          ok("install", "answer columns are in place"),
+        ]),
+        source("orders", [
+          ok("database", "connected"),
+          ok("capture", "in place"),
+          fail("install", LACKS),
+        ]),
+        source("offers", [ok("database", "connected"), skip("capture"), skip("install")]),
+      ),
+    ).toEqual([
+      ["listings", "failing", { status: "fail", words: dropped }],
+      ["orders", "failing", { status: "fail", words: LACKS }],
+      [
+        "offers",
+        "healthy",
+        { status: "skip", words: "not checked: the database check did not pass" },
+      ],
+    ]);
   });
 
   it("gives each source behind its own command", async () => {

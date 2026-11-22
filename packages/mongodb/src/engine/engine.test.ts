@@ -124,6 +124,7 @@ describe("the MongoDB engine", () => {
       "version",
       "replica-set",
       "login",
+      "capture",
       "install",
       "oplog",
       "queue",
@@ -214,6 +215,7 @@ describe("doctor", () => {
       "ok version: MongoDB 7.0.45",
       "ok replica-set: a member of the replica set rs0",
       "ok login: facetdb_worker holds facetdb_worker_tickets@app, with every right it needs: find, update and changeStream on app.tickets; find, insert, update and remove on app.facetdb_jobs; and find on app.facetdb_meta",
+      "ok capture: app.facetdb_jobs is there",
       "ok install: the marker of project proj_tickets on app.tickets, facetdb_jobs and its 2 indexes are there",
       "ok oplog: the oplog holds 30 hours of changes: a worker stopped longer than that resumes with one full pass over app.tickets, queuing every document whose state changed since its last answer and every document never answered, unpaced and with no cost estimate first",
       "ok queue: 1 job waits for tickets, 1 is claimed (a claim lapses after 15 minutes)",
@@ -223,6 +225,32 @@ describe("doctor", () => {
         (call) => call.kind !== "command" && call.kind !== "connect" && call.kind !== "close",
       ),
     ).toEqual([]);
+  });
+
+  it("fails capture, not install, on a jobs collection that is gone, and skips the queue", async () => {
+    const fake = installed();
+    fake.replies.set("listCollections 1", { cursor: { firstBatch: [], id: 0 }, ok: 1 });
+    const checks = await createMongoEngine({ worker: fake.connect }).doctor(target, URL, deps);
+    expect(checks.find((check) => check.name === "capture")).toEqual({
+      name: "capture",
+      status: "fail",
+      detail:
+        "app.facetdb_jobs is missing, and the worker never makes it (made by a write it would lack its unique index)",
+      fix: "run facetdb migrate",
+    });
+    expect(checks.find((check) => check.name === "install")).toEqual({
+      name: "install",
+      status: "ok",
+      detail:
+        "the marker of project proj_tickets on app.tickets is there; facetdb_jobs's indexes are not looked at without it",
+    });
+    expect(checks.find((check) => check.name === "queue")).toEqual({
+      name: "queue",
+      status: "skip",
+      detail: "nothing is installed to queue for",
+    });
+    // The first failure is what the worker's verdict reads: the capture, which raises.
+    expect(checks.find((check) => check.status === "fail")?.name).toBe("capture");
   });
 
   it("says who checks what the worker's role may not read: the jobs indexes and the oplog", async () => {

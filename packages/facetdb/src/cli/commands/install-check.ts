@@ -8,8 +8,10 @@ import type { InstallCheck } from "./config-reload.ts";
  * Which of an engine's doctor checks stand for "the columns are there and the worker login may
  * write them", read from the checks the doctor ran for the new question set under the worker login:
  *  - the columns: `install` on every engine (the answer columns in the catalog on PostgreSQL, MySQL,
- *    SQL Server and the polling engines; the marker and jobs on MongoDB, whose fields need none),
- *    and `marks` where the doctor has it (SQLite and libSQL: each column FacetDB writes is there);
+ *    SQL Server and the polling engines; the marker on MongoDB, whose fields need none), `marks`
+ *    where the doctor has it (SQLite and libSQL: each column FacetDB writes is there), and
+ *    `capture` where the doctor has it (the jobs table and the trigger, which were the
+ *    install check's before, so a reading still waits on them as it did);
  *  - the right to write them: `grants` (MySQL, MariaDB, SQL Server: the privilege views for FacetDB's
  *    columns), `login` (MongoDB: the rights the login holds on the collection) and `file` (SQLite:
  *    the file and its directory are writable, and the file has no other login).
@@ -17,7 +19,7 @@ import type { InstallCheck } from "./config-reload.ts";
  * columns (a libSQL token that is accepted may still be read-only), so their doctor cannot tell and
  * the source waits for migrate and a restart, as before.
  */
-const COLUMN_CHECKS: readonly string[] = ["install", "marks"];
+const COLUMN_CHECKS: readonly string[] = ["capture", "install", "marks"];
 const RIGHTS_CHECKS: readonly string[] = ["grants", "login", "file"];
 
 /** A check that found nothing wrong; a warning is worth knowing and never a failure. */

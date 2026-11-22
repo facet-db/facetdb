@@ -23,9 +23,23 @@ import { quoteIdent } from "../sql/index.ts";
 
 /**
  * `facetdb doctor`'s checks of a SQLite source: the file, its journal mode, the SQLite Node runs,
- * the install, the marks of FacetDB's columns, and the one worker's lock. The file is opened
- * read-only, so nothing is changed, and nothing is created where no file is.
+ * the change capture and the install, the marks of FacetDB's columns, and the one worker's lock.
+ * The file is opened read-only, so nothing is changed, and nothing is created where no file is.
  */
+
+/**
+ * What the `capture` check reads, in a file and on a libSQL server alike: what means the install is
+ * gone, which the worker raises Connector lost access on.
+ */
+export const CAPTURE_LOOKS_AT =
+  "reads that changes are still queued: the table, the jobs table and the two triggers, present";
+
+/**
+ * What the `install` check reads: what an install merely behind facetdb.config.ts lacks, which
+ * `facetdb migrate` brings forward and which raises nothing.
+ */
+export const INSTALL_LOOKS_AT =
+  "reads the project's marker row and that the table has every column the question set needs";
 
 /** What the `marks` check reads, in a file and on a libSQL server alike. */
 export const MARKS_LOOKS_AT =
@@ -41,10 +55,8 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
   },
   { name: "wal", looksAt: "reads the file's journal mode, which install sets to WAL" },
   { name: "sqlite", looksAt: "reads the version of the SQLite Node runs (3.35 or later)" },
-  {
-    name: "install",
-    looksAt: "reads the file for the jobs table, the project's marker row and the two triggers",
-  },
+  { name: "capture", looksAt: CAPTURE_LOOKS_AT },
+  { name: "install", looksAt: INSTALL_LOOKS_AT },
   { name: "marks", looksAt: MARKS_LOOKS_AT },
   {
     name: "lock",
@@ -137,10 +149,11 @@ export function sqliteCheck(version: string, fix: string): DoctorCheck {
 }
 
 /**
- * The `marks` check: every column of the question set is on the table and carries FacetDB's mark in
- * its definition. A rebuild's unmarked copies fail with migrate's own words and recovery; an
- * unmarked column of FacetDB's name on a table that shows no rebuild fails as the application's, as
- * migrate refuses it; a column the table lacks fails with migrate, which adds it.
+ * The `marks` check: every column of the question set the table has carries FacetDB's mark in its
+ * definition. A rebuild's unmarked copies fail with migrate's own words and recovery; an unmarked
+ * column of FacetDB's name on a table that shows no rebuild fails as the application's, as migrate
+ * refuses it. A column the table lacks is the install check's: a question added and not migrated
+ * yet is an install behind the file, never a lost access.
  */
 async function marksCheck(
   query: SqliteQuery,
@@ -160,25 +173,37 @@ async function marksCheck(
       "rename the question in the config, or the application's column, then run facetdb migrate",
     );
   }
+  return ok(
+    "marks",
+    absentColumns(table, target.questionSet).length === 0
+      ? `every column FacetDB writes on ${table.name} carries FacetDB's mark`
+      : `every column FacetDB writes that ${table.name} has carries FacetDB's mark`,
+  );
+}
+
+/** The `install` check's failure for the columns a question set needs and the table lacks. */
+function absentCheck(table: TableFacts, target: EngineTarget): DoctorCheck | undefined {
   const absent = absentColumns(table, target.questionSet);
-  if (absent.length > 0) {
-    return fail(
-      "marks",
-      `${table.name} has no column ${absent.join(", ")}, which the question set needs`,
-      "run facetdb migrate: it adds the columns the table lacks, each marked as FacetDB's",
-    );
-  }
-  return ok("marks", `every column FacetDB writes on ${table.name} carries FacetDB's mark`);
+  return absent.length === 0
+    ? undefined
+    : fail(
+        "install",
+        `${table.name} has no column ${absent.join(", ")}, which the question set needs`,
+        "run facetdb migrate: it adds the columns the table lacks, each marked as FacetDB's",
+      );
 }
 
 /**
- * The `install`, `marks` and `lock` checks, read through `query`: the table, the jobs table, the
- * project's marker row and the two triggers; the marks of FacetDB's columns; then which worker
- * holds the one worker's lock. `where` names the database in the words (the file's path, a libSQL
- * server's host). Shared by the SQLite engine and the libSQL one: the marks are in the table's
- * definition and the lock is a row of `facetdb_table_owners`, so they read the same in a file and
- * on a server. The marks are checked whenever the marker names this project, the triggers present
- * or not: a table rebuild drops the triggers along with the marks.
+ * The `capture`, `install`, `marks` and `lock` checks, read through `query`: the table, the jobs
+ * table and the two triggers (`capture`: what means changes are no longer queued, which the worker
+ * raises Connector lost access on); the project's marker row and the columns the question set needs
+ * (`install`: what `facetdb migrate` brings forward to the file, which raises nothing); the marks
+ * of FacetDB's columns; then which worker holds the one worker's lock. Each fact kept the words it
+ * had under `install` or `marks`. `where` names the database in the words (the file's path, a
+ * libSQL server's host). Shared by the SQLite engine and the libSQL one: the marks are in the
+ * table's definition and the lock is a row of `facetdb_table_owners`, so they read the same in a
+ * file and on a server. The marks are checked whenever the marker names this project, the triggers
+ * present or not: a table rebuild drops the triggers along with the marks.
  */
 export async function installChecks(
   query: SqliteQuery,
@@ -191,10 +216,11 @@ export async function installChecks(
   if (found.kind !== "table") {
     return [
       fail(
-        "install",
+        "capture",
         `${target.table} is not a table of ${where}`,
         "point the source at the table, and run facetdb migrate on it",
       ),
+      skip("install", "there is no table to check the install of"),
       skip("marks", "there is no table to check the marks of"),
       skip("lock", "there is no table to hold a lock on"),
     ];
@@ -224,11 +250,18 @@ export async function installChecks(
       ])
     ).map((row) => textOf(row, "name")),
   );
-  const missing = [
+  // What means changes are no longer queued (the capture's), and what the install lacks besides.
+  const gone = [
     ...(tables.has(JOBS_TABLE) ? [] : [JOBS_TABLE]),
-    ...(owner === undefined ? [`the marker row of ${target.table} in ${OWNERS_TABLE}`] : []),
     ...[names.insert, names.update].filter((name) => !triggers.has(name)),
   ];
+  const notInstalled = (missing: readonly string[]) =>
+    `FacetDB is not installed on ${target.table}: ${missing.join(", ")} missing`;
+  checks.push(
+    gone.length > 0
+      ? fail("capture", notInstalled(gone), "run facetdb migrate")
+      : ok("capture", `the jobs table and the two triggers of ${table} are there`),
+  );
   const projectId = owner === undefined ? undefined : textOf(owner, "project_id");
   const marks =
     projectId === undefined
@@ -236,11 +269,11 @@ export async function installChecks(
       : projectId === target.project.id
         ? await marksCheck(query, target, found)
         : skip("marks", "the table is another project's");
-  if (missing.length > 0) {
+  if (owner === undefined) {
     checks.push(
       fail(
         "install",
-        `FacetDB is not installed on ${target.table}: ${missing.join(", ")} missing`,
+        notInstalled([`the marker row of ${target.table} in ${OWNERS_TABLE}`]),
         "run facetdb migrate",
       ),
     );
@@ -261,9 +294,14 @@ export async function installChecks(
     return checks;
   }
   checks.push(
-    ok("install", `the jobs table, the marker of ${table} and its two triggers are there`),
+    absentCheck(found, target) ??
+      ok("install", `the marker of ${table} and every column the question set needs are there`),
   );
   checks.push(marks);
+  if (gone.length > 0) {
+    checks.push(skip("lock", "nothing is installed to hold a lock on"));
+    return checks;
+  }
   // The lock is the database's: a worker on any of its tables holds it (the connector refuses a
   // second one while any row's lock is fresh), so the latest renewal of every row is what counts.
   const [holder] = await query(

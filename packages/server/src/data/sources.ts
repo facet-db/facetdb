@@ -7,7 +7,7 @@ import {
 import { sourceIdOf } from "@facetdb/postgres";
 import { Hono } from "hono";
 import type { AppEnv } from "../auth/middleware.ts";
-import type { Doctors, Verdict } from "./doctor.ts";
+import { CAPTURE_CHECK, type Doctors, INSTALL_CHECK, type Verdict } from "./doctor.ts";
 import type { Capture, DashboardDoor, SourceFacts, TableFacts } from "./door.ts";
 import { counted, duration, grouped, listed } from "./figures.ts";
 import { unknownProject } from "./project.ts";
@@ -44,7 +44,10 @@ export type SourceRow = {
   readonly kind: "table" | "api" | "plugin";
   /** The connector in words, the row's tag: `Postgres, trigger`, `API`, `Plugin @facetdb/github, issues`. */
   readonly connector: string;
-  /** Doctor's install line under the worker login: its status and words; null for an API source. */
+  /**
+   * Doctor's install line under the worker login: its status and words, the capture check's when
+   * that one fails; null for an API source.
+   */
   readonly install: { readonly status: DoctorCheck["status"]; readonly words: string } | null;
   readonly verdict: Verdict;
   /** How a change reaches the worker, with when it last saw one. */
@@ -254,7 +257,11 @@ export function createSourcesService(deps: SourcesDeps): SourcesService {
         login: null,
       };
     }
-    const install = verdict.checks.find((check) => check.name === "install");
+    // The install line is the install check's, unless the capture check failed: a dropped trigger
+    // was the install line's failure before the split, and is still said there.
+    const install =
+      verdict.checks.find((check) => check.name === CAPTURE_CHECK && check.status === "fail") ??
+      verdict.checks.find((check) => check.name === INSTALL_CHECK);
     return {
       ...common,
       kind: "table",

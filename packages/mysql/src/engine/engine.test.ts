@@ -98,7 +98,7 @@ function deps(clock = new FakeClock(START)): EngineDeps {
 const brief = (checks: readonly DoctorCheck[]) => checks.map((check) => [check.name, check.status]);
 
 describe("the engine", () => {
-  it("is the engine of mysql: and mariadb:, with the install plans, several workers and doctor's five checks", async () => {
+  it("is the engine of mysql: and mariadb:, with the install plans, several workers and doctor's six checks", async () => {
     const driver = recordingDriver(scriptedDatabase(freshListings()));
     const engine = createMysqlEngine({ connect: driver.connect });
     expect(engine.name).toBe(ENGINE_NAME);
@@ -117,10 +117,15 @@ describe("the engine", () => {
     expect(engine.checks.map((check) => check.name)).toEqual([
       "database",
       "version",
+      "capture",
       "install",
       "grants",
       "queue",
     ]);
+    // Said once, where doctor --dry-run says what each check reads.
+    expect(engine.checks.find((check) => check.name === "capture")?.looksAt).toBe(
+      "reads that changes are still queued as far as the worker login sees: the jobs table. The worker login cannot see triggers, so a dropped trigger is not noticed by the worker: facetdb migrate --dry-run with the admin connection string checks them",
+    );
     const options = { ...ENGINE_DEPS, workerPassword: "a-long-random-password" };
     const planned = await engine.planInstall(target(), ADMIN_URL, options);
     const direct = await createMysqlInstaller({
@@ -156,6 +161,7 @@ describe("the engine", () => {
     expect(brief(checks)).toEqual([
       ["database", "fail"],
       ["version", "skip"],
+      ["capture", "skip"],
       ["install", "skip"],
       ["grants", "skip"],
       ["queue", "skip"],
@@ -257,10 +263,16 @@ describe("doctor", () => {
       },
       { name: "version", status: "ok", detail: "MySQL 8.4.3" },
       {
+        name: "capture",
+        status: "ok",
+        detail:
+          "app.facetdb_jobs is there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed",
+      },
+      {
         name: "install",
         status: "ok",
         detail:
-          "5 marked columns on app.listings, the jobs table and the marker row of project proj_listings are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed",
+          "5 marked columns on app.listings and the marker row of project proj_listings are there",
       },
       {
         name: "grants",
@@ -293,7 +305,7 @@ describe("doctor", () => {
       name: "install",
       status: "ok",
       detail:
-        "5 marked columns on app.facetdb_listings_answers, the view app.listings_with_answers, the jobs table and the marker row of project proj_listings are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed",
+        "5 marked columns on app.facetdb_listings_answers, the view app.listings_with_answers and the marker row of project proj_listings are there",
     });
     expect(checks.find((check) => check.name === "grants")).toEqual({
       name: "grants",
@@ -350,6 +362,7 @@ describe("doctor", () => {
       ["database", "ok"],
       ["distance", "warn"],
       ["version", "ok"],
+      ["capture", "ok"],
       ["install", "ok"],
       ["grants", "ok"],
       ["queue", "ok"],
@@ -376,6 +389,7 @@ describe("doctor", () => {
       ["version", "ok"],
       ["binlog", "warn"],
       ["sql-mode", "warn"],
+      ["capture", "ok"],
       ["install", "ok"],
       ["grants", "ok"],
       ["queue", "ok"],
@@ -412,6 +426,7 @@ describe("doctor", () => {
     expect(brief(quiet).map(([name]) => name)).toEqual([
       "database",
       "version",
+      "capture",
       "install",
       "grants",
       "queue",
@@ -443,6 +458,7 @@ describe("doctor", () => {
     expect(brief(checks)).toEqual([
       ["database", "fail"],
       ["version", "skip"],
+      ["capture", "skip"],
       ["install", "skip"],
       ["grants", "skip"],
       ["queue", "skip"],
@@ -464,18 +480,51 @@ describe("doctor", () => {
     expect(brief(checks)).toEqual([
       ["database", "ok"],
       ["version", "ok"],
+      ["capture", "fail"],
       ["install", "fail"],
       ["grants", "fail"],
       ["queue", "skip"],
     ]);
+    // The jobs table is the capture's, in the words it had under install.
     expect(checks[2]).toMatchObject({
-      detail:
-        "FacetDB is not installed on app.listings: app.listings lacks is_scam, is_scam_probability, facetdb_status, facetdb_updated_at, facetdb_reviewed; app.facetdb_jobs is missing; app.facetdb_table_owners is missing",
+      detail: "FacetDB is not installed on app.listings: app.facetdb_jobs is missing",
       fix: "run facetdb migrate",
     });
-    expect(checks[3]?.detail).toBe(
+    expect(checks[3]).toMatchObject({
+      detail:
+        "FacetDB is not installed on app.listings: app.listings lacks is_scam, is_scam_probability, facetdb_status, facetdb_updated_at, facetdb_reviewed; app.facetdb_table_owners is missing",
+      fix: "run facetdb migrate",
+    });
+    expect(checks[4]?.detail).toBe(
       "'facetdb_worker'@'%' lacks select on id, select on title, select on description, select on is_scam, select on is_scam_probability, select on facetdb_status, select on facetdb_updated_at, select on facetdb_reviewed, update on is_scam, update on is_scam_probability, update on facetdb_status, update on facetdb_updated_at, update on facetdb_reviewed, select on facetdb_jobs, insert on facetdb_jobs, update on facetdb_jobs, delete on facetdb_jobs, select on facetdb_table_owners",
     );
+  });
+
+  it("fails capture, not install, on a jobs table that is gone, and skips the queue", async () => {
+    const installed = installedListings();
+    const driver = doctorDriver({
+      ...installed,
+      tables: installed.tables.filter((table) => table.name !== "facetdb_jobs"),
+    });
+    const checks = await createMysqlEngine({ connect: driver.connect }).doctor(
+      target(),
+      WORKER_URL,
+      deps(),
+    );
+    expect(checks.find((check) => check.name === "capture")).toEqual({
+      name: "capture",
+      status: "fail",
+      detail: "FacetDB is not installed on app.listings: app.facetdb_jobs is missing",
+      fix: "run facetdb migrate",
+    });
+    expect(checks.find((check) => check.name === "install")?.status).toBe("ok");
+    expect(checks.find((check) => check.name === "queue")).toEqual({
+      name: "queue",
+      status: "skip",
+      detail: "nothing is installed to queue for",
+    });
+    // The first failure is what the worker's verdict reads: the capture, which raises.
+    expect(checks.find((check) => check.status === "fail")?.name).toBe("capture");
   });
 
   it("fails install on another project's table, and names a missing grant", async () => {
@@ -493,16 +542,17 @@ describe("doctor", () => {
       WORKER_URL,
       deps(),
     );
-    expect(checks[2]).toMatchObject({
+    expect(checks[2]).toMatchObject({ name: "capture", status: "ok" });
+    expect(checks[3]).toMatchObject({
       status: "fail",
       detail: "app.listings belongs to another project (proj_other)",
     });
-    expect(checks[3]).toMatchObject({
+    expect(checks[4]).toMatchObject({
       status: "fail",
       detail: "'facetdb_worker'@'%' lacks delete on facetdb_jobs",
       fix: "run facetdb migrate: it grants what is missing and nothing more",
     });
-    expect(checks[4]).toEqual({
+    expect(checks[5]).toEqual({
       name: "queue",
       status: "skip",
       detail: "the table is another project's",
@@ -526,11 +576,12 @@ describe("doctor", () => {
     expect(brief(checks)).toEqual([
       ["database", "ok"],
       ["version", "ok"],
+      ["capture", "ok"],
       ["install", "fail"],
       ["grants", "ok"],
       ["queue", "ok"],
     ]);
-    expect(checks[2]).toEqual({
+    expect(checks[3]).toEqual({
       name: "install",
       status: "fail",
       detail:

@@ -8,8 +8,9 @@ import { createSqliteEngine, DOCTOR_CHECKS } from "./index.ts";
 
 /**
  * Doctor's `marks` check: every column FacetDB writes on the table carries its mark in the table's
- * definition. A table an ORM rebuilt fails it with migrate's own words and recovery, a column the
- * table lacks fails it with migrate, and a table not installed for this project skips it.
+ * definition. A table an ORM rebuilt fails it with migrate's own words and recovery, and a table
+ * not installed for this project skips it. A column the table lacks is the install check's
+ * (doctor-capture.test.ts): a question added is an install behind the file.
  */
 
 const START = Date.parse("2026-11-04T09:00:00.000Z");
@@ -102,6 +103,7 @@ describe("doctor's marks check", () => {
       "file",
       "wal",
       "sqlite",
+      "capture",
       "install",
       "marks",
       "lock",
@@ -117,7 +119,7 @@ describe("doctor's marks check", () => {
     expect(marks.detail).toBe("every column FacetDB writes on listings carries FacetDB's mark");
   });
 
-  it("fails after an ORM rebuild with migrate's words and recovery, the install failing for the lost triggers", async () => {
+  it("fails after an ORM rebuild with migrate's words and recovery, the capture failing for the lost triggers", async () => {
     const file = await installed();
     edit(file, ORM_REBUILD);
     const { statuses, marks } = await marksOf(file);
@@ -125,7 +127,8 @@ describe("doctor's marks check", () => {
       ["file", "ok"],
       ["wal", "ok"],
       ["sqlite", "ok"],
-      ["install", "fail"],
+      ["capture", "fail"],
+      ["install", "ok"],
       ["marks", "fail"],
       ["lock", "skip"],
     ]);
@@ -195,7 +198,7 @@ describe("doctor's marks check", () => {
     });
   });
 
-  it("fails naming a column the question set needs and the table lacks: migrate adds it", async () => {
+  it("passes the columns a table has when the question set needs more: the install check names those", async () => {
     const file = await installed();
     const grown = target({
       questionSet: {
@@ -209,9 +212,8 @@ describe("doctor's marks check", () => {
     const { marks } = await marksOf(file, grown);
     expect(marks).toEqual({
       name: "marks",
-      status: "fail",
-      detail: "listings has no column is_spam, is_spam_probability, which the question set needs",
-      fix: "run facetdb migrate: it adds the columns the table lacks, each marked as FacetDB's",
+      status: "ok",
+      detail: "every column FacetDB writes that listings has carries FacetDB's mark",
     });
   });
 

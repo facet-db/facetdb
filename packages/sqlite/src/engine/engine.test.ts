@@ -151,6 +151,7 @@ describe("plans and runs", () => {
       ["file", "fail"],
       ["wal", "skip"],
       ["sqlite", "skip"],
+      ["capture", "skip"],
       ["install", "skip"],
       ["marks", "skip"],
       ["lock", "skip"],
@@ -254,7 +255,7 @@ describe("the runtime connector through the engine", () => {
 });
 
 describe("doctor", () => {
-  it("checks the file, WAL, the SQLite version, the install and the worker lock", async () => {
+  it("checks the file, WAL, the SQLite version, the capture, the install and the worker lock", async () => {
     const file = fileWith("listings");
     const engine = createSqliteEngine();
     const before = await engine.doctor(target(), file.path, deps);
@@ -262,12 +263,17 @@ describe("doctor", () => {
       ["file", "ok"],
       ["wal", "fail"],
       ["sqlite", "ok"],
+      ["capture", "fail"],
       ["install", "fail"],
       ["marks", "skip"],
       ["lock", "skip"],
     ]);
+    // What was one sentence under install is two, each fact in its own words.
     expect(before[3]?.detail).toBe(
-      "FacetDB is not installed on listings: facetdb_jobs, the marker row of listings in facetdb_table_owners, facetdb_listings_ins, facetdb_listings_upd missing",
+      "FacetDB is not installed on listings: facetdb_jobs, facetdb_listings_ins, facetdb_listings_upd missing",
+    );
+    expect(before[4]?.detail).toBe(
+      "FacetDB is not installed on listings: the marker row of listings in facetdb_table_owners missing",
     );
 
     await installed(file, "listings");

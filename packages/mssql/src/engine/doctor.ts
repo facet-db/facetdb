@@ -45,8 +45,11 @@ import type { OpenCursors } from "./engine.ts";
  * `facetdb doctor`'s checks of a SQL Server or Azure SQL source, under the worker login, on one
  * connection, changing nothing: the connection (the login, TLS, the round trip), the server's
  * version, the database's containment and its owner, the install as the worker sees it (FacetDB's
- * columns, the queue, the marker's row, a renamed table), the trigger, the worker's grants and the
- * queue's depth. What the worker login cannot see is the admin's to check: a trigger's stored text
+ * columns, the marker's row, a renamed table), the capture (the jobs table and the trigger, or
+ * Change Tracking in its place: what the worker raises Connector lost access on), the worker's
+ * grants and the queue's depth. A failing install is checked first and skips what follows, so a
+ * dropped trigger is not told while the install is also behind the file; a missing jobs table is
+ * still said. What the worker login cannot see is the admin's to check: a trigger's stored text
  * needs VIEW DEFINITION, which the worker never has, so `facetdb migrate --dry-run` with the admin
  * connection string is the check of the trigger's text (an empty plan means every object is as
  * installed: its trigger is compared by its stored text there). Where no variable names the
@@ -74,12 +77,12 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
   {
     name: "install",
     looksAt:
-      "reads the catalog as the worker sees it for FacetDB's columns, the jobs table, the project's marker row and a table renamed under its trigger",
+      "reads the catalog as the worker sees it for FacetDB's columns, the project's marker row and a table renamed under its trigger",
   },
   {
     name: "trigger",
     looksAt:
-      "reads the table's trigger, enabled and named for the table; its stored text is checked by facetdb migrate --dry-run with the admin connection string",
+      "reads that changes are still queued: the jobs table, and the table's trigger, enabled and named for the table; its stored text is checked by facetdb migrate --dry-run with the admin connection string",
   },
   CHANGE_TRACKING_CHECK,
   {
@@ -424,6 +427,21 @@ export async function doctorChecks(
     );
     const marker = await readMarker(query, names, objects);
     const row = marker?.find((one) => one.schema === names.schema && one.table === names.table);
+    const notInstalled = (problems: readonly string[]) =>
+      `FacetDB is not installed on ${names.label}: ${problems.join("; ")}`;
+    // The queue is the capture's: with no jobs table no change reaches the worker, which it raises
+    // Connector lost access on, so the fact is the trigger check's, or Change Tracking's in its
+    // place, in the words it had under install.
+    const queueGone = queue
+      ? undefined
+      : fail(
+          tracked ? CHANGE_TRACKING_CHECK.name : "trigger",
+          notInstalled([`${SHARED_SCHEMA}.${JOBS_TABLE} is missing`]),
+          "run facetdb migrate",
+        );
+    // When the install fails, what follows is not looked at, but a missing queue is still said.
+    const afterInstall = (why: string) =>
+      queueGone === undefined ? skipped(4, why) : [queueGone, ...skipped(5, why)];
     const problems = [
       ...(columns.length === 0
         ? [
@@ -437,7 +455,6 @@ export async function doctorChecks(
               : `${answersAt} lacks ${missing.join(", ")}`,
           ]
         : []),
-      ...(queue ? [] : [`${SHARED_SCHEMA}.${JOBS_TABLE} is missing`]),
       ...(marker === undefined
         ? [`${SHARED_SCHEMA}.${MARKER_TABLE} is missing`]
         : row === undefined
@@ -446,12 +463,8 @@ export async function doctorChecks(
     ];
     if (problems.length > 0) {
       checks.push(
-        fail(
-          "install",
-          `FacetDB is not installed on ${names.label}: ${problems.join("; ")}`,
-          "run facetdb migrate",
-        ),
-        ...skipped(4, "not checked: nothing is installed to look at"),
+        fail("install", notInstalled(problems), "run facetdb migrate"),
+        ...afterInstall("not checked: nothing is installed to look at"),
       );
       return checks;
     }
@@ -462,21 +475,23 @@ export async function doctorChecks(
           `${names.label} belongs to another project (${row.projectId})`,
           "run doctor from that project's directory, or point the source at another table",
         ),
-        ...skipped(4, "not checked: the table is another project's"),
+        ...afterInstall("not checked: the table is another project's"),
       );
       return checks;
     }
     checks.push(
       ok(
         "install",
-        `${owned.length} FacetDB columns on ${answersAt}, the jobs table and the marker row of project ${target.project.id} are there`,
+        `${owned.length} FacetDB columns on ${answersAt} and the marker row of project ${target.project.id} are there`,
       ),
     );
 
     const primary = await readKey(query, names.schema, names.table);
     const keyName = primary.length === 1 ? primary[0] : undefined;
     const key = keyName === undefined ? undefined : byName.get(keyName);
-    if (tracked) {
+    if (queueGone !== undefined) {
+      checks.push(queueGone);
+    } else if (tracked) {
       // No trigger, so no error 334 for the application either.
       checks.push(
         await changeTrackingCheck(
@@ -563,6 +578,10 @@ export async function doctorChecks(
             ),
     );
 
+    if (queueGone !== undefined) {
+      checks.push(skip("queue", `not checked: ${SHARED_SCHEMA}.${JOBS_TABLE} is missing`));
+      return checks;
+    }
     const [counts] = await query(
       `select count(*) as total, count(j.[claimed_at]) as claimed from ${names.jobsRelation} j where j.[table_name] = @p1`,
       [names.relation],

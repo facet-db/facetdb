@@ -469,13 +469,14 @@ describe("the engine through the client", () => {
 });
 
 describe("doctor", () => {
-  it("checks the server, the token, the SQLite under it, the install and the lock", async () => {
+  it("checks the server, the token, the SQLite under it, the capture, the install and the lock", async () => {
     const made = recorder(LISTINGS);
     const engine = createLibsqlEngine({ env: ENV, open: made.open });
     expect(LIBSQL_DOCTOR_CHECKS.map((check) => check.name)).toEqual([
       "server",
       "token",
       "sqlite",
+      "capture",
       "install",
       "marks",
       "lock",
@@ -485,6 +486,7 @@ describe("doctor", () => {
       ["server", "ok"],
       ["token", "ok"],
       ["sqlite", "ok"],
+      ["capture", "fail"],
       ["install", "fail"],
       ["marks", "skip"],
       ["lock", "skip"],
@@ -514,6 +516,7 @@ describe("doctor", () => {
       ["server", "skip"],
       ["token", "fail"],
       ["sqlite", "skip"],
+      ["capture", "skip"],
       ["install", "skip"],
       ["marks", "skip"],
       ["lock", "skip"],
@@ -600,6 +603,7 @@ describe("doctor", () => {
       ["server", "fail"],
       ["token", "skip"],
       ["sqlite", "skip"],
+      ["capture", "skip"],
       ["install", "skip"],
       ["marks", "skip"],
       ["lock", "skip"],

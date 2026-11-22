@@ -51,16 +51,16 @@ import { presetKeyOf } from "./model-provider.ts";
 /**
  * `facetdb doctor`: runs the checks in order, prints one line each with the fix, and exits 1 naming
  * the first failing check, 0 when all pass. A source's database is checked by its engine
- * (`DatabaseEngine.doctor`: the connection and login with the distance, the pooler, the install),
- * the store by the store door. When the store is the one table source's own database, or
- * `DATABASE_URL` names none, the report is today's eight lines; with the store in another database,
- * or several table sources, the lines come in a `source <name>:` group per source and a `store:`
- * group (the store reachable and current, its pooler, the worker's heartbeat, the secret). A
- * source's checks come after one `engine:` line naming the engine that checked it, the database its
- * scheme names and the server's version where the engine read one; each check prints under its
- * engine's own name, and each fix ends with the page about that check. A check that cannot run
- * because an earlier one failed is skipped, not reported as a second failure. Nothing here changes
- * a database or the store.
+ * (`DatabaseEngine.doctor`: the connection and login with the distance, the pooler, the capture and
+ * the install), the store by the store door. When the store is the one table source's own database,
+ * or `DATABASE_URL` names none, the report is one list of lines (nine on Postgres added `capture`);
+ * with the store in another database, or several table sources, the lines come in a `source
+ * <name>:` group per source and a `store:` group (the store reachable and current, its pooler, the
+ * worker's heartbeat, the secret). A source's checks come after one `engine:` line naming the
+ * engine that checked it, the database its scheme names and the server's version where the engine
+ * read one; each check prints under its engine's own name, and each fix ends with the page about
+ * that check. A check that cannot run because an earlier one failed is skipped, not reported as a
+ * second failure. Nothing here changes a database or the store.
  */
 
 type DoctorOptions = {
@@ -98,7 +98,7 @@ export type CheckResult = {
 export type CheckLine = CheckResult & {
   readonly id: string;
   readonly label: string;
-  /** The group it is printed under: `source <name>` or `store`; none in the eight-line report. */
+  /** The group it is printed under: `source <name>` or `store`; none in the one-list report. */
   readonly group?: string;
   /** On the `engine:` line only: what it says, as data. */
   readonly engine?: EngineReport;
@@ -492,12 +492,12 @@ async function sourceLines(
   const { deps, options } = environment;
   const { source, url } = table;
   // The checks a failure here leaves unrun: the engine's own names once it is known, else the
-  // Postgres engine's, the names of the eight-line report.
+  // Postgres engine's, the names of the one-list report.
   const failed = (result: CheckResult, engine?: DatabaseEngine) => ({
     lines: [
       line({ id: "database", label: "database" }, result, group),
       ...(engine === undefined
-        ? ["pooler", "install"]
+        ? ["pooler", "capture", "install"]
         : engine.checks
             .map((check) => check.name)
             .filter((name) => name !== "database" && name !== "worker")
@@ -648,7 +648,7 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
   const { config, plugins } = loaded;
   if (config === undefined) {
     const notChecked = skip("not checked: the config did not load");
-    for (const id of ["database", "pooler", "install", "worker"]) {
+    for (const id of ["database", "pooler", "capture", "install", "worker"]) {
       lines.push(line({ id, label: labelOf(id) }, notChecked));
     }
     lines.push(line(MODEL_KEY, notChecked), line(MODEL_REACHABLE, notChecked));
@@ -669,12 +669,12 @@ export async function runChecks(environment: DoctorEnvironment): Promise<readonl
     ]);
   const tables = tableSourcesOf(config, deps.env);
   const [only] = tables;
-  const eightLines =
+  const oneList =
     tables.length === 0 ||
     (only !== undefined &&
       tables.length === 1 &&
       (storeUrlOf(deps.env) === undefined || only.sharesStore));
-  if (eightLines) {
+  if (oneList) {
     if (only === undefined) {
       lines.push(...(await noTableLines(environment)));
       lines.push(fromCheck(await heartbeat(environment), scrub));

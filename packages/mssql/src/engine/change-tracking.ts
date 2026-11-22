@@ -24,7 +24,7 @@ import type { OpenCursors } from "./engine.ts";
 export const CHANGE_TRACKING_CHECK = {
   name: "change-tracking",
   looksAt:
-    'with capture: "change-tracking", in place of the trigger check: tracking on the database and on the table with column tracking, the retention, the worker\'s view change tracking right, and the version stored in the FacetDB store against the oldest the database still keeps',
+    'with capture: "change-tracking", in place of the trigger check: the jobs table, tracking on the database and on the table with column tracking, the retention, the worker\'s view change tracking right, and the version stored in the FacetDB store against the oldest the database still keeps',
 } as const;
 
 /** Units of `sys.change_tracking_databases.retention_period_units`, in minutes and in words. */

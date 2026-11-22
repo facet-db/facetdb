@@ -28,7 +28,9 @@ import { questionSetOf } from "./database.ts";
  *    connections borrowed from the source's own pool). A verdict that fails on any check but
  *    `install` raises it (`cause: "doctor"`), in the failed check's own words, the ones Home shows
  *    (the server's `doctorVerdict` and `losesAccess`, which Home reads by too). A failing `install`
- *    check is an install behind the file, which `facetdb migrate` fixes: it raises nothing. A look
+ *    check is an install behind the file, which `facetdb migrate` fixes: it raises nothing. A trigger
+ *    dropped or disabled, a jobs table or facetdb schema gone, fails the engine's `capture` check
+ *    (SQL Server's `trigger`), which comes before `install` and raises. A look
  *    that cannot record its outcome (the store down) is a printed line and stops nothing; a stop
  *    between two sources ends the look;
  *  - a loop that stops alone because its database refused the worker login or a right it uses (the

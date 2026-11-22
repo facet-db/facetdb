@@ -166,6 +166,7 @@ describe("the libSQL engine on sqld", () => {
         ["server", "ok"],
         ["token", "ok"],
         ["sqlite", "ok"],
+        ["capture", "ok"],
         ["install", "ok"],
         ["marks", "ok"],
         ["lock", "ok"],

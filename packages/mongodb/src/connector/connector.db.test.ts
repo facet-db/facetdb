@@ -710,6 +710,7 @@ describe.skipIf(skipUnless("MONGODB_URL"))("the connector on MONGODB_URL", () =>
       "version",
       "replica-set",
       "login",
+      "capture",
       "install",
       "oplog",
       "queue",

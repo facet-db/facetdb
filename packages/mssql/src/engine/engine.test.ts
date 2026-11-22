@@ -236,7 +236,7 @@ describe("doctor", () => {
         name: "install",
         status: "ok",
         detail:
-          "5 FacetDB columns on dbo.listings, the jobs table and the marker row of project proj_listings are there",
+          "5 FacetDB columns on dbo.listings and the marker row of project proj_listings are there",
       },
       {
         name: "trigger",
@@ -319,6 +319,38 @@ describe("doctor", () => {
     expect((await doctor(disabled)).checks.find((check) => check.name === "trigger")?.detail).toBe(
       "the trigger facetdb_listings on dbo.listings is disabled, so no change of the table reaches the queue",
     );
+  });
+
+  it("fails the trigger check, not the install, for a jobs table that is gone, and skips the queue", async () => {
+    const world = installed();
+    const gone: World = {
+      ...world,
+      objects: world.objects.filter((object) => object.name !== "facetdb_jobs"),
+    };
+    const { checks } = await doctor(gone);
+    expect(checks.find((check) => check.name === "install")?.status).toBe("ok");
+    expect(checks.find((check) => check.name === "trigger")).toEqual({
+      name: "trigger",
+      status: "fail",
+      detail: "FacetDB is not installed on dbo.listings: dbo.facetdb_jobs is missing",
+      fix: "run facetdb migrate",
+    });
+    expect(checks.find((check) => check.name === "queue")).toEqual({
+      name: "queue",
+      status: "skip",
+      detail: "not checked: dbo.facetdb_jobs is missing",
+    });
+    // The first failure is the one the worker's verdict reads: the capture, which raises.
+    expect(checks.find((check) => check.status === "fail")?.name).toBe("trigger");
+    // With Change Tracking in the trigger's place, the same fact fails that check (this world's
+    // install is the trigger's, so the install fails too, before it).
+    const tracked = await doctor(gone, {}, { ...LISTINGS, capture: "change-tracking" });
+    expect(tracked.checks.find((check) => check.name === "change-tracking")).toEqual({
+      name: "change-tracking",
+      status: "fail",
+      detail: "FacetDB is not installed on dbo.listings: dbo.facetdb_jobs is missing",
+      fix: "run facetdb migrate",
+    });
   });
 
   it("fails a login that is not the worker's, and checks nothing more", async () => {
@@ -446,11 +478,20 @@ describe("doctor", () => {
       name: "install",
       status: "fail",
       detail:
-        "FacetDB is not installed on dbo.listings: dbo.listings lacks is_scam, is_scam_probability, facetdb_status, facetdb_updated_at, facetdb_reviewed; dbo.facetdb_jobs is missing; dbo.facetdb_table_owners is missing",
+        "FacetDB is not installed on dbo.listings: dbo.listings lacks is_scam, is_scam_probability, facetdb_status, facetdb_updated_at, facetdb_reviewed; dbo.facetdb_table_owners is missing",
       fix: "run facetdb migrate",
     });
-    expect(statuses(fresh.checks.slice(-3))).toEqual([
-      ["trigger", "skip"],
+    // The missing queue is the trigger check's, still said behind a failed install; the install
+    // fails first, so a table never installed reads as behind the file, not as lost.
+    expect(fresh.checks.find((check) => check.name === "trigger")).toEqual({
+      name: "trigger",
+      status: "fail",
+      detail: "FacetDB is not installed on dbo.listings: dbo.facetdb_jobs is missing",
+      fix: "run facetdb migrate",
+    });
+    expect(statuses(fresh.checks.slice(-4))).toEqual([
+      ["install", "fail"],
+      ["trigger", "fail"],
       ["grants", "skip"],
       ["queue", "skip"],
     ]);

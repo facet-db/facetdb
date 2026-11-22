@@ -13,8 +13,20 @@ export const DOCTOR_FRESH_MS = 60_000;
 /** A source's doctor in one word: `failing` is the "Connector lost access" alert. */
 export type Verdict = "healthy" | "warning" | "failing";
 
-/** The name every engine's doctor gives the check of the install in the database. */
+/**
+ * The name every engine's doctor gives the check of the install in the database:, what an install
+ * merely behind facetdb.config.ts lacks (an answer column, a trigger watching other columns), which
+ * `facetdb migrate` brings forward.
+ */
 export const INSTALL_CHECK = "install";
+
+/**
+ * The name the doctors of PostgreSQL, SQLite, libSQL, MySQL and MongoDB give the check of what
+ * means the install is gone: the facetdb schema, the jobs table or the trigger missing, the trigger
+ * disabled. SQL Server keeps the facts in its `trigger` check (or Change Tracking's). A failing one
+ * is Connector lost access, as every failing check but `install` is.
+ */
+export const CAPTURE_CHECK = "capture";
 
 export type SourceVerdict = {
   readonly verdict: Verdict;
@@ -55,6 +67,9 @@ export function doctorVerdict(checks: readonly DoctorCheck[]): SourceVerdict {
  * "Connector lost access": a failing verdict whose failed check is not the install one. A failing
  * install check means the database answers and lacks what facetdb.config.ts asks for, which
  * `facetdb migrate` fixes: Home names that "the install is behind", and no alert is raised for it.
+ * A dropped or disabled trigger, or a jobs table or facetdb schema gone, fails the engine's capture
+ * check instead, which each doctor runs before `install`, so it is the first failure and loses
+ * access even on an install also behind.
  */
 export function losesAccess(verdict: Pick<SourceVerdict, "verdict" | "failedCheck">): boolean {
   return verdict.verdict === "failing" && verdict.failedCheck !== INSTALL_CHECK;

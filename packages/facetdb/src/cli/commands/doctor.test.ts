@@ -234,6 +234,7 @@ describe("facetdb doctor, when everything is in place", () => {
       "      engine",
       "ok    database",
       "ok    pooler",
+      "ok    capture",
       "ok    install",
       "ok    worker heartbeat",
       "ok    model key",
@@ -242,7 +243,7 @@ describe("facetdb doctor, when everything is in place", () => {
     ]);
     // The engine's line names it before its checks, and is no check of its own.
     expect(printed[1]).toBe("      engine: postgres, for Postgres");
-    expect(printed.at(-1)).toBe("All 8 checks passed.");
+    expect(printed.at(-1)).toBe("All 9 checks passed.");
     expect(lineFor(result.stdout, "worker heartbeat")).toContain("30 seconds ago");
     expect(lineFor(result.stdout, "database")).toContain(`logged in as ${WORKER_ROLE}`);
     expect(provider.callCount).toBe(1);
@@ -272,6 +273,7 @@ describe("facetdb doctor, when everything is in place", () => {
       "config:ok",
       "database:ok",
       "pooler:ok",
+      "capture:ok",
       "install:ok",
       "worker:ok",
       "model-key:ok",
@@ -422,7 +424,73 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
     );
   });
 
-  describe("install", () => {
+  describe("capture: what means the install is gone", () => {
+    beforeEach(async () => {
+      await beat(0);
+    });
+
+    /** The capture line of a failing run, and the install line beside it. */
+    async function captureLines(): Promise<{ capture: string; install: string }> {
+      const result = await doctor([], { config: configWith() });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("error: the capture check failed:");
+      return {
+        capture: lineFor(result.stdout, "capture"),
+        install: lineFor(result.stdout, "install"),
+      };
+    }
+
+    it("the schema is missing", async () => {
+      await world.client.query("drop schema facetdb cascade");
+      const { capture } = await captureLines();
+      expect(capture).toContain("listings: the facetdb schema does not exist");
+    });
+
+    it("the jobs table is missing", async () => {
+      await world.client.query("drop table facetdb.jobs cascade");
+      const { capture, install } = await captureLines();
+      expect(capture).toContain("listings: the jobs table facetdb.jobs does not exist");
+      expect(capture).toContain("Fix: run facetdb migrate");
+      expect(capture).toContain("See https://docs.facetdb.dev/fix/doctor-capture");
+      expect(install).toMatch(/^ok/);
+    });
+
+    it("the trigger is missing", async () => {
+      await world.client.query("drop trigger facetdb_listings on public.listings");
+      const { capture, install } = await captureLines();
+      expect(capture).toContain(
+        "public.listings has no trigger facetdb_listings, so changes are not queued",
+      );
+      expect(install).toMatch(/^ok/);
+    });
+
+    it("the trigger is disabled", async () => {
+      await world.client.query("alter table public.listings disable trigger facetdb_listings");
+      const { capture, install } = await captureLines();
+      expect(capture).toContain("the trigger facetdb_listings on public.listings is disabled");
+      expect(install).toMatch(/^ok/);
+    });
+
+    it("the table itself is gone", async () => {
+      await world.client.query("drop table public.listings cascade");
+      const { capture, install } = await captureLines();
+      expect(capture).toContain("the table public.listings does not exist");
+      expect(install).toMatch(/^skip.*the table does not exist/);
+    });
+
+    it("nothing was ever installed: the capture fails first, the install beside it", async () => {
+      await world.client.query("drop schema facetdb cascade");
+      await world.client.query("drop trigger if exists facetdb_listings on public.listings");
+      await world.client.query("alter table public.listings drop column category");
+      const { capture, install } = await captureLines();
+      expect(capture).toContain("the facetdb schema does not exist");
+      expect(capture).toContain("has no trigger");
+      expect(install).toMatch(/^FAIL/);
+      expect(install).toContain("lacks the answer columns");
+    });
+  });
+
+  describe("install: what an install behind the file lacks", () => {
     beforeEach(async () => {
       await beat(0);
     });
@@ -431,34 +499,9 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
       const result = await doctor([], { config });
       expect(result.code).toBe(1);
       expect(result.stderr).toContain("error: the install check failed:");
+      expect(lineFor(result.stdout, "capture")).toMatch(/^ok/);
       return lineFor(result.stdout, "install");
     }
-
-    it("the schema is missing", async () => {
-      await world.client.query("drop schema facetdb cascade");
-      expect(await installLine()).toContain("listings: the facetdb schema does not exist");
-    });
-
-    it("the jobs table is missing", async () => {
-      await world.client.query("drop table facetdb.jobs cascade");
-      const line = await installLine();
-      expect(line).toContain("listings: the jobs table facetdb.jobs does not exist");
-      expect(line).toContain("Fix: run facetdb migrate");
-    });
-
-    it("the trigger is missing", async () => {
-      await world.client.query("drop trigger facetdb_listings on public.listings");
-      expect(await installLine()).toContain(
-        "public.listings has no trigger facetdb_listings, so changes are not queued",
-      );
-    });
-
-    it("the trigger is disabled", async () => {
-      await world.client.query("alter table public.listings disable trigger facetdb_listings");
-      expect(await installLine()).toContain(
-        "the trigger facetdb_listings on public.listings is disabled",
-      );
-    });
 
     it("the trigger watches other columns than the questions read", async () => {
       expect(await installLine(configWith({ read: ["title"] }))).toContain(
@@ -469,21 +512,6 @@ describe("facetdb doctor names the first failing check and says how to fix it", 
     it("an answer column is missing", async () => {
       await world.client.query("alter table public.listings drop column category");
       expect(await installLine()).toContain("public.listings lacks the answer columns category");
-    });
-
-    it("the table itself is gone", async () => {
-      await world.client.query("drop table public.listings cascade");
-      expect(await installLine()).toContain("the table public.listings does not exist");
-    });
-
-    it("nothing was ever installed", async () => {
-      await world.client.query("drop schema facetdb cascade");
-      await world.client.query("drop trigger if exists facetdb_listings on public.listings");
-      await world.client.query("alter table public.listings drop column category");
-      const line = await installLine();
-      expect(line).toContain("the facetdb schema does not exist");
-      expect(line).toContain("has no trigger");
-      expect(line).toContain("lacks the answer columns");
     });
   });
 
@@ -792,7 +820,7 @@ describe("facetdb doctor, how far the database is", () => {
       "listings on localhost:5432/app (round trip 12 ms)",
     );
     expect(lines(result.stdout).some((text) => text.startsWith("warn"))).toBe(false);
-    expect(lines(result.stdout).at(-1)).toBe("All 8 checks passed.");
+    expect(lines(result.stdout).at(-1)).toBe("All 9 checks passed.");
   });
 
   it("takes the median, so one slow trip does not decide", async () => {
@@ -813,7 +841,7 @@ describe("facetdb doctor, how far the database is", () => {
       "warn  distance: the database answers in 190 ms; run the worker in the same region for fast answers",
     );
     expect(printed[warn - 1]).toMatch(/^ok\s+database:/);
-    expect(printed.at(-1)).toBe("All 8 checks passed.");
+    expect(printed.at(-1)).toBe("All 9 checks passed.");
     expect(result.stderr).toBe("");
   });
 
@@ -832,7 +860,7 @@ describe("facetdb doctor, how far the database is", () => {
       env: { DATABASE_URL: WORKER_URL, TYPESAFE_API_KEY: "tsk-s3cret-model-key" },
     });
     expect(failing.code).toBe(1);
-    expect(lines(failing.stdout).at(-1)).toBe("1 of 8 checks failed.");
+    expect(lines(failing.stdout).at(-1)).toBe("1 of 9 checks failed.");
     expect(lines(failing.stdout).some((text) => text.startsWith("warn  distance"))).toBe(true);
     const json = await doctor(["--json"], { connect: farAway([190]) });
     expect(json.code, json.stderr).toBe(0);
@@ -840,11 +868,12 @@ describe("facetdb doctor, how far the database is", () => {
       checks: { id: string; status: string }[];
       warnings: { id: string; status: string; detail: string }[];
     };
-    // A warning is not a check: it has a field of its own, and `checks` holds only the 8 checks.
+    // A warning is not a check: it has a field of its own, and `checks` holds only the 9 checks.
     expect(parsed.checks.map((check) => check.id)).toEqual([
       "config",
       "database",
       "pooler",
+      "capture",
       "install",
       "worker",
       "model-key",
@@ -873,7 +902,7 @@ describe("facetdb doctor, how far the database is", () => {
     const parsed = JSON.parse(result.stdout) as {
       details: { checks: { id: string }[]; warnings: { id: string }[] };
     };
-    expect(parsed.details.checks).toHaveLength(8);
+    expect(parsed.details.checks).toHaveLength(9);
     expect(parsed.details.warnings.map((warning) => warning.id)).toEqual(["distance"]);
   });
 
@@ -1042,18 +1071,19 @@ describe("facetdb doctor with the store in its own database", () => {
       "      engine",
       "ok    database",
       "ok    pooler",
+      "ok    capture",
       "ok    install",
       "store:",
       "ok    store",
       "ok    pooler",
       "ok    worker heartbeat",
       "ok    FACETDB_SECRET",
-      "All 10 checks passed.",
+      "All 11 checks passed.",
     ]);
     expect(lineFor(result.stdout, "store")).toMatch(
       /^ok {4}store: the FacetDB store on localhost:5432\/facetdb is reachable and current \(schema version \d+\)$/,
     );
-    expect(printed[10]).toBe(
+    expect(printed[11]).toBe(
       "ok    pooler: prepared statements stay on one server session on the store (a direct connection or a session pooler)",
     );
     expect(result.stdout + result.stderr).not.toContain("s3cret-worker-password");
@@ -1068,6 +1098,7 @@ describe("facetdb doctor with the store in its own database", () => {
       "- model-reachable",
       "source listings database",
       "source listings pooler",
+      "source listings capture",
       "source listings install",
       "store store",
       "store pooler",
@@ -1224,12 +1255,14 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
     await world.client.query("alter table public.listings drop column category cascade");
     const result = await doctor([], { env: {} });
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("error: the install check failed:");
+    // The schema gone is the capture's, the column the install's: capture comes first.
+    expect(result.stderr).toContain("error: the capture check failed:");
+    expect(lineFor(result.stdout, "capture")).toMatch(/^FAIL/);
     expect(lineFor(result.stdout, "install")).toMatch(/^FAIL/);
     expect(lineFor(result.stdout, "worker heartbeat")).toMatch(/^FAIL.*DATABASE_URL is not set/);
     expect(lineFor(result.stdout, "model key")).toMatch(/^FAIL/);
     expect(lineFor(result.stdout, "FACETDB_SECRET")).toMatch(/^FAIL/);
-    expect(lines(result.stdout).at(-1)).toBe("4 of 8 checks failed.");
+    expect(lines(result.stdout).at(-1)).toBe("5 of 9 checks failed.");
 
     const json = await doctor(["--json"], { env: {} });
     expect(json.code).toBe(1);
@@ -1239,10 +1272,13 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
       details: { checks: { id: string; status: string; fix?: string }[] };
     };
     expect(parsed.ok).toBe(false);
-    expect(parsed.error.code).toBe("doctor-install");
+    expect(parsed.error.code).toBe("doctor-capture");
     expect(
       parsed.details.checks.filter((check) => check.status === "fail").map((c) => c.id),
-    ).toEqual(["install", "worker", "model-key", "secret"]);
+    ).toEqual(["capture", "install", "worker", "model-key", "secret"]);
+    expect(parsed.details.checks.find((check) => check.id === "capture")?.fix).toContain(
+      "facetdb migrate",
+    );
     expect(parsed.details.checks.find((check) => check.id === "install")?.fix).toContain(
       "facetdb migrate",
     );
@@ -1258,10 +1294,13 @@ describe("facetdb doctor reports the first failure, whatever else fails", () => 
       loadConfig: () => Promise.reject(new Error("a dry run loads no config")),
     });
     expect(result.code, result.stderr).toBe(0);
-    expect(lines(result.stdout)).toHaveLength(9);
+    expect(lines(result.stdout)).toHaveLength(10);
     expect(result.stdout).toContain("1. config:");
     expect(result.stdout).toContain("3. pooler:");
-    expect(result.stdout).toContain("8. FACETDB_SECRET:");
+    expect(result.stdout).toContain(
+      "4. capture: reads that changes are still queued: the facetdb schema, the jobs table and the trigger, present and enabled",
+    );
+    expect(result.stdout).toContain("9. FACETDB_SECRET:");
     expect(result.stdout).toContain("Dry run: nothing was checked.");
     expect(provider.callCount).toBe(0);
   });

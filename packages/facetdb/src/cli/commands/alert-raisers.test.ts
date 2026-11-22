@@ -2,17 +2,25 @@ import {
   type AlertRecord,
   type AlertStore,
   createAlerts,
+  type DatabaseEngine,
   type DoctorCheck,
   EngineRefusal,
   eventKey,
   type PassReport,
 } from "@facetdb/core";
 import { FakeAlertStore } from "@facetdb/core/testing";
-import { doctorVerdict, hideSecrets, secretParts } from "@facetdb/server";
-import { describe, expect, it, vi } from "vitest";
+import { doctorVerdict, hideSecrets, losesAccess, secretParts } from "@facetdb/server";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { SourceAccessLost } from "../../plugin/index.ts";
-import { SteppedClock } from "../testing.ts";
+import {
+  createPgliteWorld,
+  type PgliteWorld,
+  postgresEngines,
+  resetPgliteWorld,
+  type SqlConnect,
+  SteppedClock,
+} from "../testing.ts";
 import {
   ACCESS_CHECK_EVERY_MS,
   CHANGES_MAX,
@@ -21,14 +29,15 @@ import {
   refusalOf,
   type WatchedSource,
 } from "./alert-raisers.ts";
-import { questionSetOf } from "./database.ts";
+import { engineTarget, projectRef, questionSetOf } from "./database.ts";
 
 /**
  * The two raisers of the running worker on the stepped clock, over core's alerts and an alert store
  * in memory: Connector lost access from each running table source's doctor every 5 minutes and from
  * a loop's refused login or credential, resolved when the source reads well again; Question set
- * changed when a source opens under a higher version, naming who changed what. The worker's own
- * wiring is proven by the alert-raisers-*.test.ts files beside it.
+ * changed when a source opens under a higher version, naming who changed what. A dropped or
+ * disabled trigger is read by the Postgres engine's own doctor on PGlite. The worker's own wiring
+ * is proven by the alert-raisers-*.test.ts files beside it.
  */
 
 const START = 1_700_000_000_000;
@@ -81,7 +90,11 @@ const HEALTHY: readonly DoctorCheck[] = [
     status: "skip",
     detail: "not checked from the worker, whose own pool is open on this database",
   },
-  ok("install", "facetdb schema, jobs table, trigger and answer columns are in place"),
+  ok("capture", "facetdb schema, jobs table and trigger are in place, the trigger enabled"),
+  ok(
+    "install",
+    "answer columns are in place, and the trigger watches the columns the questions read",
+  ),
   { name: "worker", status: "skip", detail: "not checked here" },
 ];
 
@@ -350,6 +363,231 @@ describe("Connector lost access from the worker's own reading every 5 minutes", 
     t.store.down = false;
     await t.raisers.look();
     expect(t.store.history.map((line) => line.phase)).toEqual(["raised"]);
+  });
+});
+
+describe("Connector lost access from a dropped or disabled trigger, as the Postgres engine's doctor reads it", () => {
+  /** On this machine, so the doctor connects without TLS as a worker would to a local database. */
+  const LOCAL_URL = `postgres://facetdb_worker:${PASSWORD}@localhost:5432/app`;
+  const ADMIN_URL = "postgres://admin@localhost:5432/app";
+  const PROJECT_DIR = "/work/listings-app";
+
+  /** Two table sources on one database, so a raise is seen to be the broken one's alone. */
+  const twoSources = (
+    questions: Readonly<Record<string, ReturnType<typeof noul>>>,
+  ): ProjectConfig =>
+    facetdb({
+      model: "jev-1.14.0",
+      sources: [
+        {
+          name: "listings",
+          database: LOCAL_URL,
+          table: "listings",
+          read: ["id", "title"],
+          questions,
+        },
+        {
+          name: "offers",
+          database: LOCAL_URL,
+          table: "offers",
+          read: ["id", "title"],
+          questions: { is_spam: noul("Is this offer spam?") },
+        },
+      ],
+    });
+  const AS_INSTALLED = twoSources({ is_scam: noul("Is this listing a scam?") });
+  /** A question added to listings in the file and not migrated yet: an install behind the file. */
+  const ADDED = twoSources({
+    is_scam: noul("Is this listing a scam?"),
+    is_urgent: noul("Is this listing urgent?"),
+  });
+
+  let world: PgliteWorld;
+
+  beforeAll(async () => {
+    world = await createPgliteWorld();
+  });
+
+  afterEach(async () => {
+    await resetPgliteWorld(world);
+  });
+
+  afterAll(async () => {
+    await world.close();
+  });
+
+  /**
+   * PGlite's one connection is a superuser's: the doctor asking who it is is told the worker login,
+   * as the database the connection string names would tell it; every other statement runs as is.
+   */
+  const asWorkerLogin: SqlConnect = (url, options) => {
+    const client = world.connect(url, options);
+    return {
+      ...client,
+      query: (text, params) =>
+        /^\s*select current_user::text as name\s*$/.test(text)
+          ? Promise.resolve([{ name: "facetdb_worker" }])
+          : client.query(text, params),
+    };
+  };
+
+  async function postgres(): Promise<DatabaseEngine> {
+    const [entry] = postgresEngines(asWorkerLogin);
+    if (entry === undefined) {
+      throw new Error("the test registers the Postgres engine");
+    }
+    return entry.load();
+  }
+
+  const targetOf = (project: ProjectConfig, name: string) =>
+    engineTarget(
+      project,
+      { source: sourceOf(project, name), schema: "public", table: name },
+      projectRef(PROJECT_DIR),
+    );
+
+  /** `facetdb migrate` of every source as the file holds it, by the admin (PGlite's superuser). */
+  async function migrateAll(engine: DatabaseEngine, project: ProjectConfig, clock: SteppedClock) {
+    const deps = {
+      clock,
+      allowInsecure: false,
+      storeShared: false,
+      workerPassword: "a-long-random-password",
+    };
+    for (const source of project.sources) {
+      const target = targetOf(project, source.name);
+      const plan = await engine.planInstall(target, ADMIN_URL, deps);
+      if (!plan.ok) {
+        throw new Error(`refused: ${plan.refusal.message}`);
+      }
+      expect((await engine.run(target, plan.plan, ADMIN_URL, deps)).stopped).toBeUndefined();
+    }
+  }
+
+  /**
+   * Both sources as the look reads them: the engine's doctor under the worker login, for the file
+   * as `file()` holds it now, each run counted.
+   */
+  function watched(engine: DatabaseEngine, file: () => ProjectConfig, clock: SteppedClock) {
+    const runs: string[] = [];
+    const sources = ["listings", "offers"].map(
+      (name): WatchedSource => ({
+        kind: "table",
+        name,
+        doctor: () => {
+          runs.push(name);
+          return engine.doctor(targetOf(file(), name), LOCAL_URL, {
+            clock,
+            allowInsecure: false,
+            storeShared: false,
+          });
+        },
+      }),
+    );
+    return { sources, runs };
+  }
+
+  async function installedWorld() {
+    await world.client.query("create table public.listings (id text primary key, title text)");
+    await world.client.query("create table public.offers (id text primary key, title text)");
+    const engine = await postgres();
+    const clock = new SteppedClock(START);
+    await migrateAll(engine, AS_INSTALLED, clock);
+    return { engine, clock };
+  }
+
+  const phases = (t: ReturnType<typeof setup>) =>
+    t.store.history.map((line) => `${line.phase} ${line.event.source}`);
+
+  it("raises a dropped trigger once at the look, for that source alone, in the capture check's words, and resolves after migrate", async () => {
+    const { engine, clock } = await installedWorld();
+    const file = { config: AS_INSTALLED };
+    const { sources, runs } = watched(engine, () => file.config, clock);
+    const t = setup(sources, { clock, store: new FlakyAlertStore(clock) });
+
+    await t.raisers.look();
+    expect(t.store.history).toEqual([]);
+
+    await world.client.query("drop trigger facetdb_listings on public.listings");
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised listings"]);
+    const [raised] = t.store.history;
+    expect(raised?.severity).toBe("critical");
+    expect(raised?.event).toMatchObject({
+      kind: "connector_lost_access",
+      source: "listings",
+      cause: "doctor",
+      link: ACCESS_LINK,
+    });
+    // The moved fact in its own words, under the check's new name.
+    expect(raised?.event.what).toBe(
+      "The worker cannot use the database of listings: its capture check fails: listings: public.listings has no trigger facetdb_listings, so changes are not queued.",
+    );
+    // Read again at the next look, said once: the 30-minute rule is the alerts module's.
+    await t.raisers.look();
+    expect(t.store.history).toHaveLength(1);
+
+    // facetdb migrate makes the trigger again: the next look resolves the alert, once.
+    await migrateAll(engine, AS_INSTALLED, clock);
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised listings", "resolved listings"]);
+    await t.raisers.look();
+    expect(t.store.history).toHaveLength(2);
+    // One doctor run per source per look, five looks.
+    expect(runs).toEqual(Array.from({ length: 5 }, () => ["listings", "offers"]).flat());
+  });
+
+  it("raises a disabled trigger as it does a dropped one, and resolves after migrate", async () => {
+    const { engine, clock } = await installedWorld();
+    const { sources } = watched(engine, () => AS_INSTALLED, clock);
+    const t = setup(sources, { clock, store: new FlakyAlertStore(clock) });
+
+    await world.client.query("alter table public.offers disable trigger facetdb_offers");
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised offers"]);
+    expect(t.store.history[0]?.event.what).toBe(
+      "The worker cannot use the database of offers: its capture check fails: offers: the trigger facetdb_offers on public.offers is disabled.",
+    );
+
+    await migrateAll(engine, AS_INSTALLED, clock);
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised offers", "resolved offers"]);
+  });
+
+  it("stays silent for an install behind the file, and raises a dropped trigger on it all the same", async () => {
+    const { engine, clock } = await installedWorld();
+    const file = { config: ADDED };
+    const { sources } = watched(engine, () => file.config, clock);
+    const t = setup(sources, { clock, store: new FlakyAlertStore(clock) });
+
+    // A question added in the file and not migrated yet: the install check fails, and only it.
+    const behind = doctorVerdict(
+      await engine.doctor(targetOf(ADDED, "listings"), LOCAL_URL, {
+        clock,
+        allowInsecure: false,
+        storeShared: false,
+      }),
+    );
+    expect(behind).toMatchObject({ verdict: "failing", failedCheck: "install" });
+    expect(behind.words).toBe(
+      "listings: public.listings lacks the answer columns is_urgent, is_urgent_probability",
+    );
+    expect(losesAccess(behind)).toBe(false);
+    await t.raisers.look();
+    await t.raisers.look();
+    expect(t.store.history).toEqual([]);
+
+    // The trigger dropped on top: the capture fails first, so the source has lost access.
+    await world.client.query("drop trigger facetdb_listings on public.listings");
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised listings"]);
+    expect(t.store.history[0]?.event.what).toContain("its capture check fails:");
+
+    // The migrate that installs the added question makes the trigger again: resolved, then silent.
+    await migrateAll(engine, ADDED, clock);
+    await t.raisers.look();
+    await t.raisers.look();
+    expect(phases(t)).toEqual(["raised listings", "resolved listings"]);
   });
 });
 

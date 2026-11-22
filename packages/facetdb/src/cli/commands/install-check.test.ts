@@ -204,4 +204,17 @@ describe("whether the rights were read or stood in for", () => {
       installVerdict("PostgreSQL", [ok("database"), fail("install", "lacks is_fake")], true),
     ).toEqual({ kind: "missing", missing: "lacks is_fake", rightsRead: false });
   });
+
+  it("waits on the capture check as on the install it was part of in an earlier version", () => {
+    expect(
+      installVerdict("MySQL", [ok("capture"), fail("install", "lacks is_fake"), ok("grants")]),
+    ).toEqual({ kind: "missing", missing: "lacks is_fake", rightsRead: true });
+    expect(
+      installVerdict(
+        "PostgreSQL",
+        [ok("database"), fail("capture", "has no trigger facetdb_listings"), ok("install")],
+        true,
+      ),
+    ).toEqual({ kind: "missing", missing: "has no trigger facetdb_listings", rightsRead: false });
+  });
 });

@@ -36,11 +36,12 @@ import {
 /**
  * `facetdb doctor`'s checks of a MongoDB source, under the worker login, on one connection,
  * changing nothing: the connection (the login, TLS, the round trip), the server's version, the
- * replica set change streams need, the worker's role and rights, the install as the worker sees it
- * (the project's marker, the jobs collection, its indexes), the oplog's window and the queue's
- * depth. What the worker's role may not read is said, with who can: the jobs collection's indexes
- * are the admin's `facetdb migrate --dry-run` to check (an empty plan means they are as installed),
- * and the oplog an admin's `rs.printReplicationInfo()`.
+ * replica set change streams need, the worker's role and rights, the capture (the jobs collection:
+ * what the worker raises Connector lost access on), the install as the worker sees it (the
+ * project's marker, the jobs collection's indexes), the oplog's window and the queue's depth. What
+ * the worker's role may not read is said, with who can: the jobs collection's indexes are the
+ * admin's `facetdb migrate --dry-run` to check (an empty plan means they are as installed), and the
+ * oplog an admin's `rs.printReplicationInfo()`.
  */
 
 /** The oldest MongoDB FacetDB runs on: the pinned driver's floor. */
@@ -67,9 +68,14 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
       "reads connectionStatus for the rights the worker login holds on the collection, facetdb_jobs and facetdb_meta",
   },
   {
+    name: "capture",
+    looksAt:
+      "reads that changes are still queued: the jobs collection the worker queues each change in, which it never makes",
+  },
+  {
     name: "install",
     looksAt:
-      "reads the project's marker in facetdb_meta, the jobs collection and, where the worker may list them, its indexes",
+      "reads the project's marker in facetdb_meta and, where the worker may list them, the jobs collection's indexes",
   },
   {
     name: "oplog",
@@ -238,11 +244,44 @@ function loginCheck(session: Session, database: string, collection: string): Doc
       );
 }
 
-/** The install as the worker sees it: the marker, the jobs collection, its indexes if it may list them. */
+/**
+ * The capture as the worker sees it: the jobs collection each change is queued in. With it gone no
+ * change reaches the worker, which raises Connector lost access on it; the fact keeps the words it
+ * had under install. Whether the jobs collection is there, for the install's indexes.
+ */
+async function captureCheck(
+  client: WorkerClient,
+  database: string,
+): Promise<{ readonly check: DoctorCheck; readonly jobs: boolean }> {
+  const jobs = firstBatch(
+    await client.command(database, {
+      listCollections: 1,
+      filter: { name: JOBS_COLLECTION },
+      nameOnly: true,
+      authorizedCollections: true,
+    }),
+  );
+  return jobs.length === 0
+    ? {
+        check: fail(
+          "capture",
+          `${database}.${JOBS_COLLECTION} is missing, and the worker never makes it (made by a write it would lack its unique index)`,
+          "run facetdb migrate",
+        ),
+        jobs: false,
+      }
+    : { check: ok("capture", `${database}.${JOBS_COLLECTION} is there`), jobs: true };
+}
+
+/**
+ * The install as the worker sees it: the marker, and the jobs collection's indexes if it may list
+ * them. Without the jobs collection (the capture's failure) there are no indexes to read.
+ */
 async function installCheck(
   client: WorkerClient,
   target: EngineTarget,
   database: string,
+  jobs: boolean,
 ): Promise<DoctorCheck> {
   const label = `${database}.${target.table}`;
   const [marker] = firstBatch(
@@ -266,19 +305,10 @@ async function installCheck(
       "run doctor from that project's directory, or point the source at another collection",
     );
   }
-  const jobs = firstBatch(
-    await client.command(database, {
-      listCollections: 1,
-      filter: { name: JOBS_COLLECTION },
-      nameOnly: true,
-      authorizedCollections: true,
-    }),
-  );
-  if (jobs.length === 0) {
-    return fail(
+  if (!jobs) {
+    return ok(
       "install",
-      `${database}.${JOBS_COLLECTION} is missing, and the worker never makes it (made by a write it would lack its unique index)`,
-      "run facetdb migrate",
+      `the marker of project ${target.project.id} on ${label} is there; ${JOBS_COLLECTION}'s indexes are not looked at without it`,
     );
   }
   let indexes: readonly ServerDocument[];
@@ -487,11 +517,13 @@ export async function doctorChecks(
     checks.push(versionCheck(String(info["version"] ?? "")));
     const replicaSet = replicaSetCheck(await client.command("admin", { hello: 1 }));
     checks.push(replicaSet.check, loginCheck(session, database, target.table));
-    const install = await installCheck(client, target, database);
+    const capture = await captureCheck(client, database);
+    checks.push(capture.check);
+    const install = await installCheck(client, target, database, capture.jobs);
     checks.push(install);
     checks.push(...(await oplogChecks(client, replicaSet.kind, `${database}.${target.table}`)));
     checks.push(
-      install.status === "fail"
+      install.status === "fail" || !capture.jobs
         ? skip("queue", "nothing is installed to queue for")
         : await queueCheck(client, target, database),
     );

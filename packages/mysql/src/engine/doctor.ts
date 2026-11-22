@@ -32,12 +32,14 @@ import {
 /**
  * `facetdb doctor`'s checks of a MySQL or MariaDB source, under the worker login, on one
  * connection, changing nothing: the connection (the login, TLS, the round trip), the server's
- * version, the install as the worker sees it (FacetDB's marked columns, the queue, the marker row's
- * project), the worker's grants, and the queue's depth. The triggers and their definer are the
- * admin's to check: `information_schema` lists a trigger only to an account with the `trigger`
- * privilege on its table, which the worker login never has, so `facetdb migrate --dry-run` with the
- * admin connection string is the trigger check (an empty plan means they are as installed). Where
- * no variable names the connection string, the words say "the source's connection string".
+ * version, the capture as the worker sees it (the jobs table: what the worker raises Connector lost
+ * access on), the install (FacetDB's marked columns, the marker row's project), the worker's
+ * grants, and the queue's depth. The triggers and their definer are the admin's to check:
+ * `information_schema` lists a trigger only to an account with the `trigger` privilege on its
+ * table, which the worker login never has, so a dropped trigger is not noticed by the worker, and
+ * `facetdb migrate --dry-run` with the admin connection string is the trigger check (an empty plan
+ * means they are as installed). Where no variable names the connection string, the words say "the
+ * source's connection string".
  */
 
 /** The MySQL and MariaDB FacetDB needs. */
@@ -56,9 +58,14 @@ export const DOCTOR_CHECKS: readonly { readonly name: string; readonly looksAt: 
       "reads the server's version (MySQL 8.0 or MariaDB 10.5 at least), fails binary logging in STATEMENT format, and warns of binary logging without log_bin_trust_function_creators and of NO_BACKSLASH_ESCAPES in the sql_mode",
   },
   {
+    name: "capture",
+    looksAt:
+      "reads that changes are still queued as far as the worker login sees: the jobs table. The worker login cannot see triggers, so a dropped trigger is not noticed by the worker: facetdb migrate --dry-run with the admin connection string checks them",
+  },
+  {
     name: "install",
     looksAt:
-      "reads the catalog as the worker sees it for FacetDB's marked columns, the jobs table and the project's marker row, and in side-table mode that the table is still InnoDB",
+      "reads the catalog as the worker sees it for FacetDB's marked columns and the project's marker row, and in side-table mode that the table is still InnoDB",
   },
   {
     name: "grants",
@@ -208,13 +215,18 @@ function versionCheck(version: string): DoctorCheck {
       );
 }
 
-/** The install as the worker sees it, and the queue's depth after it: the `install` and `queue` checks. */
+/**
+ * The capture and the install as the worker sees them, and the queue's depth after them: the
+ * `capture`, `install` and `queue` checks. The jobs table is the capture's: with it gone no change
+ * reaches the worker, which it raises Connector lost access on; the fact keeps the words it had
+ * under install.
+ */
 async function installChecks(
   query: MysqlQuery,
   target: EngineTarget,
   schema: string,
   rights: WorkerRights,
-): Promise<readonly [install: DoctorCheck, queue: DoctorCheck]> {
+): Promise<readonly [capture: DoctorCheck, install: DoctorCheck, queue: DoctorCheck]> {
   const label = `${schema}.${target.table}`;
   // FacetDB's columns are the table's inline, the side table's in side-table mode, whose view the
   // worker login sees too.
@@ -232,6 +244,14 @@ async function installChecks(
   const tables = await readFacetdbTables(query, schema);
   const viewMissing =
     side && (await readTableType(query, schema, sideViewName(target.table))) === undefined;
+  const notInstalled = (problems: readonly string[]) =>
+    `FacetDB is not installed on ${label}: ${problems.join("; ")}`;
+  const capture = tables.jobs
+    ? ok(
+        "capture",
+        `${schema}.${JOBS_TABLE} is there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
+      )
+    : fail("capture", notInstalled([`${schema}.${JOBS_TABLE} is missing`]), "run facetdb migrate");
   const problems = [
     ...(columns.length === 0 ? [`the worker login sees no column of ${holderLabel}`] : []),
     ...(columns.length > 0 && missing.length > 0
@@ -243,7 +263,6 @@ async function installChecks(
           `${unmarked.join(", ")} of ${holderLabel} ${unmarked.length === 1 ? "is" : "are"} not marked ${OWNED_MARK}`,
         ]
       : []),
-    ...(tables.jobs ? [] : [`${schema}.${JOBS_TABLE} is missing`]),
     ...(tables.owners ? [] : [`${schema}.${OWNERS_TABLE} is missing`]),
   ];
   let project: string | undefined;
@@ -259,16 +278,14 @@ async function installChecks(
   }
   if (problems.length > 0) {
     return [
-      fail(
-        "install",
-        `FacetDB is not installed on ${label}: ${problems.join("; ")}`,
-        "run facetdb migrate",
-      ),
+      capture,
+      fail("install", notInstalled(problems), "run facetdb migrate"),
       skip("queue", "nothing is installed to queue for"),
     ];
   }
   if (project !== undefined && project !== target.project.id) {
     return [
+      capture,
       fail(
         "install",
         `${label} belongs to another project (${project})`,
@@ -286,11 +303,14 @@ async function installChecks(
     engine === undefined
       ? ok(
           "install",
-          `${owned.length} marked columns on ${holderLabel}${side ? `, the view ${viewLabel}` : ""}, the jobs table and the marker row of project ${target.project.id} are there; the triggers are checked by facetdb migrate --dry-run with the admin connection string, which plans nothing when they are as installed`,
+          `${owned.length} marked columns on ${holderLabel}${side ? `, the view ${viewLabel}` : ""} and the marker row of project ${target.project.id} are there`,
         )
       : fail("install", engine.message, engine.fix);
+  if (!tables.jobs) {
+    return [capture, install, skip("queue", "nothing is installed to queue for")];
+  }
   if (!rights.tables.some((held) => held.table === JOBS_TABLE && held.privilege === "SELECT")) {
-    return [install, skip("queue", "the worker login may not read the jobs table")];
+    return [capture, install, skip("queue", "the worker login may not read the jobs table")];
   }
   const [row] = await query(
     `select count(*) as total, sum(${quoteIdent("claimed_at")} is not null) as claimed from ${quoteTable(schema, JOBS_TABLE)} where ${quoteIdent("table_name")} = ?`,
@@ -300,6 +320,7 @@ async function installChecks(
   const claimed = Number(row?.["claimed"] ?? 0);
   const waiting = total - claimed;
   return [
+    capture,
     install,
     ok(
       "queue",
@@ -430,6 +451,7 @@ export async function doctorChecks(
       const schema = target.schema ?? session.database;
       if (schema === undefined) {
         checks.push(
+          skip("capture", "no database to look in"),
           fail(
             "install",
             `${subject} names no database, and the source names no database for the table ${target.table}`,
@@ -441,7 +463,7 @@ export async function doctorChecks(
         return checks;
       }
       const rights = await readWorkerRights(query, schema);
-      const [install, queue] = await installChecks(query, target, schema, rights);
+      const [capture, install, queue] = await installChecks(query, target, schema, rights);
       const key = await keyOf(query, schema, target.table);
       const grants =
         key === undefined
@@ -451,7 +473,7 @@ export async function doctorChecks(
               "run facetdb migrate: it refuses a table without one, and says what to change",
             )
           : grantsCheck(target, schema, key, rights);
-      checks.push(install, grants, queue);
+      checks.push(capture, install, grants, queue);
       return checks;
     });
   } catch (error) {
