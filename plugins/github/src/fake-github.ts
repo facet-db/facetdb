@@ -1,11 +1,17 @@
 import type { GithubFetch } from "./rest.ts";
 
 /**
- * A handwritten GitHub for the action tests (facetdb-testing: fakes beside the test, no network):
- * the REST routes the actions call, over an in-memory repository, answered through the same
- * `fetch` parameter the real plugin is given. Every request is recorded; a script answers a
- * request first when it returns a response (a rate limit, a 5xx, a page from another host), and
- * a request no route knows is answered 418 and recorded, so a test can say none was made.
+ * A handwritten GitHub for the action and source tests (facetdb-testing: fakes beside the test, no
+ * network): the REST routes the actions and the issues source call, over an in-memory repository,
+ * answered through the same `fetch` parameter the real plugin is given. Every request is recorded;
+ * a script answers a request first when it returns a response (a rate limit, a 5xx, a page from
+ * another host), and a request no route knows is answered 418 and recorded, so a test can say none
+ * was made.
+ *
+ * The search (`GET /search/issues`) keeps the rules of GitHub's that the source depends on, as
+ * GitHub documents them (never seen from a session): the query must say `is:issue` or `is:pr` (422
+ * otherwise), `created:<=T` takes a time with its offset, and items created in the same second come
+ * in no promised order (here: the lower number first, the opposite of the source's own order).
  */
 
 /** One request as the fake saw it, its path's segments decoded. */
@@ -27,7 +33,21 @@ export type FakeIssue = {
   labels: string[];
   assignees: string[];
   readonly comments: FakeComment[];
+  title: string;
+  body: string | null;
+  /** GitHub's creation time, to the second: `YYYY-MM-DDTHH:MM:SSZ`. */
+  createdAt: string;
+  open: boolean;
+  /** A pull request's changed files, in GitHub's order; undefined for an issue. */
+  files: string[] | undefined;
+  /** How reading it answers once it is no longer here: 410 when deleted, 301 when transferred. */
+  gone: "deleted" | "transferred" | undefined;
 };
+
+/** A creation time by number, a minute apart, so that the higher number is the newer issue. */
+export function createdAtOf(number: number): string {
+  return new Date(Date.UTC(2026, 0, 1) + number * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
 
 export type FakeRepo = {
   hasIssues: boolean;
@@ -55,14 +75,24 @@ export function fakeGithub(options: {
   readonly token: string;
   readonly login: string;
   readonly origin?: string;
+  /** The API's path on its origin, as GitHub Enterprise Server's `/api/v3`; none by default. */
+  readonly basePath?: string;
 }) {
   const origin = options.origin ?? "https://api.github.com";
+  const basePath = (options.basePath ?? "").replace(/\/+$/, "");
   const repos = new Map<string, FakeRepo>();
+  /** Each repository's name as it was given (its case), for the URLs GitHub writes. */
+  const names = new Map<FakeRepo, string>();
   const requests: Seen[] = [];
   const unexpected: Seen[] = [];
   const scripts: Script[] = [];
-  /** `labelsMustExist`: adding a label the repository lacks is refused (422) instead of creating it. */
-  const settings = { labelsMustExist: false };
+  /**
+   * `labelsMustExist`: adding a label the repository lacks is refused (422) instead of creating it.
+   * `incompleteSearch`: the search answers `incomplete_results: true`, as when it timed out.
+   * `searchIgnoresBound`: the search reads the query but not its `created:<=` bound, so every page
+   * answers as the first.
+   */
+  const settings = { labelsMustExist: false, incompleteSearch: false, searchIgnoresBound: false };
   let nextComment = 1000;
 
   function repo(fullName: string, seed: Partial<Omit<FakeRepo, "issues">> = {}): FakeRepo {
@@ -73,6 +103,7 @@ export function fakeGithub(options: {
       collaborators: seed.collaborators ?? new Set(),
     };
     repos.set(fullName.toLowerCase(), made);
+    names.set(made, fullName);
     return made;
   }
 
@@ -82,6 +113,12 @@ export function fakeGithub(options: {
       labels: seed.labels ?? [],
       assignees: seed.assignees ?? [],
       comments: seed.comments ?? [],
+      title: seed.title ?? `Issue ${number}`,
+      body: seed.body === undefined ? `The body of ${number}.` : seed.body,
+      createdAt: seed.createdAt ?? createdAtOf(number),
+      open: seed.open ?? true,
+      files: seed.files,
+      gone: seed.gone,
     };
     target.issues.set(number, made);
     return made;
@@ -98,19 +135,107 @@ export function fakeGithub(options: {
   const has = (list: readonly string[], name: string) =>
     list.some((item) => item.toLowerCase() === name.toLowerCase());
 
-  function issueJson(number: number, found: FakeIssue) {
+  function issueJson(number: number, found: FakeIssue, target: FakeRepo) {
+    const fullName = names.get(target) ?? "unknown/unknown";
     return {
       number,
-      title: "an issue",
+      title: found.title,
+      body: found.body,
+      state: found.open ? "open" : "closed",
+      created_at: found.createdAt,
       labels: found.labels.map((name) => ({ id: 1, name, color: "ededed" })),
       assignees: found.assignees.map((login) => ({ login, id: 1 })),
+      repository_url: `${origin}${basePath}/repos/${fullName}`,
+      ...(found.files === undefined
+        ? {}
+        : {
+            pull_request: {
+              url: `${origin}${basePath}/repos/${fullName}/pulls/${number}`,
+              merged_at: null,
+            },
+          }),
     };
+  }
+
+  /** One page of `items` as GitHub pages a list: `per_page` and `page`, a `Link` to the next and the last. */
+  function paged(seen: Seen, items: readonly unknown[]): Response {
+    const size = Math.min(100, Number(seen.url.searchParams.get("per_page") ?? "30"));
+    const page = Number(seen.url.searchParams.get("page") ?? "1");
+    const last = Math.max(1, Math.ceil(items.length / size));
+    const link = (to: number) => `<${origin}${seen.url.pathname}?per_page=${size}&page=${to}>`;
+    return json(
+      200,
+      items.slice((page - 1) * size, page * size),
+      page < last ? { link: `${link(page + 1)}; rel="next", ${link(last)}; rel="last"` } : {},
+    );
+  }
+
+  /**
+   * `GET /search/issues`: the open issues or pull requests of one repository, newest first, as
+   * the source asks (`repo:`, `is:open`, `is:issue` or `is:pr`, `created:<=` with an offset,
+   * `sort=created`, `order=desc`); any other term or order is refused 422, as a query GitHub would
+   * read otherwise would be a defect of the source.
+   */
+  function search(seen: Seen): Response {
+    const params = seen.url.searchParams;
+    if (params.get("sort") !== "created" || params.get("order") !== "desc") {
+      return json(422, { message: "Validation Failed", errors: [{ code: "invalid" }] });
+    }
+    let fullName: string | undefined;
+    let pulls: boolean | undefined;
+    let open = false;
+    let before: number | undefined;
+    for (const term of (params.get("q") ?? "").split(" ").filter((part) => part !== "")) {
+      if (term.startsWith("repo:")) {
+        fullName = term.slice("repo:".length);
+      } else if (term === "is:open") {
+        open = true;
+      } else if (term === "is:issue" || term === "is:pr") {
+        pulls = term === "is:pr";
+      } else if (/^created:<=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$/.test(term)) {
+        before = settings.searchIgnoresBound
+          ? undefined
+          : Date.parse(term.slice("created:<=".length));
+      } else {
+        return json(422, { message: "Validation Failed", errors: [{ code: "invalid" }] });
+      }
+    }
+    if (pulls === undefined) {
+      return json(422, { message: "Query must include 'is:issue' or 'is:pull-request'" });
+    }
+    const target = fullName === undefined ? undefined : repos.get(fullName.toLowerCase());
+    if (target === undefined || !open) {
+      return json(422, { message: "Validation Failed", errors: [{ code: "invalid" }] });
+    }
+    const found = [...target.issues.entries()]
+      .filter(
+        ([, one]) =>
+          one.open &&
+          one.gone === undefined &&
+          (one.files !== undefined) === pulls &&
+          (before === undefined || Date.parse(one.createdAt) <= before),
+      )
+      .sort(([a, x], [b, y]) =>
+        x.createdAt === y.createdAt ? a - b : x.createdAt < y.createdAt ? 1 : -1,
+      );
+    const size = Math.min(100, Number(params.get("per_page") ?? "30"));
+    const page = Number(params.get("page") ?? "1");
+    return json(200, {
+      total_count: found.length,
+      incomplete_results: settings.incompleteSearch,
+      items: found
+        .slice((page - 1) * size, page * size)
+        .map(([number, one]) => ({ ...issueJson(number, one, target), score: 1 })),
+    });
   }
 
   function route(seen: Seen): Response {
     const { method, segments: s, body } = seen;
     if (s.length === 1 && s[0] === "user" && method === "GET") {
       return json(200, { login: options.login, id: 1 });
+    }
+    if (s.length === 2 && s[0] === "search" && s[1] === "issues" && method === "GET") {
+      return search(seen);
     }
     if (s[0] !== "repos" || s.length < 3) {
       return wrong(seen);
@@ -122,6 +247,23 @@ export function fakeGithub(options: {
     const rest = s.slice(3);
     if (rest.length === 0 && method === "GET") {
       return json(200, { full_name: `${s[1]}/${s[2]}`, has_issues: target.hasIssues });
+    }
+    if (rest[0] === "pulls" && rest.length >= 2 && method === "GET") {
+      const number = Number(rest[1]);
+      const pull = target.issues.get(number);
+      if (pull === undefined || pull.files === undefined || pull.gone !== undefined) {
+        return json(404, NOT_FOUND);
+      }
+      if (rest.length === 2) {
+        return json(200, { number, title: pull.title, changed_files: pull.files.length });
+      }
+      if (rest.length === 3 && rest[2] === "files") {
+        return paged(
+          seen,
+          pull.files.map((filename) => ({ filename, status: "modified", additions: 1 })),
+        );
+      }
+      return wrong(seen);
     }
     if (rest[0] === "labels") {
       if (rest.length === 2 && method === "GET") {
@@ -162,7 +304,16 @@ export function fakeGithub(options: {
     }
     const tail = rest.slice(2);
     if (tail.length === 0 && method === "GET") {
-      return json(200, issueJson(number, found));
+      if (found.gone === "deleted") {
+        return json(410, { message: "This issue was deleted" });
+      }
+      if (found.gone === "transferred") {
+        return new Response(null, {
+          status: 301,
+          headers: { location: `${origin}/repositories/99/issues/1` },
+        });
+      }
+      return json(200, issueJson(number, found, target));
     }
     if (tail[0] === "labels") {
       if (tail.length === 1 && method === "POST") {
@@ -213,11 +364,11 @@ export function fakeGithub(options: {
             found.assignees.push(one);
           }
         }
-        return json(201, issueJson(number, found));
+        return json(201, issueJson(number, found, target));
       }
       if (method === "DELETE") {
         found.assignees = found.assignees.filter((one) => !has(logins, one));
-        return json(200, issueJson(number, found));
+        return json(200, issueJson(number, found, target));
       }
       return wrong(seen);
     }
@@ -258,10 +409,14 @@ export function fakeGithub(options: {
 
   const fetch: GithubFetch = async (url, init) => {
     const parsed = new URL(url);
+    // The path under the API's own; undefined for a path outside it.
+    const inside = parsed.pathname.startsWith(`${basePath}/`)
+      ? parsed.pathname.slice(basePath.length)
+      : undefined;
     const seen: Seen = {
       method: init.method,
       url: parsed,
-      segments: parsed.pathname
+      segments: (inside ?? parsed.pathname)
         .split("/")
         .slice(1)
         .map((segment) => decodeURIComponent(segment)),
@@ -279,7 +434,7 @@ export function fakeGithub(options: {
         return answer;
       }
     }
-    if (parsed.origin !== origin) {
+    if (parsed.origin !== origin || inside === undefined) {
       unexpected.push(seen);
       throw new TypeError("fetch failed");
     }

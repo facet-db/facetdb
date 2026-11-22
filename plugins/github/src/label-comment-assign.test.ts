@@ -1356,12 +1356,12 @@ describe("when the config loads", () => {
     expect(leaks(error, broken)).toEqual([]);
   });
 
-  it("declares the token as the plugin's one secret and the three actions", () => {
+  it("declares the token and the webhook's secret as the plugin's secrets, and the three actions", () => {
     const plugin = createGithubPlugin({
       fetch: fakeGithub({ token: TOKEN, login: LOGIN }).fetch,
       now: Date.now,
     });
-    expect(plugin.manifest.secrets).toEqual(["token"]);
+    expect(plugin.manifest.secrets).toEqual(["token", "webhookSecret"]);
     expect(Object.keys(plugin.actions).sort()).toEqual(["assign", "comment", "label"]);
     expect(github.comment({ ...C, body: "x", when: { status: "done" } })).toEqual({
       plugin: "@facetdb/github",

@@ -4,8 +4,9 @@
  *
  * ```ts
  * import { github } from "@facetdb/github";
- * plugins: { github: { token: env("GITHUB_TOKEN") } },   // apiUrl for GitHub Enterprise Server
- * // On a source whose record key is the issue's number: each action names the repository.
+ * plugins: { github: { token: env("GITHUB_TOKEN"), webhookSecret: env("GITHUB_WEBHOOK_SECRET") } },   // apiUrl for GitHub Enterprise Server
+ * source: github.issues({ repo: "your-org/your-repo", include: ["issues", "pull_requests"] }),
+ * read: ["title", "body", "labels", "changed_files"],
  * actions: [
  *   github.label({ repo: "your-org/your-repo", when: { not_priority: true }, add: ["Not Priority"], else: { remove: ["Not Priority"] } }),
  *   github.comment({ repo: "your-org/your-repo", id: "triage", when: { status: "needs_review" }, body: "Triage: not priority is {{not_priority}} ({{not_priority.probability}})." }),
@@ -13,22 +14,50 @@
  * ],
  * ```
  *
+ * The `issues` source reads one repository's issues and pull requests, the record's key the number:
+ * GitHub's signed webhook names what changed (`receive`), `read` reads it, `scan` pages through
+ * every open one for `facetdb backfill` (issues-source.ts). Its own poll is not built yet.
+ *
  * `repo` is required in every action, and refused at load when missing: the SDK lets an action's
  * schema see nothing of the source it is configured on, so an action cannot yet take the repository
- * from a GitHub source when the config loads (not built yet: an action-level load hook that sees
- * the source, as `ChannelSpec.check` does for a channel). The comment action needs an `id` and a
- * token tied to an account (actions.ts).
+ * from the GitHub source when the config loads (an action-level load hook that sees the source, as
+ * `ChannelSpec.check` does for a channel, would let the example leave it out). On the issues source
+ * an action naming another repository than the source's is refused when it runs (issue.ts). The
+ * comment action needs an `id` and a token tied to an account (actions.ts).
  *
- * The issues source and the triage pack are not built yet; they join the same `createGithubPlugin`
- * and the same `github` helpers.
+ * The poll and the triage pack join the same `createGithubPlugin` and the same `github` helpers.
  */
-import { type ActionCall, actionCall, type JsonValue } from "facetdb";
+import { type ActionCall, actionCall, type JsonValue, type SourceCall, sourceCall } from "facetdb";
 import { definePlugin, type Plugin } from "facetdb/plugin";
 import { type ActionDeps, githubActions } from "./actions.ts";
+import { issuesSource } from "./issues-source.ts";
+import type { Kind } from "./issues-state.ts";
 import { type GithubConfig, pluginConfig } from "./settings.ts";
 
 export type { ActionDeps as GithubPluginOptions } from "./actions.ts";
 export { COMMENT_MAX, MARKER_PREFIX, NEEDS_REVIEW, VALUE_MAX } from "./comment-body.ts";
+export { SCAN_PAGE, SEEN_MAX } from "./issues-scan.ts";
+export { type IssuesSettings, issuesSettings } from "./issues-source.ts";
+export {
+  BODY_MAX,
+  FILES_SHOWN,
+  KINDS,
+  LABEL_MAX,
+  LABELS_MAX,
+  PATH_MAX,
+  TITLE_MAX,
+} from "./issues-state.ts";
+export {
+  ACCEPTED,
+  BAD_SIGNATURE,
+  NO_SIGNATURE,
+  OTHER_REPOSITORY,
+  type Receipt,
+  TOO_LARGE,
+  UNREADABLE,
+  WEBHOOK_BODY_MAX_BYTES,
+  WEBHOOKS_OFF,
+} from "./issues-webhook.ts";
 export {
   BODY_MAX_BYTES,
   GithubActionError,
@@ -40,13 +69,14 @@ export {
 } from "./rest.ts";
 export { DEFAULT_API_URL, type GithubConfig } from "./settings.ts";
 
-/** The plugin, its two side effects passed in: `fetch` and the clock. */
+/** The plugin, its two side effects passed in: `fetch` and the clock (the source reads the worker's). */
 export function createGithubPlugin(options: ActionDeps): Plugin<GithubConfig> {
   return definePlugin({
     name: "github",
     version: "0.0.0",
     facetdb: ">=0.0.0 <1.0.0",
     config: pluginConfig,
+    sources: { issues: issuesSource({ fetch: options.fetch }) },
     actions: githubActions(options),
   });
 }
@@ -85,12 +115,23 @@ export type CommentOptions = Conditional<{
   readonly id: string;
 }>;
 
-/** An action's settings as the config file holds them: JSON, with nothing left undefined. */
+export type IssuesOptions = {
+  /** `owner/name`: the repository whose issues and pull requests are the records. */
+  readonly repo: string;
+  /** What the source reads; both by default. */
+  readonly include?: readonly Kind[];
+};
+
+/** Settings as the config file holds them: JSON, with nothing left undefined. */
 function written(options: object): { readonly [key: string]: JsonValue } {
   return JSON.parse(JSON.stringify(options)) as { readonly [key: string]: JsonValue };
 }
 
 export const github = {
+  /** `github.issues({ repo: "your-org/your-repo", include: ["issues", "pull_requests"] })`. */
+  issues(options: IssuesOptions): SourceCall {
+    return sourceCall("@facetdb/github", "issues", written(options));
+  },
   /** `github.label({ repo, add: ["Not Priority"], else: { remove: ["Not Priority"] }, when })`. */
   label(options: LabelOptions): ActionCall {
     return actionCall("@facetdb/github", "label", written(options));

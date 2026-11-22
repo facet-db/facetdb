@@ -47,13 +47,14 @@ export function parseRepo(text: string): Repo | undefined {
 
 /** The refusal of an action that names no repository, with where to write it, in its own helper. */
 export function repoRequired(action: "label" | "comment" | "assign"): string {
-  return `the action names no repository: write it in the action, github.${action}({ repo: "your-org/your-repo", ... }), the repository whose issue number is the record's key (every GitHub action names it until a GitHub source of this plugin can give it)`;
+  return `the action names no repository: write it in the action, github.${action}({ repo: "your-org/your-repo", ... }), the repository whose issue number is the record's key (on a github.issues source, the same repository as the source's; every GitHub action names it until an action's check can see the source it runs on when the config loads)`;
 }
 
 /**
  * The `repo` setting of one action, required: the SDK gives an action's schema no sight of the
- * source it runs on when the config loads, and no source of this plugin exists yet, so an action
- * that named none would load clean and fail at every delivery.
+ * source it runs on when the config loads, so an action that named none would load clean on a
+ * source that is not this plugin's and fail at every delivery. On this plugin's issues source the
+ * action's `repo` must be the source's own (issue.ts, `issueOf`).
  */
 export function repoSetting(action: "label" | "comment" | "assign") {
   return z
@@ -65,7 +66,7 @@ export function repoSetting(action: "label" | "comment" | "assign") {
 }
 
 /** The largest issue number taken: GitHub's numbers are 32-bit. */
-const ISSUE_MAX = 2_147_483_647;
+export const ISSUE_MAX = 2_147_483_647;
 
 /** The issue a record's key names, or undefined when the key is not a positive integer as text. */
 export function parseIssueNumber(key: string): number | undefined {
@@ -102,16 +103,26 @@ export function apiBase(apiUrl: string | undefined): URL {
   return new URL(apiUrl ?? DEFAULT_API_URL);
 }
 
-/** The plugin's settings: `plugins: { github: { token: env("GITHUB_TOKEN") } }`. */
+/**
+ * The plugin's settings: `plugins: { github: { token: env("GITHUB_TOKEN"), webhookSecret:
+ * env("GITHUB_WEBHOOK_SECRET") } }`.
+ */
 export const pluginConfig = z.object({
   /**
-   * A token that may change the repository's issues: a fine-grained token with Issues read and
-   * write on it, or a classic token with the repo scope (public_repo for a public repository).
+   * A token that may read and change the repository's issues: a fine-grained token with Issues and
+   * Pull requests on it (read for the issues source, write as well for the actions), or a classic
+   * token with the repo scope (public_repo for a public repository).
    */
   token: z.secret().regex(TOKEN, {
     error:
       "must be a GitHub token as GitHub gives it (ghp_…, github_pat_…, ghs_…): letters, digits and _ only, no spaces",
   }),
+  /**
+   * The secret of the repository's webhook, which GitHub signs every delivery with
+   * (`X-Hub-Signature-256`). Without it the issues source answers every delivery 401: its webhooks
+   * are off, and only its poll and `facetdb backfill` find issues.
+   */
+  webhookSecret: z.secret().optional(),
   /** GitHub Enterprise Server's REST API, such as https://github.example.com/api/v3. */
   apiUrl: z
     .string()

@@ -464,8 +464,8 @@ export async function send(session: Session, request: Request): Promise<Reply> {
   throw refusal(session, request, reply);
 }
 
-/** The `rel="next"` URL of a `Link` header, or undefined. */
-function nextLink(header: string | null): string | undefined {
+/** The `rel="next"` URL of a `Link` header, or undefined. Never followed by a caller outside `pages`. */
+export function nextLink(header: string | null): string | undefined {
   if (header === null) {
     return undefined;
   }

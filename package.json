@@ -13,7 +13,7 @@
     "build": "pnpm -r --if-present run build",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "lint:types": "eslint .",
+    "lint:types": "node --max-old-space-size=4096 ./node_modules/eslint/bin/eslint.js .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --parallel --if-present run typecheck",
     "test": "vitest run",
