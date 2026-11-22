@@ -36,6 +36,7 @@ export { createCheckStore } from "./check/store.ts";
 export { onlyRecord } from "./check/target.ts";
 export { PREVIEW_MAX_LIMIT } from "./config/routes.ts";
 export type {
+  ApplyOptions,
   ConfigDraft,
   ConfigFileDoor,
   ConfigService,
@@ -61,7 +62,7 @@ export type {
   StoredVersion,
   VersionHistory,
 } from "./config/versions.ts";
-export { VERSION_HISTORY_SHOWN } from "./config/versions.ts";
+export { VERSION_HISTORY_SHOWN, versionChanges } from "./config/versions.ts";
 export type {
   AlertTestDoor,
   AlertTestOutcome,
@@ -76,6 +77,7 @@ export type {
   Home,
   SourceFacts,
   SourceRow,
+  SourceVerdict,
   TableFacts,
   WorkerLogin,
 } from "./data/index.ts";
@@ -84,6 +86,8 @@ export {
   DECISIONS_DEFAULT_LIMIT,
   DECISIONS_MAX_LIMIT,
   DOCTOR_FRESH_MS,
+  doctorVerdict,
+  losesAccess,
 } from "./data/index.ts";
 export type { DataServices } from "./data/routes.ts";
 export type { RunsPage, RunsService, RunView } from "./data/runs.ts";

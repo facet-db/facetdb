@@ -128,6 +128,43 @@ export async function readQuestionSetInForce(
   };
 }
 
+/**
+ * The set a source ran before a loop open replaces it: its version, and its set, null when that set
+ * no longer parses (an older FacetDB's rules), which an open must never fail on.
+ */
+export type ReplacedInForce = {
+  readonly version: number;
+  readonly questionSet: QuestionSet | null;
+};
+
+/**
+ * The row in force, read by the open that replaces it: the same row `readQuestionSetInForce` reads,
+ * with a set that no longer parses answered as null rather than thrown (the open writes the row
+ * anew whatever the old one holds).
+ */
+export async function readReplacedInForce(
+  query: SqlQuery,
+  sourceId: string,
+): Promise<ReplacedInForce | null> {
+  const rows = await query(
+    `select version::text as version, question_set::text as question_set
+       from facetdb.question_sets_in_force where source_id = $1`,
+    [sourceId],
+  );
+  const row = rows[0];
+  if (row === undefined) {
+    return null;
+  }
+  const version = integer(row, "version");
+  let parsed: ReturnType<typeof parseQuestionSet>;
+  try {
+    parsed = parseQuestionSet(JSON.parse(setText(row["question_set"], version, sourceId)));
+  } catch {
+    return { version, questionSet: null };
+  }
+  return { version, questionSet: parsed.ok ? parsed.questionSet : null };
+}
+
 /** Writes the set the worker runs from now on: one row per source, replaced whole at each loop open. */
 export async function writeQuestionSetInForce(
   query: SqlQuery,

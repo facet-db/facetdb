@@ -13,7 +13,7 @@ import {
 } from "@facetdb/core";
 import { Hono } from "hono";
 import type { AppEnv } from "../auth/middleware.ts";
-import { type Doctors, INSTALL_CHECK, type Verdict } from "./doctor.ts";
+import { type Doctors, INSTALL_CHECK, losesAccess, type Verdict } from "./doctor.ts";
 import type { DashboardDoor, StoppedSource } from "./door.ts";
 import { counted, dollarsOf, duration, grouped, money, percent } from "./figures.ts";
 import { sourceIds, unknownProject } from "./project.ts";
@@ -202,7 +202,8 @@ function withoutName(source: SourceState): string {
 
 const behind = (source: SourceState) =>
   source.verdict === "failing" && source.failedCheck === INSTALL_CHECK;
-const lost = (source: SourceState) => source.verdict === "failing" && !behind(source);
+// The rule the worker raises Connector lost access by, so Home and the alert agree.
+const lost = (source: SourceState) => losesAccess(source);
 
 /**
  * A failing source reads as a lost connector unless its failing check is the install one: then the
@@ -232,7 +233,8 @@ function failingWords(sources: readonly SourceState[]): string {
 
 /**
  * The title of Home's state when a source's loop failed and it stopped alone, and no failure the
- * alerts name comes first. It is no alert kind: "connector lost access" is not raised here.
+ * alerts name comes first. It is no alert kind: the worker raises "connector lost access" for a
+ * stop only when its login or credential was refused, and Home names it from the doctor's verdict.
  */
 export const SOURCE_STOPPED_TITLE = "A source stopped";
 

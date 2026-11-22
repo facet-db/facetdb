@@ -35,6 +35,7 @@ import {
 } from "../../config/index.ts";
 import { SteppedClock } from "../testing.ts";
 import {
+  type AppliedBy,
   configFileDoor,
   createFleet,
   planReload,
@@ -212,6 +213,8 @@ function rig(initial: ProjectConfig = PROJECT) {
   const lines: string[] = [];
   /** Each config the fleet handed over as the project's settings in force: at open and per reload. */
   const projects: ProjectConfig[] = [];
+  /** With each of those, the Apply its reload followed; undefined for every other load. */
+  const applies: (AppliedBy | undefined)[] = [];
   /** The review queue every loop's writes follow, by source name (the store id in these tests). */
   const queue = new FakeReviewQueue();
   /** Every connector a loop was opened with, in order. */
@@ -308,8 +311,9 @@ function rig(initial: ProjectConfig = PROJECT) {
     clock,
     print: (line) => lines.push(line),
     onPass: () => () => undefined,
-    project: (config) => {
+    project: (config, applied) => {
       projects.push(config);
+      applies.push(applied);
     },
   });
 
@@ -324,6 +328,7 @@ function rig(initial: ProjectConfig = PROJECT) {
     closed,
     lines,
     projects,
+    applies,
     state,
     queue,
     connectors,
@@ -760,12 +765,16 @@ describe("the config file door", () => {
     }
     const load = loader(fake, [PROJECT, judged.config]);
     t.state.file = judged.config;
+    const told: unknown[] = [];
     const door = configFileDoor({
       path: "facetdb.config.ts",
       files: fake.files,
       load,
       env: ENV,
-      reload: () => t.fleet.reload(),
+      reload: (applied) => {
+        told.push(applied);
+        return t.fleet.reload(applied);
+      },
     });
 
     const shown = await door.diff({ source: draft });
@@ -792,7 +801,10 @@ describe("the config file door", () => {
     );
     expect(fake.state.writes).toEqual([]);
 
-    const applied = await door.apply({ source: draft }, { plan: shown.plan, force: false });
+    const applied = await door.apply(
+      { source: draft },
+      { plan: shown.plan, force: false, by: "maya" },
+    );
     await t.fleet.settled();
 
     expect(applied).toMatchObject({
@@ -803,6 +815,12 @@ describe("the config file door", () => {
         sources: [{ source: "listings", outcome: "restarted", version: 2 }, {}],
       },
     });
+    // The reload is told who applied which source (the alert of the set it changes), and the fleet
+    // hands it on with that reload's load alone: the open's had none, nor has a Check again after
+    // it.
+    expect(told).toEqual([{ by: "maya", source: "listings" }]);
+    await door.reload();
+    expect(t.applies).toEqual([undefined, { by: "maya", source: "listings" }, undefined]);
     expect(fake.state.writes).toEqual([configFileSource(judged.config)]);
     // What GET /v1/config answers (toProjectJson of the fleet's config) is the file as written.
     expect(toProjectJson(t.fleet.config()).sources[0]?.questions["is_scam"]?.instructions).toBe(
@@ -820,12 +838,16 @@ describe("the config file door", () => {
     const fake = fakeFiles(configFileSource(PROJECT));
     const capped = { ...PROJECT, spendingCap: 2_000_000, onCapReached: "continue" as const };
     t.state.file = capped;
+    const told: unknown[] = [];
     const door = configFileDoor({
       path: "facetdb.config.ts",
       files: fake.files,
       load: loader(fake, [PROJECT, capped]),
       env: ENV,
-      reload: () => t.fleet.reload(),
+      reload: (applied) => {
+        told.push(applied);
+        return t.fleet.reload();
+      },
     });
     const project = { spendingCap: 2_000_000, onCapReached: "continue" } as const;
 
@@ -845,8 +867,10 @@ describe("the config file door", () => {
     ]);
     expect(fake.state.writes).toEqual([]);
 
-    const applied = await door.apply({ project }, { plan: shown.plan, force: false });
+    const applied = await door.apply({ project }, { plan: shown.plan, force: false, by: "maya" });
     await t.fleet.settled();
+    // A project draft writes no source: no question set is the reviewer's.
+    expect(told).toEqual([{ by: "maya", source: null }]);
 
     expect(applied).toMatchObject({
       kind: "applied",
@@ -885,7 +909,9 @@ describe("the config file door", () => {
       env: ENV,
       reload: () => Promise.reject(new Error("nothing is written, so nothing reloads")),
     });
-    expect(await door.apply({ source: draft }, { plan: "an-old-plan", force: true })).toEqual({
+    expect(
+      await door.apply({ source: draft }, { plan: "an-old-plan", force: true, by: "maya" }),
+    ).toEqual({
       kind: "stale",
     });
     expect(fake.state.writes).toEqual([]);
@@ -918,14 +944,18 @@ describe("the config file door", () => {
       message: "facetdb.config.ts has changes git has not committed, and Apply would replace them",
       fix: 'commit them (git add facetdb.config.ts && git commit), or apply again with force ("force": true) to replace them',
     });
-    expect(await door.apply({ source: draft }, { plan: shown.plan, force: false })).toEqual({
+    expect(
+      await door.apply({ source: draft }, { plan: shown.plan, force: false, by: "maya" }),
+    ).toEqual({
       kind: "uncommitted",
       ...shown.uncommitted,
     });
     expect(fake.state.writes).toEqual([]);
     expect(reloads).toEqual([]);
 
-    expect(await door.apply({ source: draft }, { plan: shown.plan, force: true })).toMatchObject({
+    expect(
+      await door.apply({ source: draft }, { plan: shown.plan, force: true, by: "maya" }),
+    ).toMatchObject({
       kind: "applied",
     });
     expect(fake.state.writes).toHaveLength(1);
@@ -1122,7 +1152,10 @@ describe("the config file door when the written file does not load", () => {
       throw new Error("planned");
     }
 
-    const result = await door.apply({ source: draft }, { plan: shown.plan, force: false });
+    const result = await door.apply(
+      { source: draft },
+      { plan: shown.plan, force: false, by: "maya" },
+    );
 
     expect(result).toEqual({
       kind: "reverted",

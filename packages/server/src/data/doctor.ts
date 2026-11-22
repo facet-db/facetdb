@@ -33,6 +33,33 @@ export type Doctors = {
   verdict(source: SourceFacts): Promise<SourceVerdict>;
 };
 
+/**
+ * A table source's doctor in one word, from the checks it ran: what Home and Sources show, and what
+ * the worker's own reading every 5 minutes raises Connector lost access on, so the two always name
+ * the same failed check in the same words.
+ */
+export function doctorVerdict(checks: readonly DoctorCheck[]): SourceVerdict {
+  // The worker's heartbeat is Home's own line; the source's verdict is its database and install.
+  const counted = checks.filter((check) => check.name !== "worker" && check.status !== "skip");
+  const failed = counted.find((check) => check.status === "fail");
+  if (failed !== undefined) {
+    return { verdict: "failing", words: failed.detail, failedCheck: failed.name, checks };
+  }
+  const warned = counted.find((check) => check.status === "warn");
+  return warned === undefined
+    ? { verdict: "healthy", words: "as installed", failedCheck: null, checks }
+    : { verdict: "warning", words: warned.detail, failedCheck: null, checks };
+}
+
+/**
+ * "Connector lost access": a failing verdict whose failed check is not the install one. A failing
+ * install check means the database answers and lacks what facetdb.config.ts asks for, which
+ * `facetdb migrate` fixes: Home names that "the install is behind", and no alert is raised for it.
+ */
+export function losesAccess(verdict: Pick<SourceVerdict, "verdict" | "failedCheck">): boolean {
+  return verdict.verdict === "failing" && verdict.failedCheck !== INSTALL_CHECK;
+}
+
 export function createDoctors(clock: Clock, freshMs: number = DOCTOR_FRESH_MS): Doctors {
   const results = new Map<
     string,
@@ -76,17 +103,7 @@ export function createDoctors(clock: Clock, freshMs: number = DOCTOR_FRESH_MS): 
           checks: [],
         };
       }
-      const checks = await checksOf(source, source.table);
-      // The worker's heartbeat is Home's own line; the source's verdict is its database and install.
-      const counted = checks.filter((check) => check.name !== "worker" && check.status !== "skip");
-      const failed = counted.find((check) => check.status === "fail");
-      if (failed !== undefined) {
-        return { verdict: "failing", words: failed.detail, failedCheck: failed.name, checks };
-      }
-      const warned = counted.find((check) => check.status === "warn");
-      return warned === undefined
-        ? { verdict: "healthy", words: "as installed", failedCheck: null, checks }
-        : { verdict: "warning", words: warned.detail, failedCheck: null, checks };
+      return doctorVerdict(await checksOf(source, source.table));
     },
   };
 }

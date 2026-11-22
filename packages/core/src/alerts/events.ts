@@ -22,12 +22,17 @@ export type AlertKind = (typeof ALERT_KINDS)[number];
 export type AlertSeverity = ChannelMessage["severity"];
 
 /**
- * The kinds the code resolves: a healthy call resolves `model_failing`. Every other kind is raised
- * and never resolved, so a page must not say it is "not resolved". A kind that gains a resolve path
- * is added here. `worker_not_running` is not one: it is raised once for a worker that is gone,
- * whose row is taken as it is raised, and nothing later says it is back.
+ * The kinds the code resolves: a healthy call resolves `model_failing`, and the worker resolves
+ * `connector_lost_access` once the source reads well again (its doctor's verdict passes at the
+ * worker's 5-minute reading, or a plugin source's read answers). Every other kind is raised and
+ * never resolved, so a page must not say it is "not resolved". A kind that gains a resolve path is
+ * added here. `worker_not_running` is not one: it is raised once for a worker that is gone, whose
+ * row is taken as it is raised, and nothing later says it is back.
  */
-export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = ["model_failing"];
+export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = [
+  "model_failing",
+  "connector_lost_access",
+];
 
 /** The Severity column of the system alerts. */
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
@@ -102,14 +107,32 @@ export type AlertEvent = {
    * minutes are two alerts.
    */
   readonly worker?: string;
+  /**
+   * The question-set version an event is about (`question_set_changed`); absent for every other
+   * event. It is part of the event's key, so a second change within 30 minutes is an alert of its
+   * own, while one version is one alert.
+   */
+  readonly version?: number;
+  /**
+   * What raised a Connector lost access alert: its source's doctor at the worker's 5-minute look,
+   * or a refusal its loop met (a refused login, right or credential). Kept with the active alert,
+   * so every worker reading it knows: a look resolves only what a doctor raised, and a refusal's
+   * alert waits for a write or a read through the source made after it began. Absent for every
+   * other event; not part of the key.
+   */
+  readonly cause?: "doctor" | "refusal";
 };
 
 /** What makes two events "the same event": one alert is sent per key per 30 minutes. */
 export function eventKey(
-  event: Pick<AlertEvent, "kind" | "project" | "source" | "question" | "worker">,
+  event: Pick<AlertEvent, "kind" | "project" | "source" | "question" | "worker" | "version">,
 ): string {
   const key = [event.kind, event.project, event.source, event.question ?? ""];
-  return (event.worker === undefined ? key : [...key, event.worker]).join("|");
+  return [
+    ...key,
+    ...(event.worker === undefined ? [] : [event.worker]),
+    ...(event.version === undefined ? [] : [`v${event.version}`]),
+  ].join("|");
 }
 
 function placeOf(event: AlertEvent): string {

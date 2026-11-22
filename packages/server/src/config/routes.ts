@@ -259,7 +259,11 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
     const outcome =
       body.confirm === undefined
         ? await service.diff(projectId, body.draft)
-        : await service.apply(projectId, body.draft, { plan: body.confirm, force: body.force });
+        : await service.apply(projectId, body.draft, {
+            plan: body.confirm,
+            force: body.force,
+            by: c.get("reviewer"),
+          });
     switch (outcome.kind) {
       case "planned": {
         const { kind: _kind, ...result } = outcome;

@@ -17,7 +17,11 @@ export {
   storePurgeRefusal,
   storePurgeStatements,
 } from "./purge.ts";
-export type { QuestionSetInForce, StoredQuestionSetVersion } from "./question-sets.ts";
+export type {
+  QuestionSetInForce,
+  ReplacedInForce,
+  StoredQuestionSetVersion,
+} from "./question-sets.ts";
 export {
   deleteCursorsSql,
   NOT_A_RESUME_ROW,

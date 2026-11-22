@@ -287,10 +287,15 @@ describe("POST /v1/apply", () => {
       },
     });
     expect(t.calls).toEqual([
-      { kind: "apply", draft: { source: DRAFT }, options: { plan: "plan-1", force: false } },
+      // The reviewer who confirmed it goes with the write: this machine's OS user here.
+      {
+        kind: "apply",
+        draft: { source: DRAFT },
+        options: { plan: "plan-1", force: false, by: "os:alex" },
+      },
     ]);
     await rig(t.door)({ source: DRAFT, confirm: "plan-1", force: true });
-    expect(t.calls.at(-1)?.options).toEqual({ plan: "plan-1", force: true });
+    expect(t.calls.at(-1)?.options).toEqual({ plan: "plan-1", force: true, by: "os:alex" });
   });
 
   it.each([
@@ -375,7 +380,7 @@ describe("POST /v1/apply", () => {
       {
         kind: "apply",
         draft: { project: { spendingCap: null } },
-        options: { plan: "plan-1", force: true },
+        options: { plan: "plan-1", force: true, by: "os:alex" },
       },
     ]);
   });

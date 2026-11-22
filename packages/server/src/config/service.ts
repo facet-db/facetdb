@@ -198,15 +198,23 @@ export type FileApply =
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
   | ({ readonly kind: "unreadable" } & Words);
 
+/**
+ * A confirmed Apply: the plan the diff answered with, whether to replace a file git keeps no copy
+ * of, and the reviewer who confirmed it, as the session names them (a question set the write
+ * changes names them in its Question set changed alert).
+ */
+export type ApplyOptions = {
+  readonly plan: string;
+  readonly force: boolean;
+  readonly by: string;
+};
+
 /** The CLI's door to `facetdb.config.ts`: the loader, the exporter, git and the reload are its. */
 export type ConfigFileDoor = {
   /** Reads the file again and applies it to the running loops, as after a write. */
   reload(): Promise<ReloadSummary>;
   diff(draft: ConfigDraft): Promise<FileDiff>;
-  apply(
-    draft: ConfigDraft,
-    options: { readonly plan: string; readonly force: boolean },
-  ): Promise<FileApply>;
+  apply(draft: ConfigDraft, options: ApplyOptions): Promise<FileApply>;
 };
 
 /** A running source the preview can read: the fields its connector reads, and the preview over it. */
@@ -300,7 +308,7 @@ export type ConfigService = {
   apply(
     projectId: string,
     draft: ConfigDraft,
-    options: { readonly plan: string; readonly force: boolean },
+    options: ApplyOptions,
   ): Promise<FileOutcome<FileApply>>;
   /** Check again: the worker reads the file and its databases again; nothing is written. */
   reload(projectId: string): Promise<FileOutcome<FileReload>>;

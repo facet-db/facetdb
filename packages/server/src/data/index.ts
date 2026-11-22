@@ -44,6 +44,8 @@ export {
   createDoctors,
   DOCTOR_FRESH_MS,
   type Doctors,
+  doctorVerdict,
+  losesAccess,
   type SourceVerdict,
   type Verdict,
 } from "./doctor.ts";

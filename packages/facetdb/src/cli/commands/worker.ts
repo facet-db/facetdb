@@ -44,6 +44,7 @@ import {
   outboxQueue,
   queueAction,
   requireAccountToServe,
+  type SecretPart,
   type StudioBuild,
   secretParts,
   type TableFacts,
@@ -104,6 +105,7 @@ import {
   storeSharedFor,
   storeSourceId,
 } from "../store-door.ts";
+import { createAlertRaisers, type WatchedSource } from "./alert-raisers.ts";
 import { createBackfillJobs } from "./backfill-jobs.ts";
 import {
   configFileDoor,
@@ -568,7 +570,10 @@ export async function runWorkers(
    * reload that keeps a loop reopens nothing, and its row rightly stays what it was.
    */
   async function inForce(loop: SourceLoop): Promise<SourceLoop> {
-    await store.questionSets.run(idOf(loop.source), loop.version, loop.questionSet);
+    const before = await store.questionSets.run(idOf(loop.source), loop.version, loop.questionSet);
+    // A version higher than the one the source ran raises Question set changed, off the open's
+    // path; of two workers opening it at once, one is told of the old version.
+    raisers.started(loop.source, loop.questionSet, loop.version, before);
     return loop;
   }
 
@@ -669,6 +674,8 @@ export async function runWorkers(
       cursorRun: `plugin-source:${idOf(source)}`,
       note: (line) => print(`${source.name}: ${line}`),
     });
+    // A read through the plugin that answered resolves its lost access at the next look.
+    connector.onWorking(() => raisers.proven(source.name));
     try {
       return await inForce({
         source,
@@ -722,8 +729,11 @@ export async function runWorkers(
       );
     }
     for (const failure of report.failures) {
-      const message =
-        failure.error instanceof Error ? failure.error.message : String(failure.error);
+      // A driver's words can quote a connection string.
+      const message = hideSecrets(
+        failure.error instanceof Error ? failure.error.message : String(failure.error),
+        secretsInForce(),
+      );
       print(
         failure.stage === "log"
           ? `${entry.source}: the decision log could not be read: ${message}`
@@ -732,6 +742,37 @@ export async function runWorkers(
     }
   };
 
+  /**
+   * The parts of every connection string a driver's words may name (the store's, each source's of
+   * the file in force, so one a reload added is hidden too): hidden from every printed line and
+   * every alert that carries words a database gave.
+   */
+  const secretsInForce = (): readonly SecretPart[] =>
+    [deps.env[STORE_VARIABLE], ...fleet.config().sources.map((source) => source.database)]
+      .filter((url): url is string => url !== undefined && url !== "")
+      .flatMap((url) => secretParts(url));
+  // Connector lost access, read every 5 minutes from each running table source's doctor and raised
+  // at a loop's refused login or credential, and Question set changed at an open.
+  const raisers = createAlertRaisers({
+    alerts,
+    active: (key) => store.alerts.getActive(key),
+    clock,
+    project: project.id,
+    links: { access: links.access, questionSet: links.questionSet },
+    sources: () =>
+      fleet.loops().flatMap((loop): WatchedSource[] => {
+        const { table } = loop;
+        if (loop.plugin !== undefined) {
+          return [{ kind: "plugin", name: loop.source.name }];
+        }
+        return table === undefined
+          ? []
+          : [{ kind: "table", name: loop.source.name, doctor: () => table.doctor() }];
+      }),
+    hide: (text) => hideSecrets(text, secretsInForce()),
+    print,
+    configPath: options.config,
+  });
   // The installs the studio ran to their end, until the reload after each reads them.
   const studioInstalls = installRuns();
   // The sources as one fleet: every loop under its own stop, so a reload after Apply restarts the
@@ -766,8 +807,9 @@ export async function runWorkers(
         throw error;
       }
     },
-    project: (next) => {
+    project: (next, applied) => {
       projectInForce = next;
+      raisers.loaded(next, applied);
     },
     load: () => {
       if (parts.configFile === undefined) {
@@ -778,8 +820,17 @@ export async function runWorkers(
     beat: (source) => alerts.signals(alertScope(project.id, source, links.worker)).beat(),
     clock,
     print,
-    onPass: tally,
+    onPass: (loop) => {
+      const seen = tally(loop);
+      return (report) => {
+        seen(report);
+        // A record's refused right raises Connector lost access; a pass begun after the alert that
+        // wrote with none is what lets the 5-minute look resolve it.
+        raisers.passed(loop.source, report);
+      };
+    },
     failure: (source, error) => installMissing(source, options.config, error),
+    stoppedAlone: (source, error) => raisers.stopped(source, error),
   });
   // This worker's own heartbeat row, and a look at the others' every 30 seconds beside the passes;
   // a failure of either is a line here and nothing more.
@@ -794,13 +845,9 @@ export async function runWorkers(
     report: (error, step) => {
       // A driver's words often name the connection string (the store's, a source's) that failed;
       // the sources are the file's in force now, so one a reload added is hidden too.
-      const hidden = [
-        deps.env[STORE_VARIABLE],
-        ...fleet.config().sources.map((source) => source.database),
-      ]
-        .filter((url): url is string => url !== undefined && url !== "")
-        .flatMap((url) => secretParts(url));
-      print(`worker heartbeat: ${WATCH_FAILURES[step]}: ${hideSecrets(errorWords(error), hidden)}`);
+      print(
+        `worker heartbeat: ${WATCH_FAILURES[step]}: ${hideSecrets(errorWords(error), secretsInForce())}`,
+      );
     },
   });
   // The studio's backfills: jobs inside this worker under the loop in force, asking through the
@@ -1066,7 +1113,9 @@ export async function runWorkers(
                   files: configFile.files,
                   load: () => configFile.load({ quiet: true }),
                   env: deps.env,
-                  reload: () => fleet.reload(),
+                  // An Apply's reviewer is who a question set its write changes is by, handed to
+                  // that reload's own load and no other.
+                  reload: (applied) => fleet.reload(applied),
                   serial: writes,
                 }),
               }),
@@ -1261,6 +1310,8 @@ export async function runWorkers(
         // This worker's row every 15 seconds, a look at the others' every 30; on the clock, beside
         // the passes and never inside one, ended by the signal like the loops.
         watch.run(signal),
+        // Each running table source's doctor every 5 minutes, the same way.
+        raisers.run(signal),
         // A backfill job stops after its page in hand when the worker does.
         ...(jobs === undefined ? [] : [jobs.until(signal)]),
       ]);
@@ -1288,6 +1339,8 @@ export async function runWorkers(
     // A --once run that threw leaves no timer behind; its row stays (see above).
     onceBeats.abort();
     await onceBeating;
+    // A raise or a resolve still on its way off a loop's path, before the store closes.
+    await raisers.settled();
     // A resolved message still on its way, before the store closes; a stop has already cut its
     // delivery off, so this waits no longer than the channel's bound.
     await alerts.drain();

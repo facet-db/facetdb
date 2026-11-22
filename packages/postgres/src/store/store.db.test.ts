@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { DEFAULT_WORKER_LIMITS } from "@facetdb/core";
+import { DEFAULT_WORKER_LIMITS, type QuestionSet } from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { connectPostgres, type SqlClient } from "../sql/index.ts";
@@ -764,5 +764,42 @@ describe("a channel's quiet-hours summary on a real Postgres", () => {
         source: "listings",
       },
     ]);
+  });
+});
+
+describe("the set in force on a real Postgres", () => {
+  const set: QuestionSet = {
+    questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
+    read: ["body"],
+    model: "jev-1.14.0",
+    thresholds: {},
+  };
+  const reworded: QuestionSet = {
+    ...set,
+    questions: [{ type: "noul", name: "scam", instructions: "Is it a fake?", stakes: "low" }],
+  };
+
+  it("answers the old version to one of two connections writing the same new version at the very same moment, and the new one to the other", async () => {
+    const [first, second] = await Promise.all([newStore(), newStore()]);
+    expect(await first.questionSets.run("src", 1, set)).toBeNull();
+    // A third connection holds the source's version lock, so both writes reach it and wait there:
+    // they are in the database at once, neither having read the row, which is the race to settle.
+    const lock = holdLock("select pg_advisory_xact_lock(hashtext($1))", ["question_set:src"]);
+    await lock.holding;
+    const byA = first.questionSets.run("src", 2, reworded);
+    const byB = second.questionSets.run("src", 2, reworded);
+    try {
+      await lockWaiters(open(), 2);
+    } finally {
+      lock.release();
+      await lock.done;
+    }
+    const answers = await Promise.all([byA, byB]);
+
+    expect(answers.map((answer) => answer?.version).sort()).toEqual([1, 2]);
+    expect(await first.questionSets.inForce("src")).toMatchObject({
+      version: 2,
+      questionSet: reworded,
+    });
   });
 });

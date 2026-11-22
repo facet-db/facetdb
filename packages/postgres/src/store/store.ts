@@ -26,9 +26,11 @@ import {
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
 import {
   type QuestionSetInForce,
+  type ReplacedInForce,
   readQuestionSetHistory,
   readQuestionSetInForce,
   readQuestionSets,
+  readReplacedInForce,
   type StoredQuestionSetVersion,
   writeQuestionSetInForce,
 } from "./question-sets.ts";
@@ -131,7 +133,10 @@ export type Store = {
    * writes the set the source's worker runs from now on, whole, under its version (store migration
    * 8; the worker calls it after `record` at every loop open), and `inForce` reads it: null until a
    * worker has recorded one. `record` alone writes no such row: `facetdb backfill` records a
-   * version too, and must not pass for the worker.
+   * version too, and must not pass for the worker. `run` answers the row it replaced, read under
+   * the source's version lock, the one `record` takes: of two workers that open the same new
+   * version at once, one is answered the old version and the other the new one, so the worker's
+   * Question set changed alert is raised once.
    */
   questionSets: {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
@@ -142,7 +147,11 @@ export type Store = {
       versions: readonly number[],
     ): Promise<ReadonlyMap<number, QuestionSet>>;
     inForce(sourceId: string): Promise<QuestionSetInForce | null>;
-    run(sourceId: string, version: number, questionSet: QuestionSet): Promise<void>;
+    run(
+      sourceId: string,
+      version: number,
+      questionSet: QuestionSet,
+    ): Promise<ReplacedInForce | null>;
   };
   /** The queue and records of one source, claimed with `skip locked`. */
   connector(options: StoreConnectorOptions): StoreConnector;
@@ -303,7 +312,12 @@ export async function createStore(options: StoreOptions): Promise<Store> {
         versions: (sourceId, versions) => readQuestionSets(client.query, sourceId, versions),
         inForce: (sourceId) => readQuestionSetInForce(client.query, sourceId),
         run: (sourceId, version, questionSet) =>
-          writeQuestionSetInForce(client.query, sourceId, version, questionSet, clock.now()),
+          client.transaction(async (query) => {
+            await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);
+            const replaced = await readReplacedInForce(query, sourceId);
+            await writeQuestionSetInForce(query, sourceId, version, questionSet, clock.now());
+            return replaced;
+          }),
         async record(sourceId, questionSet) {
           return client.transaction(async (query) => {
             await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);

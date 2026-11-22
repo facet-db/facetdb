@@ -368,10 +368,23 @@ describe("the kinds the code resolves", () => {
     await alerts.drain();
 
     const stillActive = ALERT_KINDS.filter((kind) => store.active.has(eventKey(eventOf(kind))));
-    expect(stillActive).toEqual(
-      ALERT_KINDS.filter((kind) => !RESOLVABLE_ALERT_KINDS.includes(kind)),
-    );
-    expect([...RESOLVABLE_ALERT_KINDS]).toEqual(["model_failing"]);
+    // Connector lost access is resolved by the worker's own reading of its sources (the facetdb
+    // package), through `resolve`, which this module's signals never call.
+    expect(stillActive).toEqual(ALERT_KINDS.filter((kind) => kind !== "model_failing"));
+    expect([...RESOLVABLE_ALERT_KINDS]).toEqual(["model_failing", "connector_lost_access"]);
+    const lost = eventKey(eventOf("connector_lost_access"));
+    expect((await alerts.resolve(lost)).status).toBe("resolved");
+    expect(store.active.has(lost)).toBe(false);
+  });
+
+  it("keys a question-set change by its version: one version is one alert, the next is another", async () => {
+    const { alerts, store } = setup();
+    const changed = (version: number) => ({ ...eventOf("question_set_changed"), version });
+    expect((await alerts.raise(changed(2))).status).toBe("sent");
+    expect((await alerts.raise(changed(2))).status).toBe("suppressed");
+    expect((await alerts.raise(changed(3))).status).toBe("sent");
+    expect(eventKey(changed(3))).toBe(`${eventKey(eventOf("question_set_changed"))}|v3`);
+    expect(store.history.map((line) => line.event.version)).toEqual([2, 3]);
   });
 });
 

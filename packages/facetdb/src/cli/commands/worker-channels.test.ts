@@ -20,6 +20,7 @@ import {
   type PgliteWorld,
   postgresEngines,
   resetPgliteWorld,
+  type SqlClient,
   SteppedClock,
   type Store,
   TEST_SECRET,
@@ -149,8 +150,23 @@ afterEach(async () => {
   await resetPgliteWorld(world);
 });
 
+/**
+ * PGlite's one connection is a superuser's: the doctor asking who it is (the worker's 5-minute
+ * look) is told the worker login, as the database the connection string names would tell it, so a
+ * run long enough to look raises no Connector lost access of the test's making.
+ */
+function asWorkerLogin(client: SqlClient): SqlClient {
+  return {
+    ...client,
+    query: (text, params) =>
+      /^\s*select current_user::text as name\s*$/.test(text)
+        ? Promise.resolve([{ name: "facetdb_worker" }])
+        : client.query(text, params),
+  };
+}
+
 function run(argv: readonly string[], config: ProjectConfig, stop?: AbortSignal) {
-  const connect = sharePools(world.connect);
+  const connect = sharePools((url, options) => asWorkerLogin(world.connect(url, options)));
   return runInProcess(
     argv,
     {

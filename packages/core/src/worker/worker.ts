@@ -135,6 +135,12 @@ export type RecordFailure = {
  * decided and has been returned to the queue.
  */
 export type PassReport = {
+  /**
+   * When the pass began, in ms on the worker's clock (the run log's start too): every write of the
+   * pass came after it (a write is proof the source reads well only from a pass begun after its
+   * Connector lost access alert was raised).
+   */
+  readonly startedAt: number;
   /** Distinct keys the pass took from the queue. */
   readonly claimed: number;
   /** The spending gate kept this pass from asking: the project is paused (records stay queued) or its cap could not be read. */
@@ -666,15 +672,15 @@ export function createWorker(deps: WorkerDeps): Worker {
 
   async function runOnce(): Promise<PassReport> {
     const startedAtMs = clock.now();
-    const report = await takeBatch();
+    const report = await takeBatch(startedAtMs);
     if (deps.runs !== undefined) {
       await logRun(deps.runs, report, startedAtMs);
     }
     return report;
   }
 
-  async function takeBatch(): Promise<MutablePass> {
-    const report = newPass(0);
+  async function takeBatch(startedAtMs: number): Promise<MutablePass> {
+    const report = newPass(startedAtMs);
     // A held record is asked again every 5 minutes while the model is down.
     await requeue(report, outage?.due() ?? []);
     // A paused project keeps its records queued: nothing is claimed, so nothing is lost.
@@ -809,9 +815,10 @@ type MutablePass = {
     : PassReport[K];
 };
 
-function newPass(claimed: number): MutablePass {
+function newPass(startedAt: number): MutablePass {
   return {
-    claimed,
+    startedAt,
+    claimed: 0,
     paused: false,
     written: [],
     skipped: [],

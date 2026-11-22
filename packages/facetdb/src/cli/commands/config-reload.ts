@@ -192,10 +192,11 @@ export type FleetDeps = {
   ) => { readonly message: string; readonly fix: string } | undefined;
   /**
    * The project's settings a running worker takes up without a restart (the spending cap and what
-   * happens at 100%): told each config that loads, at open and at every reload, before the
-   * sources are swapped, so the gate reads the new cap at its next check.
+   * happens at 100%): told each config that loads, at open and at every reload, before the sources
+   * are swapped, so the gate reads the new cap at its next check. A reload an Apply asked for tells
+   * who applied which source, that reload's load alone.
    */
-  readonly project?: (config: ProjectConfig) => void;
+  readonly project?: (config: ProjectConfig, applied?: AppliedBy) => void;
   /** Reads facetdb.config.ts again through the loader; a `ConfigError` when it does not load. */
   readonly load: () => Promise<ProjectConfig>;
   /** Beats the project's heartbeat, in the scope of a source. */
@@ -210,6 +211,12 @@ export type FleetDeps = {
    * source (a missing install names the source and the fix).
    */
   readonly failure?: (source: string, error: unknown) => unknown;
+  /**
+   * Told once of each loop that stopped alone, with what it threw, after the fleet took it out of
+   * the running loops (a refused login or credential raises Connector lost access). It must return
+   * at once; a hook that throws is said and changes nothing of the stop.
+   */
+  readonly stoppedAlone?: (source: SourceConfig, error: unknown) => void;
 };
 
 export type Fleet = {
@@ -248,8 +255,11 @@ export type Fleet = {
    * fleet itself: every source it ran was refused, and none is left to run or try.
    */
   run(signal: AbortSignal): Promise<void>;
-  /** Reads the file again and applies it to the running loops; resolves once the plan is made. */
-  reload(): Promise<ReloadSummary>;
+  /**
+   * Reads the file again and applies it to the running loops; resolves once the plan is made.
+   * `applied`: the Apply whose write this reload follows, handed to `project` with its load.
+   */
+  reload(applied?: AppliedBy): Promise<ReloadSummary>;
   /** Every reload in hand has finished its swap: the restarted loops run, the stopped ones closed. */
   settled(): Promise<void>;
   /** Closes every loop's connector, after any reload in hand. */
@@ -857,6 +867,13 @@ export function createFleet(deps: FleetDeps): Fleet {
       outage: slot.loop.outage,
     };
     stopped.set(name, entry);
+    try {
+      deps.stoppedAlone?.(slot.loop.source, error);
+    } catch {
+      // Fixed words: what the hook threw is not shown, as anything near a loop's failure may quote
+      // a driver's words and the connection string in them.
+      deps.print(`${name}: the alert its stop raises could not be told; its error is not shown`);
+    }
     const closed = retire(slot);
     closing.add(closed);
     void closed.then(() => closing.delete(closed));
@@ -1111,7 +1128,9 @@ export function createFleet(deps: FleetDeps): Fleet {
     await work;
   }
 
-  async function reloadNow(): Promise<{ summary: ReloadSummary; swapped: Promise<void> }> {
+  async function reloadNow(
+    applied?: AppliedBy,
+  ): Promise<{ summary: ReloadSummary; swapped: Promise<void> }> {
     const done = Promise.resolve();
     let next: ProjectConfig;
     try {
@@ -1136,7 +1155,7 @@ export function createFleet(deps: FleetDeps): Fleet {
     const steps = planReload(new Map([...slots].map(([name, slot]) => [name, slot.loop])), next);
     const notes = started === undefined ? [] : projectNotes(started, next);
     current = next;
-    deps.project?.(next);
+    deps.project?.(next, applied);
     const sources: SourceReload[] = [];
     const restarts: { slot: Slot; fresh: SourceLoop }[] = [];
     const removals: Slot[] = [];
@@ -1606,8 +1625,8 @@ export function createFleet(deps: FleetDeps): Fleet {
       await Promise.all([...slots.values()].map((slot) => slot.done));
     },
 
-    reload() {
-      const planned = queue.then(reloadNow);
+    reload(applied) {
+      const planned = queue.then(() => reloadNow(applied));
       queue = planned.then(
         ({ swapped }) => swapped,
         () => undefined,
@@ -1726,6 +1745,13 @@ export function fileQueue(): FileQueue {
 }
 
 /**
+ * The Apply a reload follows: the reviewer who confirmed it, and the source its draft wrote, null
+ * for the project's spending settings. A question set that write changes is named as theirs in its
+ * Question set changed alert.
+ */
+export type AppliedBy = { readonly by: string; readonly source: string | null };
+
+/**
  * The studio's door to facetdb.config.ts (`ServerDeps.config.file`): the diff a draft makes (one
  * source, or the project's spending settings from Settings), and on confirmation the write and the
  * fleet's reload, which puts the written cap in force at once. The draft is judged within the
@@ -1739,7 +1765,8 @@ export function configFileDoor(deps: {
   /** The loader, quiet: its warnings are the draft's, returned with the diff. */
   readonly load: () => Promise<ProjectConfig>;
   readonly env: Readonly<Record<string, string | undefined>>;
-  readonly reload: () => Promise<ReloadSummary>;
+  /** After an Apply's write, told who applied which source; Check again tells nothing. */
+  readonly reload: (applied?: AppliedBy) => Promise<ReloadSummary>;
   /**
    * The queue its applies run in, one at a time; the studio's setup flow writes the same file
    * through the same queue. Its own when absent.
@@ -1841,7 +1868,10 @@ export function configFileDoor(deps: {
               fix: written.fix,
             };
           case "written": {
-            const reload = await deps.reload();
+            const reload = await deps.reload({
+              by: options.by,
+              source: "source" in draft ? draft.source.name : null,
+            });
             if (reload.loaded) {
               return { kind: "applied", path, diff: shown.diff, reload };
             }

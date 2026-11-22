@@ -926,6 +926,44 @@ describe("alerts, cursors and question-set versions", () => {
     );
   });
 
+  it("answers the row each write of the set in force replaced, and a row that no longer parses as a version without its set", async () => {
+    const { store, db } = await newStore();
+    const set: QuestionSet = {
+      questions: [{ type: "noul", name: "scam", instructions: "Is it a scam?", stakes: "low" }],
+      read: ["body"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    // The first open of a source replaces nothing.
+    expect(await store.questionSets.run("src", 1, set)).toBeNull();
+    // The same version again (a restart, a second worker) is answered with itself.
+    expect(await store.questionSets.run("src", 1, set)).toEqual({ version: 1, questionSet: set });
+    const reworded: QuestionSet = {
+      ...set,
+      questions: [{ type: "noul", name: "scam", instructions: "Is it a fake?", stakes: "low" }],
+    };
+    // A new version is answered with the one it replaced, once: the next write sees the new one.
+    expect(await store.questionSets.run("src", 2, reworded)).toEqual({
+      version: 1,
+      questionSet: set,
+    });
+    expect(await store.questionSets.run("src", 2, reworded)).toEqual({
+      version: 2,
+      questionSet: reworded,
+    });
+    // Another source's row is its own.
+    expect(await store.questionSets.run("other", 1, set)).toBeNull();
+
+    // A row an older FacetDB wrote that this one cannot read never stops the open: it is answered
+    // with its version and no set, and replaced.
+    await db.query(
+      `update facetdb.question_sets_in_force set question_set = $1::jsonb where source_id = 'src'`,
+      [JSON.stringify({ ...set, model: "jev-latest" })],
+    );
+    expect(await store.questionSets.run("src", 3, set)).toEqual({ version: 2, questionSet: null });
+    expect(await store.questionSets.inForce("src")).toMatchObject({ version: 3, questionSet: set });
+  });
+
   it("read a source's version history newest first, each with its time and the set it was made from, up to a limit", async () => {
     const { store, clock } = await newStore();
     const set: QuestionSet = {
