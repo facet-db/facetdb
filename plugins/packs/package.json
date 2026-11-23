@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "Apache-2.0",
-  "description": "FacetDB's question packs: the marketplace trust and safety pack (scams, banned items, payment outside the platform, counterfeits).",
+  "description": "FacetDB's question packs: marketplace trust and safety (scams, banned items, payment outside the platform, counterfeits) and support inbox triage (topic, urgency, refund requests, cancellations).",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/facet-db/facetdb.git",

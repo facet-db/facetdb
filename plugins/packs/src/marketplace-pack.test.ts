@@ -2,13 +2,21 @@ import { readFile } from "node:fs/promises";
 import { facetdb, judgeDraftSource, noul, VERSION, wordingWarnings } from "facetdb";
 import { loadPlugin, type PackDefinition, type Plugin } from "facetdb/plugin";
 import { describe, expect, it } from "vitest";
-import plugin, { marketplace } from "./index.ts";
+import plugin, { marketplace, support } from "./index.ts";
+import {
+  contactProblems,
+  readSample,
+  shapeProblems,
+  sharedWording,
+  textOf,
+} from "./testing/index.ts";
 
 /**
  * The marketplace trust and safety pack: it parses through the SDK's own checks, its wording meets
  * the loader's wording check with no warning, it names the content its description names, its
- * sample holds 50 complete labelled listings, and the plugin loads as the worker loads it. Nothing
- * here calls a model: the live run is separate.
+ * sample holds 50 complete labelled listings, and the plugin loads as the worker loads it. The
+ * checks every pack's sample meets live in `testing/`. Nothing here calls a model: the live run is
+ * separate.
  */
 
 const QUESTIONS = ["scam", "banned_item", "off_platform", "counterfeit"] as const;
@@ -16,18 +24,6 @@ const ANSWERS = ["yes", "no", "unsure"] as const;
 const HIGH_STAKES = { yesAbove: 0.9, noBelow: 0.1 } as const;
 
 type Answer = (typeof ANSWERS)[number];
-type Listing = {
-  readonly id: string;
-  readonly title: string;
-  readonly description: string;
-  readonly expected: Readonly<Record<string, Answer>>;
-};
-type Sample = {
-  readonly pack: string;
-  readonly fields: readonly string[];
-  readonly answers: readonly string[];
-  readonly records: readonly Listing[];
-};
 
 /** The fewest listings per question that carry each answer: the spread the sample is held to. */
 const AT_LEAST: Readonly<Record<Answer, number>> = { yes: 7, no: 32, unsure: 5 };
@@ -35,14 +31,6 @@ const AT_LEAST: Readonly<Record<Answer, number>> = { yes: 7, no: 32, unsure: 5 }
 /** The names in backticks in a text: the state fields a question or a description refers to. */
 function contentNames(text: string): string[] {
   return [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1] ?? "");
-}
-
-/** Every run of `size` consecutive words of a text, lowercased: the phrases two texts could share. */
-function wordRuns(text: string, size: number): string[] {
-  const words = text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’][\p{L}]+)?/gu) ?? [];
-  return words
-    .slice(0, Math.max(0, words.length - size + 1))
-    .map((_, index) => words.slice(index, index + size).join(" "));
 }
 
 function textsOf(question: PackDefinition["questions"][number]): string[] {
@@ -82,10 +70,8 @@ function installed(found: Plugin) {
   };
 }
 
-async function sample(): Promise<Sample> {
-  return JSON.parse(
-    await readFile(new URL("./marketplace.sample.json", import.meta.url), "utf8"),
-  ) as Sample;
+function sample() {
+  return readSample(new URL("./marketplace.sample.json", import.meta.url));
 }
 
 describe("the marketplace pack's questions", () => {
@@ -159,23 +145,15 @@ describe("the marketplace pack's questions", () => {
 
 describe("the marketplace pack's sample", () => {
   it("holds 50 complete listings, each with an allowed answer to every question and its own id", async () => {
-    const { pack, fields, answers, records: listings } = await sample();
-    expect(pack).toBe("marketplace");
-    expect(fields).toEqual(["title", "description"]);
-    expect(answers).toEqual([...ANSWERS]);
-    expect(listings).toHaveLength(50);
-    expect(new Set(listings.map((listing) => listing.id)).size).toBe(50);
-    for (const listing of listings) {
-      expect(Object.keys(listing).sort(), listing.id).toEqual(
-        ["description", "expected", "id", "title"].sort(),
-      );
-      expect(listing.title.trim(), listing.id).not.toBe("");
-      expect(listing.description.trim(), listing.id).not.toBe("");
-      expect(Object.keys(listing.expected).sort(), listing.id).toEqual([...QUESTIONS].sort());
-      for (const question of QUESTIONS) {
-        expect(ANSWERS, `${listing.id}.${question}`).toContain(listing.expected[question]);
-      }
-    }
+    const listings = await sample();
+    expect(listings.pack).toBe("marketplace");
+    expect(listings.fields).toEqual(["title", "description"]);
+    expect(listings["answers"]).toEqual([...ANSWERS]);
+    expect(listings.records).toHaveLength(50);
+    expect(new Set(listings.records.map((listing) => listing.id)).size).toBe(50);
+    // Each listing's keys are its id, title, description and labels; both fields hold text; and
+    // every question has one of yes, no and unsure (the shared check every pack's sample meets).
+    expect(shapeProblems(marketplace, listings)).toEqual([]);
   });
 
   it("spreads every question over yes, no and unsure", async () => {
@@ -198,7 +176,7 @@ describe("the marketplace pack's sample", () => {
     expect(onPlatformScams.length).toBeGreaterThanOrEqual(3);
     const displayReplicas = listings.filter(
       (listing) =>
-        /display/i.test(`${listing.title} ${listing.description}`) &&
+        /display/i.test(textOf(listing, ["title", "description"])) &&
         listing.expected["counterfeit"] === "yes",
     );
     expect(displayReplicas.length).toBeGreaterThanOrEqual(1);
@@ -255,34 +233,11 @@ describe("the marketplace pack's sample", () => {
 
   it("shares no quoted phrase and no run of four words with any question's wording", async () => {
     // Criteria that repeat the sample's own hard cases would test the sample against itself.
-    const { records: listings } = await sample();
-    const wording = marketplace.questions.flatMap(textsOf);
-    const quoted = wording.flatMap((text) =>
-      [...text.matchAll(/(?:^|[\s(])['"‘“]([^'"’”]+)['"’”](?=[\s.,;:)]|$)/g)].map((m) =>
-        (m[1] ?? "").toLowerCase(),
-      ),
-    );
-    const runs = new Set(wording.flatMap((text) => wordRuns(text, 4)));
-    for (const listing of listings) {
-      const text = `${listing.title}\n${listing.description}`;
-      for (const phrase of quoted) {
-        expect(text.toLowerCase(), `${listing.id} repeats "${phrase}"`).not.toContain(phrase);
-      }
-      const shared = wordRuns(text, 4).filter((run) => runs.has(run));
-      expect(shared, listing.id).toEqual([]);
-    }
+    expect(sharedWording(marketplace, await sample())).toEqual([]);
   });
 
   it("holds only invented contacts: .example addresses and 555-01xx numbers", async () => {
-    const { records: listings } = await sample();
-    const text = listings.map((listing) => `${listing.title}\n${listing.description}`).join("\n");
-    expect(text).not.toMatch(/https?:|www\./i);
-    for (const [domain] of text.matchAll(/[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi)) {
-      expect(domain).toMatch(/\.example$/);
-    }
-    for (const [number] of text.matchAll(/\d{3}[-\s]?\d{4}/g)) {
-      expect(number).toMatch(/^555-01\d\d$/);
-    }
+    expect(contactProblems(marketplace, await sample())).toEqual([]);
   });
 });
 
@@ -295,8 +250,9 @@ describe("the packs plugin", () => {
     expect(loaded.manifest.name).toBe("packs");
     expect(loaded.manifest.kinds).toEqual(["pack"]);
     expect(loaded.manifest.secrets).toEqual([]);
-    expect(Object.keys(loaded.packs)).toEqual(["marketplace"]);
+    expect(Object.keys(loaded.packs)).toEqual(["marketplace", "support"]);
     expect(loaded.packs["marketplace"]).toBe(marketplace);
+    expect(loaded.packs["support"]).toBe(support);
     for (const kind of [loaded.sources, loaded.actions, loaded.channels, loaded.providers]) {
       expect(kind).toEqual({});
     }

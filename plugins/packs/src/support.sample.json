@@ -1,0 +1,557 @@
+{
+  "pack": "support",
+  "fields": ["subject", "body"],
+  "about": "50 customer messages written for this sample: invented text about an unnamed software product, invented first names, no real person or company, order and invoice numbers made up, phone numbers in the 555-0100 to 555-0199 range kept for fiction, and addresses on the reserved .example domain, which never resolves. The messages were written beside the pack's wording by the same hand, so the sample is no blind test of it. Each message carries the answer a support lead would give to each question from the message alone, read by the pack's own definitions: for topic the name of one of its options, for urgency the name of one of its levels, for wants_refund and cancel_intent yes or no, and for any question \"unsure\". \"unsure\" means that lead would not decide from the message alone and would send it to review. A live run counts agreement this way. An option or a level agrees when the model's top answer is that one at confidence 0.50 or above, and unsure agrees when the confidence is below 0.50 (topic and urgency are low stakes). For wants_refund, a high-stakes question, unsure agrees with a probability strictly between 0.10 and 0.90; for cancel_intent, low stakes, strictly between 0.30 and 0.70; yes and no agree with an automatic yes and an automatic no. The evidence reports a review on a labelled message, and an automatic answer on an unsure message, apart from the answers that are wrong, and reports the unsure messages per stakes level. Urgency is labelled by the customer's situation, never by the tone of the message: work done by hand for want of a feature is low, something that should work and slows them is medium, and money is high only while the problem keeps costing it. A request for money back because something failed is labelled with the fault's topic. The criteria describe kinds of situations and share no quoted phrase and no run of four words with any message.",
+  "records": [
+    {
+      "id": "s01",
+      "subject": "Charged twice every month",
+      "body": "Hi,\n\nSince we changed plans in September, every monthly payment to you has gone through twice: two charges of $49 each time, for a single workspace. Please refund the extra charges and stop the second one before the next renewal.\n\nThanks,\nDana",
+      "expected": {
+        "topic": "billing",
+        "urgency": "high",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s02",
+      "subject": "Can't log in after password reset",
+      "body": "I reset my password this morning and the reset link worked, but now every time I sign in it just sends me back to the login page with no error. Tried two browsers and cleared cookies. I present to a client at 2pm straight from this account. Please help asap.",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s03",
+      "subject": "How do I add a teammate?",
+      "body": "Hello! We just started using the app for our small design studio. How can I invite my colleague so she can see our projects too? I looked in the settings but couldn't spot it. No rush, thank you :)",
+      "expected": {
+        "topic": "how_to",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s04",
+      "subject": "Dark mode please",
+      "body": "Love the product. Any chance of a dark mode for the desktop app? I often work late and the white background is harsh on the eyes.",
+      "expected": {
+        "topic": "feature_request",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s05",
+      "subject": "Export to CSV gives an empty file",
+      "body": "When I export the contacts list as CSV the file downloads but only has the header row. The list has about 300 contacts and they all show fine on screen.\n\nSteps: Contacts > select all > Export > CSV.\n\nFor the mailing on Thursday I'm pasting the contacts into a spreadsheet myself, which is slow but works. I upgraded to Pro this month only for the export, so please return the upgrade fee.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "medium",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s06",
+      "subject": "Cancel at end of billing period",
+      "body": "Hello,\n\nPlease cancel our subscription so that it ends when the current billing period runs out. We have decided to move the team to a different tool. No refund needed, we'll keep using it until then.\n\nThanks for all the help over the past two years.\n\nRegards,\nOskar",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s07",
+      "subject": "Annual plan, if it doesn't work out",
+      "body": "We're thinking about switching from monthly to annual to save a bit. Say we find halfway through the year that the tool isn't right for us: would we get the money for the remaining months back, or is the annual payment final? Just want to understand this before we commit.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s08",
+      "subject": "Automatic reply: Your ticket #20417 has been updated",
+      "body": "Thank you for your message. I am out of the office until Monday 23 November with limited access to email. For urgent matters please contact my colleague at ops@northfield.example.\n\nBest regards,\nRui",
+      "expected": {
+        "topic": "something_else",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s09",
+      "subject": "ACCOUNT LOCKED",
+      "body": "my account says locked after too many attempts. i didnt even try to log in today, someone else must have. please unlock it and tell me if somebody got in and what they looked at. the email on the account is jferreira@mailbox.example",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s10",
+      "subject": "What is this $19 charge?",
+      "body": "There's a $19 payment to you on our company card from the 4th, listed as 'add-on'. As far as I know nobody here bought an add-on. What is it for?",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s11",
+      "subject": "Seriously??",
+      "body": "Why does the app log me out EVERY time I close the laptop lid?? Typing my password ten times a day is driving me mad and slowing everything down. Fix it. If this keeps up I'm switching to something else.",
+      "expected": {
+        "topic": "unsure",
+        "urgency": "medium",
+        "wants_refund": "no",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s12",
+      "subject": "Two-step codes arrive very late",
+      "body": "For the past week the sign-in codes take ten minutes or more to reach my phone. I can still get in if I wait, but it eats a chunk of every morning. The number on the account ends in 0162, if that helps.",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "medium",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s13",
+      "subject": "Feature idea: bulk edit tags",
+      "body": "It would save us a lot of time if we could select several tasks and change their tags in one go. Right now we open each task and edit its tags separately. Is anything like that on the roadmap?",
+      "expected": {
+        "topic": "feature_request",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s14",
+      "subject": "All my notes from last week are gone",
+      "body": "I opened the app this morning and every note I wrote since last Tuesday has disappeared. Older notes are still there. I did not delete anything!! These are my research notes for my thesis and I don't have copies anywhere else. Please tell me they can be restored. If they can't, I'll want my money back for the year.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "high",
+        "wants_refund": "unsure",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s15",
+      "subject": "Thank you, and goodbye",
+      "body": "Dear support team,\n\nAfter eight years we are closing our little bookshop at the end of the month, so we will have no more use for the account. Please cancel it so it does not renew. It has been a pleasure dealing with you all.\n\nWarm wishes,\nMargit",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s16",
+      "subject": "Refund or I dispute it",
+      "body": "I was charged $240 for a yearly renewal I never agreed to. I emailed twice last week and got no answer. Refund it by Friday or I will dispute the charge with my bank.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "unsure",
+        "wants_refund": "yes",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s17",
+      "subject": "refund if i cancel now?",
+      "body": "hello, i paid the year plan in august but our project is finish now and we not need the tool any more. if i cancel today, it is possible to get back money for the months left? thank you, Mehmet",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "unsure",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s18",
+      "subject": "Calendar sync broken for 3 days",
+      "body": "The calendar sync with our booking page has been broken since Monday. Customers keep booking slots that are already taken, so every morning we phone them to rebook. The sync is the reason we pay for this plan, so we'd like this month's fee back. If it is not fixed by the end of the week we will have to look at other options.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "medium",
+        "wants_refund": "yes",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s19",
+      "subject": "Storage add-on",
+      "body": "Hi there, is the extra storage add-on refundable if we buy it for a big project and then end up not needing it? Thanks",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s20",
+      "subject": "Interview request for our podcast",
+      "body": "Hello! I host a small podcast about running independent software companies, and I'd love to talk to your founder about how the product got started. Thirty minutes over video, any week this winter. Cheers, Kevin",
+      "expected": {
+        "topic": "something_else",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s21",
+      "subject": "Where is the time zone setting?",
+      "body": "I set the account up while travelling, so I think it's still on the wrong time zone: the times in my reports come out an hour off. Where do I change it?",
+      "expected": {
+        "topic": "how_to",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s22",
+      "subject": "Paid for premium templates, half of them won't open",
+      "body": "I bought the premium template pack yesterday for $35. About half of the templates show 'Failed to load' when I click them, the rest look fine. I can work with the ones that open for now, but I'd like my money back for the pack.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "medium",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s23",
+      "subject": "Lost my phone, can't get the 2FA code",
+      "body": "My phone was stolen on Saturday and the authenticator app was on it. I can't sign in without the code. I still have my email but no backup codes. What do I need to send you to prove it's me? I send my invoices from this account every Friday. You can call me on 555-0147.",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s24",
+      "subject": "Integration with our accounting software",
+      "body": "We use an accounting package that isn't on your list of integrations. Every month someone on my team re-types around 80 invoices into it. Please add an integration, or at least an export our accounting software can import. To be honest this is the main reason I might look elsewhere at renewal.",
+      "expected": {
+        "topic": "feature_request",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s25",
+      "subject": "where is the undo button?!",
+      "body": "I just moved a whole column of cards to the wrong board. HOW do I undo this??? cant find an undo anywhere and I really dont want to drag 40 cards back",
+      "expected": {
+        "topic": "how_to",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s26",
+      "subject": "Done with this",
+      "body": "Third time this month the editor freezes and I lose everything I typed. I've had enough. Cancel my account today. And after all the lost work I think I'm owed something for this month. Don't bother trying to keep me.",
+      "expected": {
+        "topic": "unsure",
+        "urgency": "unsure",
+        "wants_refund": "unsure",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s27",
+      "subject": "Thank you!",
+      "body": "Just wanted to say thanks to Leila on your support team. She sorted out our import problem last week in a single email. Great service, keep it up.",
+      "expected": {
+        "topic": "something_else",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s28",
+      "subject": "I can see another company's projects",
+      "body": "After this morning's update, the project list in our workspace shows three projects that are not ours, from a company we've never heard of. I can open them and see their files. I haven't touched anything. Please look at this right away, and I assume other people can see ours too.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s29",
+      "subject": "Wrong plan renewed",
+      "body": "Our plan renewed as annual ($588) last night, but I had meant to switch us to monthly first. Could you refund the annual payment and move us to the monthly plan? We're happy to keep using it, I just can't justify a whole year upfront right now.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s30",
+      "subject": "Extra seats by mistake, and closing",
+      "body": "Last month someone on our team upgraded us from 5 to 15 seats by mistake. We're winding the business down at the end of the year anyway, so please refund the 10 extra seats and close the account when the current month runs out. The invoice is INV-30118.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "yes",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s31",
+      "subject": "Invoice higher than usual",
+      "body": "This month's invoice came to $310, while it's normally $260. Could you break down where the extra $50 comes from? Our finance team asks about anything that changes.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s32",
+      "subject": "Charged after free trial - please refund and close",
+      "body": "Hi, I signed up for the free trial to test one thing and then forgot all about it. Today I got charged $96 for the first quarter. I haven't used it since the first day. Please refund this and close my account, I don't need it. Sorry for the hassle!",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "yes",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s33",
+      "subject": "Money-back guarantee?",
+      "body": "Your pricing page mentions a money-back guarantee. Does that cover the Business plan as well, and how long do I have to ask? I haven't bought anything yet, just comparing tools for our office.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s34",
+      "subject": "Where is my refund?",
+      "body": "Your colleague confirmed on the 3rd that you would refund the $59 for the duplicate order (order 4471-B). It's been 10 days and nothing has come back to my card. Can you check what's going on?",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "unsure",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s35",
+      "subject": "Yesterday's outage",
+      "body": "Our team couldn't use the app for most of yesterday because of your outage. We pay for 40 seats. Please refund us one day's share of this month's fee. Everything works again today, thanks for fixing it.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "low",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s36",
+      "subject": "Please add Portuguese language",
+      "body": "Hello team, our staff in the warehouse speak mostly Portuguese and the app is only in English and Spanish. Is it possible to have Portuguese also? It would help us a lot. Obrigado!",
+      "expected": {
+        "topic": "feature_request",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s37",
+      "subject": "Cancel now and refund this month",
+      "body": "The project this account was for ended in October and nobody has signed in since, but the subscription renewed on the 1st anyway. Please cancel it right away and pay back this month's charge.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "low",
+        "wants_refund": "yes",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s38",
+      "subject": "Sponsorship for a school robotics team",
+      "body": "Hi, I coach the robotics club at our local secondary school. We're looking for small sponsors for the regional competition in March, and a few of the students' parents use your app at work. Would your company consider it? Best, Ana",
+      "expected": {
+        "topic": "something_else",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s39",
+      "subject": "Dashboard very slow since the update",
+      "body": "Since the update on Tuesday the dashboard takes 30 to 40 seconds to load. Everything else is fine. Not the end of the world, but it's frustrating when I check the numbers many times a day. Given that we pay for the premium tier, I think some compensation would be fair.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "medium",
+        "wants_refund": "unsure",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s40",
+      "subject": "Delete my account and data",
+      "body": "Under data protection law I request that you close my account and delete all personal data you hold about me. Please confirm in writing when this is done. My login is tvoss@inbox.example.",
+      "expected": {
+        "topic": "unsure",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s41",
+      "subject": "Exporting everything before we switch",
+      "body": "We're moving to another platform next month. What's the best way to export all our projects, including attachments and comments? Once that's done we'll cancel.",
+      "expected": {
+        "topic": "how_to",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "yes"
+      }
+    },
+    {
+      "id": "s42",
+      "subject": "Search doesn't find words inside PDFs",
+      "body": "When I search for a word I know is in one of our uploaded PDFs, nothing comes up. Search seems to look at file names only. Is that how it's supposed to work? For now I keep a spreadsheet of which file holds what.",
+      "expected": {
+        "topic": "unsure",
+        "urgency": "unsure",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s43",
+      "subject": "Card expired, account read-only",
+      "body": "Got an email that our payment failed because the card on file expired. I've added a new card, but the account still shows a red banner saying payment is overdue and has gone read-only: nobody on the team can edit or create anything.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s44",
+      "subject": "SSO login error for the whole team",
+      "body": "Since this morning nobody in our company can sign in with single sign-on. We get 'invalid response from identity provider'. We haven't changed anything on our side. 25 people are stuck and can't work. If this drags on we'll need to talk about whether we stay. Call me at 555-0183 if that's faster.",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "high",
+        "wants_refund": "no",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s45",
+      "subject": "Downloading our files before cancelling",
+      "body": "If we decide to cancel next year, how do we download all our files first, and are they kept for a while afterwards? Our budget isn't settled yet.",
+      "expected": {
+        "topic": "how_to",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "unsure"
+      }
+    },
+    {
+      "id": "s46",
+      "subject": "Invoice overdue - action required",
+      "body": "Dear customer, your invoice is overdue. Please open the attached document and confirm your payment details within 24 hours to avoid suspension of services. Accounts department",
+      "expected": {
+        "topic": "something_else",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s47",
+      "subject": "Bulk SMS never sent",
+      "body": "We paid $120 for an SMS bundle on Monday and scheduled a reminder to all our patients. The campaign shows as sent, but none of the patients received anything and the credits are gone. In the end we phoned everyone ourselves. Please refund the bundle.",
+      "expected": {
+        "topic": "product_fault",
+        "urgency": "medium",
+        "wants_refund": "yes",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s48",
+      "subject": "Password reset email never arrives",
+      "body": "I've clicked forgot password five times and no email comes, not even in spam. My address is hokafor@work.example. I can still use the app on my phone where I'm logged in, but I need the desktop version for reports.",
+      "expected": {
+        "topic": "account_access",
+        "urgency": "medium",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s49",
+      "subject": "Would love a weekly summary email",
+      "body": "Suggestion: a short email every Monday with what changed in our projects over the week before. At the moment I open every project on Monday morning to catch up.",
+      "expected": {
+        "topic": "feature_request",
+        "urgency": "low",
+        "wants_refund": "no",
+        "cancel_intent": "no"
+      }
+    },
+    {
+      "id": "s50",
+      "subject": "Still being charged after cancelling",
+      "body": "I cancelled my subscription in September and I have the confirmation email. You charged my card again on 1 November, $29, and another charge will follow on 1 December unless you stop it. Please refund the November one and make sure nothing more goes through.",
+      "expected": {
+        "topic": "billing",
+        "urgency": "high",
+        "wants_refund": "yes",
+        "cancel_intent": "yes"
+      }
+    }
+  ]
+}

@@ -290,7 +290,8 @@
         "channel": [],
         "provider": [],
         "pack": [
-          "marketplace"
+          "marketplace",
+          "support"
         ]
       },
       "core": {
