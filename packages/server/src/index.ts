@@ -94,13 +94,32 @@ export type { RunsPage, RunsService, RunView } from "./data/runs.ts";
 export { createRunsService, RUNS_PER_PAGE } from "./data/runs.ts";
 export type { ErrorBody } from "./errors.ts";
 export { ApiError } from "./errors.ts";
-export type { HookDelivery, HookOutcome, HooksDoor } from "./hooks/index.ts";
+export type {
+  HookAdmission,
+  HookDelivery,
+  HookLimiter,
+  HookOutcome,
+  HookRequest,
+  HooksDoor,
+} from "./hooks/index.ts";
 export {
+  createHookLimiter,
+  HOOK_ADDRESS_BURST,
+  HOOK_ADDRESS_PER_SECOND,
+  HOOK_BODIES_AT_ONCE,
+  HOOK_BODY_DEADLINE_MS,
   HOOK_BODY_MAX_BYTES,
+  HOOK_BUSY_RETRY_AFTER_SECONDS,
+  HOOK_READING_PER_ADDRESS,
   HOOK_RETRY_AFTER_SECONDS,
+  HOOK_SOURCE_BURST,
+  HOOK_SOURCE_PER_SECOND,
   HOOK_TIMEOUT_MS,
+  HOOK_TRACKED_ADDRESSES,
+  HOOK_TRACKED_SOURCES,
   HOOKS_PATH,
   hookBodyTooLarge,
+  hookBodyTooSlow,
   isHookUrl,
   NO_HOOKS,
 } from "./hooks/index.ts";

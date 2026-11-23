@@ -3,8 +3,16 @@ import type { Peer } from "./middleware.ts";
 const IPV4_LOOPBACK = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 const IPV4_MAPPED = /^::ffff:/i;
 
-/** The headers a reverse proxy adds; one of them means the visitor is not who the socket says. */
-const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip"] as const;
+/**
+ * The headers a reverse proxy adds; one of them means the visitor is not who the socket says. The
+ * hook route's limits read the same list (hooks/limits.ts).
+ */
+export const PROXY_HEADERS = [
+  "forwarded",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-real-ip",
+] as const;
 
 /** 127.0.0.0/8 and ::1, also as an IPv4-mapped IPv6 address, which a dual-stack socket reports. */
 export function isLoopbackAddress(address: string | undefined): boolean {

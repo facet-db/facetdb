@@ -572,7 +572,8 @@ export function processDeps(
       });
     },
     provider: (config, plugins) => provider(config, env, run.stopSignal, plugins),
-    serve: serveHttp,
+    // The hook route's rate limits read the process's clock.
+    serve: (handler, port, host) => serveHttp(handler, port, host, { clock }),
     osUser: () => {
       try {
         return userInfo().username;

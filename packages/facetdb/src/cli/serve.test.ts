@@ -1,5 +1,6 @@
 import { type ClientRequest, request as httpRequest, type OutgoingHttpHeaders } from "node:http";
 import { connect, type Socket } from "node:net";
+import { FakeClock } from "@facetdb/core/testing";
 import { HOOK_BODY_MAX_BYTES } from "@facetdb/server";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HttpListener } from "./program.ts";
@@ -44,7 +45,8 @@ async function serve(lingerMs?: number): Promise<{ readonly port: number; readon
     },
     0,
     "127.0.0.1",
-    lingerMs,
+    // A clock that stands still: these few hooks are far inside the rate limits.
+    { clock: new FakeClock(), ...(lingerMs === undefined ? {} : { lingerMs }) },
   );
   return { port: listener.port, seen };
 }
