@@ -1,4 +1,5 @@
-export { recordAnswer } from "./answer.ts";
+export type { WrittenAnswer } from "./answer.ts";
+export { recordAnswer, writeAnswer } from "./answer.ts";
 export type { CurrentTarget } from "./current.ts";
 export { answersCurrentFor } from "./current.ts";
 export type {

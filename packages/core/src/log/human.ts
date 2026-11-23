@@ -218,6 +218,7 @@ function statusAfterPeople(current: RecordStatus, allDecided: boolean): RecordSt
   return allDecided ? transition(current, "human-decided-last") : current;
 }
 
-function humanCount(history: readonly LogEntry[]): number {
+/** How many people's entries (decisions and withdrawals) a record's history holds. */
+export function humanCount(history: readonly LogEntry[]): number {
   return history.filter((entry) => entry.kind === "human").length;
 }

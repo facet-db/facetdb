@@ -554,34 +554,51 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           usage: response.usage,
           at: new Date(clock.now()),
         };
-        const writes: RecordDecision[] = [];
-        const result = await recordAnswer(entry, questionSet, log, (key, decision, hash) => {
-          writes.push(decision);
-          return connector.write(key, decision, hash);
-        });
-        written = result.written;
-        (written ? report.answered : report.discarded).push(row.key);
-        const [decision] = writes;
-        if (written && decision?.status === "needs_review") {
-          pageToReview += 1;
-        }
-        // The write has landed: the queue follows it as the loop's write does, a card at the
-        // record's state. A follow that fails leaves the claim released, not acked (as the worker's
-        // does): the answer is logged and current, so no later backfill follows it, and only the
-        // worker's next pass over the queued job re-writes the decision and follows, without
-        // asking the model again.
-        if (written && decision !== undefined) {
-          try {
-            await followReview(
-              deps.reviews,
-              { key: row.key, stateHash: row.hash },
-              decision,
-              entry,
-            );
-          } catch (error) {
+        // Each write that lands is followed by the queue as the loop's write is, a card at the
+        // record's state, before `recordAnswer` reads the log again (a person's decision logged
+        // meanwhile is written, and followed, by a second write). `landed` holds what each landed
+        // write carried, the last one last.
+        const landed: RecordDecision[] = [];
+        try {
+          const result = await recordAnswer(
+            entry,
+            questionSet,
+            log,
+            async (key, decision, hash) => {
+              const write = await connector.write(key, decision, hash);
+              if (write.written) {
+                landed.push(decision);
+                await followReview(
+                  deps.reviews,
+                  { key: row.key, stateHash: row.hash },
+                  decision,
+                  entry,
+                );
+              }
+              return write;
+            },
+          );
+          written = result.written;
+        } catch (error) {
+          // A write landed and what follows it failed (the queue's follow, or the read after it):
+          // the answer is logged and written, so it counts as answered, and the claim is released,
+          // not acked (as the worker's is). The answer is current, so no later backfill follows
+          // it; the worker's next pass over the queued job writes the decision again and follows,
+          // without asking the model again.
+          const last = landed.at(-1);
+          if (last !== undefined) {
+            report.answered.push(row.key);
+            if (last.status === "needs_review") {
+              pageToReview += 1;
+            }
             endClaim = () => connector.release([row.key]);
-            throw error;
           }
+          throw error;
+        }
+        (written ? report.answered : report.discarded).push(row.key);
+        // When the last write landed, it is the last of `landed`, and the row holds its decision.
+        if (written && landed.at(-1)?.status === "needs_review") {
+          pageToReview += 1;
         }
       } finally {
         await endClaim();

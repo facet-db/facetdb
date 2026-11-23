@@ -14,10 +14,11 @@ import type {
 import {
   type AnswerEntry,
   answersCurrentFor,
-  decideRecord,
+  type DecisionWriter,
+  type LogEntry,
   recordAnswer,
   standingHuman,
-  statusOf,
+  writeAnswer,
 } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type RecordStatus, shouldSkip, transition } from "../records/index.ts";
@@ -323,6 +324,37 @@ export function createWorker(deps: WorkerDeps): Worker {
   }
 
   /**
+   * The writer `writeAnswer` is handed: the connector's write, and the review queue following each
+   * write that lands at once, so the queue has followed the last landed write before the log is
+   * read again. A person who decides after that read follows the queue after it too.
+   */
+  function writeAndFollow(row: ReadRow, answer: AnswerEntry): DecisionWriter {
+    return async (key, decision, expectedHash) => {
+      const result = await connector.write(key, decision, expectedHash);
+      if (result.written) {
+        await follow(row, decision, answer);
+      }
+      return result;
+    };
+  }
+
+  /**
+   * When the decisions written from `answer` over `history` were made: the later of the answer and
+   * the people's decisions that stand on it, by the rule `decideRecord` applies (a retired decision,
+   * or one on a question no longer asked, moves nothing). The actions report this time.
+   */
+  function decidedAtOf(answer: AnswerEntry, history: readonly LogEntry[]): Date {
+    let decidedAt = answer.at;
+    for (const question of questionSet.questions) {
+      const human = standingHuman(history, question.name, answer.stateHash);
+      if (human !== undefined && human.at > decidedAt) {
+        decidedAt = human.at;
+      }
+    }
+    return decidedAt;
+  }
+
+  /**
    * A write that lands with a status other than needs_review, or a record deleted from its source,
    * takes the record's card out, whatever the worker knows of its past: one delete by key. A card
    * may outlive the log the worker reads (a purged and reinstalled source, a rebuild's card), and
@@ -464,21 +496,14 @@ export function createWorker(deps: WorkerDeps): Worker {
    * cannot tell these apart, so it does what covers all of them: the logged answer's decisions
    * (with the people's decisions on this state laid over them), written again and followed by the
    * actions. Undefined when the record must be asked: no answer, another state, another version, or
-   * a question the answer lacks. `decidedAt` is the latest logged entry behind the decisions: the
-   * answer, or a person's decision on its state made after it.
+   * a question the answer lacks (`answersCurrentFor` checks every question of the set, so
+   * `writeAnswer` can decide each one). Otherwise the answer and the record's history, read once
+   * here, before the write, as it always was.
    */
-  async function currentDecision(
+  async function currentAnswer(
     row: ReadRow,
     prior: AnswerEntry | undefined,
-  ): Promise<
-    | {
-        readonly decision: RecordDecision;
-        readonly decidedAt: Date;
-        /** The logged answer the decision was made from. */
-        readonly answer: AnswerEntry;
-      }
-    | undefined
-  > {
+  ): Promise<{ readonly answer: AnswerEntry; readonly history: readonly LogEntry[] } | undefined> {
     if (
       prior === undefined ||
       !answersCurrentFor(prior, {
@@ -489,21 +514,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     ) {
       return undefined;
     }
-    const history = await log.history(row.key);
-    const decisions = decideRecord(questionSet, questionSet.thresholds, prior, history);
-    if (decisions === undefined) {
-      return undefined;
-    }
-    // The later of the answer and the people's decisions that stand on it, by the rule
-    // `decideRecord` applies: a retired decision, or one on a question no longer asked, moves nothing.
-    let decidedAt = prior.at;
-    for (const question of questionSet.questions) {
-      const human = standingHuman(history, question.name, prior.stateHash);
-      if (human !== undefined && human.at > decidedAt) {
-        decidedAt = human.at;
-      }
-    }
-    return { decision: { decisions, status: statusOf(decisions) }, decidedAt, answer: prior };
+    return { answer: prior, history: await log.history(row.key) };
   }
 
   async function processRecord(
@@ -532,20 +543,33 @@ export function createWorker(deps: WorkerDeps): Worker {
         return "ack";
       }
 
-      const current = await currentDecision(row, prior);
+      const current = await currentAnswer(row, prior);
       if (current !== undefined) {
-        const { decision, decidedAt, answer } = current;
-        const result = await connector.write(row.key, decision, row.hash);
-        if (!result.written) {
+        const { answer } = current;
+        // A person's decision logged between the history read above and the write is written too,
+        // by a second write after the read that follows the first (`writeAnswer`).
+        const landed = await writeAnswer(
+          answer,
+          questionSet,
+          log,
+          writeAndFollow(row, answer),
+          current.history,
+        );
+        if (!landed.written) {
           // The state changed since: the record is asked again with it, and nothing runs now.
           report.discarded.push(row.key);
           return "release";
         }
-        await follow(row, decision, answer);
-        // The actions follow every write that lands. After a lost ack they run again, at least
-        // once, as they did when the record was asked again, and report the logged decision's time,
-        // not this run's.
-        const failures = await runActions(row, decision.status, decision.decisions, decidedAt);
+        const { decision } = landed;
+        // The actions follow every write that lands, with the decision that landed last. After a
+        // lost ack they run again, at least once, as they did when the record was asked again, and
+        // report the logged decision's time, not this run's.
+        const failures = await runActions(
+          row,
+          decision.status,
+          decision.decisions,
+          decidedAtOf(answer, landed.history),
+        );
         report.failures.push(...failures);
         const settled = afterActions(failures);
         // Counted as settled only once its actions are handed on: a pass that only released it
@@ -653,36 +677,38 @@ export function createWorker(deps: WorkerDeps): Worker {
         usage: response.usage,
         at: new Date(clock.now()),
       };
-      // The only door to the database: `recordAnswer` logs, decides and writes with this hash. A record
-      // with no logged answer has no person's decision either (a person decides on a logged answer,
-      // applyHumanDecision), so its log before this entry is known to be empty and is not read again.
-      const writes: RecordDecision[] = [];
-      const result = await recordAnswer(
+      // The only door to the database: `recordAnswer` logs, decides and writes with this hash, then
+      // reads the log once more and writes again if a person decided meanwhile. A record with no
+      // logged answer has no person's decision either (a person decides on a logged answer,
+      // applyHumanDecision), so its log before this entry is known to be empty and is not read
+      // before the write; the read after it still catches a person's entry logged since.
+      const landed = await recordAnswer(
         entry,
         questionSet,
         log,
-        async (key, decision, hash) => {
-          writes.push(decision);
-          return connector.write(key, decision, hash);
-        },
+        writeAndFollow(row, entry),
         prior === undefined ? [] : undefined,
       );
-      const [written] = writes;
-      if (!result.written || written === undefined) {
-        // The record changed while in flight: the answer is discarded and the record queued again.
+      if (!landed.written) {
+        // The answer is discarded and the record queued again.
         report.discarded.push(row.key);
         return "release";
       }
-      await follow(row, written, entry);
+      const { decision: written } = landed;
       report.written.push(row.key);
       if (written.status === "needs_review") {
         report.toReview.push(row.key);
       }
 
-      // The write above is the default action; the rest follow it. The answer is logged and written
-      // either way; a step whose action was not handed on releases the job, and the next pass hands
-      // it on from the log without asking the model.
-      const failures = await runActions(row, written.status, written.decisions, entry.at);
+      // The write above is the default action; the rest follow it, with the decision that landed
+      // last. The answer is logged and written either way; a step whose action was not handed on
+      // releases the job, and the next pass hands it on from the log without asking the model.
+      const failures = await runActions(
+        row,
+        written.status,
+        written.decisions,
+        decidedAtOf(entry, landed.history),
+      );
       report.failures.push(...failures);
       return afterActions(failures);
     } catch (error) {

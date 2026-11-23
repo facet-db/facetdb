@@ -217,6 +217,7 @@ describe("store statements per answered record", () => {
     ["finish", /^with counted as \(\s+insert into facetdb\.usage/],
     ["log answer", /^insert into facetdb\.decisions/],
     ["write", /^update facetdb\.records/],
+    ["history", /^select record_key, kind, version::text as version/],
     ["ack", /^delete from "facetdb"\."jobs"\s+where record_key in \(/],
   ];
 
@@ -311,7 +312,7 @@ describe("store statements per answered record", () => {
     return { worker, queue, sent, store, alerts, clock };
   }
 
-  it("20 answered records cost 4 statements each, plus 8 for the pass: 88 in all", async () => {
+  it("20 answered records cost 5 statements each, plus 8 for the pass: 108 in all", async () => {
     const { worker, queue, sent } = await worldOf();
     await queue(Array.from({ length: 20 }, (_, n) => `r${String(n).padStart(2, "0")}`));
 
@@ -334,14 +335,16 @@ describe("store statements per answered record", () => {
       read: 1,
       "latest answers": 1,
       ack: 1,
-      // Each record: admitted, counted, logged and written, one statement each.
+      // Each record: admitted, counted, logged and written, one statement each, and its log read
+      // once after the write, so a person's decision logged meanwhile is written too.
       reserve: 20,
       finish: 20,
       "log answer": 20,
       write: 20,
+      history: 20,
     });
-    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 8.
-    expect(sent).toHaveLength(88);
+    // At the bound of 5 per record, with the pass's own statements on top: 5 × 20 + 8.
+    expect(sent).toHaveLength(108);
   });
 
   it("one answered record, in the order the store sees them", async () => {
@@ -362,6 +365,7 @@ describe("store statements per answered record", () => {
       "alert state",
       "log answer",
       "write",
+      "history",
       "ack",
     ]);
   });

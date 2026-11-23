@@ -976,7 +976,7 @@ async function recordingRig(provider: ScriptedProvider = ScriptedProvider.always
 }
 
 describe("round trips per record", () => {
-  it("a batch of 20 records answered for the first time costs one latestAnswers, and per record exactly admit, appendAnswer, write and finish", async () => {
+  it("a batch of 20 records answered for the first time costs one latestAnswers, and per record exactly admit, appendAnswer, write, one log read after the write, and finish", async () => {
     const test = await recordingRig();
     for (let index = 0; index < 20; index += 1) {
       test.db.edit(`k${index}`, { body: `listing ${index}` });
@@ -985,12 +985,15 @@ describe("round trips per record", () => {
     const report = await createWorker(test.deps).runOnce();
 
     expect(report.written).toHaveLength(20);
-    // No logged answer means no person's decision either, so the log is not read after the append.
+    // No logged answer means no person's decision either, so the log is not read between the append
+    // and the write; it is read once after the write, so a person's decision logged meanwhile is
+    // written too.
     expect(test.calls.all()).toEqual({
       allowsWork: 1,
       claim: 1,
       read: 1,
       latestAnswers: 1,
+      history: 20,
       admit: 20,
       appendAnswer: 20,
       write: 20,
@@ -998,12 +1001,11 @@ describe("round trips per record", () => {
       ack: 1,
     });
     expect(test.calls.of("latestAnswer")).toBe(0);
-    expect(test.calls.of("history")).toBe(0);
     expect(test.calls.of("settle")).toBe(0);
     expect(test.calls.of("record")).toBe(0);
   });
 
-  it("a batch of 20 records answered before and changed since also reads each record's log once", async () => {
+  it("a batch of 20 records answered before and changed since also reads each record's log once before the write", async () => {
     const test = await recordingRig();
     const worker = createWorker(test.deps);
     for (let index = 0; index < 20; index += 1) {
@@ -1023,10 +1025,11 @@ describe("round trips per record", () => {
       claim: 1,
       read: 1,
       latestAnswers: 1,
-      // Per record: one read after the append so a person's decision on this state stands. The
-      // withdrawal of a card at the old state reads no log: it is one delete by key and hash,
-      // whatever the old answer decided.
-      history: 20,
+      // Per record: one read after the append so a person's decision on this state stands, and one
+      // after the write so a person's decision logged meanwhile is written too. The withdrawal of a
+      // card at the old state reads no log: it is one delete by key and hash, whatever the old
+      // answer decided.
+      history: 40,
       admit: 20,
       appendAnswer: 20,
       write: 20,
@@ -1120,7 +1123,8 @@ describe("a record already answered at its state", () => {
       claim: 1,
       read: 1,
       latestAnswers: 1,
-      history: 1,
+      // One read to decide from, and one after the write.
+      history: 2,
       write: 1,
       ack: 1,
     });
