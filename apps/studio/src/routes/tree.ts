@@ -11,7 +11,7 @@ import { parseSearch } from "./search.ts";
 import { settingsRoute } from "./settings.tsx";
 import { signInRoute } from "./sign-in.tsx";
 import { sourcesRoute } from "./sources.tsx";
-import { whyRoute } from "./why.tsx";
+import { whyByQueryRoute, whyRoute } from "./why.tsx";
 
 /**
  * The studio's routes, written in code (there is no router plugin in the build): the eight pages,
@@ -27,6 +27,7 @@ export const routeTree = rootRoute.addChildren([
     reviewRoute,
     decisionsRoute,
     whyRoute,
+    whyByQueryRoute,
     pluginsRoute,
     alertsRoute,
     settingsRoute,

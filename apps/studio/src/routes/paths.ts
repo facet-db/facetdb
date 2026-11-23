@@ -12,6 +12,7 @@ export const STUDIO_ROUTES = [
   "/review",
   "/decisions",
   "/decisions/$source/$key",
+  "/decisions/history",
   "/plugins",
   "/alerts",
   "/settings",

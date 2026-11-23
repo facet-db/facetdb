@@ -78,7 +78,13 @@ export type {
   UncommittedState,
   WordingWarning,
 } from "./client.ts";
-export { ApiError, createApiClient, needsSignIn, SIGN_IN_CODE } from "./client.ts";
+export {
+  ApiError,
+  createApiClient,
+  isDotSegment,
+  needsSignIn,
+  SIGN_IN_CODE,
+} from "./client.ts";
 export {
   homeQuery,
   projectQuery,

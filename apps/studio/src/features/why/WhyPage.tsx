@@ -87,7 +87,7 @@ export function WhyPage({
   recordKey,
 }: {
   readonly source: string;
-  /** The key as the log shows it, already decoded from the path. */
+  /** The key as the log shows it, already decoded from the path or the query. */
   readonly recordKey: string;
 }) {
   const api = useApi();

@@ -695,3 +695,52 @@ describe("GET /v1/decisions/:source/:key", () => {
     expect(missing.body["error"].fix).toContain("the document's _id as you write it");
   });
 });
+
+describe("GET /v1/decisions/history?source=&key=", () => {
+  it("answers a key of . or .. that no path can hold, with the same body as the path form", async () => {
+    const dots = [answered(".", 0, 0.9), answered("..", 1, 0.2), ...LOG];
+    const { get } = rig(dots);
+    // The path form cannot reach these records: the URL standard resolves the dot segments,
+    // percent-encoded or not, before the request is made.
+    for (const path of ["/v1/decisions/listings/%2E", "/v1/decisions/listings/%2E%2E"]) {
+      const { status, body } = await get(path);
+      expect(status, path).not.toBe(200);
+      expect(body["key"], path).toBeUndefined();
+    }
+    for (const key of [".", ".."]) {
+      const { status, body } = await get(
+        `/v1/decisions/history?source=listings&key=${encodeURIComponent(key)}`,
+      );
+      expect(status, key).toBe(200);
+      expect(body["key"]).toBe(key);
+      expect(body["entries"]).toHaveLength(1);
+    }
+    const byQuery = await get("/v1/decisions/history?source=listings&key=a%2Fb");
+    expect(byQuery.status).toBe(404);
+    expect(byQuery.body["error"].code).toBe("unknown_record");
+    expect((await get("/v1/decisions/history?source=listings&key=a")).body).toEqual(
+      (await get("/v1/decisions/listings/a")).body,
+    );
+  });
+
+  it("asks the same login and refuses a query it cannot read, the same way the path form fails", async () => {
+    const { get } = rig(LOG);
+    const at = "/v1/decisions/history?source=listings&key=a";
+    expect((await get(at, null)).status).toBe(401);
+    expect((await get(at, OTHER_KEY)).body["error"].code).toBe("unknown_project");
+    const source = await get("/v1/decisions/history?source=orders&key=a");
+    expect(source.status).toBe(404);
+    expect(source.body["error"].code).toBe("unknown_source");
+    for (const query of [
+      "source=listings",
+      "key=a",
+      "source=listings&key=",
+      "source=listings&key=a&q=a",
+    ]) {
+      const { status, body } = await get(`/v1/decisions/history?${query}`);
+      expect(status, query).toBe(400);
+      expect(body["error"].code).toBe("invalid_request");
+      expect(body["error"].fix).toBe("Pass source and key, the record's key as the log shows it.");
+    }
+  });
+});

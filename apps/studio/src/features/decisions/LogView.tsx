@@ -9,7 +9,7 @@ import {
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
-import type { DecisionFilters } from "../../api/index.ts";
+import { type DecisionFilters, isDotSegment } from "../../api/index.ts";
 import { useApi, useSchedule } from "../../deps.tsx";
 import { Problem, StaleNote } from "./controls.tsx";
 import { type LogLine, logLines } from "./log-lines.ts";
@@ -77,15 +77,25 @@ export function LogView({
       kind: "text",
       id: "record",
       header: "Record",
-      cell: (line) => (
-        <Link
-          to="/decisions/$source/$key"
-          params={{ source, key: line.record }}
-          className={RECORD_LINK}
-        >
-          {line.record}
-        </Link>
-      ),
+      // A key of `.` or `..` would be resolved out of a path, so it goes in the query instead.
+      cell: (line) =>
+        isDotSegment(line.record) ? (
+          <Link
+            to="/decisions/history"
+            search={{ source, key: line.record }}
+            className={RECORD_LINK}
+          >
+            {line.record}
+          </Link>
+        ) : (
+          <Link
+            to="/decisions/$source/$key"
+            params={{ source, key: line.record }}
+            className={RECORD_LINK}
+          >
+            {line.record}
+          </Link>
+        ),
     },
     { kind: "text", id: "question", header: "Question", cell: (line) => line.question },
     {

@@ -10,7 +10,7 @@ import { defaultParseSearch } from "@tanstack/react-router";
  * also means a hand-typed `?q="abc"` loses its quotes and searches for abc.
  * Everything else is parsed as before.
  */
-export const WRITTEN_TEXT_KEYS = ["source", "q", "question", "reviewer"] as const;
+export const WRITTEN_TEXT_KEYS = ["source", "q", "key", "question", "reviewer"] as const;
 
 function asWritten(value: string): string {
   try {

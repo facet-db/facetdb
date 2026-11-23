@@ -1170,7 +1170,10 @@ export type ApiClient = {
   readonly sourceNames: () => Promise<readonly string[]>;
   /** One page of one source's log, newest first; `cursor` is the previous page's `next`. */
   readonly decisions: (filters: DecisionFilters, cursor?: string) => Promise<DecisionsPage>;
-  /** One record's history; the key is as the log shows it, encoded once into the path here. */
+  /**
+   * One record's history; the key is as the log shows it, encoded once into the path here, or
+   * into the query for a key of `.` or `..` (isDotSegment).
+   */
   readonly decisionHistory: (source: string, key: string) => Promise<DecisionHistory>;
   /** One page of the run log from 1; one source by name, or every source. */
   readonly runs: (options: {
@@ -1277,6 +1280,14 @@ export type ApiClient = {
     confirm: { readonly plan: string; readonly force: boolean },
   ) => Promise<ApplyWritten>;
 };
+
+/**
+ * Whether a record's key is a dot segment, `.` or `..`: the URL standard resolves one away in any
+ * path, percent-encoded or not, so such a key reaches its record only as a query value.
+ */
+export function isDotSegment(key: string): boolean {
+  return key === "." || key === "..";
+}
 
 /** A record's key as one path segment: the surface reads it back URL-decoded. */
 const keyPath = (card: ReviewCardId) => encodeURIComponent(card.key);
@@ -1397,7 +1408,9 @@ export function createApiClient(fetch: Fetch): ApiClient {
       call(
         decisionHistorySchema,
         "GET",
-        `/decisions/${encodeURIComponent(source)}/${encodeURIComponent(key)}`,
+        isDotSegment(key)
+          ? `/decisions/history?source=${encodeURIComponent(source)}&key=${encodeURIComponent(key)}`
+          : `/decisions/${encodeURIComponent(source)}/${encodeURIComponent(key)}`,
       ),
     runs: ({ source, page }) =>
       call(
