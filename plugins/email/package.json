@@ -10,10 +10,25 @@
     "directory": "plugins/email"
   },
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
   "scripts": {
+    "build": "../../scripts/build-package.sh",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },

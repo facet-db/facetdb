@@ -10,12 +10,44 @@
     "directory": "packages/facetdb"
   },
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "files": [
+    "dist",
+    "examples/*/facetdb.config.ts",
+    "examples/*/seed.sql",
+    "examples/*/seed-quick.sql",
+    "examples/*/seed.js",
+    "examples/*/seed-quick.js",
+    "examples/*/*.md"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./plugin": "./src/plugin/index.ts",
     "./schema": "./src/config/schema.ts"
   },
+  "publishConfig": {
+    "bin": {
+      "facetdb": "./dist/cli/main.js"
+    },
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./plugin": {
+        "types": "./dist/plugin/index.d.ts",
+        "import": "./dist/plugin/index.js"
+      },
+      "./schema": {
+        "types": "./dist/config/schema.d.ts",
+        "import": "./dist/config/schema.js"
+      }
+    }
+  },
   "scripts": {
+    "build": "../../scripts/build-package.sh",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "registry:build": "node --disable-warning=ExperimentalWarning src/plugin/registry-build.ts",
     "test": "vitest run",

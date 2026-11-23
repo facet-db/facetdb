@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "composite": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "tsconfig.build.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/testing/**",
+    "src/**/*-world.ts",
+    "src/**/e2e/**",
+    "src/**/fixtures/**"
+  ],
+  "references": [
+    { "path": "../core/tsconfig.build.json" },
+    { "path": "../sql-polling/tsconfig.build.json" }
+  ]
+}

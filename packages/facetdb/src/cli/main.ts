@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync } from "node:fs";
@@ -686,8 +687,8 @@ export function processDeps(
 
 /**
  * Where `pnpm build` writes the studio: the dist/ beside `@facetdb/studio`'s package.json, a
- * workspace dependency of this package (a published package bundles the build into it). Undefined
- * when the package is not installed, and `facetdb studio` then says how to get a build.
+ * dependency of this package whose published tarball holds only that dist/. Undefined when the
+ * package is not installed, and `facetdb studio` then says how to get a build.
  */
 function studioDistDir(): string | undefined {
   try {
