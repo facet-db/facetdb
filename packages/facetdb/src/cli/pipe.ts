@@ -14,11 +14,11 @@
  */
 export type RunEnding = {
   /**
-   * A signal that aborts on the process's stop signals (`listen` wires them) and on a closed pipe:
-   * `CliDeps.stopSignal`.
+   * The run's one signal, aborted on the process's stop signals (`listen` wires them, once) and
+   * on a closed pipe: `CliDeps.stopSignal`. Every call hands out the same signal.
    */
   stopSignal(): AbortSignal;
-  /** The closed pipe: aborts every signal handed out, or calls `exit` when none was. */
+  /** The closed pipe: aborts the signal handed out, or calls `exit` when none was. */
   end(): void;
   /** Whether the pipe closed: the run's exit code is then 0, whatever the command returned. */
   pipeClosed(): boolean;
@@ -30,24 +30,26 @@ export function runEnding(options: {
   /** Calls `abort` on the process's stop signals (SIGINT, SIGTERM), once each. */
   readonly listen: (abort: () => void) => void;
 }): RunEnding {
-  const stops: AbortController[] = [];
+  // One controller and one `listen` for the run, made at the first `stopSignal()`: the worker asks
+  // per bind and per reload, and a listener per call passed Node's ten.
+  let stop: AbortController | undefined;
   let closed = false;
   return {
     stopSignal: () => {
-      const stop = new AbortController();
-      options.listen(() => stop.abort());
-      stops.push(stop);
+      if (stop === undefined) {
+        const made = new AbortController();
+        options.listen(() => made.abort());
+        stop = made;
+      }
       return stop.signal;
     },
     end: () => {
       closed = true;
-      if (stops.length === 0) {
+      if (stop === undefined) {
         options.exit();
         return;
       }
-      for (const stop of stops) {
-        stop.abort();
-      }
+      stop.abort();
     },
     pipeClosed: () => closed,
   };

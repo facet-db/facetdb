@@ -386,12 +386,16 @@ function onStopSignals(abort: () => void): void {
   process.once("SIGTERM", abort);
 }
 
-/** A stop signal on the process's own stop signals alone, for a caller with no closed-pipe guard. */
-function signalStop(): AbortSignal {
-  const stop = new AbortController();
-  onStopSignals(() => stop.abort());
-  return stop.signal;
-}
+/**
+ * The process's one stop signal on its own stop signals alone, for a caller with no closed-pipe
+ * guard: an ending nothing ends but SIGINT and SIGTERM, listening once at the first call.
+ */
+const signalStop = runEnding({
+  exit: () => {
+    process.exit(0);
+  },
+  listen: onStopSignals,
+}).stopSignal;
 
 export function processDeps(
   run: { readonly output: OutputWriters; readonly stopSignal: () => AbortSignal } = {
