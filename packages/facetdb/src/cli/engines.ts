@@ -108,7 +108,7 @@ export const POLLED_COLUMNS = {
 } as const satisfies Pick<EngineTypes, "statusNullUntil" | "reviewed">;
 
 /** Every database FacetDB connects to: its engine's key and schemes. */
-const DATABASES: readonly KnownDatabase[] = [
+export const DATABASES: readonly KnownDatabase[] = [
   {
     key: "postgres",
     name: "Postgres",

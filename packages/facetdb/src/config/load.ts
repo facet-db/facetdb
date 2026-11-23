@@ -7,6 +7,7 @@ import { isEnvReference, type ProjectConfig } from "./dsl.ts";
 import {
   ConfigError,
   type ConfigIssue,
+  connectionIssues,
   duplicateTableIssues,
   parseProjectConfig,
 } from "./schema.ts";
@@ -141,6 +142,9 @@ function recordVariables(
   if (issues.length === 0) {
     issues.push(...duplicateTableIssues(sources));
   }
+  // A source written env("X") reached the schema without its connection string: what only the
+  // string decides (capture, lastChanged) is judged now that it is read.
+  issues.push(...connectionIssues(sources));
   return { config: { ...config, sources }, issues };
 }
 

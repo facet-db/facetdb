@@ -182,6 +182,9 @@ function engineLine(
   const how = [
     ...(source.connector === undefined ? [] : [`connector: "${source.connector}"`]),
     ...(source.capture === undefined ? [] : [`capture: "${source.capture}"`]),
+    ...(source.lastChanged === undefined
+      ? []
+      : [`lastChanged: ${JSON.stringify(source.lastChanged)}`]),
   ];
   const report: EngineReport = {
     source: source.name,

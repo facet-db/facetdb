@@ -562,6 +562,95 @@ function captureIssue(source: {
 }
 
 /**
+ * The schemes whose engine polls the table itself (CockroachDB, Oracle: cli/engines.ts, `polls`),
+ * the only ones besides `connector: "polling"` whose worker reads `lastChanged`.
+ */
+const POLLED_SCHEMES: ReadonlySet<string> = new Set(["cockroachdb", "oracle"]);
+
+/** The schemes of a MongoDB connection string, a database watched by its change stream. */
+const CHANGE_STREAM_SCHEMES: ReadonlySet<string> = new Set(["mongodb", "mongodb+srv"]);
+
+/** The schemes of a Postgres connection string, the database `connector: "polling"` reads. */
+const POSTGRES_SCHEMES: ReadonlySet<string> = new Set(["postgres", "postgresql"]);
+
+/** The schemes of every database FacetDB watches by its trigger (cli/engines.ts). */
+const TRIGGER_SCHEMES: ReadonlySet<string> = new Set([
+  ...POSTGRES_SCHEMES,
+  "mysql",
+  "mariadb",
+  ...CHANGE_TRACKING_SCHEMES,
+  "sqlite",
+  "file",
+  "libsql",
+]);
+
+/**
+ * Why `lastChanged` cannot be this table source's, or undefined: only the polling engine reads it,
+ * so on a database watched by its trigger, by SQL Server's Change Tracking or by MongoDB's change
+ * stream it would be silently ignored; it is refused here at the boundary instead. A plugin or API
+ * source is refused it by its own rule. A source with no connection string yet (its variable is
+ * read after the schema, or not set) is judged once it has one (`connectionIssues`). The words name
+ * a scheme only when it is a known database's, and never any other part of the string.
+ */
+function lastChangedIssue(source: {
+  readonly api: boolean;
+  readonly source?: unknown;
+  readonly capture?: "trigger" | "change-tracking";
+  readonly connector?: "polling";
+  readonly lastChanged?: string | false;
+  readonly database?: string;
+}): string | undefined {
+  if (
+    source.lastChanged === undefined ||
+    source.api ||
+    source.source !== undefined ||
+    source.connector === "polling" ||
+    source.database === undefined
+  ) {
+    return undefined;
+  }
+  const scheme = URL_SCHEME.exec(source.database.trim())?.[1]?.toLowerCase();
+  if (scheme !== undefined && POLLED_SCHEMES.has(scheme)) {
+    return undefined;
+  }
+  const rule = "only a polled table reads lastChanged";
+  if (scheme !== undefined && CHANGE_STREAM_SCHEMES.has(scheme)) {
+    return `${rule}, and FacetDB watches this ${scheme}: database by its change stream; remove lastChanged`;
+  }
+  if (scheme === undefined || !TRIGGER_SCHEMES.has(scheme)) {
+    return `${rule}, and this source's database is not polled; remove lastChanged`;
+  }
+  if (source.capture === "change-tracking" && CHANGE_TRACKING_SCHEMES.has(scheme)) {
+    return `${rule}, and FacetDB watches this ${scheme}: database by Change Tracking; remove lastChanged`;
+  }
+  const polling = POSTGRES_SCHEMES.has(scheme)
+    ? ', or set connector: "polling" if the host forbids triggers'
+    : "";
+  return `${rule}, and FacetDB watches this ${scheme}: database by its trigger; remove lastChanged${polling}`;
+}
+
+/**
+ * What the schema could not judge of each source until its connection string was read: `capture`
+ * and `lastChanged`, by the database the string names. The loader reads a source's `env("X")` after
+ * the schema has run, so it calls this once the strings are in; a source already judged with its
+ * string passes again unchanged, and one still without a string is left alone.
+ */
+export function connectionIssues(sources: readonly SourceConfig[]): ConfigIssue[] {
+  return sources.flatMap((source, index) => {
+    const issues: ConfigIssue[] = [];
+    const capture = captureIssue(source);
+    if (capture !== undefined) {
+      issues.push({ path: `sources[${index}].capture`, message: capture });
+    }
+    const lastChanged = lastChangedIssue(source);
+    if (lastChanged !== undefined) {
+      issues.push({ path: `sources[${index}].lastChanged`, message: lastChanged });
+    }
+    return issues;
+  });
+}
+
+/**
  * A column's name as `lastChanged` takes it: an identifier of the source's database, in any case
  * (Oracle keeps unquoted names in capitals), never empty and never SQL. The polling engine quotes
  * it, and refuses it at migrate when the table has no such column.
@@ -640,6 +729,10 @@ const sourceSchema = strict({
   const capture = captureIssue(source);
   if (capture !== undefined) {
     context.addIssue({ code: "custom", path: ["capture"], message: capture });
+  }
+  const lastChanged = lastChangedIssue(source);
+  if (lastChanged !== undefined) {
+    context.addIssue({ code: "custom", path: ["lastChanged"], message: lastChanged });
   }
 });
 

@@ -914,6 +914,8 @@ describe("what the schema refuses", () => {
                 api: false,
                 table: "listings",
                 database: { env: "DATABASE_URL" },
+                // Only a polled table reads lastChanged.
+                connector: "polling",
                 lastChanged,
               },
             ],
