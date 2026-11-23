@@ -3,6 +3,23 @@ import type { z } from "zod";
 import type { AppEnv } from "./auth/middleware.ts";
 import { ApiError } from "./errors.ts";
 
+/**
+ * The largest body a request may carry on any path but a plugin source's webhook (whose own cap is
+ * `HOOK_BODY_MAX_BYTES`): 1 MB (1 MiB), `POST /v1/check` included. cli/serve.ts refuses a body past
+ * it before the app sees the request, so before any login check.
+ */
+export const BODY_MAX_BYTES = 1024 * 1024;
+
+/** The 413 of a studio or API request whose body is past `BODY_MAX_BYTES` (a hook's is `hookBodyTooLarge`). */
+export function requestTooLarge(): ApiError {
+  return new ApiError(
+    413,
+    "request_too_large",
+    `The request's body is larger than the ${BODY_MAX_BYTES} bytes (1 MB) a request may carry here.`,
+    "Send only the fields the source reads to POST /v1/check, or a smaller draft from the studio.",
+  );
+}
+
 /** Reads a request's JSON body once (`@hono/node-server` buffers it); a body that is not JSON is a 400. */
 export async function readJson(request: { json(): Promise<unknown> }): Promise<unknown> {
   try {

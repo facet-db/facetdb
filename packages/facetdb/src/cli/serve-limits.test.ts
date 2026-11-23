@@ -111,20 +111,21 @@ function send(
 }
 
 /**
- * A request over a bare socket that sends its head (and `start` of its body) and then waits:
- * unlike `node:http`'s client it leaves the connection to the server, so the test sees who closes
- * it. `continued` resolves on the server's `100 Continue` (asked by an `expect` header): `node:http`
- * writes it on the request's headers and calls the server's handler in the same turn, so by then
- * the request has been admitted or refused. `answer` is the first final answer, `closed` the server
- * closing its end, `errors` what the connection met; `seen` says whether each has happened yet.
+ * A request over a bare socket that sends its head (and `start` of its body) and then waits: unlike
+ * `node:http`'s client it leaves the connection to the server, so the test sees who closes it.
+ * `handled` resolves on the server's first word to it: the `100 Continue` an `expect` header asks
+ * for, which the adapter writes only to a request it admitted, or the answer refusing it on its
+ * headers; either way the request has been admitted or refused by then. `answer` is the first final
+ * answer, `closed` the server closing its end, `errors` what the connection met; `seen` says
+ * whether each has happened yet.
  */
 type Stalled = {
   readonly socket: Socket;
-  readonly continued: Promise<void>;
+  readonly handled: Promise<void>;
   readonly answer: Promise<Answer>;
   readonly closed: Promise<void>;
   readonly errors: Error[];
-  readonly seen: { answered: boolean; closed: boolean };
+  readonly seen: { continued: boolean; answered: boolean; closed: boolean };
 };
 
 function stall(
@@ -134,7 +135,7 @@ function stall(
   const socket = connect({ port, host: "127.0.0.1", localAddress: options.from ?? "127.0.0.1" });
   opened.push(socket);
   const errors: Error[] = [];
-  const seen = { answered: false, closed: false };
+  const seen = { continued: false, answered: false, closed: false };
   socket.on("error", (error) => errors.push(error));
   const closed = new Promise<void>((done) => {
     const heard = (): void => {
@@ -144,9 +145,9 @@ function stall(
     socket.once("end", heard);
     socket.once("close", heard);
   });
-  let heardContinue = (): void => {};
-  const continued = new Promise<void>((done) => {
-    heardContinue = done;
+  let heard = (): void => {};
+  const handled = new Promise<void>((done) => {
+    heard = done;
   });
   const answer = new Promise<Answer>((resolve, reject) => {
     let received = Buffer.alloc(0);
@@ -163,7 +164,8 @@ function stall(
           .split("\r\n");
         const status = Number(statusLine.split(" ")[1]);
         if (status === 100) {
-          heardContinue();
+          seen.continued = true;
+          heard();
           received = received.subarray(split + 4);
           continue;
         }
@@ -181,6 +183,7 @@ function stall(
           return;
         }
         seen.answered = true;
+        heard();
         resolve({
           status,
           retryAfter: headers.get("retry-after"),
@@ -193,7 +196,7 @@ function stall(
     socket.on("error", reject);
   });
   socket.write(`${options.headers}\r\n${options.start ?? ""}`);
-  return { socket, continued, answer, closed, errors, seen };
+  return { socket, handled, answer, closed, errors, seen };
 }
 
 const hookHead = (path: string, length: number, extra = ""): string =>
@@ -224,7 +227,7 @@ async function stallMany(
       headers: hookHead("/v1/hooks/github/issues", STALLED_LENGTH, "expect: 100-continue\r\n"),
       start: options.start ?? "",
     });
-    await one.continued;
+    await one.handled;
     stalled.push(one);
   }
   return stalled;
@@ -286,7 +289,7 @@ describe("serveHttp limits a plugin source's webhook before it reads a body (ser
     expect(seen.some((one) => one.body.includes("late"))).toBe(false);
   });
 
-  it("lets one address's senders that send headers and stop hold 2 slots, refusing the rest, while another address is answered", async () => {
+  it("lets one address's senders that send headers and stop hold 2 slots, refusing the rest with no 100 Continue, while another address is answered", async () => {
     const { port, seen } = await serve({ bodyDeadlineMs: LONG_MS, lingerMs: LONG_MS });
     const stalled = await stallMany(port, { from: () => "127.0.0.1" });
 
@@ -300,6 +303,10 @@ describe("serveHttp limits a plugin source's webhook before it reads a body (ser
     }
     expect(stalled.map((one) => one.seen.answered)).toEqual(
       stalled.map((_, at) => at >= HOOK_READING_PER_ADDRESS),
+    );
+    // Each asked `Expect: 100-continue`: only the admitted ones were told to send their body.
+    expect(stalled.map((one) => one.seen.continued)).toEqual(
+      stalled.map((_, at) => at < HOOK_READING_PER_ADDRESS),
     );
     // The rest of the slots still serve other addresses, as many as are left.
     const others = await stallMany(port, {
