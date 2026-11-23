@@ -352,8 +352,7 @@ describe("a source's backfill from the Sources page", () => {
       questions: ["is_vehicle"],
       counts: COUNTS(1_200),
       endedAt: "2026-11-06T12:01:00.000Z",
-      words:
-        "Finished for is_vehicle: 1,200 records answered, 0 already had these answers, 0 left for the worker.",
+      words: "Finished: 1,200 answered.",
     });
     const paused: Home = {
       ...SAMPLE_HOME,
@@ -768,5 +767,66 @@ describe("the offer after an installed question", () => {
     ).toBeVisible();
     expect(screen.queryByText(/have no answer for is_vehicle yet/)).toBeNull();
     expect(screen.queryByRole("group", { name: "Backfill of listings" })).toBeNull();
+  });
+
+  describe("a finished job of the added question that skipped records", () => {
+    // The worker's words for such a job: they send the reader to the Sources page by name.
+    const SKIPPED_WORDS =
+      "Finished: 1,180 answered. 20 skipped (changed or never fully answered): use Answer existing records on the Sources page to queue them with every question.";
+    const FINISHED_SKIPPING = sampleBackfill("finished", {
+      questions: ["is_vehicle"],
+      counts: { records: 1_200, queued: 0, answered: 1_180, alreadyAnswered: 0, deferred: 20 },
+      endedAt: "2026-11-06T12:01:00.000Z",
+      words: SKIPPED_WORDS,
+    });
+
+    it("on the Sources page, Answer existing records asks the whole set, which queues the skipped records", async () => {
+      const { api } = worker(FINISHED_SKIPPING);
+      const { studio, group } = await sourcesPage(api);
+      expect(await within(group).findByText(SKIPPED_WORDS)).toBeVisible();
+
+      await studio.user.click(button(group, "Answer existing records"));
+
+      expect(await within(group).findByText("Counting the records")).toBeVisible();
+      // No questions sent: the whole set, as the words promise.
+      expect(api.calls.filter((call) => call.startsWith("backfillEstimate"))).toEqual([
+        "backfillEstimate listings",
+      ]);
+    });
+
+    it("in the install's offer, the control of the same name asks the added question alone again, so the words name the page", async () => {
+      const config: { pending: readonly PendingSource[] } = { pending: [LISTINGS_ADDED] };
+      const { api } = worker(FINISHED_SKIPPING, {
+        projectConfig: (): Promise<ProjectConfig> =>
+          Promise.resolve({ ...SAMPLE_PROJECT_CONFIG, pending: [...config.pending] }),
+        migrateRun: () => {
+          config.pending = [];
+          return Promise.resolve(SAMPLE_MIGRATED);
+        },
+      });
+      const studio = renderStudio({ path: "/questions", api });
+      await screen.findByRole("article", { name: "is_scam" });
+      const block = screen.getByRole("region", { name: NOT_RUNNING_HEADING });
+      await studio.user.click(
+        await within(block).findByRole("button", { name: "Install from this page" }),
+      );
+      await studio.user.click(within(block).getByLabelText("Connection string"));
+      await studio.user.paste(ADMIN);
+      await studio.user.click(within(block).getByRole("button", { name: "Show the SQL" }));
+      await studio.user.click(
+        await within(block).findByRole("button", { name: "Install is_vehicle" }),
+      );
+      const group = await screen.findByRole("group", { name: "Backfill of listings" });
+      // The offer shows the job of its own question, words and all.
+      expect(await within(group).findByText(SKIPPED_WORDS)).toBeVisible();
+
+      await studio.user.click(button(group, "Answer existing records"));
+
+      expect(await within(group).findByText("Counting the records")).toBeVisible();
+      // The added question alone: it would skip the same records again.
+      expect(api.calls.filter((call) => call.startsWith("backfillEstimate"))).toEqual([
+        "backfillEstimate listings is_vehicle",
+      ]);
+    });
   });
 });

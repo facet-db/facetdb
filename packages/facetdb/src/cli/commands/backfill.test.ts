@@ -409,7 +409,7 @@ describe("facetdb backfill", () => {
     }
     // 10 records a second: each record starts 100 ms after the last.
     expect(world.clock.sleeps.filter((ms) => ms > 0)).toContain(100);
-    expect(result.stdout).toContain("6 records answered");
+    expect(result.stdout).toContain("Done: 6 answered.\n");
     for (const key of KEYS) {
       expect(world.db.decisionOf(key)?.status).toBe("done");
     }

@@ -195,7 +195,7 @@ describe("facetdb backfill --question behind the worker's backoff", () => {
         2,
       );
       expect(clock.sleeps).toContain(waited);
-      expect(result.stdout).toContain("6 records answered");
+      expect(result.stdout).toContain("Done: 6 answered.\n");
       const answers = await categoryAnswers();
       for (const key of KEYS) {
         expect(answers.get(key)).toMatchObject({ type: "choice", top: "car" });

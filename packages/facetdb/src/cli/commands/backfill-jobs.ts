@@ -21,6 +21,7 @@ import type {
   BackfillJobStatus,
   BackfillJobsDoor,
 } from "@facetdb/server";
+import { addedQuestionsEnd, type LeftOver, leftOver, NOTHING_LEFT } from "./backfill-left.ts";
 import type { SourceLoop } from "./config-reload.ts";
 
 /**
@@ -148,6 +149,8 @@ type Job = {
   startedAt: number | null;
   endedAt: number | null;
   counts: Counts;
+  /** An added-question job's deferred records by what becomes of each, from its report. */
+  left: LeftOver;
   cause: StopCause | undefined;
   why: string | null;
   /** Ends the estimate's wait (true lets the job run); set only while it waits. */
@@ -316,7 +319,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       case "finished":
         return job.questions === null
           ? `Finished: ${grouped.format(counts.queued)} records queued for the worker, ${grouped.format(counts.alreadyAnswered)} already answered.`
-          : `Finished: ${grouped.format(counts.answered)} records answered, ${grouped.format(counts.alreadyAnswered)} already had these answers, ${grouped.format(counts.deferred)} left for the worker.`;
+          : addedQuestionsEnd("Finished", counts, job.left, job.source, "studio");
       case "stopped":
       case "failed":
       case "paused":
@@ -405,6 +408,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       alreadyAnswered: report.alreadyAnswered.length,
       deferred: report.deferred.length,
     };
+    job.left = leftOver(report.deferred);
     switch (report.status) {
       case "completed":
         job.state = "finished";
@@ -599,6 +603,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
         startedAt: null,
         endedAt: null,
         counts: noCounts(),
+        left: NOTHING_LEFT,
         cause: undefined,
         why: null,
         answer: undefined,

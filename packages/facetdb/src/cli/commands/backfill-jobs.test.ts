@@ -623,7 +623,7 @@ describe("a backfill job: the estimate first", () => {
     expect(done).toMatchObject({
       questions: ["spam"],
       counts: { records: 30, queued: 0, answered: 30, alreadyAnswered: 0, deferred: 0 },
-      words: "Finished: 30 records answered, 0 already had these answers, 0 left for the worker.",
+      words: "Finished: 30 answered.",
     });
     // One request a record, of the added question alone, each admitted before it was made.
     expect(t.provider.asked).toHaveLength(30);

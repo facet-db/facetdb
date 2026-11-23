@@ -15,6 +15,7 @@ import {
 import { requireUsableUrl } from "../engines.ts";
 import { type CliDeps, CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
+import { addedQuestionsEnd, leftOver } from "./backfill-left.ts";
 import {
   ALLOW_INSECURE_OPTION,
   loadPluginHost,
@@ -330,7 +331,16 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       print(
         onlyQuestions === undefined
           ? `Done: ${whole.format(report.enqueued.length)} records queued for the worker, ${whole.format(report.alreadyAnswered.length)} already answered. Run facetdb worker to answer the queue.`
-          : `Done: ${whole.format(report.answered.length)} records answered, ${whole.format(report.alreadyAnswered.length)} already had these answers, ${whole.format(report.deferred.length)} left for the worker.`,
+          : addedQuestionsEnd(
+              "Done",
+              {
+                answered: report.answered.length,
+                alreadyAnswered: report.alreadyAnswered.length,
+              },
+              leftOver(report.deferred),
+              source.name,
+              "cli",
+            ),
       );
       return { ok: true, ...summary(report) };
     } catch (error) {
