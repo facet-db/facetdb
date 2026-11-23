@@ -17,8 +17,17 @@ import type { HttpHandler, HttpListener } from "./program.ts";
  *
  * A request is held whole before the handler sees it, except a plugin source's webhook, which
  * anyone may send: past `HOOK_BODY_MAX_BYTES` it is answered 413 as soon as its declared length or
- * the bytes received say so, nothing more of it is kept, and the connection is closed.
+ * the bytes received say so, nothing more of it is kept, and the connection is closed once the
+ * sender has finished its request or `REFUSED_BODY_LINGER_MS` has passed.
  */
+
+/**
+ * How long a refused hook's connection stays open after its 413, reading and dropping what the
+ * sender still writes. Closing at once, with the sender's bytes unread, makes the kernel reset the
+ * connection, and a sender still writing meets the reset before it reads the answer; nginx lingers
+ * after its own 413 for the same reason. Bounded, so a sender that never ends costs two seconds.
+ */
+export const REFUSED_BODY_LINGER_MS = 2000;
 
 /** The URL a request is made with: the one the hook check reads and the router routes by. */
 function urlOf(incoming: IncomingMessage): string {
@@ -42,29 +51,53 @@ function requestOf(incoming: IncomingMessage, url: string, body: Buffer): Reques
 
 /**
  * The 413 of a hook's body past the cap, in the surface's one error shape and with a request id as
- * every answer of the app carries; the connection closes.
+ * every answer of the app carries. The answer goes out whole at once, its length declared, so the
+ * sender can read it while it still writes. The response ends, and Node closes the connection it
+ * marked `connection: close`, only once the request has ended or the linger has passed; until
+ * then the request is read and its bytes dropped, so none of them is kept.
  */
-function refuseTooLarge(outgoing: ServerResponse): void {
+function refuseTooLarge(
+  incoming: IncomingMessage,
+  outgoing: ServerResponse,
+  lingerMs: number,
+): void {
   const error = hookBodyTooLarge();
+  const body = Buffer.from(JSON.stringify(error.toBody()));
   outgoing.writeHead(error.status, {
     "content-type": "application/json",
+    "content-length": body.byteLength,
     connection: "close",
     [REQUEST_ID_HEADER]: randomUUID(),
   });
-  outgoing.end(JSON.stringify(error.toBody()));
+  outgoing.write(body);
+  const close = (): void => {
+    clearTimeout(timer);
+    incoming.off("end", close);
+    outgoing.off("close", close);
+    if (!outgoing.writableEnded && !outgoing.destroyed) {
+      outgoing.end();
+    }
+  };
+  const timer = setTimeout(close, lingerMs);
+  incoming.once("end", close);
+  // A connection that errors or is closed first (the sender gave up) leaves no timer behind.
+  outgoing.once("close", close);
+  // A declared length refused on its headers was never read: flowing with no reader drops it.
+  incoming.resume();
 }
 
 export async function serveHttp(
   handler: HttpHandler,
   port: number,
   host: string,
+  lingerMs: number = REFUSED_BODY_LINGER_MS,
 ): Promise<HttpListener> {
   const server = createServer((incoming, outgoing) => {
     const url = urlOf(incoming);
     const limit = isHookUrl(url) ? HOOK_BODY_MAX_BYTES : undefined;
     const declared = incoming.headers["content-length"];
     if (limit !== undefined && declared !== undefined && Number(declared) > limit) {
-      refuseTooLarge(outgoing);
+      refuseTooLarge(incoming, outgoing, lingerMs);
       return;
     }
     const chunks: Buffer[] = [];
@@ -78,7 +111,7 @@ export async function serveHttp(
       if (limit !== undefined && size > limit) {
         refused = true;
         chunks.length = 0;
-        refuseTooLarge(outgoing);
+        refuseTooLarge(incoming, outgoing, lingerMs);
         return;
       }
       chunks.push(chunk);
