@@ -310,6 +310,15 @@ export type Alerts = {
    * active. A healthy model call does not wait: it starts the same delivery off its path.
    */
   resolve(key: string): Promise<AlertOutcome>;
+  /**
+   * `resolve` for an event that something healthy resolves again and again (a plugin's delivered
+   * action resolves its Action credential refused): no store read while this process knows the key
+   * holds no alert, and one check and one resolved message per key in flight, whatever the number
+   * of callers. Rejects when the store fails. A raise of the key, and the heartbeat of its source
+   * (`signals(scope).beat`), make the next call read again, so an alert another worker or an
+   * earlier run raised is still resolved.
+   */
+  resolveOpen(key: string): Promise<void>;
   signals(scope: AlertScope): AlertSignals;
   /**
    * Waits for every resolved message still on its way (never rejects): what the worker awaits at
@@ -760,6 +769,42 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     await pending;
   }
 
+  /**
+   * `Alerts.resolveOpen`: resolves `key` unless this process knows it holds no alert, concurrent
+   * calls sharing one check and one resolved message (`clearing`), as a healthy model call resolves
+   * Model failing; unlike it, the resolved message is awaited here, so a store failure is the
+   * caller's, never the next model call's. "Known clear" is learned from a read (or a resolve),
+   * forgotten by a raise of the key and by the heartbeat of its source.
+   */
+  async function resolveOpen(key: string): Promise<void> {
+    if (knownClear.has(key)) {
+      return;
+    }
+    let pending = clearing.get(key);
+    if (pending === undefined) {
+      pending = resolveOpenNow(key).finally(() => clearing.delete(key));
+      clearing.set(key, pending);
+    }
+    await pending;
+  }
+
+  async function resolveOpenNow(key: string): Promise<void> {
+    const paced = pacedUntil.get(key);
+    if (resolving.has(key) || (paced !== undefined && clock.now() < paced)) {
+      return;
+    }
+    const raisedBefore = raises.get(key) ?? 0;
+    const active = await store.getActive(key);
+    const outcome = active === undefined ? undefined : await resolveActive(key, active);
+    // A raise meanwhile reopened the key: it is not clear, whatever was read before it.
+    if (
+      (outcome === undefined || outcome.status === "resolved") &&
+      (raises.get(key) ?? 0) === raisedBefore
+    ) {
+      knownClear.add(key);
+    }
+  }
+
   /** A store failure around a resolved message delivered off the path, said by the next call. */
   function throwStoreError(): void {
     const failed = storeError;
@@ -840,6 +885,14 @@ export function createAlerts(deps: AlertsDeps): Alerts {
       async beat() {
         knownClear.delete(modelKey(scope));
         knownClear.delete(changedKey(scope));
+        // The source's credential alerts, one per plugin, which another worker may have raised: the
+        // next delivered try of each reads its key again.
+        const credentials = `${eventKey({ kind: "action_credential_refused", ...scope, question: null })}|`;
+        for (const key of knownClear) {
+          if (key.startsWith(credentials)) {
+            knownClear.delete(key);
+          }
+        }
         // The project's own row, which Home reads. No alert resolves here: a worker that died is
         // alerted once by another worker and the alert never resolves.
         await store.saveHeartbeat(scope.project, clock.now());
@@ -1028,5 +1081,5 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     channels = next;
   }
 
-  return { raise, resolve, signals, drain, summarize, test, rebind };
+  return { raise, resolve, resolveOpen, signals, drain, summarize, test, rebind };
 }

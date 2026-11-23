@@ -1265,6 +1265,7 @@ describe("the worker's outbox loop", () => {
       alertFailures: [
         { event: refused, error: new Error("the alerts table is unreachable"), final: false },
       ],
+      credentialAlertFailures: [],
     };
     const driver = new Error(`connect ECONNREFUSED: ${WORKER_URL}`);
     const stop = new AbortController();
@@ -1285,6 +1286,48 @@ describe("the worker's outbox loop", () => {
       OUTBOX_PASS_FAILED,
     ]);
     expect(printed.join("\n")).not.toContain("ECONNREFUSED");
+  });
+
+  it("prints each credential alert a pass could not raise or resolve, in fixed words, never its error", async () => {
+    const event = {
+      projectId: "p",
+      deliveryId: "9",
+      sourceId: "p:issues",
+      plugin: "@facetdb/github",
+      action: "label",
+      attempts: 2,
+      queuedAt: START,
+    };
+    const driver = new Error(`connect ECONNREFUSED: ${WORKER_URL}`);
+    const stop = new AbortController();
+    const printed: string[] = [];
+
+    await deliverUntil(
+      stop.signal,
+      () => {
+        stop.abort();
+        return Promise.resolve({
+          alertFailures: [],
+          credentialAlertFailures: [
+            { phase: "raise" as const, event, error: driver },
+            {
+              phase: "resolve" as const,
+              event: { projectId: "p", sourceId: "p:issues", plugin: "@facetdb/github" },
+              error: driver,
+            },
+          ],
+        });
+      },
+      new FakeClock(START),
+      (text) => printed.push(text),
+    );
+
+    expect(printed).toEqual([
+      "Action credential refused for plugin @facetdb/github on source issues (delivery 9) could not be raised. The action stays on its backoff, and its next refused try raises the alert again.",
+      "Action credential refused for plugin @facetdb/github on source issues could not be resolved after a delivered try. The plugin's next delivered try on that source resolves it.",
+    ]);
+    expect(printed.join("\n")).not.toContain("ECONNREFUSED");
+    expect(printed.join("\n")).not.toContain("worker-password");
   });
 
   it("--once prints every give-up alert that could not be raised too, the last one included", async () => {

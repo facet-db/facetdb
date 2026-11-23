@@ -56,7 +56,10 @@ const SUBJECT = "github label on acme/shop#7";
 /** GitHub's fix for a refused token, as `@facetdb/github` writes it. */
 const TOKEN_FIX =
   "the token is wrong, expired or revoked: put a valid one in the variable plugins.github.token names, then restart the worker";
-const REFUSED_TOKEN = `${SUBJECT}: GitHub answered 401 to reading the issue: GitHub does not accept the token. ${TOKEN_FIX}`;
+/** GitHub's fix for a token not allowed to act on the repository (its 403), as `@facetdb/github` writes it. */
+const FORBIDDEN_FIX =
+  "the token may not do this on the repository: give a fine-grained token Issues read and write on it";
+const FORBIDDEN = `${SUBJECT}: GitHub answered 403 to adding the labels: the token is not allowed to. ${FORBIDDEN_FIX}`;
 
 type Fields = {
   readonly status?: number;
@@ -79,6 +82,17 @@ const refusedToken = () =>
     {
       status: 401,
     },
+  );
+
+/**
+ * A token GitHub knows but does not let act (its 403): refused for good. A 401 is not
+ * (action-unauthorized.test.ts): a rotated credential comes back.
+ */
+const forbidden = () =>
+  githubError(
+    `${SUBJECT}: GitHub answered 403 to adding the labels: the token is not allowed to`,
+    FORBIDDEN_FIX,
+    { status: 403 },
   );
 
 /** What the plugins throw at their next call: the GitHub action's error, and the channel's. */
@@ -357,20 +371,20 @@ async function throughOutbox(
 }
 
 describe("a first-party action's own failure words", () => {
-  it("gives GitHub's refused token up at once, in its words with its fix, the alert raised now", async () => {
-    const run = await runnerFor({ action: refusedToken });
+  it("gives GitHub's refusal for good (a token not allowed to) up at once, in its words with its fix, the alert raised now", async () => {
+    const run = await runnerFor({ action: forbidden });
     const t = await throughOutbox(run);
 
     expect(t.report.gaveUp).toEqual([t.id]);
     expect(t.stored).toMatchObject({
       attempts: 1,
       gave_up_at: String(START),
-      last_error: `${REFUSED_TOKEN}; ${REFUSED_FOR_GOOD}`,
+      last_error: `${FORBIDDEN}; ${REFUSED_FOR_GOOD}`,
     });
     expect(t.gaveUp).toEqual([
       {
         event: expect.objectContaining({ attempts: 1, refused: true, plugin: "@facetdb/github" }),
-        lastError: REFUSED_TOKEN,
+        lastError: FORBIDDEN,
       },
     ]);
     const [given] = t.gaveUp;
@@ -380,7 +394,7 @@ describe("a first-party action's own failure words", () => {
       () => "studio",
     );
     expect(alert.what).toContain("was given up at once, refused for good after 1 attempt");
-    expect(alert.what).toContain(TOKEN_FIX);
+    expect(alert.what).toContain(FORBIDDEN_FIX);
     expect(alert.did).toBe(GAVE_UP_REFUSED_DID);
     for (const form of TOKEN_FORMS) {
       expect(JSON.stringify([t.stored, t.gaveUp, alert])).not.toContain(form);
@@ -462,6 +476,8 @@ describe("a first-party action's own failure words", () => {
 });
 
 describe("words that are not kept", () => {
+  // A 403 here: a 401 whose words are withheld still says its credential was refused
+  // (action-unauthorized.test.ts); these are about the words alone.
   it("falls back to the fixed words when GitHub's words repeat the token, raw or encoded", async () => {
     const echoes: readonly ((token: string) => string)[] = [
       (token) => `the token ${token} is refused`,
@@ -472,7 +488,7 @@ describe("words that are not kept", () => {
     ];
     for (const echo of echoes) {
       const run = await runnerFor({
-        action: (token) => githubError(`${SUBJECT}: ${echo(token)}`, TOKEN_FIX, { status: 401 }),
+        action: (token) => githubError(`${SUBJECT}: ${echo(token)}`, TOKEN_FIX, { status: 403 }),
       });
       const failed = await failureOf(run);
       // The plugin's own error is handed on untouched, never as words the outbox keeps.
@@ -481,7 +497,7 @@ describe("words that are not kept", () => {
 
     const run = await runnerFor({
       action: (token) =>
-        githubError(`${SUBJECT}: the token ${token} is refused`, TOKEN_FIX, { status: 401 }),
+        githubError(`${SUBJECT}: the token ${token} is refused`, TOKEN_FIX, { status: 403 }),
     });
     const t = await throughOutbox(run);
     // Not kept, so not read either: the backoff and the 24 hours, as in an earlier version.
@@ -520,7 +536,7 @@ describe("words that are not kept", () => {
       action: (token) => {
         // A reload while the action runs puts the first settings back in force.
         live.swap(first);
-        return githubError(`${SUBJECT}: the token ${token} is refused`, TOKEN_FIX, { status: 401 });
+        return githubError(`${SUBJECT}: the token ${token} is refused`, TOKEN_FIX, { status: 403 });
       },
       channel: () => new Error("unused"),
     };

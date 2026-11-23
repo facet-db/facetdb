@@ -1133,10 +1133,15 @@ describe("GitHub's refusals", () => {
     const kept = (error: GithubActionError) =>
       firstPartyFailure("@facetdb/github", error, [TOKEN], ACTION_WORDS_MAX);
 
-    // A refused token: for good, the words kept whole, the fix among them.
+    // A refused token: not for good (a rotated token comes back), the credential said refused, the
+    // words kept whole, the fix among them.
     let error = await refusedWith(() => json(401, { message: `Bad credentials ${TOKEN}` }));
     expect(error.temporary).toBeUndefined();
-    expect(kept(error)).toEqual({ words: error.message, permanent: true });
+    expect(kept(error)).toEqual({
+      words: error.message,
+      permanent: false,
+      credentialRefused: true,
+    });
     expect(error.message).toContain(error.fix);
     // A missing repository: GitHub's 404 for it, for good.
     const missing = failure(

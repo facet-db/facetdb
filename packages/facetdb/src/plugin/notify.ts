@@ -430,6 +430,8 @@ async function deliver(
       throw new ActionFailed(error.message, {
         ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
         permanent: error.permanent,
+        // The channel's service refused the plugin's credential (a 401).
+        ...(error.credentialRefused ? { credentialRefused: true } : {}),
       });
     }
     throw error instanceof ChannelFailed ? new ActionFailed(error.message) : error;

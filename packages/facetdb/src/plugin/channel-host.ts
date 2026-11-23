@@ -11,6 +11,7 @@ import {
   processZone,
   type QuietWindow,
 } from "@facetdb/core";
+import { CREDENTIAL_WORDS_WITHHELD } from "@facetdb/server";
 import {
   type AlertChannel,
   type AlertSends,
@@ -118,9 +119,16 @@ export type FirstPartyFailure = {
   readonly retryAfterMs?: number;
   /**
    * The same refusal comes back on every try: the error says so (`temporary: false`), or, saying
-   * neither way, it carries an HTTP 4xx `status` other than 408, 425 and 429. Never with a wait.
+   * neither way, it carries an HTTP 4xx `status` other than 401, 408, 425 and 429. Never with a
+   * wait, never with `credentialRefused`.
    */
   readonly permanent: boolean;
+  /**
+   * The service refused the plugin's credential: its `status` is 401 and its `temporary` is not
+   * `false`. Not permanent, as a rotated credential comes back: the outbox keeps the row on its 24
+   * hours of retries and raises Action credential refused at once.
+   */
+  readonly credentialRefused?: true;
 };
 
 /** Text with control and invisible format characters made spaces, held to `max` characters. */
@@ -150,6 +158,19 @@ function refusedForGood(error: Error): boolean {
     status < 500 &&
     !TRIED_AGAIN_4XX.has(status)
   );
+}
+
+/**
+ * Whether a first-party error says the service refused its credential: an HTTP 401 `status` that
+ * its own `temporary` does not mark for good. A 401 marked `temporary: false` is the plugin's word
+ * that this refusal comes back on every try, and is refused for good as before.
+ */
+function credentialRefused(error: Error): boolean {
+  const { temporary, status } = error as {
+    readonly temporary?: unknown;
+    readonly status?: unknown;
+  };
+  return status === 401 && temporary !== false;
 }
 
 /** The wait a first-party error asks for: a whole, finite number of milliseconds from 0, else none. */
@@ -186,9 +207,27 @@ export function firstPartyFailure(
     return undefined;
   }
   const retryAfterMs = waitAskedFor(error);
-  return retryAfterMs === undefined
-    ? { words, permanent: refusedForGood(error) }
-    : { words, retryAfterMs, permanent: false };
+  // A refused credential is tried again for its 24 hours, never refused for good.
+  const credential = credentialRefused(error);
+  return {
+    words,
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    permanent: retryAfterMs === undefined && !credential && refusedForGood(error),
+    ...(credential ? { credentialRefused: true as const } : {}),
+  };
+}
+
+/**
+ * Whether a first-party plugin's own error (`FIRST_PARTY_DELIVERY_ERRORS`) says its credential was
+ * refused (a 401, `temporary` not `false`), read whether or not its words are kept: a status is no
+ * secret, so a 401 whose words repeat a handed value, or are empty, still raises Action credential
+ * refused, in fixed words. A community plugin's error never says it.
+ */
+export function firstPartyCredentialRefused(packageName: string, error: unknown): boolean {
+  const name = FIRST_PARTY_DELIVERY_ERRORS[packageName];
+  return (
+    name !== undefined && error instanceof Error && error.name === name && credentialRefused(error)
+  );
 }
 
 /**
@@ -199,11 +238,14 @@ export function firstPartyFailure(
 export class ChannelRefused extends ChannelFailed {
   readonly retryAfterMs: number | undefined;
   readonly permanent: boolean;
+  /** The channel's service refused the plugin's credential: a notify row's outbox raises its alert. */
+  readonly credentialRefused: boolean;
 
   constructor(failure: FirstPartyFailure) {
     super(failure.words);
     this.retryAfterMs = failure.retryAfterMs;
     this.permanent = failure.permanent;
+    this.credentialRefused = failure.credentialRefused === true;
   }
 }
 
@@ -605,9 +647,17 @@ export async function deliverThrough(
       resolved.values,
       DELIVERY_WORDS_MAX,
     );
-    throw vouched === undefined
-      ? new ChannelFailed(deliveryFailedWords(resolved.hosted.packageName, carried))
-      : new ChannelRefused(vouched);
+    if (vouched !== undefined) {
+      throw new ChannelRefused(vouched);
+    }
+    // Words withheld, a refused credential is still said, in fixed words.
+    throw firstPartyCredentialRefused(resolved.hosted.packageName, error)
+      ? new ChannelRefused({
+          words: CREDENTIAL_WORDS_WITHHELD,
+          permanent: false,
+          credentialRefused: true,
+        })
+      : new ChannelFailed(deliveryFailedWords(resolved.hosted.packageName, carried));
   } finally {
     settled.abort();
     stop.removeEventListener("abort", onStop);

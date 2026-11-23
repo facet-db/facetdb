@@ -36,9 +36,13 @@ import {
 } from "@facetdb/model";
 import {
   type AlertFailure,
+  type CredentialAlertFailure,
   createCheckStore,
   createOutbox,
   createServer,
+  credentialRefusedAlert,
+  credentialRefusedKey,
+  credentialSubject,
   DeliveryPassFailed,
   type DeliveryReport,
   gaveUpAlert,
@@ -1029,6 +1033,14 @@ export async function runWorkers(
       onGiveUp: async (event, _signal, lastError) => {
         await alerts.raise(gaveUpAlert(event, lastError, links.gaveUp));
       },
+      // An action whose service refused its plugin's credential (a 401) keeps its 24 hours of
+      // retries and raises Action credential refused, one per plugin of a source; that plugin's
+      // next delivered try on the source resolves it: once per key in flight, and with no store
+      // read while this worker knows the key clear (core's `resolveOpen`).
+      onCredentialRefused: async (event, _signal, lastError) => {
+        await alerts.raise(credentialRefusedAlert(event, lastError, links.credential));
+      },
+      onActionDelivered: (event) => alerts.resolveOpen(credentialRefusedKey(event)),
       // A plugin's action row runs here, through the plugins this worker loaded, on the record read
       // through its source's loop in force; only this project's rows are taken.
       actionProject: project.id,
@@ -1477,7 +1489,7 @@ function printSummaries(report: SummaryReport, print: (text: string) => void): v
  */
 export async function deliverUntil(
   signal: AbortSignal,
-  deliver: () => Promise<Pick<DeliveryReport, "alertFailures">>,
+  deliver: () => Promise<OutboxPassReport>,
   clock: { sleep(ms: number): Promise<void> },
   print: (text: string) => void,
   summarize: () => Promise<SummaryReport> = () =>
@@ -1517,7 +1529,7 @@ export async function deliverUntil(
  * with the store's own error, as a pass did before.
  */
 async function deliverPass(
-  deliver: () => Promise<Pick<DeliveryReport, "alertFailures">>,
+  deliver: () => Promise<OutboxPassReport>,
   print: (text: string) => void,
 ): Promise<void> {
   try {
@@ -1531,14 +1543,33 @@ async function deliverPass(
   }
 }
 
-/** Every give-up alert of a delivery pass that could not be raised, one line each, none dropped. */
-function printAlertFailures(
-  report: Pick<DeliveryReport, "alertFailures">,
-  print: (text: string) => void,
-): void {
+/**
+ * What the outbox's loop reads of a pass: the give-up alerts it could not raise, and the credential
+ * alerts it could not raise or resolve, which a caller that runs no action may leave out.
+ */
+type OutboxPassReport = Pick<DeliveryReport, "alertFailures"> &
+  Partial<Pick<DeliveryReport, "credentialAlertFailures">>;
+
+/** Every alert of a delivery pass that could not be raised or resolved, one line each, none dropped. */
+function printAlertFailures(report: OutboxPassReport, print: (text: string) => void): void {
   for (const failure of report.alertFailures) {
     print(alertFailureLine(failure));
   }
+  for (const failure of report.credentialAlertFailures ?? []) {
+    print(credentialAlertFailureLine(failure));
+  }
+}
+
+/**
+ * A credential alert that did not go out or was not resolved, in fixed words: whose credential and
+ * what happens next. Its error is not printed: a store driver's words can name the store's address,
+ * and a channel's never reach here (they are recorded with the alert).
+ */
+function credentialAlertFailureLine(failure: CredentialAlertFailure): string {
+  const whose = credentialSubject(failure.event);
+  return failure.phase === "raise"
+    ? `Action credential refused for ${whose} (delivery ${failure.event.deliveryId}) could not be raised. The action stays on its backoff, and its next refused try raises the alert again.`
+    : `Action credential refused for ${whose} could not be resolved after a delivered try. The plugin's next delivered try on that source resolves it.`;
 }
 
 /** One alert that did not go out, in plain words: which webhook, why, and what happens next. */

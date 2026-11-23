@@ -37,8 +37,14 @@ export type GaveUpLink = (kind: "action" | "webhook") => string;
 /** A webhook has no source in its row: its give-up concerns the whole project, as the spending cap does. */
 const EVERY_SOURCE = "all sources";
 
-/** The source's name inside its store id (`sourceIdOf(project, name)`); the id itself if it is not one. */
-function sourceName(event: { readonly projectId: string; readonly sourceId: string }): string {
+/**
+ * The source's name inside its store id (`sourceIdOf(project, name)`); the id itself if it is not
+ * one. The credential alert names its source by it too.
+ */
+export function sourceName(event: {
+  readonly projectId: string;
+  readonly sourceId: string;
+}): string {
   const prefix = sourceIdOf(event.projectId, "");
   return event.sourceId.startsWith(prefix) ? event.sourceId.slice(prefix.length) : event.sourceId;
 }

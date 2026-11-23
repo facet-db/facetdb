@@ -17,6 +17,9 @@ export const ALERT_KINDS = [
   "question_set_changed",
   // A plugin action, or a webhook, the outbox stopped trying after 24 hours.
   "action_gave_up",
+  // A plugin's action answered 401, its credential refused; the row keeps its 24 hours of retries,
+  // and a later delivered try of that plugin resolves it.
+  "action_credential_refused",
 ] as const;
 
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -30,12 +33,14 @@ export type AlertSeverity = ChannelMessage["severity"];
  * or a plugin source's read answers). Every other kind is raised and never resolved, so a page must
  * not say it is "not resolved". A kind that gains a resolve path is added here.
  * `worker_not_running` is not one: it is raised once for a worker that is gone, whose row is taken
- * as it is raised, and nothing later says it is back.
+ * as it is raised, and nothing later says it is back. `action_credential_refused` is resolved by
+ * the outbox's next delivered try of that plugin on that source.
  */
 export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = [
   "model_failing",
   "model_changed",
   "connector_lost_access",
+  "action_credential_refused",
 ];
 
 /** The Severity column of the system alerts. */
@@ -50,6 +55,7 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   backfill_failed: "warning",
   question_set_changed: "information",
   action_gave_up: "warning",
+  action_credential_refused: "warning",
 };
 
 /** No heartbeat for this long and the worker is not running. */
@@ -83,6 +89,7 @@ export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
   backfill_failed: "Backfill failed",
   question_set_changed: "Question set changed",
   action_gave_up: "Action gave up",
+  action_credential_refused: "Action credential refused",
 };
 
 /**
@@ -182,6 +189,12 @@ export type AlertEvent = {
    */
   readonly version?: number;
   /**
+   * The plugin an event is about, as the config names it (`action_credential_refused`,
+   * `@facetdb/github`); absent for every other event. It is part of the event's key, so each plugin
+   * of a source holds its own alert, and every action of one plugin there shares it.
+   */
+  readonly plugin?: string;
+  /**
    * What raised a Connector lost access alert: its source's doctor at the worker's 5-minute look,
    * or a refusal its loop met (a refused login, right or credential). Kept with the active alert,
    * so every worker reading it knows: a look resolves only what a doctor raised, and a refusal's
@@ -193,13 +206,17 @@ export type AlertEvent = {
 
 /** What makes two events "the same event": one alert is sent per key per 30 minutes. */
 export function eventKey(
-  event: Pick<AlertEvent, "kind" | "project" | "source" | "question" | "worker" | "version">,
+  event: Pick<
+    AlertEvent,
+    "kind" | "project" | "source" | "question" | "worker" | "version" | "plugin"
+  >,
 ): string {
   const key = [event.kind, event.project, event.source, event.question ?? ""];
   return [
     ...key,
     ...(event.worker === undefined ? [] : [event.worker]),
     ...(event.version === undefined ? [] : [`v${event.version}`]),
+    ...(event.plugin === undefined ? [] : [`plugin:${event.plugin}`]),
   ].join("|");
 }
 

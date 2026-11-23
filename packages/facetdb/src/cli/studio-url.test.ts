@@ -64,6 +64,7 @@ describe("the links", () => {
       backfill: links.backfill(),
       access: links.access(),
       spendingCap: links.spendingCap(),
+      credential: links.credential(),
       questionSet: links.questionSet("orders"),
       record: links.record("orders", "r1"),
       list: links.list("orders", "week"),
@@ -73,6 +74,7 @@ describe("the links", () => {
       backfill: "https://facetdb.example.com/sources",
       access: "https://facetdb.example.com/sources",
       spendingCap: "https://facetdb.example.com/settings",
+      credential: "https://facetdb.example.com/alerts",
       questionSet: "https://facetdb.example.com/questions?source=orders",
       record: "https://facetdb.example.com/decisions/orders/r1",
       list: "https://facetdb.example.com/decisions?source=orders&time=week",
@@ -105,6 +107,7 @@ describe("the links", () => {
       backfill: links.backfill(),
       access: links.access(),
       spendingCap: links.spendingCap(),
+      credential: links.credential(),
       questionSet: links.questionSet("orders"),
     }).toEqual({
       worker: `${DOCS}/worker`,
@@ -112,6 +115,7 @@ describe("the links", () => {
       backfill: `${DOCS}/backfill`,
       access: `${DOCS}/worker-login`,
       spendingCap: `${DOCS}/spending-cap`,
+      credential: `${DOCS}/action-credential`,
       questionSet: `${DOCS}/question-set`,
     });
     expect(links.record("orders", "r1")).toBeUndefined();
@@ -589,6 +593,37 @@ const tracker = definePlugin({
   actions: { tag: action({ config: z.object({ tag: z.string() }), run: async () => {} }) },
 });
 
+/** GitHub's 401, in `@facetdb/github`'s words. */
+const GITHUB_REFUSED =
+  "github label on r1: GitHub answered 401 to adding the labels: GitHub does not accept the token. the token is wrong, expired or revoked: put a valid one in the variable plugins.github.token names, then restart the worker";
+
+/** Whether the GitHub stand-in refuses its token now. */
+const github = { refuses: true };
+
+/**
+ * A stand-in for `@facetdb/github` (a first-party package, so its own error's words are kept): its
+ * label action throws GitHub's 401 as `GithubActionError` while `github.refuses`, else succeeds.
+ */
+const githubPlugin = definePlugin({
+  name: "github",
+  version: "1.0.0",
+  facetdb: "*",
+  config: z.object({}),
+  actions: {
+    label: action({
+      config: z.object({}),
+      run: async () => {
+        if (github.refuses) {
+          throw Object.assign(new Error(GITHUB_REFUSED), {
+            name: "GithubActionError",
+            status: 401,
+          });
+        }
+      },
+    }),
+  },
+});
+
 /** An install whose studio is built, or (`built` false) one with no studio package at all. */
 function install(built: boolean): StudioInstall {
   const files: Readonly<Record<string, string>> = {
@@ -699,8 +734,10 @@ describe("the worker's alerts", () => {
             projectDir: PROJECT_DIR,
             coreVersion: VERSION,
             importModule: (specifier) =>
-              specifier === "@facetdb/tracker"
-                ? Promise.resolve({ default: tracker })
+              specifier === "@facetdb/tracker" || specifier === "@facetdb/github"
+                ? Promise.resolve({
+                    default: specifier === "@facetdb/tracker" ? tracker : githubPlugin,
+                  })
                 : Promise.reject(
                     Object.assign(new Error(`Cannot find package '${specifier}'`), {
                       code: "ERR_MODULE_NOT_FOUND",
@@ -843,6 +880,72 @@ describe("the worker's alerts", () => {
 
   it("an action that gave up keeps its docs page with no studio", async () => {
     expect(await actionGivenUp(["--no-http"])).toBe(`${DOCS}/actions`);
+  });
+
+  /**
+   * A record the worker answers, whose GitHub label the outbox runs in the same `--once` pass and
+   * GitHub refuses with a 401: the row stays open on its backoff, and the worker raises Action
+   * credential refused. Answers the alert's event as it was recorded.
+   */
+  async function credentialRefused(argv: readonly string[]): Promise<AlertEvent> {
+    github.refuses = true;
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const config = listings(undefined, undefined, [actionCall("@facetdb/github", "label", {})]);
+
+    const result = await worker(config, ["--once", ...argv]);
+
+    expect(result.code, result.stderr).toBe(0);
+    const [row] = await world.client.query(
+      `select attempts, gave_up_at, delivered_at, last_error from facetdb.webhook_outbox
+        where plugin = '@facetdb/github'`,
+    );
+    expect(row).toMatchObject({
+      attempts: 1,
+      gave_up_at: null,
+      delivered_at: null,
+      last_error: GITHUB_REFUSED,
+    });
+    const event = (await alertsRaised()).find(
+      (raised) => raised.kind === "action_credential_refused",
+    );
+    if (event === undefined) {
+      throw new Error("no action_credential_refused alert was raised");
+    }
+    return event;
+  }
+
+  it("a refused credential raises its alert, linked to the Alerts page, and the next delivered try resolves it", async () => {
+    const event = await credentialRefused(["--port", "4321"]);
+    expect(event).toMatchObject({
+      source: "listings",
+      plugin: "@facetdb/github",
+      link: "http://127.0.0.1:4321/alerts",
+    });
+    expect(event.what).toContain(GITHUB_REFUSED);
+
+    // The token works again: the row's next try, due now, is delivered and resolves the alert.
+    github.refuses = false;
+    await world.client.query("update facetdb.webhook_outbox set next_attempt_at = 0");
+    const config = listings(undefined, undefined, [actionCall("@facetdb/github", "label", {})]);
+    const again = await worker(config, ["--once", "--port", "4321"]);
+
+    expect(again.code, again.stderr).toBe(0);
+    const [row] = await world.client.query(
+      "select delivered_at from facetdb.webhook_outbox where plugin = '@facetdb/github'",
+    );
+    expect(row?.["delivered_at"]).not.toBeNull();
+    const lines = await world.client.query("select record from facetdb.alert_history order by id");
+    expect(
+      lines
+        .map((line) => line["record"] as AlertRecord)
+        .filter((record) => record.event.kind === "action_credential_refused")
+        .map((record) => record.phase),
+    ).toEqual(["raised", "resolved"]);
+    expect(await world.client.query("select key from facetdb.alerts")).toEqual([]);
+  });
+
+  it("a refused credential keeps its docs fix page with no studio", async () => {
+    expect((await credentialRefused(["--no-http"])).link).toBe(`${DOCS}/action-credential`);
   });
 
   it("a webhook that gave up links to the Alerts page of the served studio", async () => {

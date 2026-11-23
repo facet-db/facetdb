@@ -184,6 +184,14 @@ export type { StudioBuild, StudioFiles } from "./studio/build.ts";
 export { openStudioBuild, STUDIO_INDEX_FILE, STUDIO_ROUTES_FILE } from "./studio/build.ts";
 export type { WebhookConfig, WebhookPayload } from "./webhooks/action.ts";
 export { createWebhookAction } from "./webhooks/action.ts";
+export type { CredentialLink } from "./webhooks/credential-refused.ts";
+export {
+  CREDENTIAL_REFUSED_DID,
+  CREDENTIAL_WORDS_WITHHELD,
+  credentialRefusedAlert,
+  credentialRefusedKey,
+  credentialSubject,
+} from "./webhooks/credential-refused.ts";
 export type { GaveUpLink } from "./webhooks/gave-up.ts";
 export {
   GAVE_UP_DID,
@@ -194,11 +202,14 @@ export {
 } from "./webhooks/gave-up.ts";
 export type {
   ActionClose,
+  ActionCredentialRefused,
   ActionDefer,
+  ActionDelivered,
   ActionDelivery,
   ActionFailedHints,
   ActionGaveUp,
   AlertFailure,
+  CredentialAlertFailure,
   DeliveryReport,
   DigestDelivery,
   DigestRow,

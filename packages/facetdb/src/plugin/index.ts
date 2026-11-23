@@ -62,6 +62,7 @@ export {
   deliveryFailedWords,
   deliveryFailureLine,
   FIRST_PARTY_DELIVERY_ERRORS,
+  firstPartyCredentialRefused,
   firstPartyFailure,
   quietWindowFor,
   revealsSecret,

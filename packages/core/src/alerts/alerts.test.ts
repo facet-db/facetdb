@@ -379,10 +379,30 @@ describe("the kinds the code resolves", () => {
       "model_failing",
       "model_changed",
       "connector_lost_access",
+      "action_credential_refused",
     ]);
     const lost = eventKey(eventOf("connector_lost_access"));
     expect((await alerts.resolve(lost)).status).toBe("resolved");
     expect(store.active.has(lost)).toBe(false);
+    // The outbox's next delivered try of the plugin resolves it, through `resolve` too.
+    const refused = eventKey(eventOf("action_credential_refused"));
+    expect((await alerts.resolve(refused)).status).toBe("resolved");
+    expect(store.active.has(refused)).toBe(false);
+  });
+
+  it("keys a refused credential by its plugin: one alert per plugin of a source", async () => {
+    const { alerts, store } = setup();
+    const refused = (plugin: string) => ({ ...eventOf("action_credential_refused"), plugin });
+    expect((await alerts.raise(refused("@facetdb/github"))).status).toBe("sent");
+    expect((await alerts.raise(refused("@facetdb/github"))).status).toBe("suppressed");
+    expect((await alerts.raise(refused("@facetdb/telegram"))).status).toBe("sent");
+    expect(eventKey(refused("@facetdb/github"))).toBe(
+      `${eventKey(eventOf("action_credential_refused"))}|plugin:@facetdb/github`,
+    );
+    expect(store.history.map((line) => line.event.plugin)).toEqual([
+      "@facetdb/github",
+      "@facetdb/telegram",
+    ]);
   });
 
   it("keys a question-set change by its version: one version is one alert, the next is another", async () => {
@@ -409,6 +429,115 @@ describe("severities", () => {
       backfill_failed: "warning",
       question_set_changed: "information",
       action_gave_up: "warning",
+      action_credential_refused: "warning",
     });
+  });
+});
+
+/** The fake store, each read of the alerts held while the gate is closed, every read counted. */
+class GatedAlertStore extends FakeAlertStore {
+  readonly reads: string[] = [];
+  /** Every read fails, as an alert store that is down. */
+  failReads = false;
+  #open: (() => void) | undefined;
+  #gate: Promise<void> | undefined;
+
+  close(): void {
+    this.#gate = new Promise((open) => {
+      this.#open = open;
+    });
+  }
+
+  open(): void {
+    this.#open?.();
+    this.#gate = undefined;
+  }
+
+  override async getActive(key: string) {
+    this.reads.push(key);
+    await this.#gate;
+    if (this.failReads) {
+      throw new Error("the alerts table is unreachable");
+    }
+    return super.getActive(key);
+  }
+}
+
+describe("resolveOpen: an alert something healthy resolves again and again", () => {
+  const refused = { ...eventOf("action_credential_refused"), plugin: "@facetdb/github" };
+  const key = eventKey(refused);
+
+  function gated() {
+    const clock = new FakeClock(1_000_000);
+    const store = new GatedAlertStore(clock);
+    const channel = new FakeChannel<null>();
+    const alerts = createAlerts({
+      store,
+      clock,
+      channels: [{ name: "fake", deliver: (message) => channel.deliver(message, null) }],
+    });
+    const resolvedSent = () =>
+      channel.delivered.filter((delivery) => delivery.message.text.startsWith("Resolved:"));
+    return { clock, store, alerts, resolvedSent };
+  }
+
+  it("shares one read and one resolved message among callers whose calls overlap", async () => {
+    const { store, alerts, resolvedSent } = gated();
+    await alerts.raise(refused);
+    const before = store.reads.length;
+    store.close();
+    const calls = Array.from({ length: 20 }, () => alerts.resolveOpen(key));
+    store.open();
+    await Promise.all(calls);
+
+    expect(store.reads.slice(before)).toEqual([key]);
+    expect(resolvedSent()).toHaveLength(1);
+    expect(store.history.map((line) => line.phase)).toEqual(["raised", "resolved"]);
+  });
+
+  it("reads nothing while the key is known clear; a raise, or its source's heartbeat, reads again", async () => {
+    const { store, alerts, resolvedSent } = gated();
+    await alerts.resolveOpen(key);
+    await alerts.resolveOpen(key);
+    expect(store.reads).toEqual([key]);
+
+    // Its own raise makes the key open again: the next call reads and resolves it.
+    await alerts.raise(refused);
+    const before = store.reads.length;
+    await alerts.resolveOpen(key);
+    expect(resolvedSent()).toHaveLength(1);
+    expect(store.reads.slice(before)).toEqual([key]);
+
+    // Another process's raise is unseen until the source's heartbeat forgets what this one knew.
+    const other = createAlerts({
+      store,
+      clock: new FakeClock(1_000_000 + 31 * MINUTE),
+      channels: [],
+    });
+    await other.raise(refused);
+    await alerts.resolveOpen(key);
+    expect(store.active.has(key)).toBe(true);
+    await alerts.signals(scope).beat();
+    await alerts.resolveOpen(key);
+    expect(store.active.has(key)).toBe(false);
+  });
+
+  it("resolves an alert an earlier run left open at its first call", async () => {
+    const { store, clock } = gated();
+    await createAlerts({ store, clock, channels: [] }).raise(refused);
+    const restarted = createAlerts({ store, clock, channels: [] });
+    await restarted.resolveOpen(key);
+    expect(store.active.has(key)).toBe(false);
+    expect(store.history.map((line) => line.phase)).toEqual(["raised", "resolved"]);
+  });
+
+  it("rejects when the store fails, and learns nothing from it", async () => {
+    const { store, alerts } = gated();
+    await alerts.raise(refused);
+    store.failReads = true;
+    await expect(alerts.resolveOpen(key)).rejects.toThrow("unreachable");
+    store.failReads = false;
+    await alerts.resolveOpen(key);
+    expect(store.active.has(key)).toBe(false);
   });
 });

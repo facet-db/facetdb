@@ -47,6 +47,11 @@ export type Links = {
    */
   readonly gaveUp: (kind: "action" | "webhook") => string;
   /**
+   * A plugin's credential refused by its service: the Alerts page, which lists the event with its
+   * plugin's words and fix, else the docs fix page `action-credential`.
+   */
+  readonly credential: () => string;
+  /**
    * The summary of what a channel's quiet hours held, and a test message: the Alerts page, else the
    * docs page on alerts.
    */
@@ -122,6 +127,7 @@ export function createLinks(base: StudioBase): Links {
     backfill: () => page("/sources", "backfill"),
     access: () => page("/sources", "worker-login"),
     gaveUp: (kind) => page("/alerts", kind === "action" ? "actions" : "webhooks"),
+    credential: () => page("/alerts", "action-credential"),
     alerts: () => page("/alerts", "alerts"),
     spendingCap: () => page("/settings", "spending-cap"),
     questionSet: (source) => page(`/questions?source=${encode(source)}`, "question-set"),

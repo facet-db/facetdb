@@ -23,6 +23,7 @@ import {
   type ActionDefer,
   type ActionDelivery,
   ActionFailed,
+  CREDENTIAL_WORDS_WITHHELD,
 } from "@facetdb/server";
 import { ZodObject, type ZodType, z } from "zod";
 import {
@@ -42,7 +43,7 @@ import {
   WEBHOOK_PLUGIN,
   webhookStep,
 } from "./builtin/webhook.ts";
-import { firstPartyFailure, handedValues } from "./channel-host.ts";
+import { firstPartyCredentialRefused, firstPartyFailure, handedValues } from "./channel-host.ts";
 import { shortName } from "./define.ts";
 import {
   type HostedPlugin,
@@ -805,7 +806,14 @@ export function createActionRunner(
         throw new ActionFailed(vouched.words, {
           ...(vouched.retryAfterMs === undefined ? {} : { retryAfterMs: vouched.retryAfterMs }),
           permanent: vouched.permanent,
+          // A 401, its credential refused, keeps its retries and raises its alert.
+          ...(vouched.credentialRefused === true ? { credentialRefused: true } : {}),
         });
+      }
+      // Words withheld, a refused credential is still said (a status is no secret), in fixed words,
+      // so its alert is raised without them.
+      if (firstPartyCredentialRefused(hosted.packageName, error)) {
+        throw new ActionFailed(CREDENTIAL_WORDS_WITHHELD, { credentialRefused: true });
       }
       // A plugin that throws an `ActionFailed` of its own would have its words kept: they are
       // dropped, as any other error of the plugin's is.

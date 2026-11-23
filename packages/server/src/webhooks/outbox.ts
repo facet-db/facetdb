@@ -211,11 +211,17 @@ export type ActionFailedHints = {
    */
   readonly retryAfterMs?: number;
   /**
-   * True when the same refusal comes back on every try (a refused token, a missing repository):
-   * the row is given up at once, its give-up alert raised now with these words, instead of after
-   * 24 hours of the same refusal. Wins over `retryAfterMs`.
+   * True when the same refusal comes back on every try (a missing repository, a token not allowed
+   * to): the row is given up at once, its give-up alert raised now with these words, instead of
+   * after 24 hours of the same refusal. Wins over `retryAfterMs` and `credentialRefused`.
    */
   readonly permanent?: boolean;
+  /**
+   * True when the service refused the plugin's credential, an HTTP 401: a rotated credential comes
+   * back, so the row keeps its backoff and its 24 hours, and `onCredentialRefused` raises its alert
+   * at this try. Followed only when not `permanent`.
+   */
+  readonly credentialRefused?: boolean;
 };
 
 /**
@@ -228,13 +234,60 @@ export type ActionFailedHints = {
 export class ActionFailed extends Error {
   readonly retryAfterMs: number | undefined;
   readonly permanent: boolean;
+  readonly credentialRefused: boolean;
 
   constructor(message: string, hints: ActionFailedHints = {}) {
     super(message);
     this.retryAfterMs = hints.retryAfterMs;
     this.permanent = hints.permanent === true;
+    this.credentialRefused = hints.credentialRefused === true;
   }
 }
+
+/**
+ * A try of a plugin's action (or of a digest, as its oldest row) whose service refused the plugin's
+ * credential (`ActionFailed.credentialRefused`). The row stays on its backoff and its 24 hours; the
+ * composition root raises Action credential refused, keyed by the project, the source and the
+ * plugin.
+ */
+export type ActionCredentialRefused = {
+  readonly projectId: string;
+  readonly deliveryId: string;
+  /** The store's id of the source: `sourceIdOf(project, name)`. */
+  readonly sourceId: string;
+  readonly plugin: string;
+  readonly action: string;
+  readonly attempts: number;
+  readonly queuedAt: number;
+};
+
+/**
+ * A delivered try of a plugin's action, or of a digest: the plugin's credential worked on that
+ * source, so the composition root resolves its Action credential refused alert.
+ */
+export type ActionDelivered = {
+  readonly projectId: string;
+  /** The store's id of the source: `sourceIdOf(project, name)`. */
+  readonly sourceId: string;
+  readonly plugin: string;
+};
+
+/**
+ * A credential alert that threw or outlived the timeout: its raise at a refused try, or its resolve
+ * at a delivered one. Reported, never retried on its own: the row's next refused try raises it
+ * again, and the plugin's next delivered try resolves it again.
+ */
+export type CredentialAlertFailure =
+  | {
+      readonly phase: "raise";
+      readonly event: ActionCredentialRefused;
+      readonly error: unknown;
+    }
+  | {
+      readonly phase: "resolve";
+      readonly event: ActionDelivered;
+      readonly error: unknown;
+    };
 
 /**
  * Appended to the `last_error` of a row given up at once, before `ALERT_NOT_RAISED`'s note when its
@@ -280,13 +333,33 @@ export type OutboxDeps = {
    */
   onGiveUp(event: WebhookGaveUp, signal: AbortSignal, lastError: string): Promise<void>;
   /**
+   * Raises the alert for a try whose service refused the plugin's credential, within the send
+   * timeout, once the row is written back on its backoff while this loop still held it (a try at
+   * the deadline gives up with Action gave up alone); `lastError` is the try's failure in the words
+   * `last_error` keeps. Called at every such try: the alert's 30-minute rule makes it one alert.
+   * Absent, nothing is raised.
+   */
+  readonly onCredentialRefused?: (
+    event: ActionCredentialRefused,
+    signal: AbortSignal,
+    lastError: string,
+  ) => Promise<void>;
+  /**
+   * Told of a delivered try of a plugin's action or digest, within the send timeout, after the row
+   * is marked delivered, once per plugin and source per pass however many of its rows went: the
+   * composition root resolves that plugin's credential alert on that source. Absent, nothing is
+   * resolved.
+   */
+  readonly onActionDelivered?: (event: ActionDelivered, signal: AbortSignal) => Promise<void>;
+  /**
    * Runs one attempt of a plugin's action, within the send timeout (`signal` aborts when it runs
    * out): resolves when it succeeded, with `ActionClose` when the row must be closed untried again,
    * or with `ActionDefer` when it cannot be tried yet; throws (`ActionFailed` for words worth
    * keeping) when the attempt failed, which is retried on the webhook's schedule, after the wait an
    * `ActionFailed` asked for when it says one, and given up at once when it says the refusal is for
-   * good. An outbox without a runner sends webhooks only and leaves action rows to the loop that
-   * has one.
+   * good; one that says the credential was refused keeps that schedule and is told to
+   * `onCredentialRefused`. An outbox without a runner sends webhooks only and leaves action rows to
+   * the loop that has one.
    */
   readonly runAction?: (
     row: ActionDelivery,
@@ -416,6 +489,8 @@ export type DeliveryReport = {
   readonly lost: readonly string[];
   /** Alerts that could not be raised for a webhook given up on; reported, never swallowed. */
   readonly alertFailures: readonly AlertFailure[];
+  /** Credential alerts that could not be raised or resolved; reported, never swallowed. */
+  readonly credentialAlertFailures: readonly CredentialAlertFailure[];
 };
 
 /** A give-up alert that threw or outlived the timeout. */
@@ -652,6 +727,7 @@ function failureOf(error: unknown): Failure {
     failure: withoutNotes(error.message),
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
     ...(error.permanent ? { permanent: true } : {}),
+    ...(error.credentialRefused ? { credentialRefused: true } : {}),
   };
 }
 
@@ -1045,6 +1121,66 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   }
 
   /**
+   * Raises the credential alert for a try of an action (a digest's oldest row) its service refused
+   * so, under the send timeout. Called once the try's outcome is written and only while this loop
+   * held the row. A raise that throws or outlives the timeout is reported in `failures`, never
+   * thrown: the row's next refused try raises it again.
+   */
+  async function credentialRefusedAt(
+    row: Pick<Claimed, "id" | "projectId" | "attempts" | "createdAt">,
+    target: Extract<Target, { kind: "action" }>,
+    failure: string,
+    failures: CredentialAlertFailure[],
+  ): Promise<void> {
+    const raise = deps.onCredentialRefused;
+    if (raise === undefined) {
+      return;
+    }
+    const event: ActionCredentialRefused = {
+      projectId: row.projectId,
+      deliveryId: row.id,
+      sourceId: target.sourceId,
+      plugin: target.plugin,
+      action: target.action,
+      attempts: row.attempts,
+      queuedAt: row.createdAt,
+    };
+    try {
+      await withinTimeout((signal) => raise(event, signal, failure));
+    } catch (error) {
+      failures.push({ phase: "raise", event, error });
+    }
+  }
+
+  /**
+   * Tells the composition root of a delivered try of a plugin's action or digest, under the send
+   * timeout, once the row is marked delivered: once per plugin and source per pass (`told`, the
+   * pass's own), however many of its rows were delivered, every one of them waiting on that one
+   * call; one that throws is reported in `failures`, once.
+   */
+  async function deliveredFor(
+    projectId: string,
+    target: Extract<Target, { kind: "action" }>,
+    failures: CredentialAlertFailure[],
+    told: Map<string, Promise<void>>,
+  ): Promise<void> {
+    const tell = deps.onActionDelivered;
+    if (tell === undefined) {
+      return;
+    }
+    const event: ActionDelivered = { projectId, sourceId: target.sourceId, plugin: target.plugin };
+    const subject = JSON.stringify([projectId, target.sourceId, target.plugin]);
+    let telling = told.get(subject);
+    if (telling === undefined) {
+      telling = withinTimeout((signal) => tell(event, signal)).catch((error: unknown) => {
+        failures.push({ phase: "resolve", event, error });
+      });
+      told.set(subject, telling);
+    }
+    await telling;
+  }
+
+  /**
    * The 24 hours are spent, or the runner said the action is refused for good, and it is given up
    * at once. Renews the lease, raises the alert under the timeout, then closes the row; an alert
    * that fails keeps the row open for one more try of the alert alone, its `last_error` noting a
@@ -1349,6 +1485,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       readonly gaveUp: string[];
       readonly lost: string[];
       readonly alertFailures: AlertFailure[];
+      readonly credentialAlertFailures: CredentialAlertFailure[];
+      /** The pass's delivered plugins, each told once (`deliveredFor`). */
+      readonly told: Map<string, Promise<void>>;
     },
   ): Promise<void> {
     const { target } = group;
@@ -1387,6 +1526,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     };
     if (tried.outcome === "done") {
       await settle(lists.delivered, "delivered_at = $4::bigint, last_error = null", [now]);
+      // The plugin's credential worked on this source, once a row is marked delivered.
+      if (members.some((member) => lists.delivered.includes(member.id))) {
+        await deliveredFor(group.projectId, target, lists.credentialAlertFailures, lists.told);
+      }
       return;
     }
     if (tried.outcome === "closed") {
@@ -1395,13 +1538,29 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     }
     const queuedAt = Math.min(...members.map((member) => member.createdAt));
     const deadline = queuedAt + GIVE_UP_AFTER_MS;
-    // A wait the runner asked for, and a refusal for good, hold for the whole digest.
+    // A wait the runner asked for, and a refusal for good, hold for the whole digest; so does a
+    // refused credential, which raises one alert for the digest, as its oldest row, once the rows
+    // are written back on the backoff, and only while this loop held that row. A digest given up at
+    // its deadline raises Action gave up alone: it is no longer tried.
     const refused = tried.permanent === true;
     if (!refused && now < deadline) {
       await settle(lists.retrying, "next_attempt_at = $4::bigint, last_error = $5", [
         nextTry(now, tried, oldest.attempts, deadline),
         tried.failure,
       ]);
+      if (tried.credentialRefused === true && !lists.lost.includes(oldest.id)) {
+        await credentialRefusedAt(
+          {
+            id: oldest.id,
+            projectId: group.projectId,
+            attempts: oldest.attempts,
+            createdAt: queuedAt,
+          },
+          target,
+          tried.failure,
+          lists.credentialAlertFailures,
+        );
+      }
       return;
     }
     // The alert first, as for one row: a crash before the others are closed gives them up again
@@ -1457,6 +1616,9 @@ export function createOutbox(deps: OutboxDeps): Outbox {
       const held: string[] = [];
       const lost: string[] = [];
       const alertFailures: AlertFailure[] = [];
+      const credentialAlertFailures: CredentialAlertFailure[] = [];
+      /** The plugins and sources this pass told of a delivered try, each told once. */
+      const told = new Map<string, Promise<void>>();
 
       const report = { retrying, gaveUp, lost, alertFailures };
 
@@ -1505,6 +1667,10 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         if (tried.outcome === "done") {
           const kept = await whileHeld(row, "delivered_at = $4::bigint, last_error = null", [now]);
           (kept ? delivered : lost).push(row.id);
+          // A delivered try of a plugin's action resolves its credential alert there.
+          if (kept && row.target.kind === "action") {
+            await deliveredFor(row.projectId, row.target, credentialAlertFailures, told);
+          }
           return;
         }
         if (tried.outcome === "deferred") {
@@ -1522,6 +1688,8 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         const deadline = row.createdAt + GIVE_UP_AFTER_MS;
         const refused = tried.permanent === true;
         if (refused || now >= deadline) {
+          // A row given up at its deadline raises Action gave up alone, never the credential alert,
+          // whose words say the action is still tried.
           await giveUp(row, now, tried.failure, report, refused);
           return;
         }
@@ -1531,6 +1699,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           tried.failure,
         ]);
         (rescheduled ? retrying : lost).push(row.id);
+        // A refused credential is no refusal for good: the row keeps its backoff and its 24 hours,
+        // and the try raises the credential alert once it is written back, still held.
+        const { target } = row;
+        if (rescheduled && tried.credentialRefused === true && target.kind === "action") {
+          await credentialRefusedAt(row, target, tried.failure, credentialAlertFailures);
+        }
       }
 
       const rows = await claim(now);
@@ -1593,7 +1767,16 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           });
         }
       }
-      const lists = { delivered, closed, retrying, gaveUp, lost, alertFailures };
+      const lists = {
+        delivered,
+        closed,
+        retrying,
+        gaveUp,
+        lost,
+        alertFailures,
+        credentialAlertFailures,
+        told,
+      };
       await Promise.all([
         plain,
         ...alone.map(deliverRow),
@@ -1612,6 +1795,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
         held,
         lost,
         alertFailures,
+        credentialAlertFailures,
       };
       // Said once every other row of the pass has run: the pass failed for the rows not placed,
       // and its report goes with the error, so no give-up alert it could not raise goes unsaid.
