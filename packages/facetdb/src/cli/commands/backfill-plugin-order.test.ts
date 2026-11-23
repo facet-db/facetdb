@@ -19,6 +19,7 @@ import {
   FakeOpenConnector,
   FakeReviewQueue,
   FakeRunLog,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createFakeProvider } from "@facetdb/model";
 import type { BackfillJobStatus } from "@facetdb/server";
@@ -301,7 +302,12 @@ describe("the worker's backfill job", () => {
     const database = thirtyRows(clock);
     const loopOf = (version: number): JobLoop => {
       const chosen = sourceOf(name);
-      return { source: chosen, questionSet: questionSetOf(PROJECT, chosen), version };
+      return {
+        source: chosen,
+        questionSet: questionSetOf(PROJECT, chosen),
+        version,
+        heldModel: freshHeldModel(version),
+      };
     };
     const loops = new Map<string, JobLoop>([[name, loopOf(1)]]);
     let pause: Pause | undefined;
@@ -355,6 +361,7 @@ describe("the worker's backfill job", () => {
     };
     const signals: AlertSignals = {
       modelCall: () => Promise.resolve(),
+      modelChecked: () => Promise.resolve(),
       beat: () => Promise.resolve(),
       backfillFinished: () => Promise.resolve(),
       backfillFailed: () => Promise.resolve(),

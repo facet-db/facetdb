@@ -5,6 +5,7 @@ import {
   FakeDecisionLog,
   FakeReviewQueue,
   FakeRunLog,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { type BackfillProgress, type CursorStore, createBackfill } from "../backfill/index.ts";
@@ -108,6 +109,7 @@ function world(during?: (request: ProviderRequest) => void) {
     limits: { ...DEFAULT_WORKER_LIMITS, maxInFlight: 1 },
     questionSet: SCAM_ONLY,
     version: 1,
+    heldModel: freshHeldModel(),
     spending: UNLIMITED,
     runs: { log: runs, source: SOURCE },
   };
@@ -284,6 +286,7 @@ describe("a backfill's run log", () => {
       reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
       runs: { log: runs, source: SOURCE },
     });
@@ -323,6 +326,7 @@ describe("a backfill's run log", () => {
       limits: DEFAULT_WORKER_LIMITS,
       questionSet: SCAM_ONLY,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     });
     await worker.runOnce();

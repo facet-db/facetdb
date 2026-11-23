@@ -41,3 +41,4 @@ export {
   tally,
 } from "./sample-run.ts";
 export { FakeStore } from "./store.ts";
+export { FakeVersionModels, freshHeldModel } from "./version-models.ts";

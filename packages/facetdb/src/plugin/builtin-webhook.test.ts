@@ -9,7 +9,7 @@ import type {
   SpendingGate,
 } from "@facetdb/core";
 import { ActionNotQueued, createWorker, DEFAULT_WORKER_LIMITS, reviewsOf } from "@facetdb/core";
-import { FakeReviewQueue } from "@facetdb/core/testing";
+import { FakeReviewQueue, freshHeldModel } from "@facetdb/core/testing";
 import { createStore, pgliteClient, sourceIdOf } from "@facetdb/postgres";
 import { freshPglite, type PGlite, resetPglite, TEST_SECRET } from "@facetdb/postgres/testing";
 import {
@@ -309,6 +309,7 @@ async function rig(config = project(), refuse?: { readonly holding: string; time
       limits: DEFAULT_WORKER_LIMITS,
       questionSet: { ...questionSet, thresholds },
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     });
   const worker = workerWith(questionSet.thresholds);

@@ -34,6 +34,7 @@ import {
   STORE_TABLES,
   STORE_VERSION_TABLE,
   STORE_WORKER_READ_ONLY_TABLES,
+  STORE_WORKER_SET_ONCE_COLUMN,
   STORE_WORKER_UPSERT_TABLES,
   storeInstallStatements,
 } from "../store/index.ts";
@@ -749,6 +750,14 @@ begin
     )}, held, owner);
   end if;
 end $$`,
+      "store",
+    ),
+    // Store migration 11: a version's model, set once by its first answer. Update on that column
+    // alone, after the revoke above, which takes back every column's update with the table's and is
+    // not what the check above reads (a column's grant is not in the table's privileges).
+    plain(
+      "grants",
+      `grant update (${quoteIdent(STORE_WORKER_SET_ONCE_COLUMN.column)}) on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_WORKER_SET_ONCE_COLUMN.table)} to ${worker}`,
       "store",
     ),
     plain(

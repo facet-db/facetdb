@@ -7,7 +7,7 @@ import type {
   SpendingGate,
 } from "@facetdb/core";
 import { createWorker, DEFAULT_WORKER_LIMITS, reviewsOf } from "@facetdb/core";
-import { FakeClock, FakeReviewQueue } from "@facetdb/core/testing";
+import { FakeClock, FakeReviewQueue, freshHeldModel } from "@facetdb/core/testing";
 import { sourceIdOf } from "@facetdb/postgres";
 import {
   createMemoryStore,
@@ -133,6 +133,7 @@ async function rig() {
       limits: DEFAULT_WORKER_LIMITS,
       questionSet,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     });
   const app = createServer({

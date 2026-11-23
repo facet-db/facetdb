@@ -12,7 +12,7 @@ import {
   reviewsOf,
   type SpendingGate,
 } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
+import { FakeClock, freshHeldModel } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { pgliteClient, type SqlClient, type SqlRow } from "../sql/index.ts";
 import { createDecisionLog } from "./decision-log.ts";
@@ -483,6 +483,7 @@ describe("an API source's worker keeps the store's queue", () => {
         limits: DEFAULT_WORKER_LIMITS,
         questionSet,
         version,
+        heldModel: freshHeldModel(version),
         spending: UNLIMITED,
       });
     await connector.upsertRecord("m1", { title: "Phone", body: "pay by gift card" });

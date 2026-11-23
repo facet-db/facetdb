@@ -21,7 +21,7 @@ export type {
   ScanPage,
   WriteResult,
 } from "./connector.ts";
-export type { DecisionLog, LogPage } from "./decision-log.ts";
+export type { DecisionLog, LogPage, VersionModels } from "./decision-log.ts";
 export type {
   DatabaseEngine,
   DoctorCheck,

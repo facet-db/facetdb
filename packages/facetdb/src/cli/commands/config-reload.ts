@@ -4,6 +4,7 @@ import {
   type Connector,
   type DecisionLog,
   EngineRefusal,
+  type HeldModel,
   type KeyText,
   type PassReport,
   type Question,
@@ -100,6 +101,11 @@ export type SourceLoop = {
   readonly questionSet: QuestionSet;
   /** The question-set version every answer of this loop is logged under. */
   readonly version: number;
+  /**
+   * The model `version` is held to, read at the loop's first answer and kept: its worker, its check
+   * calls and its backfill jobs all check through this one.
+   */
+  readonly heldModel: HeldModel;
   readonly worker: Worker;
   /**
    * The source's whole connector: the studio's preview and test read through it, and a reviewer's

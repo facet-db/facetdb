@@ -4,6 +4,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type {
@@ -133,6 +134,7 @@ async function world(
     log,
     questionSet: SCAM_AND_SPAM,
     version: 2,
+    heldModel: freshHeldModel(2),
     spending: UNLIMITED,
     reviews,
   });
@@ -275,6 +277,7 @@ describe("backfill of an added question follows the review queue", () => {
       limits: DEFAULT_WORKER_LIMITS,
       questionSet: SCAM_AND_SPAM,
       version: 2,
+      heldModel: freshHeldModel(2),
       spending: UNLIMITED,
     });
     const asked = model.requests.length;

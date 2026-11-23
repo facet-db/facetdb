@@ -15,6 +15,7 @@ import {
   FakeDecisionLog,
   FakeEngine,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import type { ReloadSummary } from "@facetdb/server";
 import { describe, expect, it } from "vitest";
@@ -124,10 +125,12 @@ function loopOf(source: SourceConfig, config: ProjectConfig, version: number): S
   const clock = new FakeClock(0);
   const questionSet = questionSetOf(config, source);
   const connector = new FakeConnector(new FakeDatabase({ fields: source.read, clock }));
+  const heldModel = freshHeldModel(version);
   return {
     source,
     questionSet,
     version,
+    heldModel,
     worker: createWorker({
       connector,
       provider: { ask: () => Promise.reject(new Error("these tests ask the model nothing")) },
@@ -138,8 +141,10 @@ function loopOf(source: SourceConfig, config: ProjectConfig, version: number): S
       limits: DEFAULT_WORKER_LIMITS,
       questionSet,
       version,
+      heldModel,
       alerts: {
         modelCall: () => Promise.resolve(),
+        modelChecked: () => Promise.resolve(),
         beat: () => Promise.resolve(),
         backfillFinished: () => Promise.resolve(),
         backfillFailed: () => Promise.resolve(),

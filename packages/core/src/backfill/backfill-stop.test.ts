@@ -4,6 +4,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type {
@@ -142,6 +143,7 @@ async function rig(rows = 30): Promise<Rig> {
       reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     }),
   };

@@ -212,7 +212,11 @@ Each record has one status in `facetdb_status`. There are six, and no seventh.
 | `skipped` | Every state field was blank, or the source's `where` excluded the record | Nothing to do |
 
 A failed model call is an error, never an answer. A question's value column is NULL until it has a
-decision.
+decision. A question-set version is held to the model its first answer named: a response naming
+another model writes nothing, raises Model changed and holds the source (one record asked every 5
+minutes, the others waiting in the queue unasked) until that model answers again or a new `model`
+in the config starts a new version; `facetdb doctor` says when the server answers under a name
+other than the config's.
 
 ## State hash and when FacetDB asks again
 

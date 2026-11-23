@@ -9,7 +9,12 @@ import {
   reviewsOf,
   spendingGate,
 } from "@facetdb/core";
-import { FakeClock, FakeReviewQueue, runConnectorContract } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeReviewQueue,
+  freshHeldModel,
+  runConnectorContract,
+} from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { CLAIM_LEASE_MS, pgliteClient } from "../sql/index.ts";
 import { createStore } from "./store.ts";
@@ -290,6 +295,7 @@ describe("store statements per answered record", () => {
       limits: DEFAULT_WORKER_LIMITS,
       questionSet,
       version: 1,
+      heldModel: freshHeldModel(),
       alerts: alerts.signals({ project: "p", source: "src", link: "https://docs.facetdb.dev" }),
       // A cap far away, so the status stays "ok" and the count of a normal pass is what is measured.
       spending: spendingGate(spending, "p", () =>
@@ -305,7 +311,7 @@ describe("store statements per answered record", () => {
     return { worker, queue, sent, store, alerts, clock };
   }
 
-  it("20 answered records cost 4 statements each, plus 7 for the pass: 87 in all", async () => {
+  it("20 answered records cost 4 statements each, plus 8 for the pass: 88 in all", async () => {
     const { worker, queue, sent } = await worldOf();
     await queue(Array.from({ length: 20 }, (_, n) => `r${String(n).padStart(2, "0")}`));
 
@@ -319,12 +325,12 @@ describe("store statements per answered record", () => {
     }
     expect(Object.fromEntries(counts)).toEqual({
       // The pass: the spending check, the claim, the heartbeat (which resolves no alert now), the
-      // batch's read and its prior answers, the first healthy model call's alert, and the batch's
-      // ack.
+      // batch's read and its prior answers, the first healthy model call's alert and the first
+      // answer naming the held model's (Model changed), and the batch's ack.
       "usage total": 1,
       claim: 1,
       heartbeat: 1,
-      "alert state": 1,
+      "alert state": 2,
       read: 1,
       "latest answers": 1,
       ack: 1,
@@ -334,8 +340,8 @@ describe("store statements per answered record", () => {
       "log answer": 20,
       write: 20,
     });
-    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 7.
-    expect(sent).toHaveLength(87);
+    // Within the bound of 5 per record, with the pass's own statements on top: 4 × 20 + 8.
+    expect(sent).toHaveLength(88);
   });
 
   it("one answered record, in the order the store sees them", async () => {
@@ -352,6 +358,7 @@ describe("store statements per answered record", () => {
       "latest answers",
       "reserve",
       "finish",
+      "alert state",
       "alert state",
       "log answer",
       "write",

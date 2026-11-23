@@ -9,6 +9,7 @@ import {
   type QuestionSetVersion,
   type ReviewQueue,
   type UsageStore,
+  type VersionModels,
 } from "@facetdb/core";
 import { connectPostgres, pgliteClient, type SqlClient, type SqlConnect } from "../sql/index.ts";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./decision-log.ts";
 import { createAlertStore, createCursorStore, createUsageStore } from "./operations.ts";
 import {
+  answerVersionModel,
   type QuestionSetInForce,
   type ReplacedInForce,
   readQuestionSetHistory,
@@ -136,9 +138,10 @@ export type Store = {
    * version too, and must not pass for the worker. `run` answers the row it replaced, read under
    * the source's version lock, the one `record` takes: of two workers that open the same new
    * version at once, one is answered the old version and the other the new one, so the worker's
-   * Question set changed alert is raised once.
+   * Question set changed alert is raised once. `answeredBy` is core's `VersionModels`: the model a
+   * version is held to, set by its first answer.
    */
-  questionSets: {
+  questionSets: VersionModels & {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
     history(sourceId: string, limit: number): Promise<readonly StoredQuestionSetVersion[]>;
     record(sourceId: string, questionSet: QuestionSet): Promise<QuestionSetVersion>;
@@ -311,6 +314,8 @@ export async function createStore(options: StoreOptions): Promise<Store> {
         history: (sourceId, limit) => readQuestionSetHistory(client.query, sourceId, limit),
         versions: (sourceId, versions) => readQuestionSets(client.query, sourceId, versions),
         inForce: (sourceId) => readQuestionSetInForce(client.query, sourceId),
+        answeredBy: (sourceId, version, named) =>
+          answerVersionModel(client.query, sourceId, version, named),
         run: (sourceId, version, questionSet) =>
           client.transaction(async (query) => {
             await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);

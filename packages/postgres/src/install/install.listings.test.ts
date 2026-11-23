@@ -81,7 +81,13 @@ describe("the printed install script and the store's tables", () => {
           storeGrants.filter((statement) => statement.endsWith(`to "${WORKER_ROLE}"`)),
           storeGrants.filter((statement) => !statement.endsWith(`to "${WORKER_ROLE}"`)),
         ];
-        expect(toWorker.length).toBe(storeNames.length);
+        // One grant per store object, and store migration 11's one column: a version's model, the
+        // only column of an append-only log the worker updates.
+        const setOnce = `grant update ("answered_by") on "facetdb"."question_set_versions" to "${WORKER_ROLE}"`;
+        expect(toWorker).toContain(setOnce);
+        expect(toWorker.filter((statement) => statement !== setOnce)).toHaveLength(
+          storeNames.length,
+        );
         for (const statement of storeGrants) {
           expect(statement).not.toMatch(/\bcreate\b/i);
           expect(statement).not.toMatch(/\bwith grant option\b/i);

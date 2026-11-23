@@ -181,3 +181,36 @@ export async function writeQuestionSetInForce(
     [sourceId, version, JSON.stringify(questionSet), nowMs],
   );
 }
+
+/**
+ * The model `version` of a source is held to (store migration 11), answered after one read once an
+ * answer has set it, with nothing written. Until then it is set to `named` by one statement:
+ * Postgres re-reads a row another transaction updated before updating it, so of two first answers
+ * the first write wins and both are answered its name. A version the store does not keep is an
+ * error, never a name.
+ */
+export async function answerVersionModel(
+  query: SqlQuery,
+  sourceId: string,
+  version: number,
+  named: string,
+): Promise<string> {
+  const where = "where source_id = $1 and version = $2";
+  const read = await query(`select answered_by from facetdb.question_set_versions ${where}`, [
+    sourceId,
+    version,
+  ]);
+  const set =
+    read[0] === undefined || read[0]["answered_by"] !== null
+      ? read
+      : await query(
+          `update facetdb.question_set_versions set answered_by = coalesce(answered_by, $3) ${where}
+           returning answered_by`,
+          [sourceId, version, named],
+        );
+  const row = set[0];
+  if (row === undefined) {
+    throw new Error(`the FacetDB store keeps no question-set version ${version} of "${sourceId}"`);
+  }
+  return text(row, "answered_by");
+}

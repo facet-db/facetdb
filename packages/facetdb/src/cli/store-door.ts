@@ -796,6 +796,66 @@ export async function heartbeatCheck(
     : ok("worker", `the last heartbeat was ${ageOf(age)} ago`);
 }
 
+/**
+ * A source's question-set version in force: the model its set asks for, as the worker runs it, and
+ * the model the store holds it to, as its first answer named it.
+ */
+export type HeldVersion = {
+  readonly source: string;
+  readonly version: number;
+  readonly model: string;
+  readonly held: string;
+};
+
+/**
+ * The model each of `sources`'s versions in force is held to (store migration 11), for doctor's
+ * model check: one plain select, as `heartbeatCheck` reads. A version nothing has answered holds
+ * none, and so does a project with no store. A store that cannot be read (its URL refused, a store
+ * before migration 11, a login that may not read it) is said in words with no secret in them.
+ */
+export async function heldVersions(
+  connect: SqlConnect,
+  env: Env,
+  projectId: string,
+  sources: readonly string[],
+  allowInsecure: boolean | undefined,
+): Promise<
+  | { readonly kind: "read"; readonly versions: readonly HeldVersion[] }
+  | { readonly kind: "unreadable"; readonly why: string }
+> {
+  const url = storeUrlOf(env);
+  if (url === undefined) {
+    return { kind: "read", versions: [] };
+  }
+  const refused = storeUrlProblem(url, allowInsecure, env["PGHOST"]);
+  if (refused !== undefined) {
+    return { kind: "unreadable", why: refused.problem };
+  }
+  const names = new Map(sources.map((name) => [sourceIdOf(projectId, name), name]));
+  try {
+    const rows = await withConnection(connect, url, (query) =>
+      query(
+        `select f.source_id, f.version::text as version, f.question_set->>'model' as model,
+                v.answered_by
+           from facetdb.question_sets_in_force f
+           join facetdb.question_set_versions v on v.source_id = f.source_id and v.version = f.version
+          where f.source_id = any($1::text[]) and v.answered_by is not null
+          order by f.source_id`,
+        [[...names.keys()]],
+      ),
+    );
+    const versions = rows.map((row) => ({
+      source: names.get(String(row["source_id"])) ?? String(row["source_id"]),
+      version: Number(row["version"]),
+      model: String(row["model"]),
+      held: String(row["answered_by"]),
+    }));
+    return { kind: "read", versions };
+  } catch (error) {
+    return { kind: "unreadable", why: plainMessage(error, [url, env[SECRET_VARIABLE]]) };
+  }
+}
+
 /** `FACETDB_SECRET`, or undefined when it is unset or empty. */
 function storeSecretOf(env: Env): string | undefined {
   const secret = env[SECRET_VARIABLE];

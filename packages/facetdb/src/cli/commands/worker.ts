@@ -10,6 +10,8 @@ import {
   createWorker,
   createWorkerWatch,
   DEFAULT_WORKER_LIMITS,
+  type HeldModel,
+  holdModel,
   type KeyText,
   knownZone,
   type ModelProvider,
@@ -22,6 +24,7 @@ import {
   type SummaryReport,
   type Worker,
   type WorkerWatchStep,
+  withoutProbe,
 } from "@facetdb/core";
 import {
   createBackoff,
@@ -541,12 +544,14 @@ export async function runWorkers(
   /**
    * One source's worker, under the question set and version its loop runs. The loop's worker
    * carries the alerts and `outage`, the loop's outage policy; a check call's worker (one record,
-   * `forRecord`, no policy) leaves both to the loop, which answers the record if it fails.
+   * `forRecord`, no policy) leaves both to the loop, which answers the record if it fails. Both
+   * check the model through the loop's `heldModel`.
    */
   function workerFor(
     source: SourceConfig,
     questionSet: QuestionSet,
     version: number,
+    heldModel: HeldModel,
     connector: Connector,
     outage: OutagePolicyHandle | undefined,
   ): Worker {
@@ -564,6 +569,7 @@ export async function runWorkers(
       },
       questionSet,
       version,
+      heldModel,
       ...(outage !== undefined
         ? {
             alerts: alerts.signals(alertScope(project.id, source.name, links.model)),
@@ -579,16 +585,17 @@ export async function runWorkers(
   /**
    * Registers a source and records its question set: a new version only when the set's content
    * changed (`store.questionSets.record`), at start and when a reload restarts it. The set in force
-   * is written apart, by `inForce`, once the whole loop has opened.
+   * is written apart, by `inForce`, once the whole loop has opened. The loop's held model is read
+   * from the store at its first answer, never here.
    */
   async function start(
     source: SourceConfig,
     kind: "api" | "plugin" | "plugin-source",
     questionSet: QuestionSet,
-  ): Promise<number> {
+  ): Promise<{ readonly version: number; readonly heldModel: HeldModel }> {
     await store.ensureSource({ projectId: project.id, name: source.name, kind });
-    const recorded = await store.questionSets.record(idOf(source), questionSet);
-    return recorded.version;
+    const { version } = await store.questionSets.record(idOf(source), questionSet);
+    return { version, heldModel: holdModel(store.questionSets, idOf(source), version, clock) };
   }
 
   /**
@@ -617,13 +624,14 @@ export async function runWorkers(
     // The loop's own policy, kept on the loop so a restart hands its held records on.
     const outage = createOutagePolicy({ onOutage: source.onOutage, clock });
     if (source.api) {
-      const version = await start(source, "api", questionSet);
+      const { version, heldModel } = await start(source, "api", questionSet);
       const connector = store.connector({ sourceId: idOf(source), fields: source.read, workerId });
       return inForce({
         source,
         questionSet,
         version,
-        worker: workerFor(source, questionSet, version, connector, outage),
+        heldModel,
+        worker: workerFor(source, questionSet, version, heldModel, connector, outage),
         connector,
         keyText: undefined,
         outage,
@@ -645,12 +653,13 @@ export async function runWorkers(
     // Its log and versions are kept in the store under the source's name, registered as a
     // plugin-kind source, as backfill does (the store has no third kind).
     try {
-      const version = await start(source, "plugin", questionSet);
+      const { version, heldModel } = await start(source, "plugin", questionSet);
       return await inForce({
         source,
         questionSet,
         version,
-        worker: workerFor(source, questionSet, version, connector, outage),
+        heldModel,
+        worker: workerFor(source, questionSet, version, heldModel, connector, outage),
         connector,
         keyText: await parts.keyTextOf?.(source),
         table,
@@ -696,7 +705,7 @@ export async function runWorkers(
     // The loop reads its plugin with the settings in force when it opened, to its close: a reload
     // that changes them restarts it, and the batch in hand finishes on these.
     const opened = plugins.current();
-    const version = await start(source, "plugin-source", questionSet);
+    const { version, heldModel } = await start(source, "plugin-source", questionSet);
     const connector = createPluginSourceConnector({
       store: store.connector({ sourceId: idOf(source), fields: source.read, workerId }),
       name: source.name,
@@ -715,7 +724,8 @@ export async function runWorkers(
         source,
         questionSet,
         version,
-        worker: workerFor(source, questionSet, version, connector, outage),
+        heldModel,
+        worker: workerFor(source, questionSet, version, heldModel, connector, outage),
         connector,
         keyText: undefined,
         outage,
@@ -765,6 +775,12 @@ export async function runWorkers(
     if (report.alreadyAnswered.length > 0) {
       print(
         `${entry.source}: already answered ${shown(report.alreadyAnswered)} at this state, so the model was not asked again`,
+      );
+    }
+    if (report.waiting.length > 0) {
+      // The source is held by a changed model; the failure line above says which.
+      print(
+        `${entry.source}: ${report.waiting.length} more waiting unasked while the model is changed; one record is asked every 5 minutes`,
       );
     }
     for (const failure of report.failures) {
@@ -1055,6 +1071,8 @@ export async function runWorkers(
               loop.source,
               loop.questionSet,
               loop.version,
+              // It sees the loop's hold, and the loop's probe stays the loop's.
+              withoutProbe(loop.heldModel),
               onlyRecord(connector, key),
               undefined,
             );

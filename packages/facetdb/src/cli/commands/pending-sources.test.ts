@@ -1,5 +1,5 @@
 import type { Clock, Worker } from "@facetdb/core";
-import { FakeClock, FakeConnector, FakeDatabase } from "@facetdb/core/testing";
+import { FakeClock, FakeConnector, FakeDatabase, freshHeldModel } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceConfig } from "../../config/index.ts";
 import { CliError } from "../program.ts";
@@ -78,6 +78,7 @@ function rig(installed: Installed = CANNOT_TELL) {
         source,
         questionSet,
         version: 1,
+        heldModel: freshHeldModel(),
         worker: NOT_RUNNING,
         connector: new FakeConnector(database),
         keyText: undefined,

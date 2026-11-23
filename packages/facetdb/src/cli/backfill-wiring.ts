@@ -7,6 +7,7 @@ import {
   type Connector,
   createAlerts,
   createSpending,
+  holdModel,
   type ModelProvider,
   reviewsOf,
   type SpendingCap,
@@ -96,6 +97,13 @@ export function wireBackfillDryRun(wiring: DryRunWiring): BackfillDeps {
     },
     questionSet: questionSetOf(config, source),
     version: 1,
+    heldModel: {
+      check: () => neverDoes("checks the model's answer"),
+      holding: undefined,
+      probeAt: undefined,
+      probeDue: () => neverDoes("asks the model"),
+      mayAsk: () => neverDoes("asks the model"),
+    },
     ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
     spending: {
       allowsWork: () => neverDoes("checks the spending cap"),
@@ -219,6 +227,8 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
     log: store.log(sourceId),
     questionSet,
     version: version.version,
+    // An added question's answers are held to the version's model, as the worker's are.
+    heldModel: holdModel(store.questionSets, sourceId, version.version, clock),
     ...(source.maxStateTokens === undefined ? {} : { maxStateTokens: source.maxStateTokens }),
     alerts: alerts.signals(alertScope(project.id, source.name, noServedStudio(config).backfill)),
     spending: projectSpending(config, store, alerts, clock, project.id),

@@ -4,6 +4,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type { AlertSignals } from "../alerts/index.ts";
@@ -283,6 +284,7 @@ async function rig(rows: number, pageSize = 10): Promise<Rig> {
       reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet,
       version,
+      heldModel: freshHeldModel(version),
       spending: UNLIMITED,
     }),
   };
@@ -488,6 +490,7 @@ describe("backfill pacing", () => {
       reviews: reviewsOf(new FakeReviewQueue(), "listings"),
       questionSet: SCAM_ONLY,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     });
 
@@ -983,6 +986,7 @@ describe("backfill alerts", () => {
       told,
       signals: {
         modelCall: () => Promise.resolve(),
+        modelChecked: () => Promise.resolve(),
         beat: () => Promise.resolve(),
         backfillFinished: ({ answered, queued, question }) => {
           told.push(`finished ${answered}+${queued} ${question}`);

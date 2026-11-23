@@ -463,6 +463,17 @@ end $$;
 
 insert into facetdb.store_migrations (version) values (10) on conflict (version) do nothing;
 
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.question_set_versions') and attname = 'answered_by'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.question_set_versions add column answered_by text;
+  end if;
+end $$;
+
+insert into facetdb.store_migrations (version) values (11) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -686,6 +697,8 @@ begin
     raise exception using errcode = 'FD052', message = format('FacetDB: the worker login still holds %s on the append-only logs after the revoke; Postgres takes back only grants made by the role that runs it. Run facetdb migrate as the owner of the store''s tables (%s) or a member of its role, or have the role that granted it revoke it; nothing was changed.', held, owner);
   end if;
 end $$;
+
+grant update ("answered_by") on "facetdb"."question_set_versions" to "facetdb_worker";
 
 grant select on "facetdb"."store_migrations" to "facetdb_worker";
 

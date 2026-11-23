@@ -9,7 +9,7 @@ import {
   type SpendingGate,
   type StateValue,
 } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
+import { FakeClock, freshHeldModel } from "@facetdb/core/testing";
 import { createFakeProvider } from "@facetdb/model";
 import {
   connectPostgres,
@@ -178,6 +178,7 @@ describe("a plugin source's backfill beside its loop on a real Postgres (plugin-
       log: job.log(ID),
       questionSet: SET,
       version,
+      heldModel: freshHeldModel(version),
       spending: UNLIMITED,
       reviews: reviewsOf(job.reviews, ID),
     });
@@ -191,6 +192,7 @@ describe("a plugin source's backfill beside its loop on a real Postgres (plugin-
       limits: { ...DEFAULT_WORKER_LIMITS, claimBatch: 5 },
       questionSet: SET,
       version,
+      heldModel: freshHeldModel(version),
       spending: UNLIMITED,
     });
 

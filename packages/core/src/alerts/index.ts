@@ -34,7 +34,7 @@ export {
 } from "./alerts.ts";
 export type { WorkerWatch, WorkerWatchDeps, WorkerWatchStep } from "./dead-worker.ts";
 export { createWorkerWatch } from "./dead-worker.ts";
-export type { AlertEvent, AlertKind, AlertSeverity } from "./events.ts";
+export type { AlertEvent, AlertKind, AlertSeverity, ModelChange } from "./events.ts";
 export {
   ALERT_KINDS,
   ALERT_SEVERITY,
@@ -44,6 +44,9 @@ export {
   eventKey,
   FAILURE_WINDOW_MS,
   HEARTBEAT_LOSS_MS,
+  MODEL_NAME_MAX,
+  modelChangedWords,
+  modelNameWords,
   RESOLVABLE_ALERT_KINDS,
   resolvedMessage,
   WORKER_BEAT_EVERY_MS,

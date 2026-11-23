@@ -1,4 +1,9 @@
-import type { DatabaseEngine, DoctorCheck, Question } from "@facetdb/core";
+import {
+  type DatabaseEngine,
+  type DoctorCheck,
+  modelNameWords,
+  type Question,
+} from "@facetdb/core";
 import {
   ConfigError,
   type PluginProviderRef,
@@ -28,6 +33,7 @@ import {
 import {
   enginePlansStore,
   heartbeatCheck,
+  heldVersions,
   pollingStoreClash,
   STORE_SECRET_VARIABLE,
   sameDatabase,
@@ -113,6 +119,7 @@ export type DoctorEnvironment = {
 const ok = (detail: string): CheckResult => ({ status: "ok", detail });
 const fail = (detail: string, fix: string): CheckResult => ({ status: "fail", detail, fix });
 const skip = (detail: string): CheckResult => ({ status: "skip", detail });
+const warn = (detail: string): CheckResult => ({ status: "warn", detail });
 
 /** The words of the checks an engine names by id (`worker`, not "worker heartbeat"). */
 const LABELS: Readonly<Record<string, string>> = { worker: "worker heartbeat" };
@@ -388,33 +395,53 @@ const PING_QUESTION: Question = {
   stakes: "low",
 };
 
-/** The provider answers one tiny question; `--offline` skips the network. */
-async function modelReachable(
-  { deps, options }: DoctorEnvironment,
+/** The model check's result, with the name the model answered under when it answered. */
+type Reached = CheckResult & { readonly named?: string };
+
+/** The one tiny question asked under `model`; the name the server answered under. */
+async function ping(
+  { deps }: DoctorEnvironment,
   config: ProjectConfig,
   plugins: PluginHost | undefined,
-): Promise<CheckResult> {
+  model: string,
+): Promise<string> {
+  const response = await deps.provider(config, plugins).ask({
+    model,
+    state: { note: "This is a test from facetdb doctor." },
+    questions: [PING_QUESTION],
+  });
+  return response.model;
+}
+
+/** The keys a model error may quote, blanked from what doctor prints. */
+function modelKeys({ deps }: DoctorEnvironment, config: ProjectConfig): (string | undefined)[] {
+  const chosen = presetKeyOf(config);
+  return [
+    deps.env["TYPESAFE_API_KEY"],
+    ...(chosen === undefined ? [] : [deps.env[chosen.variable]]),
+  ];
+}
+
+/** The provider answers one tiny question; `--offline` skips the network. */
+async function modelReachable(
+  environment: DoctorEnvironment,
+  config: ProjectConfig,
+  plugins: PluginHost | undefined,
+): Promise<Reached> {
   const chosen = presetKeyOf(config);
   // A preset the FacetDB team has not run against its vendor says so, whatever the answer was.
   const unrun =
     chosen === undefined || chosen.proven
       ? ""
       : `; the FacetDB team has not run the ${chosen.provider} provider yet, so tell us how it went`;
-  if (options.offline) {
+  if (environment.options.offline) {
     return skip(`skipped because of --offline${unrun}`);
   }
   try {
-    const response = await deps.provider(config, plugins).ask({
-      model: config.model,
-      state: { note: "This is a test from facetdb doctor." },
-      questions: [PING_QUESTION],
-    });
-    return ok(`${response.model} answered a test question${unrun}`);
+    const named = await ping(environment, config, plugins, config.model);
+    return { ...ok(`${modelNameWords(named)} answered a test question${unrun}`), named };
   } catch (error) {
-    const keys = [deps.env["TYPESAFE_API_KEY"]];
-    if (chosen !== undefined) {
-      keys.push(deps.env[chosen.variable]);
-    }
+    const keys = modelKeys(environment, config);
     const leave = "or run facetdb doctor --offline to leave this check out";
     let fix: string;
     if (chosen !== undefined) {
@@ -437,11 +464,104 @@ async function modelLines(
   plugins: PluginHost | undefined,
 ): Promise<readonly CheckLine[]> {
   const key = line(MODEL_KEY, modelKey(environment, config, plugins));
-  const reachable =
+  const reachable: Reached =
     key.status === "ok"
       ? await modelReachable(environment, config, plugins)
       : skip(`not checked: the ${MODEL_KEY.label} check did not pass`);
-  return [key, line(MODEL_REACHABLE, reachable)];
+  return [
+    key,
+    line(MODEL_REACHABLE, reachable),
+    ...(reachable.named === undefined
+      ? []
+      : await modelNameNotes(environment, config, plugins, reachable.named)),
+  ];
+}
+
+/** Notes under the model check, never checks of their own. */
+const MODEL_NAME = { id: "model-name", label: "model name" } as const;
+
+/**
+ * The worker holds each question-set version to the model its first answer named. A server that
+ * answers under its own name whatever is asked (the publisher's Strands Decider server) makes the
+ * config's `model` a label; a version the store holds to another name than the server answers its
+ * source's own `model` with now is one whose source the worker holds. Each source is compared with
+ * an answer to its own model: the project's, asked by the check above, or one a source sets, asked
+ * once here; and only while the file names the model of the version in force (otherwise the next
+ * reload starts a new version, and nothing is asked for it). Silent when the names agree. Names a
+ * server chose are quoted as `modelNameWords` says.
+ */
+async function modelNameNotes(
+  environment: DoctorEnvironment,
+  config: ProjectConfig,
+  plugins: PluginHost | undefined,
+  named: string,
+): Promise<readonly CheckLine[]> {
+  const { deps, options } = environment;
+  const note = (detail: string) => line(MODEL_NAME, warn(detail));
+  const notes: CheckLine[] = [];
+  if (named !== config.model) {
+    notes.push(
+      note(
+        `the server answers as ${modelNameWords(named)}, not ${config.model}: it serves its own model whatever is asked, so the config's model is only a label. To serve another model, also set a new model in facetdb.config.ts, which starts a new question-set version`,
+      ),
+    );
+  }
+  const read = await heldVersions(
+    deps.connect,
+    deps.env,
+    projectRef(deps.projectDir).id,
+    config.sources.map((source) => source.name),
+    options.allowInsecure,
+  );
+  if (read.kind === "unreadable") {
+    notes.push(
+      note(
+        `the store could not be read, so no source's model was compared with the one its version is held to: ${read.why}`,
+      ),
+    );
+    return notes;
+  }
+  const answers = new Map<string, { readonly named: string } | { readonly failed: string }>([
+    [config.model, { named }],
+  ]);
+  for (const version of read.versions) {
+    const model =
+      config.sources.find((each) => each.name === version.source)?.model ?? config.model;
+    if (model !== version.model) {
+      // The file names another model than the version the worker runs: its next reload starts a
+      // new version, held to whatever answers it first, so this one's name is nothing to compare.
+      notes.push(
+        note(
+          `the worker runs version ${version.version} of ${version.source} on ${version.model}, and facetdb.config.ts names ${model}: a new version starts at the worker's next reload`,
+        ),
+      );
+      continue;
+    }
+    let answer = answers.get(model);
+    if (answer === undefined) {
+      try {
+        answer = { named: await ping(environment, config, plugins, model) };
+      } catch (error) {
+        answer = { failed: plainMessage(error, modelKeys(environment, config)) };
+      }
+      answers.set(model, answer);
+    }
+    const held = modelNameWords(version.held);
+    if ("failed" in answer) {
+      notes.push(
+        note(
+          `${model}, the model of ${version.source}, did not answer a test question (${answer.failed}), so the model its version ${version.version} is held to (${held}) was not compared`,
+        ),
+      );
+    } else if (answer.named !== version.held) {
+      notes.push(
+        note(
+          `the store holds version ${version.version} of ${version.source} to ${held}, and the server now answers ${model} as ${modelNameWords(answer.named)}: the worker holds ${version.source}, writing none of its answers, until ${held} is served again or a new model in facetdb.config.ts starts a new version`,
+        ),
+      );
+    }
+  }
+  return notes;
 }
 
 /** A table source, with the connection string it reads and whether the store is its database. */

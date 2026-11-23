@@ -10,7 +10,7 @@ import type {
   SpendingGate,
 } from "@facetdb/core";
 import { configureAction, createWorker, DEFAULT_WORKER_LIMITS, reviewsOf } from "@facetdb/core";
-import { FakeClock, FakeReviewQueue } from "@facetdb/core/testing";
+import { FakeClock, FakeReviewQueue, freshHeldModel } from "@facetdb/core/testing";
 import { createStore, migrateStore, pgliteClient, sourceIdOf } from "@facetdb/postgres";
 import { freshPglite, type PGlite, resetPglite, TEST_SECRET } from "@facetdb/postgres/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -335,6 +335,7 @@ async function rig() {
       limits: DEFAULT_WORKER_LIMITS,
       questionSet: QUESTIONS,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: UNLIMITED,
     });
 

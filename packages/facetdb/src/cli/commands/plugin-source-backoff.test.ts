@@ -10,6 +10,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createFakeProvider } from "@facetdb/model";
 import { describe, expect, it } from "vitest";
@@ -126,10 +127,12 @@ function rig() {
         cursorRun: "plugin-source:p:issues",
         note: (line) => lines.push(line),
       });
+      const heldModel = freshHeldModel();
       const loop: SourceLoop = {
         source: opened,
         questionSet,
         version: 1,
+        heldModel,
         worker: createWorker({
           connector,
           provider: createFakeProvider({ defaults: { noul: 0.01 } }),
@@ -140,6 +143,7 @@ function rig() {
           limits: DEFAULT_WORKER_LIMITS,
           questionSet,
           version: 1,
+          heldModel,
           spending: UNLIMITED,
         }),
         connector,

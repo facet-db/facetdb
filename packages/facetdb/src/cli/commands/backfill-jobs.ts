@@ -52,8 +52,11 @@ import type { SourceLoop } from "./config-reload.ts";
  */
 export const ESTIMATE_KEPT_MS = 10 * 60 * 1000;
 
-/** What a job needs of the loop in force: its source, and the question set and version it runs. */
-export type JobLoop = Pick<SourceLoop, "source" | "questionSet" | "version">;
+/**
+ * What a job needs of the loop in force: its source, the question set and version it runs, and the
+ * model that version is held to, which the job checks its answers against as the loop does.
+ */
+export type JobLoop = Pick<SourceLoop, "source" | "questionSet" | "version" | "heldModel">;
 
 export type BackfillJobsDeps = {
   /** The project's id: part of every run's key in the cursor store. */
@@ -467,6 +470,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
         log: deps.log(job.source),
         questionSet: loop.questionSet,
         version: loop.version,
+        heldModel: loop.heldModel,
         ...(loop.source.maxStateTokens === undefined
           ? {}
           : { maxStateTokens: loop.source.maxStateTokens }),

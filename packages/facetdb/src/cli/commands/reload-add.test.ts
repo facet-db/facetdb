@@ -16,6 +16,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createOutagePolicy } from "@facetdb/model";
 import { describe, expect, it } from "vitest";
@@ -189,6 +190,7 @@ function rig(initial: ProjectConfig = PROJECT) {
   };
   const signals = (source: string): AlertSignals => ({
     modelCall: () => Promise.resolve(),
+    modelChecked: () => Promise.resolve(),
     beat: () => {
       beats.push({ source, at: clock.now(), by: "loop" });
       return Promise.resolve();
@@ -214,10 +216,12 @@ function rig(initial: ProjectConfig = PROJECT) {
       versions.set(source.name, rows);
       const connector = new FakeConnector(databaseOf(source));
       const outage = createOutagePolicy({ onOutage: "hold", clock, retryWindowMs: 0 });
+      const heldModel = freshHeldModel(version.version);
       const loop: SourceLoop = {
         source,
         questionSet,
         version: version.version,
+        heldModel,
         worker: createWorker({
           connector,
           provider,
@@ -228,6 +232,7 @@ function rig(initial: ProjectConfig = PROJECT) {
           limits: DEFAULT_WORKER_LIMITS,
           questionSet,
           version: version.version,
+          heldModel,
           alerts: signals(source.name),
           outage,
           spending: UNLIMITED,

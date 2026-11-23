@@ -69,10 +69,9 @@ describe("store migration 10", () => {
 
     expect(await migrateStore(world.client)).toEqual([]);
 
-    expect(SCHEMA_VERSION).toBe(10);
     expect(await storeVersion(world.client.query)).toEqual({
       kind: "found",
-      newest: 10,
+      newest: SCHEMA_VERSION,
       current: true,
     });
     expect(await outboxIndexes()).toContainEqual(BATCH_INDEX);

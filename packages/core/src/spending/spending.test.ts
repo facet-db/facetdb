@@ -5,6 +5,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -814,6 +815,7 @@ async function workersOnOneQueue(
       limits: { ...DEFAULT_WORKER_LIMITS, claimBatch: 1 },
       questionSet,
       version: 1,
+      heldModel: freshHeldModel(),
       spending: gate,
     }),
   );
@@ -877,6 +879,7 @@ async function workerWith(
     limits,
     questionSet,
     version: 1,
+    heldModel: freshHeldModel(),
     spending: gate,
   });
   for (const key of ["a", "b", "c"] satisfies RecordKey[]) {

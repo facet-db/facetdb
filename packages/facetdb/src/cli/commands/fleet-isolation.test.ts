@@ -14,6 +14,7 @@ import {
   FakeDecisionLog,
   FakeEngine,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createFakeProvider, createOutagePolicy, DEFAULT_RETRY_EVERY_MS } from "@facetdb/model";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -195,6 +196,7 @@ function rig() {
   };
   const signals = (source: string): AlertSignals => ({
     modelCall: () => Promise.resolve(),
+    modelChecked: () => Promise.resolve(),
     beat: () => {
       beats.push({ source, at: clock.now() });
       return Promise.resolve();
@@ -216,10 +218,12 @@ function rig() {
             : (state.ordersError ?? (down(source.name) ? new Error(REFUSED) : undefined)),
       );
       const outage = createOutagePolicy({ onOutage: "hold", clock, retryWindowMs: 0 });
+      const heldModel = freshHeldModel();
       const loop: SourceLoop = {
         source,
         questionSet,
         version: 1,
+        heldModel,
         worker: createWorker({
           connector,
           provider: model,
@@ -230,6 +234,7 @@ function rig() {
           limits: DEFAULT_WORKER_LIMITS,
           questionSet,
           version: 1,
+          heldModel,
           alerts: signals(source.name),
           outage,
           spending: UNLIMITED,

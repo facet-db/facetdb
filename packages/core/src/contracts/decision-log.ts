@@ -48,3 +48,17 @@ export type DecisionLog = {
    */
   count(version?: number): Promise<number>;
 };
+
+/**
+ * The model each question-set version is held to: the store keeps, per source and version, the
+ * model the first answer under it named. The Postgres store
+ * (`facetdb.question_set_versions.answered_by`) implements it.
+ */
+export type VersionModels = {
+  /**
+   * Sets the version's model to `named` when no answer has set it yet, and answers the name held,
+   * in one statement: of two workers' first answers the first write wins and both are answered
+   * its name. A version the store does not keep is an error.
+   */
+  answeredBy(sourceId: string, version: number, named: string): Promise<string>;
+};

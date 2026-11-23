@@ -8,6 +8,8 @@ import {
   alertMessage,
   eventKey,
   FAILURE_WINDOW_MS,
+  type ModelChange,
+  modelChangedWords,
   resolvedMessage,
 } from "./events.ts";
 import {
@@ -279,6 +281,12 @@ export type AlertScope = {
 export type AlertSignals = {
   /** One model call finished, well or badly; judges the failure rate over the last 5 minutes. */
   modelCall(ok: boolean): Promise<void>;
+  /**
+   * A response's model was checked against the one its question-set version is held to: a change
+   * raises Model changed, and null (the held model answered) resolves it. One alert per source,
+   * whatever the version: the first answer under a new version names the model it holds.
+   */
+  modelChecked(change: ModelChange | null): Promise<void>;
   /** The worker is alive. */
   beat(): Promise<void>;
   backfillFinished(summary: {
@@ -735,16 +743,29 @@ export function createAlerts(deps: AlertsDeps): Alerts {
         did: "Retrying with backoff; a record that cannot be answered is marked error and asked again.",
       });
     } else {
-      const key = modelKey(scope);
-      if (knownClear.has(key)) {
-        return;
-      }
-      let pending = clearing.get(key);
-      if (pending === undefined) {
-        pending = clear(key).finally(() => clearing.delete(key));
-        clearing.set(key, pending);
-      }
-      await pending;
+      await clearUnlessKnown(modelKey(scope));
+    }
+  }
+
+  /** Resolves `key` unless this process knows it holds no alert; concurrent calls share one check. */
+  async function clearUnlessKnown(key: string): Promise<void> {
+    if (knownClear.has(key)) {
+      return;
+    }
+    let pending = clearing.get(key);
+    if (pending === undefined) {
+      pending = clear(key).finally(() => clearing.delete(key));
+      clearing.set(key, pending);
+    }
+    await pending;
+  }
+
+  /** A store failure around a resolved message delivered off the path, said by the next call. */
+  function throwStoreError(): void {
+    const failed = storeError;
+    if (failed !== undefined) {
+      storeError = undefined;
+      throw failed.error;
     }
   }
 
@@ -791,19 +812,34 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     return eventKey({ kind: "model_failing", ...scope, question: null });
   }
 
+  /** Model changed's key: one per source, so the first answer under a new version resolves it. */
+  function changedKey(scope: AlertScope): string {
+    return eventKey({ kind: "model_changed", ...scope, question: null });
+  }
+
   function signals(scope: AlertScope): AlertSignals {
     return {
       async modelCall(ok) {
         calls.push({ at: clock.now(), ok });
         await checkModel(scope);
-        const failed = storeError;
-        if (failed !== undefined) {
-          storeError = undefined;
-          throw failed.error;
+        throwStoreError();
+      },
+      async modelChecked(change) {
+        if (change === null) {
+          await clearUnlessKnown(changedKey(scope));
+          throwStoreError();
+          return;
         }
+        await raise({
+          kind: "model_changed",
+          ...modelChangedWords(change),
+          ...scope,
+          question: null,
+        });
       },
       async beat() {
         knownClear.delete(modelKey(scope));
+        knownClear.delete(changedKey(scope));
         // The project's own row, which Home reads. No alert resolves here: a worker that died is
         // alerted once by another worker and the alert never resolves.
         await store.saveHeartbeat(scope.project, clock.now());

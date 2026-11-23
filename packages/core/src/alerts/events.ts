@@ -7,6 +7,8 @@ import type { ChannelMessage } from "../contracts/index.ts";
 export const ALERT_KINDS = [
   "worker_not_running",
   "model_failing",
+  // A response named another model than the one that first answered its version.
+  "model_changed",
   "connector_lost_access",
   "spending_80",
   "spending_paused",
@@ -22,15 +24,17 @@ export type AlertKind = (typeof ALERT_KINDS)[number];
 export type AlertSeverity = ChannelMessage["severity"];
 
 /**
- * The kinds the code resolves: a healthy call resolves `model_failing`, and the worker resolves
- * `connector_lost_access` once the source reads well again (its doctor's verdict passes at the
- * worker's 5-minute reading, or a plugin source's read answers). Every other kind is raised and
- * never resolved, so a page must not say it is "not resolved". A kind that gains a resolve path is
- * added here. `worker_not_running` is not one: it is raised once for a worker that is gone, whose
- * row is taken as it is raised, and nothing later says it is back.
+ * The kinds the code resolves: a healthy call resolves `model_failing`, a response naming the model
+ * its version is held to resolves `model_changed`, and the worker resolves `connector_lost_access`
+ * once the source reads well again (its doctor's verdict passes at the worker's 5-minute reading,
+ * or a plugin source's read answers). Every other kind is raised and never resolved, so a page must
+ * not say it is "not resolved". A kind that gains a resolve path is added here.
+ * `worker_not_running` is not one: it is raised once for a worker that is gone, whose row is taken
+ * as it is raised, and nothing later says it is back.
  */
 export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = [
   "model_failing",
+  "model_changed",
   "connector_lost_access",
 ];
 
@@ -38,6 +42,7 @@ export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = [
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   worker_not_running: "critical",
   model_failing: "critical",
+  model_changed: "critical",
   connector_lost_access: "critical",
   spending_80: "warning",
   spending_paused: "critical",
@@ -70,6 +75,7 @@ export const WORKER_NOT_RUNNING_WHAT = "The worker has sent no heartbeat for 2 m
 export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
   worker_not_running: "Worker not running",
   model_failing: "Model failing",
+  model_changed: "Model changed",
   connector_lost_access: "Connector lost access",
   spending_80: "Spending at 80% of the cap",
   spending_paused: "Spending cap reached",
@@ -78,6 +84,68 @@ export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
   question_set_changed: "Question set changed",
   action_gave_up: "Action gave up",
 };
+
+/**
+ * A response that named another model than the one its question-set version is held to: the
+ * version, the name the store holds for it, and the name the response gave.
+ */
+export type ModelChange = {
+  readonly version: number;
+  readonly held: string;
+  readonly named: string;
+};
+
+/** The longest model name a message quotes, in characters: a server names itself, unbounded. */
+export const MODEL_NAME_MAX = 80;
+
+/**
+ * What a server-chosen name keeps: letters, digits, spaces, and the `.`, `-`, `:`, `/` and `+` that
+ * model names use. Everything else goes: control and format characters (line breaks, bidi
+ * overrides, zero-width marks) and every character a channel reads as markup (Slack's `<…>` links
+ * and mentions, `_`, `*` and `~` emphasis, Markdown, HTML, `@` mentions).
+ */
+const NOT_A_NAME = /[^\p{L}\p{N} .:/+-]/gu;
+
+/**
+ * Nothing link-shaped is left to autolink: a scheme's `://`, and a dot before a letter or inside an
+ * address of four numbers, are written `[:]//` and `[.]`, the usual defanged form. A version's dots
+ * (`jev-1.14.0`) stand between digits and stay.
+ */
+function defanged(name: string): string {
+  return name
+    .replace(/\d+(?:\.\d+){3}/g, (address) => address.replaceAll(".", "[.]"))
+    .replace(/\.(?=\p{L})/gu, "[.]")
+    .replaceAll("://", "[:]//");
+}
+
+/**
+ * A model name a server chose, as a message may quote it: only plain text, nothing a channel could
+ * render as markup, emphasis or a link, then cut at `MODEL_NAME_MAX` characters, never inside one.
+ */
+export function modelNameWords(model: string): string {
+  const characters = [...defanged(model.replace(NOT_A_NAME, ""))];
+  if (characters.length === 0) {
+    return "(a name with nothing printable)";
+  }
+  return characters.length <= MODEL_NAME_MAX
+    ? characters.join("")
+    : `${characters.slice(0, MODEL_NAME_MAX - 1).join("")}…`;
+}
+
+/**
+ * What happened, and what FacetDB did with the fix. The worker's failure, a backfill's failed run
+ * and the alert all say it in these words.
+ */
+export function modelChangedWords(change: ModelChange): {
+  readonly what: string;
+  readonly did: string;
+} {
+  const held = modelNameWords(change.held);
+  return {
+    what: `The model answered as ${modelNameWords(change.named)}, not ${held}, the model that first answered question-set version ${change.version}.`,
+    did: `None of its answers was written, and the source is held: one record is asked again every 5 minutes, the others wait without a model call. Serve ${held} again at the provider's address, or set a new model in facetdb.config.ts, which starts a new version; every waiting record is then asked again.`,
+  };
+}
 
 /** One alert per event per this long until it resolves. */
 export const ALERT_WINDOW_MS = 30 * 60_000;

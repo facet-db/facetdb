@@ -4,6 +4,7 @@ import {
   FakeConnector,
   FakeDatabase,
   FakeDecisionLog,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type { AlertSignals } from "../alerts/index.ts";
@@ -213,6 +214,7 @@ async function rig(
       limits: options.limits ?? DEFAULT_WORKER_LIMITS,
       questionSet,
       version: 3,
+      heldModel: freshHeldModel(3),
       spending: UNLIMITED,
     },
   };
@@ -967,6 +969,7 @@ async function recordingRig(provider: ScriptedProvider = ScriptedProvider.always
     limits: DEFAULT_WORKER_LIMITS,
     questionSet,
     version: 3,
+    heldModel: freshHeldModel(3),
     spending: recordingGate(calls),
   };
   return { db, calls, connector, log, provider, deps };
@@ -1297,6 +1300,8 @@ describe("telling the alerts module", () => {
       told,
       signals: {
         modelCall: (ok) => tell(`call ${ok ? "ok" : "failed"}`),
+        // Model changed has a file of its own (model-changed.test.ts).
+        modelChecked: () => Promise.resolve(),
         beat: () => tell("beat"),
         backfillFinished: () => tell("backfill finished"),
         backfillFailed: () => tell("backfill failed"),

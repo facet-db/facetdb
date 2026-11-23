@@ -66,10 +66,21 @@ export async function newStore(
 }
 
 /**
+ * Takes migration 11 back off a migrated store (a version's model), with its version row, for a
+ * test building an older store; version-model.test.ts proves it alone.
+ */
+export async function takeBackMigration11(client: SqlClient): Promise<void> {
+  await client.query(`alter table facetdb.question_set_versions drop column answered_by`);
+  await client.query(`delete from facetdb.store_migrations where version = 11`);
+}
+
+/**
  * Takes migration 10 back off a migrated store (the outbox's batch index), with its version row,
- * for a test building an older store; store-migration-10.test.ts proves it alone.
+ * for a test building an older store; store-migration-10.test.ts proves it alone. Migration 11 goes
+ * first, with its version row.
  */
 export async function takeBackMigration10(client: SqlClient): Promise<void> {
+  await takeBackMigration11(client);
   await client.query(`drop index facetdb.webhook_outbox_batch`);
   await client.query(`delete from facetdb.store_migrations where version = 10`);
 }

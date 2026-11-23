@@ -17,6 +17,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createOutagePolicy, DEFAULT_RETRY_EVERY_MS } from "@facetdb/model";
 import { describe, expect, it } from "vitest";
@@ -189,6 +190,7 @@ function rig(initial: ProjectConfig = PROJECT) {
   };
   const signals = (): AlertSignals => ({
     modelCall: () => Promise.resolve(),
+    modelChecked: () => Promise.resolve(),
     beat: () => {
       beats.push({ at: clock.now(), by: "loop" });
       return Promise.resolve();
@@ -210,10 +212,12 @@ function rig(initial: ProjectConfig = PROJECT) {
       const connector = new FakeConnector(databaseOf(source));
       // A failed call holds the record at once (no retry window), as after ten minutes of outage.
       const outage = createOutagePolicy({ onOutage: "hold", clock, retryWindowMs: 0 });
+      const heldModel = freshHeldModel(version.version);
       const loop: SourceLoop = {
         source,
         questionSet,
         version: version.version,
+        heldModel,
         worker: createWorker({
           connector,
           provider,
@@ -224,6 +228,7 @@ function rig(initial: ProjectConfig = PROJECT) {
           limits: DEFAULT_WORKER_LIMITS,
           questionSet,
           version: version.version,
+          heldModel,
           alerts: signals(),
           outage,
           spending: UNLIMITED,

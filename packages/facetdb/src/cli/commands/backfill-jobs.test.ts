@@ -19,6 +19,7 @@ import {
   FakeOpenConnector,
   FakeReviewQueue,
   FakeRunLog,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import type { BackfillJobState, BackfillJobStatus } from "@facetdb/server";
 import { describe, expect, it } from "vitest";
@@ -74,7 +75,12 @@ function sourceOf(name: string): SourceConfig {
 /** A loop as the fleet holds one: a reload that restarts a source puts a new one in its place. */
 function loopOf(name: string, version = 1): JobLoop {
   const source = sourceOf(name);
-  return { source, questionSet: questionSetOf(PROJECT, source), version };
+  return {
+    source,
+    questionSet: questionSetOf(PROJECT, source),
+    version,
+    heldModel: freshHeldModel(version),
+  };
 }
 
 /** A point a test holds a job at: `entered` once the job is there, `release` lets it go on. */
@@ -315,6 +321,7 @@ function rig(
 
   const signals = (name: string): AlertSignals => ({
     modelCall: () => Promise.resolve(),
+    modelChecked: () => Promise.resolve(),
     beat: () => Promise.resolve(),
     backfillFinished: (summary) => {
       alerts.push(`${name} finished ${JSON.stringify(summary)}`);

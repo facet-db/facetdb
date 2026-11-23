@@ -10,7 +10,13 @@ import type {
   SpendingGate,
 } from "@facetdb/core";
 import { reviewsOf } from "@facetdb/core";
-import { FakeClock, FakeDecisionLog, FakeReviewQueue, FakeRunLog } from "@facetdb/core/testing";
+import {
+  FakeClock,
+  FakeDecisionLog,
+  FakeReviewQueue,
+  FakeRunLog,
+  freshHeldModel,
+} from "@facetdb/core/testing";
 import type { BackfillJobState, BackfillJobStatus } from "@facetdb/server";
 import { expect } from "vitest";
 import { facetdb, noul } from "../../config/index.ts";
@@ -48,7 +54,12 @@ export function listingsLoop(): JobLoop {
   if (source === undefined) {
     throw new Error("the world's project has no source");
   }
-  return { source, questionSet: questionSetOf(PROJECT, source), version: 1 };
+  return {
+    source,
+    questionSet: questionSetOf(PROJECT, source),
+    version: 1,
+    heldModel: freshHeldModel(),
+  };
 }
 
 /** The question set the world's table is installed with: the loop's. */
@@ -82,6 +93,7 @@ const UNLIMITED: SpendingGate = {
 
 const QUIET: AlertSignals = {
   modelCall: () => Promise.resolve(),
+  modelChecked: () => Promise.resolve(),
   beat: () => Promise.resolve(),
   backfillFinished: () => Promise.resolve(),
   backfillFailed: () => Promise.resolve(),

@@ -12,7 +12,7 @@ import {
   type SpendingGate,
   type StateValue,
 } from "@facetdb/core";
-import { FakeClock, runConnectorContract } from "@facetdb/core/testing";
+import { FakeClock, freshHeldModel, runConnectorContract } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import {
   createStore,
@@ -323,6 +323,7 @@ async function rigOf(count: number, pageSize: number): Promise<Rig> {
   // A backfill that finished or failed says so.
   const recordingAlerts: AlertSignals = {
     modelCall: () => Promise.resolve(),
+    modelChecked: () => Promise.resolve(),
     beat: () => Promise.resolve(),
     backfillFinished: (summary) => {
       alerts.push(`finished: ${summary.queued} queued`);
@@ -391,6 +392,7 @@ async function rigOf(count: number, pageSize: number): Promise<Rig> {
         log: store.log(ID),
         questionSet: set,
         version,
+        heldModel: freshHeldModel(version),
         alerts: recordingAlerts,
         spending: UNLIMITED,
         runs: { log: store.runs, source: ID },
@@ -413,6 +415,7 @@ async function rigOf(count: number, pageSize: number): Promise<Rig> {
         limits: DEFAULT_WORKER_LIMITS,
         questionSet: set,
         version,
+        heldModel: freshHeldModel(version),
         spending: UNLIMITED,
       });
       for (;;) {

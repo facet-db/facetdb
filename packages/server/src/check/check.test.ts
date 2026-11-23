@@ -1,4 +1,5 @@
 import type {
+  HeldModel,
   ModelProvider,
   OutagePolicy,
   OutageVerdict,
@@ -8,8 +9,19 @@ import type {
   RecordKey,
   SpendingGate,
 } from "@facetdb/core";
-import { createWorker, DEFAULT_WORKER_LIMITS, reviewsOf } from "@facetdb/core";
-import { FakeClock, FakeReviewQueue } from "@facetdb/core/testing";
+import {
+  createWorker,
+  DEFAULT_WORKER_LIMITS,
+  holdModel,
+  reviewsOf,
+  withoutProbe,
+} from "@facetdb/core";
+import {
+  FakeClock,
+  FakeReviewQueue,
+  FakeVersionModels,
+  freshHeldModel,
+} from "@facetdb/core/testing";
 import { type ApiKeyStore, sourceIdOf } from "@facetdb/postgres";
 import {
   createMemoryStore,
@@ -180,6 +192,7 @@ function recordingKeyStore(inner: ApiKeyStore): ApiKeyStore & { readonly verifie
 async function rig(
   questions: QuestionSet["questions"] = [urgency, wantsRefund],
   outage?: OutagePolicy,
+  heldModel?: HeldModel,
 ) {
   const clock = new FakeClock(1_700_000_000_000);
   const memory = await createMemoryStore(clock, pglite);
@@ -208,6 +221,7 @@ async function rig(
       limits: DEFAULT_WORKER_LIMITS,
       questionSet: questionSet(...questions),
       version: 1,
+      heldModel: heldModel ?? freshHeldModel(),
       spending: UNLIMITED,
       ...(outage === undefined ? {} : { outage }),
     });
@@ -518,6 +532,35 @@ describe("POST /v1/check when the answer does not come", () => {
     expect(t.clock.sleeps.reduce((total, ms) => total + ms, 0)).toBeGreaterThanOrEqual(
       CHECK_WAIT_MS,
     );
+  });
+
+  it("answers 503 at once on a source a changed model holds, its next probe as retry-after, asking nothing", async () => {
+    // The loop's held model, on a clock of its own started where the rig's starts: version 1 was
+    // first answered by jev-1.14.0, and a minute later the server answered as another model.
+    const loopClock = new FakeClock(1_700_000_000_000);
+    const loop = holdModel(new FakeVersionModels(), SOURCE_ID, 1, loopClock);
+    await loop.check("jev-1.14.0");
+    loopClock.advance(60_000);
+    await loop.check("strands-decider-7b");
+
+    // A check call sees the loop's hold through its probe-less view, as the worker command builds it.
+    const t = await rig(undefined, undefined, withoutProbe(loop));
+    const response = await t.post(ticket(CHARGED));
+    expect(response.status).toBe(503);
+    expect(response.json).toMatchObject({ error: { code: "model_unavailable" } });
+    // The next probe is 5 minutes after the changed answer: 6 minutes from the rig's clock.
+    expect(response.headers.get("retry-after")).toBe("360");
+    // At once: no model request, no poll to the deadline, and the probe left to the loop.
+    expect(t.provider.requests).toHaveLength(0);
+    expect(t.clock.sleeps).toEqual([]);
+    loopClock.advance(5 * 60_000);
+    expect(loop.probeDue()).toBe(true);
+    // Stored and still queued, for the loop's probe or its next version.
+    expect(await t.inspect.getRecord("T-1042")).toMatchObject({
+      status: "pending",
+      decision: null,
+    });
+    expect(await t.holder.claimRecord("T-1042")).toBe(true);
   });
 });
 

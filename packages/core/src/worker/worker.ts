@@ -25,6 +25,7 @@ import { checkStateSize, estimateRequestTokens, estimateTokens } from "../reques
 import { followReview, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
 import { ActionNotQueued, type ActionStep } from "./action-pipeline.ts";
+import type { HeldModel, ModelChangedError } from "./held-model.ts";
 import {
   RUN_LOG_PRUNE_EVERY_MS,
   RUN_LOG_RETENTION_MS,
@@ -93,9 +94,11 @@ export type WorkerDeps = {
   /** The question-set version in force; every logged answer carries it. */
   readonly version: number;
   /**
-   * Where the heartbeat and the outcome of every model call go; optional so a bare worker still
-   * runs.
+   * The model `version` is held to, the loop's own, shared with its check calls. Required, as the
+   * spending gate is: a worker built without one would write an answer from any model.
    */
+  readonly heldModel: HeldModel;
+  /** Where the heartbeat and the outcome of every model call go; optional so a bare worker still runs. */
   readonly alerts?: AlertSignals;
   /** The retry window and `onOutage` policy; without it a failed call just returns the record to the queue. */
   readonly outage?: OutagePolicy;
@@ -170,6 +173,16 @@ export type PassReport = {
   readonly warned: readonly { readonly key: RecordKey; readonly estimate: number }[];
   /** The model stayed down past the retry window: marked `error` (hold) or `unchecked` (release) and left the queue. */
   readonly held: readonly { readonly key: RecordKey; readonly status: "error" | "unchecked" }[];
+  /**
+   * Claimed while the source is held by a changed model, so not asked: back in the queue as they
+   * were, with no model call and nothing written, until the held model answers again.
+   */
+  readonly waiting: readonly RecordKey[];
+  /**
+   * When the pass ended with the source held by a changed model, the time (ms, on the worker's
+   * clock) its next probe may be asked; null when it is not held. A check call answers by it.
+   */
+  readonly heldUntil: number | null;
   /** Held records queued again, on their 5-minute schedule or because the model came back. */
   readonly requeued: readonly RecordKey[];
   readonly failures: readonly RecordFailure[];
@@ -224,6 +237,7 @@ export function createWorker(deps: WorkerDeps): Worker {
     limits,
     questionSet,
     version,
+    heldModel,
     alerts,
     outage,
     spending,
@@ -403,6 +417,23 @@ export function createWorker(deps: WorkerDeps): Worker {
   }
 
   /**
+   * The response named another model than the one this version is held to, which now holds the
+   * source (`heldModel`). No answer entry is made and nothing is written; the failure stays in the
+   * report, the alert is raised, and the record goes back to the queue, where it waits with the
+   * source's others: the queue keeps them through a reload or a restart, whatever loop claims them
+   * next.
+   */
+  async function modelChanged(
+    row: ReadRow,
+    change: ModelChangedError,
+    report: MutablePass,
+  ): Promise<Settled> {
+    report.failures.push({ key: row.key, stage: "ask", error: change });
+    await tell(report, row.key, (signals) => signals.modelChecked(change));
+    return "release";
+  }
+
+  /**
    * The model call failed and the outage policy says the retry window is spent: the record gets its
    * status through `write`, still guarded by the hash it was read with, and leaves the queue.
    */
@@ -525,6 +556,14 @@ export function createWorker(deps: WorkerDeps): Worker {
         return settled;
       }
 
+      // The source is held by a changed model (an answer of this pass, of a check call or of a
+      // backfill job of the loop named another) and its probe is not due: the record waits in the
+      // queue, unasked. Every record that needs no model call has been settled above.
+      if (heldModel.holding !== undefined && !heldModel.probeDue()) {
+        report.waiting.push(row.key);
+        return "release";
+      }
+
       const estimate = estimateTokens(row.state);
       const size = checkStateSize(estimate, limits.maxStateTokens);
       if (size.kind === "refuse") {
@@ -560,6 +599,14 @@ export function createWorker(deps: WorkerDeps): Worker {
         report.paused = true;
         return "release";
       }
+      // A held source's probe is spent here, as its request goes: of the lanes that came this far
+      // together, one asks and the others wait, and a probe whose record needed no call spent
+      // nothing, so the next record that needs one asks.
+      if (!heldModel.mayAsk()) {
+        await release(report, row.key, reservation);
+        report.waiting.push(row.key);
+        return "release";
+      }
 
       stage = "ask";
       let response: ProviderResponse;
@@ -585,10 +632,17 @@ export function createWorker(deps: WorkerDeps): Worker {
       // Paid for: the reservation gives way to the count, in one store call.
       await countSpend(report, row.key, reservation, response.usage.inputTokens);
       report.tokens += response.usage.inputTokens;
+      stage = "record";
+      // An answer from another model than the one this version is held to is never logged or
+      // written. It is no failure to reach the model, so Model failing hears nothing.
+      const changed = await heldModel.check(response.model);
+      if (changed !== undefined) {
+        return await modelChanged(row, changed, report);
+      }
       await tell(report, row.key, (signals) => signals.modelCall(true));
+      await tell(report, row.key, (signals) => signals.modelChecked(null));
       await requeue(report, outage?.succeeded(row.key) ?? []);
 
-      stage = "record";
       const entry: AnswerEntry = {
         kind: "answer",
         key: row.key,
@@ -673,6 +727,7 @@ export function createWorker(deps: WorkerDeps): Worker {
   async function runOnce(): Promise<PassReport> {
     const startedAtMs = clock.now();
     const report = await takeBatch(startedAtMs);
+    report.heldUntil = heldModel.probeAt ?? null;
     if (deps.runs !== undefined) {
       await logRun(deps.runs, report, startedAtMs);
     }
@@ -686,7 +741,12 @@ export function createWorker(deps: WorkerDeps): Worker {
     // A paused project keeps its records queued: nothing is claimed, so nothing is lost.
     const allowed = await spendingAllows(report);
     report.paused = !allowed;
-    const claimed = allowed ? await connector.claim(limits.claimBatch) : [];
+    // A source held by a changed model claims nothing until its probe is due, every 5 minutes; then
+    // one record that needs a model call is asked and the rest wait in the queue, as a swapped
+    // server bills every retry, until the probe's answer names the held model.
+    const limit =
+      allowed && (heldModel.holding === undefined || heldModel.probeDue()) ? limits.claimBatch : 0;
+    const claimed = limit > 0 ? await connector.claim(limit) : [];
     // The queue holds one entry per record, but a connector may repeat a key in a batch.
     const keys = [...new Set(claimed)];
     report.claimed = keys.length;
@@ -829,6 +889,8 @@ function newPass(startedAt: number): MutablePass {
     refused: [],
     warned: [],
     held: [],
+    waiting: [],
+    heldUntil: null,
     requeued: [],
     failures: [],
     toReview: [],

@@ -485,6 +485,20 @@ end $$`,
       ),
     ],
   },
+  {
+    version: 11,
+    statements: [
+      // The model the first answer under a version named, which every later answer of the version
+      // must name. Nullable, with no default: a version nothing has answered holds none, and adding
+      // the column rewrites no row. A version made before this migration is held by its next
+      // answer.
+      unlessColumn(
+        "facetdb.question_set_versions",
+        "answered_by",
+        `alter table facetdb.question_set_versions add column answered_by text`,
+      ),
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */
@@ -556,9 +570,18 @@ export const STORE_TABLES: readonly string[] = [
  * The store's append-only logs: the decision log and the question-set versions are only ever read
  * and inserted into (a correction is a new row), so the worker login holds select and insert on
  * them and nothing more. Only the admin's `uninstall
- * --purge` deletes from them.
+ * --purge` deletes from them. The one exception is a column, `STORE_WORKER_SET_ONCE_COLUMN`.
  */
 export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versions", "decisions"];
+
+/**
+ * The one column of an append-only log the worker sets (store migration 11): a version's model,
+ * written once by its first answer. The worker login holds update on this column alone.
+ */
+export const STORE_WORKER_SET_ONCE_COLUMN = {
+  table: "question_set_versions",
+  column: "answered_by",
+} as const;
 
 /**
  * The store's tables the worker login only reads: the reviewer accounts, whose passwords the studio

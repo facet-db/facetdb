@@ -17,6 +17,7 @@ import {
   FakeDecisionLog,
   FakeEngine,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider, type FakeScript } from "@facetdb/model";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -160,6 +161,7 @@ function depsFor(provider: FakeProvider, connector: Connector = world.connector)
     reviews: reviewsOf(new FakeReviewQueue(), source.name),
     questionSet,
     version: 1,
+    heldModel: freshHeldModel(),
     spending: {
       allowsWork: () => Promise.resolve(true),
       admit: () => Promise.resolve("reservation"),

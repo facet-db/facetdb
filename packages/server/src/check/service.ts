@@ -103,6 +103,10 @@ export function createCheckService(deps: CheckDeps): CheckService {
       await source.connector.upsertRecord(request.id, request.record);
 
       const deadline = clock.now() + CHECK_WAIT_MS;
+      /** When the last pass found the source held by a changed model, its next probe. */
+      let heldUntil: number | null = null;
+      /** The seconds until the held source's next probe: what the caller is told to wait. */
+      const untilProbe = (at: number) => Math.max(1, Math.ceil((at - clock.now()) / 1_000));
       for (;;) {
         const stored = await source.connector.getRecord(request.id);
         if (stored === undefined) {
@@ -114,6 +118,17 @@ export function createCheckService(deps: CheckDeps): CheckService {
             id: request.id,
             status: stored.status,
             answers: answersOf(stored),
+          };
+        }
+        if (heldUntil !== null) {
+          // A source held by a changed model asks nothing but the loop's probe, and a check call
+          // never takes it: the record waits in the queue, so the call says so at once.
+          return {
+            kind: "unanswered",
+            id: request.id,
+            reason: "unavailable",
+            retryAfterSeconds: untilProbe(heldUntil),
+            queued: true,
           };
         }
         if (clock.now() >= deadline) {
@@ -133,11 +148,13 @@ export function createCheckService(deps: CheckDeps): CheckService {
             kind: "unanswered",
             id: request.id,
             reason: "unavailable",
-            retryAfterSeconds: deps.retryAfterSeconds,
+            retryAfterSeconds:
+              report.heldUntil === null ? deps.retryAfterSeconds : untilProbe(report.heldUntil),
             queued: !held,
           };
         }
-        if (report.claimed === 0) {
+        heldUntil = report.heldUntil;
+        if (report.claimed === 0 && heldUntil === null) {
           // Another worker holds the job: look again shortly instead of asking twice.
           await clock.sleep(CHECK_POLL_MS);
         }

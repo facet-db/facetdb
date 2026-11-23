@@ -1,5 +1,12 @@
 export type { ActionStep } from "./action-pipeline.ts";
 export { ActionNotQueued, conditionHolds, configureAction } from "./action-pipeline.ts";
+export type { HeldModel } from "./held-model.ts";
+export {
+  holdModel,
+  MODEL_CHANGED_PROBE_EVERY_MS,
+  ModelChangedError,
+  withoutProbe,
+} from "./held-model.ts";
 export type { Run, RunKind, RunLog, RunRecorder } from "./run-log.ts";
 export {
   errorCount,

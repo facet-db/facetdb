@@ -4,6 +4,7 @@ import {
   FakeDatabase,
   FakeDecisionLog,
   FakeReviewQueue,
+  freshHeldModel,
 } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import type { ModelProvider, ProviderResponse } from "../contracts/index.ts";
@@ -317,6 +318,7 @@ async function workerRig(responses: ProviderResponse[]) {
     limits: DEFAULT_WORKER_LIMITS,
     questionSet,
     version,
+    heldModel: freshHeldModel(version),
     spending: UNLIMITED,
   });
   const workerAt = (version: number) => createWorker(depsAt(version));

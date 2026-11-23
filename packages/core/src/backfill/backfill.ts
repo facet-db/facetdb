@@ -21,7 +21,12 @@ import {
 } from "../requests/index.ts";
 import { followReview, type SourceReviews } from "../review/index.ts";
 import { type ReservationId, SpendingAlertError, type SpendingGate } from "../spending/index.ts";
-import { DEFAULT_MAX_IN_FLIGHT, errorCount, type RunRecorder } from "../worker/index.ts";
+import {
+  DEFAULT_MAX_IN_FLIGHT,
+  errorCount,
+  type HeldModel,
+  type RunRecorder,
+} from "../worker/index.ts";
 
 /** Jev charges $0.042 per million input tokens and nothing for output. */
 export const PRICE_PER_MILLION_INPUT_TOKENS = 0.042;
@@ -77,6 +82,11 @@ export type BackfillDeps = {
   readonly questionSet: QuestionSet;
   /** The question-set version in force; every logged answer carries it. */
   readonly version: number;
+  /**
+   * The model `version` is held to, checked as the worker checks it. Required: a backfill built
+   * without one would write an answer from any model.
+   */
+  readonly heldModel: HeldModel;
   /** The source's own refuse limit for a record's state; 32,000 when absent. */
   readonly maxStateTokens?: number;
   /** Told when a run finishes or stops. */
@@ -391,6 +401,9 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     // `false` would be narrowed to the literal and every later read read as always false.
     let paused = false as boolean;
 
+    /** Set when a response named another model than the version's: the run asks no more. */
+    let modelChanged = false as boolean;
+
     /** The page in hand's input tokens and records written for review, for its run row. */
     let pageTokens = 0;
     let pageToReview = 0;
@@ -401,7 +414,7 @@ export function createBackfill(deps: BackfillDeps): Backfill {
       prior: AnswerEntry | undefined,
       only: ReadonlySet<string>,
     ): Promise<void> {
-      if (paused) {
+      if (paused || modelChanged) {
         return;
       }
       try {
@@ -487,6 +500,14 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           state: row.state,
           questions: asked,
         };
+        // A source held by a changed model asks nothing but its loop's probe, and a backfill is no
+        // probe: the record fails in Model changed's words with no model call.
+        const holding = deps.heldModel.holding;
+        if (holding !== undefined) {
+          modelChanged = true;
+          report.failures.push({ key: row.key, error: holding });
+          return;
+        }
         // Admitted before the call, as the worker admits each of its requests. A refused request is
         // not made, and the run pauses; the record goes back to the queue with its claim.
         const reservation = await spending.admit(estimateRequestTokens(request));
@@ -503,13 +524,25 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           // Counted (or failed) by now: the reservation gives way to the count, or to nothing.
           await releaseSpend(row, reservation);
         }
+        // Paid and counted above, and checked as the worker checks it. An answer from another model
+        // than the one this version is held to is never logged or written: the record fails in
+        // Model changed's words, the alert is raised, and the run asks no more.
+        const changed = await deps.heldModel.check(response.model);
+        if (changed !== undefined) {
+          modelChanged = true;
+          report.failures.push({ key: row.key, error: changed });
+          await deps.alerts?.modelChecked(changed).catch((error: unknown) => {
+            report.failures.push({ key: row.key, error });
+          });
+          return;
+        }
         // Every other question keeps the answer it already has, so its decision is the one it had.
         const kept = prior === undefined ? {} : prior.answers;
         const entry: AnswerEntry = {
           kind: "answer",
           key: row.key,
           version,
-          model: questionSet.model,
+          model: response.model,
           stateHash: row.hash,
           answers: {
             ...kept,
