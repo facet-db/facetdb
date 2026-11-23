@@ -9,6 +9,8 @@ import {
   pollingEngines,
   resetPgliteWorld,
   type SqlConnect,
+  storeScript,
+  storeStepStatements,
   WORKER_ROLE,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
@@ -119,9 +121,7 @@ describe('facetdb migrate with connector: "polling"', () => {
     const dry = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
     expect(dry.code, dry.stderr).toBe(0);
     expect(
-      dry.stdout.startsWith(
-        '-- store: localhost:5432/app\nbegin;\n\ncreate schema if not exists "facetdb";',
-      ),
+      dry.stdout.startsWith(`-- store: localhost:5432/app\n${storeScript(storeStepStatements())}`),
     ).toBe(true);
     // The trigger scripts' header and the table's lock, then the pinned column statements.
     const at = dry.stdout.indexOf(

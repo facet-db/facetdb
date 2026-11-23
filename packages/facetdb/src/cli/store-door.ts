@@ -2,28 +2,30 @@ import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS, type QuestionSet } fro
 import {
   AmbiguousHostError,
   deleteCursorsSql,
-  migrateStore,
+  LOCK_TIMEOUT,
   PlaintextUrlError,
   type PurgedSource,
+  planStoreStep,
   readResumeRows,
   readStoreLog,
   rebuildStoreReviewQueue,
-  rekeyNotes,
   requireTls,
   resumeRowsStatements,
+  runStoreStep,
   SCHEMA_VERSION,
   SECRET_VARIABLE,
   type SqlConnect,
+  STORE_NEWER_STATE,
+  StoreBusyError,
   type StoreLog,
-  StoreNotInstalledError,
   sourceIdOf,
-  storeInstallStatements,
   storePurgeRefusal,
   storePurgeStatements,
+  storeScript,
   storeVersion,
 } from "@facetdb/postgres";
 import type { SourceConfig } from "../config/index.ts";
-import { isPostgresUrl, schemeOf } from "./engines.ts";
+import { databaseChanged, isPostgresUrl, schemeOf } from "./engines.ts";
 import { CliError, databaseLabel, plainMessage } from "./program.ts";
 
 // The reviewer accounts' rules: a command checks a name and hashes a password before it opens the
@@ -41,8 +43,10 @@ export {
  * `DATABASE_URL` names, whatever engine a source has. A command reaches a source's database through
  * its engine and the store through here; the composition root opens the store's services
  * (`createStore`, main.ts). When the store is a source's own database (`storeShared`) the engine's
- * plans carry the store's statements, today's one script; otherwise, and always for a polling
- * source, migrate's store part, uninstall's purge and doctor's store group are here.
+ * plans carry the store's statements (no-ops on a current store) and uninstall's and doctor's store
+ * parts; otherwise, and always for a polling source, uninstall's purge and doctor's store group are
+ * here. Migrate's store step is here in both cases: it runs on its own, before any source's
+ * transaction.
  */
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -372,12 +376,7 @@ export function storeSharedFor(env: Env, source: SourceConfig): boolean {
   );
 }
 
-/** A script as the engines print theirs: one transaction, a blank line between statements. */
-function scriptOf(statements: readonly string[]): string {
-  return `begin;\n\n${statements.join(";\n\n")};\n\ncommit;\n`;
-}
-
-/** The store's part of `facetdb migrate` when it is its own database, as shown before it runs. */
+/** The store's part of `facetdb migrate` (its step), as shown before it runs. */
 export type StoreMigration = {
   /** Where it runs: `host/db`, what the script's header and the confirmation name. */
   readonly label: string;
@@ -386,15 +385,35 @@ export type StoreMigration = {
    * DDL is shown, and `--json` reports nothing applied.
    */
   readonly current: boolean;
-  /** The store's whole idempotent DDL, what migrate brings it to; empty when it is current. */
+  /**
+   * The step's script (`storeStepStatements`: the store's lock, then its whole idempotent DDL),
+   * what migrate brings it to and runs statement for statement; empty when it is current.
+   */
   readonly script: string;
   /** What its migrations cannot settle (store version 4's shared logs), said before it runs. */
   readonly notes: readonly string[];
+  /** Whether the login may create the store's tables; true when it is current (nothing to create). */
+  readonly mayCreate: boolean;
 };
 
 /**
- * The store's part as it stands, read and nothing else: current, or the DDL that brings it to this
- * version. A store newer than this FacetDB is refused here, before the confirmation, in words.
+ * Whose connection string reaches the store for its step: `DATABASE_URL`'s when the store is its
+ * own database, the admin's when it is the source's (the store's step runs on its own there too,
+ * under the admin string the source's install runs with).
+ */
+export type StoreLogin = "store" | "admin";
+
+function storeNewer(label: string, newest: number): CliError {
+  return new CliError(
+    "store-newer",
+    `the FacetDB store on ${label} is at schema version ${newest}, newer than this FacetDB knows (${SCHEMA_VERSION}); nothing was run`,
+    "upgrade FacetDB to the version that wrote the store, then run facetdb migrate again",
+  );
+}
+
+/**
+ * The store's step as it stands, read and nothing else: current, or the script that brings it to
+ * this version. A store newer than this FacetDB is refused here, before the confirmation, in words.
  */
 export async function showStoreMigration(
   connect: SqlConnect,
@@ -403,41 +422,105 @@ export async function showStoreMigration(
   const client = connect(url);
   try {
     const label = databaseLabel(url);
-    const found = await storeVersion(client.query);
-    if (found.kind === "found" && found.newest > SCHEMA_VERSION) {
-      throw new CliError(
-        "store-newer",
-        `the FacetDB store on ${label} is at schema version ${found.newest}, newer than this FacetDB knows (${SCHEMA_VERSION}); nothing was run`,
-        "upgrade FacetDB to the version that wrote the store, then run facetdb migrate again",
-      );
+    const step = await planStoreStep(client.query);
+    if (step.kind === "newer") {
+      throw storeNewer(label, step.newest);
     }
-    const current = found.kind === "found" && found.current;
-    return {
-      label,
-      current,
-      script: current ? "" : scriptOf(storeInstallStatements()),
-      notes: current ? [] : await rekeyNotes(client.query),
-    };
+    return step.kind === "current"
+      ? { label, current: true, script: "", notes: [], mayCreate: true }
+      : {
+          label,
+          current: false,
+          script: storeScript(step.statements),
+          notes: step.notes,
+          mayCreate: step.mayCreate,
+        };
   } finally {
     await client.close();
   }
 }
 
 /**
- * Brings the store to this FacetDB's schema version (`migrateStore`): what the script shown holds,
- * the missing migrations only, under the store's advisory lock, before the source's part runs.
+ * The refusal of a store step whose login may not create the store's tables, before the
+ * confirmation: in the words of the string that reaches it (`DATABASE_URL`, or the admin string
+ * when the store is the source's own database).
  */
-export async function runStoreMigration(connect: SqlConnect, url: string): Promise<void> {
+export function storeLoginError(label: string, login: StoreLogin): CliError {
+  return login === "store"
+    ? new CliError(
+        "store-login",
+        `the login in DATABASE_URL may not create the store's tables in ${label}; nothing was run`,
+        "point DATABASE_URL at a login that may create tables in that database (its owner, as a free Supabase or Neon project gives you), then run facetdb migrate again",
+      )
+    : new CliError(
+        "store-login",
+        `the login in the admin connection string may not create the store's tables in ${label}; nothing was run`,
+        "give the admin connection string of a login that may create tables in that database (its owner, as a free Supabase or Neon project gives you), then run facetdb migrate again",
+      );
+}
+
+/**
+ * Refuses, in FacetDB's words, a store step the login may not run (it may not create the store's
+ * tables), so no caller meets Postgres's bare "permission denied": `runStoreMigration` checks it at
+ * every run, and migrate before its confirmation too. A dry run prints the step without it.
+ */
+export function requireStoreRunnable(store: StoreMigration, login: StoreLogin): void {
+  if (!store.current && !store.mayCreate) {
+    throw storeLoginError(store.label, login);
+  }
+}
+
+/**
+ * The step stopped at its lock timeout, in FacetDB's words: which store table is busy and what to
+ * do. Its one transaction rolled back, so nothing of it ran.
+ */
+function storeBusy(error: StoreBusyError, label: string): CliError {
+  const table = error.table ?? "one of the store's tables";
+  return new CliError(
+    "store-busy",
+    `another transaction holds ${table} on ${label}, so the FacetDB store's migration stopped waiting for it after ${LOCK_TIMEOUT}; nothing was run`,
+    `wait for that transaction to end, or end it (pg_stat_activity names it; pg_locks shows what it holds on ${table}), then run facetdb migrate again`,
+  );
+}
+
+/**
+ * Brings the store to this FacetDB's schema version in its own transaction, before any source's
+ * part runs: the step is planned again right before the run and runs only when its script is the
+ * one shown, statement for statement, so the SQL executed is the SQL printed. A store that moved
+ * since the show (another migrate, a worker's start) runs nothing: the words say to look again. A
+ * login that may not create the store's tables, and a store table another transaction holds past
+ * the step's lock timeout, stop in FacetDB's words.
+ */
+export async function runStoreMigration(
+  connect: SqlConnect,
+  url: string,
+  shown: StoreMigration,
+  login: StoreLogin,
+): Promise<void> {
   const client = connect(url);
   try {
-    await migrateStore(client);
+    const again = await planStoreStep(client.query);
+    if (again.kind === "newer") {
+      throw storeNewer(shown.label, again.newest);
+    }
+    // For a store that is behind, the script is a constant (the whole idempotent DDL), so this
+    // compare checks the kind alone: still behind, as shown. What protects the run from a store
+    // that moves after it is the script itself: the store's advisory lock taken first, and FD053
+    // raised under it when a newer FacetDB wrote the store.
+    if (again.kind !== "behind" || storeScript(again.statements) !== shown.script) {
+      throw databaseChanged();
+    }
+    requireStoreRunnable({ ...shown, mayCreate: again.mayCreate }, login);
+    await runStoreStep(client, again.statements);
   } catch (error) {
-    if (error instanceof StoreNotInstalledError) {
-      throw new CliError(
-        "store-login",
-        `the login in DATABASE_URL may not create the store's tables in ${databaseLabel(url)}; nothing was run`,
-        "point DATABASE_URL at a login that may create tables in that database (its owner, as a free Supabase or Neon project gives you), then run facetdb migrate again",
-      );
+    if (error instanceof StoreBusyError) {
+      throw storeBusy(error, shown.label);
+    }
+    // The step's own check under the store's lock: a newer FacetDB migrated it between the two
+    // reads. The driver's error is a boundary, read by its code; the transaction rolled back.
+    if (error instanceof Error && "code" in error && error.code === STORE_NEWER_STATE) {
+      const found = await storeVersion(client.query);
+      throw storeNewer(shown.label, found.kind === "found" ? found.newest : 0);
     }
     throw error;
   } finally {
@@ -512,7 +595,7 @@ export async function showStoreUninstall(
     return {
       label: databaseLabel(url),
       statements,
-      script: scriptOf(statements),
+      script: storeScript(statements),
       log: purge ? await readStoreLog(client.query, source.id) : undefined,
       resumeRows,
     };

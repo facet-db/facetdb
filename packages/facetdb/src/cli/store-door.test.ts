@@ -4,11 +4,20 @@ import { CliError } from "./program.ts";
 import {
   ownVariable,
   requireStoreSecret,
+  runStoreMigration,
   sameDatabase,
+  showStoreMigration,
   storeSecretWarning,
   storeSharedFor,
   storeUrlProblem,
 } from "./store-door.ts";
+import {
+  CURRENT_STORE,
+  type SqlConnect,
+  storeAtVersions,
+  storeScript,
+  storeStepStatements,
+} from "./testing.ts";
 
 /**
  * The store door's rules that need no database: when two connection strings reach one database as
@@ -157,5 +166,79 @@ describe("the store's secret", () => {
       /^warning: FACETDB_SECRET is not set\. migrate does not need it, but facetdb worker does/,
     );
     expect(storeSecretWarning({ FACETDB_SECRET: "a-long-random-value" })).toBeUndefined();
+  });
+});
+
+/**
+ * The store's step at its run: every caller of `runStoreMigration` gets FacetDB's words for a login
+ * that may not create the store's tables and for a store table held past the step's lock timeout,
+ * never the server's bare error. A store at the version before this FacetDB's newest, as its
+ * version table holds it; a transaction that only records what it was sent.
+ */
+describe("runStoreMigration", () => {
+  const STORE_URL = "postgres://owner:s3cret-owner@localhost:5432/facetdb";
+  const BEHIND = CURRENT_STORE.slice(0, -1);
+
+  /** The store `storeAtVersions` reads, with `failAt` the statement its transaction stops at. */
+  function storeWith(options: {
+    readonly mayCreate: boolean;
+    readonly failAt?: (text: string) => boolean;
+  }) {
+    const sent: string[] = [];
+    const transactions: number[] = [];
+    const connect: SqlConnect = (url, connectOptions) => {
+      const reads = storeAtVersions(BEHIND, { mayCreate: options.mayCreate })(url, connectOptions);
+      return {
+        ...reads,
+        transaction: (work) => {
+          transactions.push(1);
+          return work((text) => {
+            sent.push(text);
+            return options.failAt?.(text) === true
+              ? Promise.reject(
+                  Object.assign(new Error("canceling statement due to lock timeout"), {
+                    code: "55P03",
+                  }),
+                )
+              : Promise.resolve([]);
+          });
+        },
+      };
+    };
+    return { connect, sent, transactions };
+  }
+
+  it("refuses a login that may not create the store's tables, in FacetDB's words, and opens no transaction", async () => {
+    const store = storeWith({ mayCreate: false });
+    const shown = await showStoreMigration(store.connect, STORE_URL);
+    // The show (a dry run's) prints the step whatever the login may do.
+    expect(shown.script).toBe(storeScript(storeStepStatements()));
+    const refused = runStoreMigration(store.connect, STORE_URL, shown, "store");
+    await expect(refused).rejects.toThrow(CliError);
+    await expect(refused).rejects.toThrow(
+      "the login in DATABASE_URL may not create the store's tables in localhost:5432/facetdb; nothing was run",
+    );
+    await expect(runStoreMigration(store.connect, STORE_URL, shown, "admin")).rejects.toThrow(
+      "the login in the admin connection string may not create the store's tables in localhost:5432/facetdb; nothing was run",
+    );
+    expect(store.transactions).toEqual([]);
+  });
+
+  it("stops at the lock timeout naming the store table another transaction holds, and what to do", async () => {
+    const store = storeWith({
+      mayCreate: true,
+      failAt: (text) => text.includes("create index webhook_outbox_batch on"),
+    });
+    const shown = await showStoreMigration(store.connect, STORE_URL);
+    const stopped = runStoreMigration(store.connect, STORE_URL, shown, "store");
+    await expect(stopped).rejects.toMatchObject({
+      code: "store-busy",
+      message:
+        "another transaction holds facetdb.webhook_outbox on localhost:5432/facetdb, so the FacetDB store's migration stopped waiting for it after 10s; nothing was run",
+      fix: "wait for that transaction to end, or end it (pg_stat_activity names it; pg_locks shows what it holds on facetdb.webhook_outbox), then run facetdb migrate again",
+    });
+    // The step pinned the install's lock timeout right after the store's lock, as printed.
+    expect(store.sent.slice(0, 2)).toEqual(storeStepStatements().slice(0, 2));
+    expect(store.sent[1]).toBe("set local lock_timeout = '10s'");
   });
 });

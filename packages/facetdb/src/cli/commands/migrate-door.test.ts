@@ -29,10 +29,12 @@ import {
 } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess } from "../program.ts";
+import { CURRENT_STORE, storeAtVersions } from "../testing.ts";
 import { createFleet, fileQueue, type SourceLoop } from "./config-reload.ts";
 import { questionSetOf } from "./database.ts";
 import { COMMANDS } from "./index.ts";
 import { installRuns, installVerdict } from "./install-check.ts";
+import { STORE_CURRENT } from "./migrate.ts";
 import { createMigrateDoor } from "./migrate-door.ts";
 import { registeredDatabases } from "./setup-door.ts";
 
@@ -172,6 +174,7 @@ function rig(file: ProjectConfig = ADDED) {
     statements: STATEMENTS as readonly string[],
     transactional: true,
     loadFails: false,
+    store: CURRENT_STORE,
   };
   const installs: { target: EngineTarget; options: InstallOptions }[] = [];
   const engine = new MigrateEngine({
@@ -207,6 +210,8 @@ function rig(file: ProjectConfig = ADDED) {
     databases: registeredDatabases({
       engines: [lazyEngine("postgres", () => Promise.resolve(engine))],
       env: ENV,
+      // The store on the source's database, read at every plan.
+      connect: (url) => storeAtVersions(state.store)(url),
     }),
     project: { id: "listings-app", name: "listings-app" },
     allowInsecureStore: false,
@@ -254,14 +259,16 @@ describe("the migrate door's plan", () => {
         env: ENV,
         loadConfig: () => Promise.resolve(ADDED),
         engines: [lazyEngine("postgres", () => Promise.resolve(t.engine))],
-        connect: () => {
-          throw new Error("the store shares the source's database: migrate opens no store");
-        },
+        // The store shares the source's database: migrate reads its step there.
+        connect: storeAtVersions(CURRENT_STORE),
       },
       COMMANDS,
     );
     expect(dry.code, dry.stderr).toBe(0);
-    expect(dry.stdout).toBe(`${outcome.sql}Dry run: nothing was changed.\n`);
+    // Above the source's part, the store's step: current, so nothing to run there.
+    expect(dry.stdout).toBe(
+      `-- store: localhost:5432/app\n${STORE_CURRENT}\n-- source listings: localhost:5432/app\n${outcome.sql}Dry run: nothing was changed.\n`,
+    );
     expect(outcome).toEqual({
       kind: "planned",
       engine: "postgres",
@@ -286,6 +293,26 @@ describe("the migrate door's plan", () => {
     expect(t.installs.at(-1)?.options.workerPassword).toBe("worker-pw-WORKERMARK");
     expect(t.engine.runs).toEqual([]);
     expectNoSecret(JSON.stringify(outcome));
+  });
+
+  it("refuses a store on the source's own database that is behind, so the source's install never runs a store migration", async () => {
+    const t = rig();
+    t.state.store = CURRENT_STORE.slice(0, -1);
+    // The host is a part of the source's connection string, which the door's words hide.
+    const refused = {
+      kind: "refused",
+      code: "store-not-current",
+      message:
+        "the FacetDB store on [hidden]/app needs facetdb migrate before a source's install runs from the studio",
+      fix: "run facetdb migrate on this machine, then restart facetdb worker",
+    };
+    expect(await t.door.plan("listings", ADMIN)).toEqual(refused);
+    expect(await t.door.run("listings", ADMIN, { engine: "postgres", sql: "" })).toEqual(refused);
+    expect(t.engine.runs).toEqual([]);
+    expect(t.reloads).toEqual([]);
+    // Once migrate brought it to this version, the same install plans.
+    t.state.store = CURRENT_STORE;
+    expect((await planned(t)).kind).toBe("planned");
   });
 
   it("refuses a name the file does not have, an API source, and a source the worker does not run", async () => {
@@ -528,6 +555,7 @@ describe("the reload after the door's run", () => {
       databases: registeredDatabases({
         engines: [lazyEngine("postgres", () => Promise.resolve(t.engine))],
         env: ENV,
+        connect: storeAtVersions(CURRENT_STORE),
       }),
       project: { id: "listings-app", name: "listings-app" },
       allowInsecureStore: false,

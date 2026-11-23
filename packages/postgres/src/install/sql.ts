@@ -25,7 +25,14 @@ import {
   VIEW_NAME_SETTING,
   VIEW_SCHEMA_SETTING,
 } from "../scan/index.ts";
-import { JOBS_TABLE, jobsTableSql, quoteIdent, quoteLiteral, quoteTable } from "../sql/index.ts";
+import {
+  JOBS_TABLE,
+  jobsTableSql,
+  lockTimeoutStatement,
+  quoteIdent,
+  quoteLiteral,
+  quoteTable,
+} from "../sql/index.ts";
 import {
   PROJECTS_TABLE_SQL,
   STORE_APPEND_ONLY_TABLES,
@@ -433,7 +440,7 @@ export function installSql(
     plain("settings", "set local standard_conforming_strings = on"),
     // The script takes ACCESS EXCLUSIVE on the customer's table (its first lock, below): better a
     // failed migrate after ten seconds than the application's queries piling up behind it.
-    plain("settings", "set local lock_timeout = '10s'"),
+    plain("settings", lockTimeoutStatement()),
     // A script that creates the worker login (it was absent when planned) holds the login's lock
     // for its whole transaction, first of all, so two first installs on one server (two projects)
     // run one after the other: the second, once the first commits, finds the login and stops at its
@@ -460,8 +467,12 @@ export function installSql(
     // application's. The login's lock above stays first: it is on a name, not a table, and only
     // install takes it.
     plain("settings", `lock table ${table} in access exclusive mode`),
-    // The FacetDB store's whole schema, made here by the admin so the worker login creates nothing
-    // (its migrations are store/schema.ts's, one definition; the queue's table is among them).
+    // The FacetDB store's whole schema, made by the admin so the worker login creates nothing (its
+    // migrations are store/schema.ts's, one definition; the queue's table is among them). Where the
+    // store is this database, `facetdb migrate` brings it to this version in the store's own step
+    // first, in its own transaction, and the studio's installs refuse a store that is behind, so
+    // these find every object and run no migration while this script holds the table: each is
+    // looked up first.
     ...storeInstallStatements().map(storeStatement),
     // The project marker: which project installed on which table; `facetdb.projects` is the
     // store's.

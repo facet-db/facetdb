@@ -93,8 +93,9 @@ export type SetupPlan = {
    */
   readonly counted: "statistics" | "rows-read";
   /**
-   * The FacetDB store is another database than the source's: `facetdb migrate` then prints the
-   * store's part, and the line naming the source's database by its host, above this script.
+   * The FacetDB store is another database than the source's. `facetdb migrate` prints the store's
+   * part, and the line naming the source's database by its host, above this script wherever the
+   * store is.
    */
   readonly storeElsewhere: boolean;
 };
@@ -172,7 +173,7 @@ export type MigratePlan = {
   readonly transactional: boolean;
   /** The questions the file adds to what the source runs: what the install is for. */
   readonly questions: readonly string[];
-  /** The store is another database: migrate also prints its part above this one (current here). */
+  /** The store is another database; migrate prints its part above this one wherever it is. */
   readonly storeElsewhere: boolean;
 };
 

@@ -133,6 +133,12 @@ export type DoorDatabases = {
   same(a: string, b: string): boolean;
   /** Whether the store is `source`'s own database, so the install's plan holds the store's part. */
   storeShared(source: SourceConfig): boolean;
+  /**
+   * The driver that reads where the store stands on a source's own database (`storeShared`), with
+   * the admin string the install plans with: the composition root's under `facetdb worker`, the
+   * embedded database's under `facetdb dev`.
+   */
+  readonly connect: CliDeps["connect"];
   /** The worker login's password an install creates the login with, or why there is none. */
   workerPassword(engine: DatabaseEngine, source: SourceConfig): ReturnType<typeof passwordOf>;
   /**
@@ -144,8 +150,10 @@ export type DoorDatabases = {
 };
 
 /** The doors' databases under `facetdb worker`: the registered engines, judged by the scheme table. */
-export function registeredDatabases(deps: Pick<CliDeps, "engines" | "env">): DoorDatabases {
-  const { engines, env } = deps;
+export function registeredDatabases(
+  deps: Pick<CliDeps, "engines" | "env" | "connect">,
+): DoorDatabases {
+  const { engines, env, connect } = deps;
   return {
     // The same answer as the static table alone gave before only because main.ts registers an
     // engine for every key of that table.
@@ -155,6 +163,7 @@ export function registeredDatabases(deps: Pick<CliDeps, "engines" | "env">): Doo
     adminEngine: (source, admin) => adminEngineOf(engines, source, admin),
     same: (a, b) => sameDatabase(a, b, env),
     storeShared: (source) => storeSharedFor(env, source),
+    connect,
     workerPassword: passwordOf,
     variableFix: () =>
       "set it to the worker login's connection string (postgres://facetdb_worker:<a long random password>@<host>/<database>: the install creates that login with that password), restart facetdb worker, then show the SQL again",
@@ -200,10 +209,13 @@ export async function adminEngineOf(
 
 /**
  * One source's install, planned with the admin string and printed exactly as `facetdb migrate
- * --source <name> --dry-run` prints the source's part (`installPrintout`). The store's part: when
- * the store is the source's own database the engine's plan holds it; otherwise a worker running on
- * the store has it current, so it is only read, for its notes, and a store `facetdb migrate` would
- * still have to move is refused. A refusal in the CLI's words throws.
+ * --source <name> --dry-run` prints the source's part (`installPrintout`). The store's part, wherever
+ * the store is: a worker running on the store has it current, so it is only read, and a
+ * store `facetdb migrate` would still have to move is refused, so the source's transaction never
+ * runs a store migration. When the store is the source's own database the engine's plan still holds
+ * the store's statements, which then find everything and change nothing; it is read under the admin
+ * string, after the engine's plan, whose refusal of that string comes before any connection. A
+ * refusal in the CLI's words throws.
  */
 export async function sourceInstallOf(
   deps: InstallDeps,
@@ -216,29 +228,22 @@ export async function sourceInstallOf(
   const { databases } = deps;
   const source = target.source;
   const storeShared = databases.storeShared(source);
-  const notes: string[] = [];
-  if (!storeShared) {
-    const store = await showStoreMigration(
-      deps.cli.connect,
-      requireStoreUrl(env, deps.allowInsecureStore),
-    );
-    if (!store.current) {
-      throw new CliError(
-        "store-not-current",
-        `the FacetDB store on ${store.label} needs facetdb migrate before a source's install runs from the studio`,
-        "run facetdb migrate on this machine, then restart facetdb worker",
-      );
-    }
-    notes.push(...store.notes);
-  }
   const own = engineTarget(config, target, deps.project);
   const engineDeps: EngineDeps = { clock, allowInsecure: false, storeShared };
   const login = databases.workerPassword(engine, source);
   const plan = await planInstall(engine, target, own, admin, engineDeps, login);
+  const store = storeShared
+    ? await showStoreMigration(databases.connect, admin)
+    : await showStoreMigration(deps.cli.connect, requireStoreUrl(env, deps.allowInsecureStore));
+  if (!store.current) {
+    throw new CliError(
+      "store-not-current",
+      `the FacetDB store on ${store.label} needs facetdb migrate before a source's install runs from the studio`,
+      "run facetdb migrate on this machine, then restart facetdb worker",
+    );
+  }
   const label = engine.label(own, admin);
-  const sql = installPrintout(source.name, label, engine.render(plan), [
-    ...new Set([...notes, ...plan.notes]),
-  ]);
+  const sql = installPrintout(source.name, label, engine.render(plan), [...new Set(plan.notes)]);
   return {
     engine,
     own,

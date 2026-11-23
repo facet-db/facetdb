@@ -118,7 +118,10 @@ function markerOf(given: string | undefined): string {
  * store and the install creating the worker login with dev's password. Any other connection string
  * is refused in words naming the one to use; the string itself is in none of them.
  */
-function embeddedDatabases(engine: DatabaseEngine): DoorDatabases {
+function embeddedDatabases(
+  engine: DatabaseEngine,
+  admin: ReturnType<DoorDatabases["connect"]>,
+): DoorDatabases {
   const only = (url: string): DatabaseEngine => {
     if (url.trim() !== DEV_URL) {
       throw new CliError(
@@ -138,6 +141,11 @@ function embeddedDatabases(engine: DatabaseEngine): DoorDatabases {
     // installed is taken under any string the file reads it from.
     same: () => true,
     storeShared: () => true,
+    // The store's version is read on the one database, as its admin (setup-door.ts).
+    connect: (url) => {
+      only(url);
+      return admin;
+    },
     workerPassword: () => ({ password: DEV_WORKER_PASSWORD }),
     // Dev's address is the admin string of every call, which the setup hides from its words: the
     // address is named as the one dev printed, never spelled here.
@@ -332,7 +340,7 @@ export const devCommand = defineCommand<DevOptions>("dev", {
               },
               files: deps.configFiles,
             },
-            databases: embeddedDatabases(engine),
+            databases: embeddedDatabases(engine, client),
             provider,
             sessionSecret: secret,
             plugins,

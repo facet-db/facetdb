@@ -1,6 +1,6 @@
 import { OWNED_MARK } from "@facetdb/core";
 import { SIDE_MARK, SIDE_TABLE_SCHEMA } from "../scan/index.ts";
-import { quoteLiteral, type SqlQuery, type SqlRow } from "../sql/index.ts";
+import { lockTimeoutStatement, quoteLiteral, type SqlQuery, type SqlRow } from "../sql/index.ts";
 import { type InstallStatement, type ProjectRef, plain } from "./sql.ts";
 
 /**
@@ -145,5 +145,5 @@ export function settingsStatement(
 /** The rules every destructive script pins for its transaction, as install does. */
 export const SCRIPT_HEADER: readonly InstallStatement[] = [
   plain("settings", "set local standard_conforming_strings = on"),
-  plain("settings", "set local lock_timeout = '10s'"),
+  plain("settings", lockTimeoutStatement()),
 ];

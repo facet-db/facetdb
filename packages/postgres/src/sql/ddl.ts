@@ -15,6 +15,18 @@ import { quoteLiteral } from "./identifier.ts";
  */
 
 /**
+ * How long a statement of FacetDB's scripts (install, prune, uninstall, the store's step) waits for
+ * a lock before it stops: better a failed migrate after ten seconds than the application's queries,
+ * or the worker's reads and appends, piling up behind a lock request that waits for ever.
+ */
+export const LOCK_TIMEOUT = "10s";
+
+/** The statement that pins the lock timeout for the script's transaction. */
+export function lockTimeoutStatement(limit: string = LOCK_TIMEOUT): string {
+  return `set local lock_timeout = ${quoteLiteral(limit)}`;
+}
+
+/**
  * Runs `statement` (a `create index` or another creation) only when no relation named `relation`
  * (schema-qualified, as `to_regclass` reads it) exists.
  */

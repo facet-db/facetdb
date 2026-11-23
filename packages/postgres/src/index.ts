@@ -17,6 +17,8 @@ export * from "./scan/index.ts";
 export {
   connectPostgres,
   DEFAULT_MAX_CONNECTIONS,
+  // How long FacetDB's scripts wait for a lock: the CLI's words name it.
+  LOCK_TIMEOUT,
   pgliteClient,
   type SqlClient,
   type SqlConnect,

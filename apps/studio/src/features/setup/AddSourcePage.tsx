@@ -1387,7 +1387,7 @@ function PlanShown({
   return (
     <div className="grid gap-4">
       <p id={sqlId} className="max-w-[72ch] text-text-2">
-        {`This runs once on ${plan.table} with the admin connection string from step one${plan.transactional ? ", as one transaction: all of it or nothing" : ""}. Read it first: it is the text facetdb migrate --dry-run prints for this source.${plan.storeElsewhere ? " The FacetDB store is another database here, so facetdb migrate also prints the store's part above it (current: nothing to run there) and a line naming this database by its host." : ""}`}
+        {`This runs once on ${plan.table} with the admin connection string from step one${plan.transactional ? ", as one transaction: all of it or nothing" : ""}. Read it first: it is the text facetdb migrate --dry-run prints for this source, below the FacetDB store's part.`}
       </p>
       <Scroll labelledBy={sqlId} tall>
         {plan.sql}

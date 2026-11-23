@@ -19,9 +19,10 @@ import {
 } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess } from "../program.ts";
-import type { SqlConnect } from "../testing.ts";
+import { CURRENT_STORE, type SqlConnect, storeAtVersions } from "../testing.ts";
 import { fileQueue } from "./config-reload.ts";
 import { COMMANDS } from "./index.ts";
+import { STORE_CURRENT } from "./migrate.ts";
 import { createSetupDoor, registeredDatabases } from "./setup-door.ts";
 
 /**
@@ -234,6 +235,8 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
     databases: registeredDatabases({
       engines: [lazyEngine("postgres", () => Promise.resolve(engine))],
       env,
+      // The store on the source's database, current, read at every plan.
+      connect: storeAtVersions(CURRENT_STORE),
     }),
     project: { id: "listings-app", name: "listings-app" },
     ran: (source, config) => {
@@ -402,14 +405,16 @@ describe("the setup door's plan", () => {
         env: ENV,
         loadConfig: () => Promise.resolve(written.plan.config),
         engines: [lazyEngine("postgres", () => Promise.resolve(t.engine))],
-        connect: () => {
-          throw new Error("the store shares the source's database: migrate opens no store");
-        },
+        // The store shares the source's database: migrate reads its step there.
+        connect: storeAtVersions(CURRENT_STORE),
       },
       COMMANDS,
     );
     expect(dry.code, dry.stderr).toBe(0);
-    expect(dry.stdout).toBe(`${outcome.sql}Dry run: nothing was changed.\n`);
+    // Above the source's part, the store's step: current, so nothing to run there.
+    expect(dry.stdout).toBe(
+      `-- store: localhost:5432/app\n${STORE_CURRENT}\n-- source listings: localhost:5432/app\n${outcome.sql}Dry run: nothing was changed.\n`,
+    );
     expect(outcome.sql).toBe(
       [
         "-- facetdb migrate: listings (public.listings)",

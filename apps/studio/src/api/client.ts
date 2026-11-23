@@ -954,7 +954,10 @@ const setupPlanSchema = z.object({
     /** The records counted by the database's statistics (an estimate), or the rows read. */
     counted: z.enum(["statistics", "rows-read"]),
   }),
-  /** The store is another database: migrate also prints the store's part above this script. */
+  /**
+   * The store is another database than the source's. Migrate prints the store's part above this
+   * script wherever the store is, so the page's words do not depend on it.
+   */
   storeElsewhere: z.boolean(),
 });
 export type SetupPlan = z.infer<typeof setupPlanSchema>;
@@ -992,7 +995,7 @@ const migratePlanSchema = z.object({
   transactional: z.boolean(),
   /** The questions the file adds to what the source runs. */
   questions: z.array(z.string()),
-  /** The store is another database: migrate also prints its part above this one. */
+  /** The store is another database; migrate prints its part above this one wherever it is. */
   storeElsewhere: z.boolean(),
 });
 export type MigratePlan = z.infer<typeof migratePlanSchema>;

@@ -264,7 +264,7 @@ export function InstallQuestion({
           {shown === null ? null : (
             <div className="grid gap-3">
               <p id={sqlId} className="m-0 max-w-[64ch] text-text-2">
-                {`This runs once on ${shown.table}${shown.transactional ? ", as one transaction: all of it or nothing" : ""}. Read it first: it is the text facetdb migrate --source ${source} --dry-run prints for this source.${shown.storeElsewhere ? " The FacetDB store is another database here, so facetdb migrate also prints the store's part above it (current: nothing to run there)." : ""}`}
+                {`This runs once on ${shown.table}${shown.transactional ? ", as one transaction: all of it or nothing" : ""}. Read it first: it is the text facetdb migrate --source ${source} --dry-run prints for this source, below the FacetDB store's part.`}
               </p>
               <ScrollRegion
                 aria-labelledby={sqlId}

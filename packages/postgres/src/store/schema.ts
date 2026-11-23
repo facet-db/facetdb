@@ -1,6 +1,9 @@
 import {
   jobsTableSql,
+  LOCK_TIMEOUT,
+  lockTimeoutStatement,
   quoteIdent,
+  quoteLiteral,
   type SqlClient,
   type SqlQuery,
   unlessColumn,
@@ -615,6 +618,8 @@ export const STORE_SEQUENCES: readonly string[] = [
   "runs_id_seq",
 ];
 
+const SCHEMA_SQL = `create schema if not exists ${quoteIdent("facetdb")}`;
+
 const VERSION_TABLE_SQL = `create table if not exists facetdb.store_migrations (
   version integer primary key,
   applied_at timestamptz not null default now()
@@ -626,22 +631,62 @@ function recordMigration(version: number): string {
 }
 
 /**
- * The store's whole DDL as one idempotent script, for the install script `facetdb migrate` prints
- * and runs with the admin credential: the schema, the version table, every migration in order and
- * the rows that mark them applied. `migrateStore` runs the same statements, so the two cannot drift.
+ * The store's whole DDL as one idempotent script: the schema, the version table, every migration in
+ * order and the rows that mark them applied. The install script of a source whose database is the
+ * store holds it, run with the admin credential after the store's own step (`storeStepStatements`)
+ * has brought the store to this version, so there it finds everything and changes nothing.
+ * `migrateStore` and the store's step run the same statements, so none of them can drift.
  */
 export function storeInstallStatements(): string[] {
-  return [
-    `create schema if not exists ${quoteIdent("facetdb")}`,
-    VERSION_TABLE_SQL,
-    ...MIGRATIONS.flatMap((migration) => [
-      ...migration.statements,
-      recordMigration(migration.version),
-    ]),
-  ];
+  return [SCHEMA_SQL, VERSION_TABLE_SQL, ...migrationStatements()];
+}
+
+/** Every migration's statements in order, each followed by the row that marks it applied. */
+function migrationStatements(): string[] {
+  return MIGRATIONS.flatMap((migration) => [
+    ...migration.statements,
+    recordMigration(migration.version),
+  ]);
 }
 
 const SCHEMA_LOCK = "facetdb.store_migrations";
+
+/**
+ * The SQLSTATE the store's step raises when, under the store's lock, it finds the store written by
+ * a newer FacetDB (one that migrated it between the show and the run): the step rolls back whole.
+ */
+export const STORE_NEWER_STATE = "FD053";
+
+/**
+ * The store's step of `facetdb migrate` as one script, run in its own transaction before any
+ * source's, so no lock on a customer's table is held while the store's migrations run (an index
+ * built on a large log): the store's advisory lock first, the one `migrateStore` takes, so two
+ * migrates or a migrate and a worker's start take turns; then the lock timeout the install pins
+ * (`LOCK_TIMEOUT`), so a statement waiting behind a transaction left open on a store table stops
+ * instead of queueing the worker's reads and appends behind it for ever (after the advisory lock,
+ * so a second migrate waits its turn behind a first that is itself bounded); then the schema and
+ * the version table; then the check that no newer FacetDB wrote the store meanwhile; then the
+ * store's whole idempotent DDL (`storeInstallStatements`' migrations), each statement written to be
+ * run again (an index or a column looked up first), so a migration already applied finds its
+ * objects and changes nothing. The lock's key is a literal, so the script printed is the script
+ * run. `lockTimeout` is for tests that cannot wait ten seconds.
+ */
+export function storeStepStatements(lockTimeout: string = LOCK_TIMEOUT): string[] {
+  return [
+    `select pg_advisory_xact_lock(hashtext(${quoteLiteral(SCHEMA_LOCK)}))`,
+    lockTimeoutStatement(lockTimeout),
+    SCHEMA_SQL,
+    VERSION_TABLE_SQL,
+    `do $$
+begin
+  if exists (select 1 from facetdb.store_migrations where version > ${SCHEMA_VERSION}) then
+    raise exception using errcode = '${STORE_NEWER_STATE}',
+      message = 'FacetDB: the FacetDB store is newer than this FacetDB knows (${SCHEMA_VERSION})';
+  end if;
+end $$`,
+    ...migrationStatements(),
+  ];
+}
 
 /** The store is behind this FacetDB and the login cannot create what is missing (it is not an admin). */
 export class StoreNotInstalledError extends Error {

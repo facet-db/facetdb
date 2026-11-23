@@ -1,5 +1,11 @@
 import type { Clock } from "@facetdb/core";
-import { createPostgresEngine, postgresDialect, type SqlConnect } from "@facetdb/postgres";
+import {
+  createPostgresEngine,
+  postgresDialect,
+  SCHEMA_VERSION,
+  type SqlConnect,
+  type SqlQuery,
+} from "@facetdb/postgres";
 import { pollingEngine } from "@facetdb/sql-polling";
 import type { ProjectConfig } from "../config/index.ts";
 import { lazyEngine } from "./engines.ts";
@@ -27,6 +33,9 @@ export {
   type SqlConnect,
   type Store,
   sourceIdOf,
+  // The store's step as migrate prints and runs it: migrate.test.ts compares with it.
+  storeScript,
+  storeStepStatements,
   WORKER_ROLE,
 } from "@facetdb/postgres";
 export {
@@ -129,4 +138,44 @@ export function pollingEngines(
     ...postgresEngines(connect),
     lazyEngine("polling", () => Promise.resolve(pollingEngine(postgresDialect, connect, { warn }))),
   ];
+}
+
+/** Every store version this FacetDB knows: a current store's version table. */
+export const CURRENT_STORE: readonly number[] = Array.from(
+  { length: SCHEMA_VERSION },
+  (_, index) => index + 1,
+);
+
+/**
+ * A store that is its version table alone, holding `versions`: the studio's doors read where a
+ * store on the source's own database stands through it, beside core's fake engine, which has no
+ * database. It answers the reads of the store's step and nothing else, so a door that ran anything
+ * there fails its test.
+ */
+export function storeAtVersions(
+  versions: readonly number[],
+  options: { readonly mayCreate?: boolean } = {},
+): SqlConnect {
+  const query: SqlQuery = (text) => {
+    if (text.includes("to_regclass('facetdb.store_migrations')")) {
+      return Promise.resolve([{ present: true }]);
+    }
+    if (text.startsWith("select version::text as version from facetdb.store_migrations")) {
+      return Promise.resolve(versions.map((version) => ({ version: String(version) })));
+    }
+    if (text.includes("has_database_privilege(current_database(), 'create')")) {
+      return Promise.resolve([{ may: options.mayCreate ?? true }]);
+    }
+    if (text.includes("to_regclass('facetdb.sources')")) {
+      return Promise.resolve([{ present: false }]);
+    }
+    return Promise.reject(new Error(`the fake store only reads its version, not: ${text}`));
+  };
+  const refused = () => Promise.reject(new Error("the fake store runs nothing"));
+  return () => ({
+    query,
+    transaction: refused,
+    pipeline: refused,
+    close: () => Promise.resolve(),
+  });
 }

@@ -11,8 +11,10 @@ import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
 import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
 import {
   rebuildReviewCards,
+  requireStoreRunnable,
   requireStoreUrl,
   runStoreMigration,
+  type StoreLogin,
   type StoreMigration,
   sameDatabase,
   showStoreMigration,
@@ -40,13 +42,15 @@ import {
  * Every script is printed first, from the engine's plans; then, once confirmed, each plan is made
  * again and runs only when its script is the one shown, so the SQL executed is the SQL printed,
  * string for string. The admin connection string is used for the run and kept nowhere. The store is
- * the Postgres `DATABASE_URL` names: when it is the source's own database the engine's plan holds
- * its part, today's one script; otherwise the store's part is printed and run first, under a `--
- * store:` header (a store already current says so and runs nothing; one newer than this FacetDB is
- * refused before the confirmation), and each source's under `-- source <name>:`. The store's step
- * is said as it runs, and a source's failure after it says the store moved. Every line names the
- * table as its engine does (`DatabaseEngine.label`): `public.listings` on Postgres, `dbo.listings`
- * on SQL Server, `listings` on MySQL.
+ * the Postgres `DATABASE_URL` names. Its step is printed and run first, on its own, in its own
+ * transaction, under a `-- store:` header (a store already current says so and runs nothing; one
+ * newer than this FacetDB is refused before the confirmation), and each source's part under `--
+ * source <name>:`; also when the store is the source's own database, where the step runs under the
+ * admin string and the engine's plan still holds the store's statements, which then find everything
+ * and change nothing. So no statement holds a lock on a customer's table while the store's
+ * migrations run. The store's step is said as it runs, and a source's failure after it says the
+ * store moved. Every line names the table as its engine does (`DatabaseEngine.label`):
+ * `public.listings` on Postgres, `dbo.listings` on SQL Server, `listings` on MySQL.
  */
 
 type MigrateOptions = {
@@ -302,7 +306,10 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     // The engine first, so a scheme FacetDB does not serve is refused before a credential is asked.
     const { engine, url } = await adminRun(deps, first, options.adminUrl);
     const storeShared = storeSharedFor(deps.env, first.source);
-    const storeUrl = storeShared ? undefined : requireStoreUrl(deps.env, allowInsecure);
+    // The store's step runs on its own wherever the store is: on the source's own database under
+    // the admin string, which is what may create there; else on DATABASE_URL.
+    const storeLogin: StoreLogin = storeShared ? "admin" : "store";
+    const storeUrl = storeShared ? url : requireStoreUrl(deps.env, allowInsecure);
     const engineDeps: EngineDeps = { clock: deps.clock, allowInsecure, storeShared };
     const shown: Shown[] = [];
     for (const target of targets) {
@@ -320,16 +327,13 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         pruneScript: prune === undefined ? "" : engine.render(prune),
       });
     }
-    const store: StoreMigration | undefined =
-      storeUrl === undefined ? undefined : await showStoreMigration(deps.connect, storeUrl);
-    if (store !== undefined) {
-      print(`-- store: ${store.label}`);
-      print(store.current ? STORE_CURRENT : store.script);
-    }
+    // Read after the engine's plans, so a refusal of the admin string (no TLS) comes before any
+    // connection opens with it.
+    const store: StoreMigration = await showStoreMigration(deps.connect, storeUrl);
+    print(`-- store: ${store.label}`);
+    print(store.current ? STORE_CURRENT : store.script);
     for (const item of shown) {
-      if (store !== undefined) {
-        print(`-- source ${item.target.source.name}: ${databaseLabel(url)}`);
-      }
+      print(`-- source ${item.target.source.name}: ${databaseLabel(url)}`);
       if (item.pruneScript !== "") {
         print(`-- facetdb migrate --prune: ${item.target.source.name} (${item.label})`);
         print(item.pruneScript);
@@ -347,10 +351,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     // Store version 4 rekeys each source id to `<project>:<name>`; a log another project shared
     // stays with the registered one, said once before anything runs (the store's own notes when it
     // is its own database, the install plan's when the plan holds the store's part).
-    const notes = new Set([
-      ...(store?.notes ?? []),
-      ...shown.flatMap((item) => item.install.notes),
-    ]);
+    const notes = new Set([...store.notes, ...shown.flatMap((item) => item.install.notes)]);
     for (const note of notes) {
       print(noteLine(note));
     }
@@ -365,16 +366,12 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       ok: true,
       dryRun: options.dryRun,
       // A current store runs nothing: no SQL, and never reported applied.
-      ...(store === undefined
-        ? {}
-        : {
-            store: {
-              database: store.label,
-              current: store.current,
-              sql: store.script,
-              applied: applied && !store.current,
-            },
-          }),
+      store: {
+        database: store.label,
+        current: store.current,
+        sql: store.script,
+        applied: applied && !store.current,
+      },
       sources: shown.map((item) => ({
         source: item.target.source.name,
         table: item.label,
@@ -396,12 +393,14 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       print("Dry run: nothing was changed.");
       return summary(false);
     }
+    // The dry run prints the step for whoever may run it; a run whose login may not create the
+    // store's tables stops here, before the confirmation, in words (and again at the run).
+    requireStoreRunnable(store, storeLogin);
     if (!options.yes) {
-      // One database named once: a polling source's store part may run where its table is, told by
-      // where the two strings connect, never by how their labels read.
-      const oneDatabase = storeUrl !== undefined && sameDatabase(storeUrl, url, deps.env);
+      // One database named once: the store's step may run where the table is (a shared store, or a
+      // polling source's), told by where the two strings connect, never by their labels.
       const where =
-        store === undefined || store.current || oneDatabase
+        store.current || sameDatabase(storeUrl, url, deps.env)
           ? databaseLabel(url)
           : `${store.label} and ${databaseLabel(url)}`;
       const answer = await deps.io.prompt(`Run the SQL above on ${where}? Type yes to continue: `);
@@ -413,17 +412,17 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         );
       }
     }
-    // The store first: the source's worker writes its log there from its first record. Its step is
-    // said as it happens, and a source's failure after it says the store moved.
+    // The store first, in its own transaction committed before any source's begins: the source's
+    // worker writes its log there from its first record, and a store migration that builds an index
+    // on a large log holds the store's tables while it builds, never a customer's table. Its step
+    // is said as it happens, and a source's failure after it says the store moved.
     let migratedStore: string | undefined;
-    if (store !== undefined && storeUrl !== undefined) {
-      if (store.current) {
-        print(`The FacetDB store on ${store.label} was current: nothing ran there.`);
-      } else {
-        await runStoreMigration(deps.connect, storeUrl);
-        migratedStore = store.label;
-        print(`Migrated the FacetDB store on ${store.label}.`);
-      }
+    if (store.current) {
+      print(`The FacetDB store on ${store.label} was current: nothing ran there.`);
+    } else {
+      await runStoreMigration(deps.connect, storeUrl, store, storeLogin);
+      migratedStore = store.label;
+      print(`Migrated the FacetDB store on ${store.label}.`);
     }
     const installed: string[] = [];
     for (const item of shown) {
@@ -458,7 +457,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     // store, for every source of the config.
     const waiting = await rebuildReviewCards(
       deps.connect,
-      storeUrl ?? url,
+      storeUrl,
       project.id,
       new Map(
         config.sources.map((source) => [

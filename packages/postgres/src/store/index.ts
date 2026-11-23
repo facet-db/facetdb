@@ -45,6 +45,7 @@ export {
   SCHEMA_VERSION,
   STORE_APPEND_ONLY_TABLES,
   STORE_FUNCTIONS,
+  STORE_NEWER_STATE,
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
@@ -53,6 +54,7 @@ export {
   STORE_WORKER_UPSERT_TABLES,
   StoreNotInstalledError,
   storeInstallStatements,
+  storeStepStatements,
   storeVersion,
 } from "./schema.ts";
 export type {
@@ -62,6 +64,13 @@ export type {
   CredentialStore,
 } from "./secrets.ts";
 export { sourceIdOf } from "./source-id.ts";
+export {
+  planStoreStep,
+  runStoreStep,
+  StoreBusyError,
+  type StoreStep,
+  storeScript,
+} from "./step.ts";
 export type { SourceKind, Store, StoreOptions } from "./store.ts";
 export { AmbiguousHostError, createStore, PlaintextUrlError, requireTls } from "./store.ts";
 export {

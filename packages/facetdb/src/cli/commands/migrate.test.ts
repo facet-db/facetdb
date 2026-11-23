@@ -7,6 +7,7 @@ import { lazyEngine } from "../engines.ts";
 import { runInProcess, runProgram } from "../program.ts";
 import { NO_TERMINAL } from "../terminal.ts";
 import {
+  CURRENT_STORE,
   createPgliteWorld,
   migrate,
   type PgliteWorld,
@@ -15,9 +16,13 @@ import {
   resetPgliteWorld,
   type SqlConnect,
   sourceIdOf,
+  storeAtVersions,
+  storeScript,
+  storeStepStatements,
   TEST_SECRET,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
+import { STORE_CURRENT } from "./migrate.ts";
 
 /**
  * `facetdb migrate` and `facetdb uninstall` through the in-process runner, on PGlite: the commands'
@@ -79,6 +84,23 @@ async function columns(): Promise<string[]> {
     "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'listings' order by ordinal_position",
   );
   return rows.map((row) => String(row["column_name"]));
+}
+
+/** What a migrate changes, read from the catalog: the table's columns, the store's tables and rows. */
+async function catalog(): Promise<unknown> {
+  return {
+    listings: await columns(),
+    versions: await world.client.query(
+      "select version, applied_at::text as at from facetdb.store_migrations order by version",
+    ),
+    indexes: await world.client.query(
+      "select indexname, indexdef from pg_indexes where schemaname = 'facetdb' order by indexname",
+    ),
+    columns: await world.client.query(
+      `select table_name, column_name, data_type from information_schema.columns
+        where table_schema = 'facetdb' order by table_name, ordinal_position`,
+    ),
+  };
 }
 
 async function facetdbSchemaExists(): Promise<boolean> {
@@ -312,13 +334,44 @@ describe("facetdb migrate", () => {
     expect(await columns()).toEqual(
       expect.arrayContaining(["is_scam", "category", "facetdb_status", "facetdb_reviewed"]),
     );
-    // One transaction ran, and each statement it ran appears in the printed script.
-    expect(transactions).toHaveLength(1);
-    for (const text of transactions[0] ?? []) {
+    // Two transactions ran: the store's step on its own, exactly the script printed under its
+    // header, then the source's install, each statement of which the printout holds.
+    expect(transactions).toHaveLength(2);
+    const [step = [], install = []] = transactions;
+    expect(result.stdout).toContain(
+      `-- store: localhost:5432/app\n${storeScript(step)}-- source listings: localhost:5432/app\n`,
+    );
+    expect(step).toEqual(storeStepStatements());
+    for (const text of install) {
       if (!text.includes("$1")) {
         expect(result.stdout).toContain(text);
       }
     }
+    // The customer's table is locked by the install alone, after the store's step committed.
+    const lock = 'lock table "public"."listings" in access exclusive mode';
+    expect(step.some((text) => text.includes('"public"."listings"'))).toBe(false);
+    expect(install).toContain(lock);
+    expect(result.stdout.indexOf("Migrated the FacetDB store on localhost:5432/app.")).toBeLessThan(
+      result.stdout.indexOf("Installed on public.listings (source listings)."),
+    );
+  });
+
+  it("runs the store's step again as nothing, and the install as no change, the second time", async () => {
+    expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
+    const before = await catalog();
+    const { connect, transactions } = recordingConnect();
+    const again = await run(["migrate", "--yes", "--admin-url", ADMIN_URL], { connect });
+    expect(again.code, again.stderr).toBe(0);
+    expect(again.stdout).toContain(
+      `-- store: localhost:5432/app\n${STORE_CURRENT}\n-- source listings: localhost:5432/app\n`,
+    );
+    expect(again.stdout).toContain(
+      "The FacetDB store on localhost:5432/app was current: nothing ran there.",
+    );
+    // The install's transaction alone ran, and the store's statements in it changed nothing.
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0]?.[0]).not.toBe(storeStepStatements()[0]);
+    expect(await catalog()).toEqual(before);
   });
 
   it("prints the same SQL string it runs, under --json too", async () => {
@@ -343,11 +396,14 @@ describe("facetdb migrate", () => {
   });
 
   it("runs nothing when the database changed after the SQL was shown", async () => {
+    // The store current first, so its step runs nothing and the source's part is all that moves.
+    expect((await run(["migrate", "--yes", "--admin-url", ADMIN_URL])).code).toBe(0);
     const before = await columns();
-    // Connections: 0 is the engine's plan shown, 1 the plan made again at the run (the engine plans
-    // and runs on its own connections); before 1, the key changes.
+    // Connections: 0 is the engine's plan shown, 1 the store's step read (current), 2 the engine's
+    // plan made again at the run (the engine plans and runs on its own connections); before 2, the
+    // key changes.
     const { connect, transactions } = recordingConnect(async (index) => {
-      if (index === 1) {
+      if (index === 2) {
         await world.client.query("alter table public.listings rename column id to listing_id");
       }
     });
@@ -356,6 +412,62 @@ describe("facetdb migrate", () => {
     expect(result.stderr).toContain("https://docs.facetdb.dev/fix/database-changed");
     expect(transactions).toEqual([]);
     expect(await columns()).toEqual(before.map((c) => (c === "id" ? "listing_id" : c)));
+  });
+
+  it("runs nothing when the store moved after its step was shown", async () => {
+    const before = await columns();
+    // Connections: 0 is the engine's plan shown, 1 the store's step read, 2 the step read again
+    // right before it runs; before 2, another migrate brings the store to this version.
+    const { connect, transactions } = recordingConnect(async (index) => {
+      if (index === 2) {
+        await world.client.transaction(async (query) => {
+          for (const statement of storeStepStatements()) {
+            await query(statement);
+          }
+        });
+      }
+    });
+    const result = await run(["migrate", "--yes", "--admin-url", ADMIN_URL], { connect });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("https://docs.facetdb.dev/fix/database-changed");
+    expect(result.stdout).not.toContain("Migrated the FacetDB store");
+    expect(transactions).toEqual([]);
+    expect(await columns()).toEqual(before);
+  });
+
+  it("a source refused after the store's step ran on its own database says the store moved", async () => {
+    // Once the store's step commits, the source's table is renamed: the source's part is refused
+    // after the store's part ran, in the same database.
+    const connect: SqlConnect = (url, options) => {
+      const inner = world.connect(url, options);
+      return {
+        ...inner,
+        transaction: async (work) => {
+          let first: string | undefined;
+          const done = await inner.transaction((query) =>
+            work((text, params) => {
+              first ??= text;
+              return query(text, params);
+            }),
+          );
+          if (first === storeStepStatements()[0]) {
+            await world.client.query("alter table public.listings rename to listings_old");
+          }
+          return done;
+        },
+      };
+    };
+    const result = await run(["migrate", "--yes", "--json", "--admin-url", ADMIN_URL], {
+      connect,
+    });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("Migrated the FacetDB store on localhost:5432/app.");
+    const parsed = JSON.parse(result.stdout) as { error: { message: string }; details: unknown };
+    expect(parsed.error.message).toContain(
+      "Already run in this run, before this, and kept: the FacetDB store's migration on localhost:5432/app.",
+    );
+    expect(parsed.error.message).not.toContain("nothing was run");
+    expect(parsed.details).toEqual({ storeMigrated: "localhost:5432/app", installed: [] });
   });
 
   it("asks for the admin connection string with the input hidden, and writes it nowhere", async () => {
@@ -626,10 +738,11 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     );
   }
 
-  it("prints today's one script, with no header, when the store is the source's database", async () => {
+  it("prints the store's step under its own header, then today's install script, when the store is the source's database", async () => {
     const result = await run(["migrate", "--dry-run", "--admin-url", ADMIN_URL]);
     expect(result.code, result.stderr).toBe(0);
-    // The pre-058 path's dry run on the same database: the oracle, byte for byte.
+    // The pre-058 path's dry run on the same database: the oracle for the source's part, byte for
+    // byte; its store statements stay in it, and find everything once the store's step has run.
     const today = await migrate({
       adminUrl: ADMIN_URL,
       connect: world.connect,
@@ -651,10 +764,8 @@ describe("the store is the Postgres DATABASE_URL names", () => {
       throw new Error(today.reason);
     }
     expect(result.stdout).toBe(
-      `-- facetdb migrate: listings (public.listings)\n${today.sql}Dry run: nothing was changed.\n`,
+      `-- store: localhost:5432/app\n${storeScript(storeStepStatements())}-- source listings: localhost:5432/app\n-- facetdb migrate: listings (public.listings)\n${today.sql}Dry run: nothing was changed.\n`,
     );
-    expect(result.stdout).not.toContain("-- store:");
-    expect(result.stdout).not.toContain("-- source ");
   });
 
   it("prints the store's part and the source's part under the database each runs in, and asks once", async () => {
@@ -662,7 +773,7 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     expect(dry.code, dry.stderr).toBe(0);
     expect(
       dry.stdout.startsWith(
-        '-- store: localhost:5432/facetdb\nbegin;\n\ncreate schema if not exists "facetdb";',
+        `-- store: localhost:5432/facetdb\n${storeScript(storeStepStatements())}`,
       ),
     ).toBe(true);
     const source = dry.stdout.indexOf(
@@ -739,6 +850,42 @@ describe("the store is the Postgres DATABASE_URL names", () => {
       applied: false,
     });
     expect(parsed.sources[0]?.applied).toBe(true);
+  });
+
+  it("prints the store's step for a login that may not create the store's tables, and refuses to run it before the confirmation", async () => {
+    // The store's login reads its version table and may create nothing (the step runs the script it
+    // printed, so its words come before the confirmation, not from the server).
+    const connect: SqlConnect = (url, options) =>
+      url === STORE_URL
+        ? storeAtVersions(CURRENT_STORE.slice(0, -1), { mayCreate: false })(url, options)
+        : world.connect(url, options);
+    const deps = {
+      projectDir: PROJECT_DIR,
+      env: { DATABASE_URL: STORE_URL },
+      loadConfig: () => Promise.resolve(ownVariable),
+      engines: postgresEngines(connect),
+      connect,
+    };
+    const dry = await runInProcess(
+      ["migrate", "--dry-run", "--admin-url", ADMIN_URL],
+      deps,
+      COMMANDS,
+    );
+    expect(dry.code, dry.stderr).toBe(0);
+    expect(dry.stdout).toContain(
+      `-- store: localhost:5432/facetdb\n${storeScript(storeStepStatements())}`,
+    );
+    const real = await runInProcess(
+      ["migrate", "--admin-url", ADMIN_URL],
+      { ...deps, answers: ["yes"] },
+      COMMANDS,
+    );
+    expect(real.code).toBe(1);
+    expect(real.prompts).toEqual([]);
+    expect(real.stderr).toContain(
+      "error: the login in DATABASE_URL may not create the store's tables in localhost:5432/facetdb; nothing was run",
+    );
+    expect(await facetdbSchemaExists()).toBe(false);
   });
 
   it("refuses a store newer than this FacetDB before the confirmation, and runs nothing", async () => {
