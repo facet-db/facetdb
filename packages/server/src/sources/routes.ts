@@ -1,13 +1,18 @@
 import { type Context, Hono } from "hono";
-import { getCookie } from "hono/cookie";
 import { createMiddleware } from "hono/factory";
 import { z } from "zod";
-import { fromThisMachine } from "../auth/loopback.ts";
 import type { AppEnv } from "../auth/middleware.ts";
-import { SESSION_COOKIE } from "../auth/sessions.ts";
+import { isOperator, type OperatorRefusal, operatorRefusal } from "../auth/operator.ts";
 import { ApiError } from "../errors.ts";
 import { readJson } from "../request.ts";
-import { MIGRATE_OPERATOR_ONLY, type SetupAnswer, type SetupService } from "./service.ts";
+import {
+  MIGRATE_NO_OPERATOR,
+  MIGRATE_OPERATOR_ONLY,
+  NO_OPERATOR,
+  type SetupAccess,
+  type SetupAnswer,
+  type SetupService,
+} from "./service.ts";
 
 /**
  * The setup flow's endpoints: `GET /v1/sources/setup` says whether this browser may add a source
@@ -86,26 +91,49 @@ async function parsed<Schema extends z.ZodType>(
   return body.data;
 }
 
-/** Whether the request is this machine's operator: loopback, and no session cookie. */
-function isOperator(c: Context<AppEnv>): boolean {
-  return fromThisMachine(c.req.raw, c.env) && getCookie(c, SESSION_COOKIE) === undefined;
+/**
+ * The words of a refusal: to a request that is not the operator (undefined: the service's own), and
+ * to every request where no address makes the operator.
+ */
+type Refusals = {
+  readonly notOperator: OperatorRefusal | undefined;
+  readonly noOperator: OperatorRefusal;
+};
+
+const SETUP_REFUSALS: Refusals = { notOperator: undefined, noOperator: NO_OPERATOR };
+const MIGRATE_REFUSALS: Refusals = {
+  notOperator: MIGRATE_OPERATOR_ONLY,
+  noOperator: MIGRATE_NO_OPERATOR,
+};
+
+/**
+ * Whether the setup is open to this request, in the words for it: a studio whose `studioUrl`
+ * names another host has no operator, and says so with the commands to run instead.
+ */
+function setupAccess(c: Context<AppEnv>, service: SetupService, refusals: Refusals): SetupAccess {
+  const access = service.access(isOperator(c));
+  if (access.open || access.code !== "operator_only") {
+    return access;
+  }
+  const words = operatorRefusal(c, {
+    notOperator: refusals.notOperator ?? access,
+    noOperator: refusals.noOperator,
+  });
+  return { open: false, code: access.code, message: words.message, fix: words.fix };
 }
 
 /**
  * The setup's writing routes take the operator alone: a request from another machine, through a
  * proxy, under a foreign Host or Origin, or signed in with an account, is refused before its body
- * is read. That only a page of the studio itself can send one is app.ts's `requireOwnPage`, ahead
- * of this. An added question's install is guarded the same way, in its own words.
+ * is read, and so is every request where no address makes the operator (a `studioUrl` on another
+ * host). That only a page of the studio itself can send one is app.ts's `requireOwnPage`, ahead of
+ * this. An added question's install is guarded the same way, in its own words.
  */
-function requireOperator(
-  service: SetupService,
-  refusal?: { readonly message: string; readonly fix: string },
-) {
+function requireOperator(service: SetupService, refusals: Refusals) {
   return createMiddleware<AppEnv>(async (c, next) => {
-    const access = service.access(isOperator(c));
+    const access = setupAccess(c, service, refusals);
     if (!access.open && access.code === "operator_only") {
-      const words = refusal ?? access;
-      throw new ApiError(403, access.code, words.message, words.fix);
+      throw new ApiError(403, access.code, access.message, access.fix);
     }
     await next();
   });
@@ -137,12 +165,12 @@ export function setupRoutes(service: SetupService): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
 
   // Readable by any reviewer: the page says before step one whether it can be done here.
-  route.get("/sources/setup", (c) => c.json(service.access(isOperator(c))));
+  route.get("/sources/setup", (c) => c.json(setupAccess(c, service, SETUP_REFUSALS)));
 
-  route.use("/sources/inspect", requireOperator(service));
-  route.use("/sources/preview", requireOperator(service));
-  route.use("/sources/plan", requireOperator(service));
-  route.use("/sources/install", requireOperator(service));
+  route.use("/sources/inspect", requireOperator(service, SETUP_REFUSALS));
+  route.use("/sources/preview", requireOperator(service, SETUP_REFUSALS));
+  route.use("/sources/plan", requireOperator(service, SETUP_REFUSALS));
+  route.use("/sources/install", requireOperator(service, SETUP_REFUSALS));
 
   route.post("/sources/inspect", async (c) => {
     const body = await parsed(inspectBody, c.req, SHAPES.inspect);
@@ -170,7 +198,7 @@ export function setupRoutes(service: SetupService): Hono<AppEnv> {
 
   // An added question's install, shown then run, for a source the file has; the operator's alone,
   // as the setup's.
-  route.use("/sources/:name/migrate/*", requireOperator(service, MIGRATE_OPERATOR_ONLY));
+  route.use("/sources/:name/migrate/*", requireOperator(service, MIGRATE_REFUSALS));
 
   route.post("/sources/:name/migrate/plan", async (c) => {
     const name = pathName(c.req.param("name"));

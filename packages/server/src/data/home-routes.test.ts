@@ -59,6 +59,8 @@ function localStudio(projectId: string): StudioAccess {
       canAdd: () => Promise.resolve(false),
     },
     projectId,
+    operatorByAddress: true,
+    log: () => undefined,
   };
 }
 

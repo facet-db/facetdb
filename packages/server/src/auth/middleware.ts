@@ -20,6 +20,13 @@ export type AppEnv = {
     projectId: string;
     /** The reviewer on record, `maya` or `os:alex`; set by `requireReviewer` only. */
     reviewer: string;
+    /**
+     * Who the request is by its address alone, set for every request before any route
+     * (`addressCheck`, auth/operator.ts): `this-machine` (`fromThisMachine`), `elsewhere`
+     * otherwise, and `nobody` for every request of a studio whose `studioUrl` names another host,
+     * where no address makes the operator.
+     */
+    byAddress: "this-machine" | "elsewhere" | "nobody";
   };
 };
 

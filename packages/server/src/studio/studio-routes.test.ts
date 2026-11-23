@@ -101,6 +101,8 @@ const studio: StudioAccess = {
     canAdd: () => Promise.resolve(false),
   },
   projectId: PROJECT,
+  operatorByAddress: true,
+  log: () => undefined,
 };
 
 function appWith(studioApp: StudioBuild | undefined) {

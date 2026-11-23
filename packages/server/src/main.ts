@@ -54,6 +54,11 @@ export type ServerDeps = {
   readonly sessionSecret: string;
   /** The operating system's user name: the reviewer on record for a request on this machine. */
   readonly osUser: () => string;
+  /**
+   * Whether a request from this machine is the operator, with no sign-in: the caller passes
+   * `operatorKnownByAddress` of the config's `studioUrl`, false when it names another host.
+   */
+  readonly operatorByAddress: boolean;
   /** One line per sign-in, refusal, lockout and account made; names only, never a password. */
   readonly log: (line: string) => void;
   /** The workers that answer each API source's queue. */
@@ -206,6 +211,8 @@ export function createServer(deps: ServerDeps): Hono<AppEnv> {
       }),
       reviewers,
       projectId: deps.config.projectId,
+      operatorByAddress: deps.operatorByAddress,
+      log: deps.log,
     },
     ...(deps.studioApp === undefined ? {} : { studioApp: deps.studioApp }),
     newRequestId: randomUUID,

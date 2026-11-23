@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { API_VERSION } from "./api-version.ts";
 import type { ApiKeys } from "./auth/api-keys.ts";
 import { type AppEnv, requireApiKey } from "./auth/middleware.ts";
+import { addressCheck } from "./auth/operator.ts";
 import { type Reviewers, reviewersRoutes } from "./auth/reviewers.ts";
 import { requireReviewer, type Sessions, sessionRoutes } from "./auth/sessions.ts";
 import { checkRoute } from "./check/route.ts";
@@ -28,6 +29,14 @@ export type StudioAccess = {
   readonly reviewers: Reviewers;
   /** The one project this open-source worker serves; every reviewer request belongs to it. */
   readonly projectId: string;
+  /**
+   * Whether a request from this machine is the operator, who needs no sign-in: false when the
+   * config's `studioUrl` names another host (`operatorKnownByAddress`), and then every request
+   * signs in and none may add a source or install a question from the studio.
+   */
+  readonly operatorByAddress: boolean;
+  /** The worker's log: the one line about a proxy in front with no forwarding header. */
+  readonly log: (line: string) => void;
 };
 
 export type AppDeps = {
@@ -75,10 +84,17 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
     c.header(REQUEST_ID_HEADER, requestId);
     await next();
   });
+  // Who a request is by its address (`byAddress`): one instance, so the proxy line it may print is
+  // printed once, run first in the two groups that read it (1 and 4).
+  const byAddress = addressCheck({
+    operatorByAddress: deps.studio.operatorByAddress,
+    log: deps.studio.log,
+  });
 
   // Who may call what is decided here and nowhere else, in four groups. Registration order is
   // the contract: a request answered by an earlier group never reaches a later group's middleware.
   //  1. Public: signing in and out (the cookie is the credential, and the password is checked).
+  app.use(`/${API_VERSION}/session/*`, byAddress);
   app.route(`/${API_VERSION}/session`, sessionRoutes(deps.studio.sessions));
   //  2. A project API key (`facetdb keys add`): the SDK and other servers calling the check API.
   //     Any route a program calls with a key joins this group, with `requireApiKey` on its path.
@@ -99,6 +115,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   //     must not be able to decide a card, make an account or spend model budget with it. The
   //     reviewer check comes first, so a stranger is told to sign in, not about the body.
   const studio = new Hono<AppEnv>();
+  studio.use("*", byAddress);
   studio.use("*", requireReviewer(deps.studio.sessions, deps.studio.projectId));
   studio.use("*", requireOwnPage());
   studio.route("/", configRoutes(deps.config));

@@ -116,6 +116,8 @@ function rig(file: ConfigFileDoor | undefined, projectId = PROJECT) {
         canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
+      operatorByAddress: true,
+      log: () => undefined,
     },
     newRequestId: () => "req-1",
   });

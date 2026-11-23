@@ -343,6 +343,8 @@ export const devCommand = defineCommand<DevOptions>("dev", {
             databases: embeddedDatabases(engine, client),
             provider,
             sessionSecret: secret,
+            // On 127.0.0.1 alone, the OS user stays the operator whatever studioUrl says.
+            operatorByAddress: true,
             plugins,
             ...(studio === undefined ? {} : { studio: studio.build }),
           },

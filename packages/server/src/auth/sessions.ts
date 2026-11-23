@@ -7,12 +7,12 @@ import { createMiddleware } from "hono/factory";
 import { z } from "zod";
 import { ApiError } from "../errors.ts";
 import { bodyProblems, readJson, requireOwnPage } from "../request.ts";
-import { fromThisMachine } from "./loopback.ts";
 import type { AppEnv } from "./middleware.ts";
 
 /**
  * Reviewer sessions. On this machine's loopback address the reviewer is the OS user and nobody
- * signs in; from any other address a reviewer signs in with a `facetdb users add` account and
+ * signs in; from any other address, and from every address when the config's `studioUrl` names
+ * another host (auth/operator.ts), a reviewer signs in with a `facetdb users add` account and
  * carries a signed cookie. The cookie is `<name>.<expiry>.<signature>`: the signature is an
  * HMAC-SHA256, under a key derived from `FACETDB_SECRET`, of the name, the expiry (milliseconds
  * since the epoch) and the moment the account was made. Binding the account's own creation time
@@ -232,35 +232,47 @@ const signInBody = z.strictObject({
 const SIGN_IN_FIX =
   'Sign in with POST /v1/session and a body of {"name", "password"}, using an account made by `facetdb users add <name>`; on the machine that runs facetdb worker, open http://127.0.0.1 and no sign-in is needed.';
 
+/** The same, where no address makes the operator (a `studioUrl` on another host). */
+const SIGN_IN_EVERYWHERE_FIX =
+  'Sign in with POST /v1/session and a body of {"name", "password"}, using an account made by `facetdb users add <name>`.';
+
 const ENDED = {
   "no-cookie": "This request is not signed in.",
   expired: "Your session has ended.",
   invalid: "This session is not valid.",
 } as const;
 
-/** Set-Cookie attributes shared by sign-in and sign-out; `Secure` follows the request. */
-function cookieAttributes(local: boolean) {
-  return { path: "/", httpOnly: true, sameSite: "Lax", secure: !local } as const;
+/**
+ * Set-Cookie attributes shared by sign-in and sign-out; `Secure` follows the request: dropped only
+ * for this machine's operator by address (`byAddress`, set by app.ts's `addressCheck`), so it holds
+ * for every request of a studio whose `studioUrl` names another host.
+ */
+function cookieAttributes(byAddress: AppEnv["Variables"]["byAddress"]) {
+  return {
+    path: "/",
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: byAddress !== "this-machine",
+  } as const;
 }
 
 /**
  * Who may use the studio's routes. Everything mounted behind this is reviewer-only: it sets
  * `reviewer` and `projectId` (the one project this open-source worker serves). A route for the
- * SDK or another machine uses `requireApiKey` instead, mounted before this one (app.ts).
+ * SDK or another machine uses `requireApiKey` instead, mounted before this one (app.ts). Who is on
+ * this machine is `byAddress`, which app.ts's `addressCheck` sets before any route.
  */
 export function requireReviewer(sessions: Sessions, projectId: string) {
   return createMiddleware<AppEnv>(async (c, next) => {
     const cookie = getCookie(c, SESSION_COOKIE);
-    const found = await sessions.reviewerFor({
-      local: fromThisMachine(c.req.raw, c.env),
-      cookie,
-    });
+    const byAddress = c.get("byAddress");
+    const found = await sessions.reviewerFor({ local: byAddress === "this-machine", cookie });
     if (found.kind === "sign-in") {
       throw new ApiError(
         401,
         "sign-in",
         ENDED[found.why],
-        SIGN_IN_FIX,
+        byAddress === "nobody" ? SIGN_IN_EVERYWHERE_FIX : SIGN_IN_FIX,
         // A cookie that did not hold is cleared, so the browser stops sending it.
         cookie === undefined
           ? {}
@@ -296,7 +308,7 @@ export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
     switch (result.kind) {
       case "signed-in":
         setCookie(c, SESSION_COOKIE, result.cookie, {
-          ...cookieAttributes(fromThisMachine(c.req.raw, c.env)),
+          ...cookieAttributes(c.get("byAddress")),
           maxAge: SESSION_TTL_MS / 1000,
         });
         return c.json({
@@ -323,7 +335,7 @@ export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
   });
 
   route.delete("/", requireOwnPage(), (c) => {
-    deleteCookie(c, SESSION_COOKIE, cookieAttributes(fromThisMachine(c.req.raw, c.env)));
+    deleteCookie(c, SESSION_COOKIE, cookieAttributes(c.get("byAddress")));
     return c.json({ signedOut: true });
   });
 

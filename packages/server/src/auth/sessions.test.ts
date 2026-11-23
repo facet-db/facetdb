@@ -117,7 +117,13 @@ function rig(options: { readonly secret?: string; readonly users?: Partial<Users
       alerts: { alerts: () => Promise.reject(new Error("no alerts here")) },
       access: { access: () => Promise.reject(new Error("no studio access here")) },
     },
-    studio: { sessions, reviewers: createReviewers({ users, log }), projectId: PROJECT },
+    studio: {
+      sessions,
+      reviewers: createReviewers({ users, log }),
+      projectId: PROJECT,
+      operatorByAddress: true,
+      log,
+    },
     review: NO_REVIEW,
     newRequestId: () => "req-1",
   });
@@ -655,7 +661,9 @@ describe("a surface open to other machines", () => {
 
   it("refuses to start without an account, with the fix, before anything starts", async () => {
     for (const host of ["0.0.0.0", "::", "192.168.1.20", "studio.example.com"]) {
-      const refusal = await requireAccountToServe(host, none).catch((error: unknown) => error);
+      const refusal = await requireAccountToServe({ host, studioUrl: undefined }, none).catch(
+        (error: unknown) => error,
+      );
       expect(refusal).toBeInstanceOf(OpenSurfaceError);
       expect((refusal as OpenSurfaceError).message).toContain(`--host ${host}`);
       expect((refusal as OpenSurfaceError).fix).toContain("facetdb users add <name>");
@@ -663,9 +671,13 @@ describe("a surface open to other machines", () => {
   });
 
   it("starts once an account exists, and a loopback host never needs one", async () => {
-    await expect(requireAccountToServe("0.0.0.0", some)).resolves.toBeUndefined();
+    await expect(
+      requireAccountToServe({ host: "0.0.0.0", studioUrl: undefined }, some),
+    ).resolves.toBeUndefined();
     for (const host of ["127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST", "127.0.0.2"]) {
-      await expect(requireAccountToServe(host, none)).resolves.toBeUndefined();
+      await expect(
+        requireAccountToServe({ host, studioUrl: undefined }, none),
+      ).resolves.toBeUndefined();
     }
   });
 

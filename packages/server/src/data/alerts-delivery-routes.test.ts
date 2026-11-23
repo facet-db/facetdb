@@ -75,6 +75,8 @@ const STUDIO: StudioAccess = {
     canAdd: () => Promise.resolve(false),
   },
   projectId: PROJECT,
+  operatorByAddress: true,
+  log: () => undefined,
 };
 
 let pglite: PGlite;

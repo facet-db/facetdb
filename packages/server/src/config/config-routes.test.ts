@@ -363,6 +363,8 @@ async function rig(
         canAdd: () => Promise.resolve(false),
       },
       projectId: options.studioProject ?? PROJECT,
+      operatorByAddress: true,
+      log: () => undefined,
     },
     review: NO_REVIEW,
     newRequestId: () => "req-1",

@@ -57,8 +57,10 @@ const EXEMPT: Readonly<Record<string, string>> = {
 const KNOWN_MIDDLEWARE: Readonly<Record<string, string>> = {
   "/*": "the request id on every request (app.ts)",
   "/v1/check/*": "the project API key the check route takes (requireApiKey)",
+  "/v1/session/*":
+    "who the request is by its address (addressCheck), which the session cookie's Secure reads; it answers nothing",
   "/v1/*":
-    "the studio group's reviewer check (requireReviewer) and the guard itself (requireOwnPage)",
+    "who the request is by its address (addressCheck), the studio group's reviewer check (requireReviewer) and the guard itself (requireOwnPage)",
   "/v1/sources/inspect": "the setup's operator-only check (requireOperator), behind the guard",
   "/v1/sources/preview": "the setup's operator-only check (requireOperator), behind the guard",
   "/v1/sources/plan": "the setup's operator-only check (requireOperator), behind the guard",
@@ -114,6 +116,8 @@ type Identity = {
 function rig() {
   const calls: string[] = [];
   const deliveries: HookDelivery[] = [];
+  /** What the app logs: the proxy line of `addressCheck`, which no request here earns. */
+  const logged: string[] = [];
   /** A service method that writes down that it was reached, and answers nothing. */
   const reached = (name: string) => (): never => {
     calls.push(name);
@@ -204,6 +208,11 @@ function rig() {
         add: reached("reviewers.add"),
       },
       projectId: PROJECT,
+      // No studioUrl on another host: the loopback identity is the OS user.
+      operatorByAddress: true,
+      log: (line) => {
+        logged.push(line);
+      },
     },
     // Mounted, so a write ever added beside the built app's pages is walked too. `[[]]` is the
     // smallest build, the one page `/`: a build's routes say which GET paths answer index.html,
@@ -244,7 +253,7 @@ function rig() {
     };
   }
 
-  return { app, calls, deliveries, send };
+  return { app, calls, deliveries, logged, send };
 }
 
 const MULTIPART_BOUNDARY = "forged";
@@ -385,6 +394,9 @@ describe("every route that changes something, read off the app", () => {
           `${what} to a service: ${fixFor(write)}`,
         ).toEqual([]);
         expect(response.setCookie, `${what} and set a cookie: ${fixFor(write)}`).toBeNull();
+        // No forged request here comes through a loopback socket with a foreign Origin, so none is
+        // taken for a proxy without a forwarding header.
+        expect(t.logged, `${what} and printed a line`).toEqual([]);
       }
       // The studio's own page gets past the guard to the route: the path is real, the guard let it by.
       const own = await t.send(

@@ -235,8 +235,9 @@ describe("facetdb users list", () => {
   it("says there is no account, and what the studio does without one", async () => {
     const result = await run(["users", "list"]);
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("No reviewer accounts yet");
-    expect(result.stdout).toContain("loopback");
+    expect(result.stdout).toContain(
+      "No reviewer accounts yet, so the studio starts only on 127.0.0.1 (never with a studioUrl on another host) until an account exists again.",
+    );
   });
 
   it("lists the names and dates, and --json carries them with no password and no hash", async () => {
@@ -288,8 +289,9 @@ describe("facetdb users remove", () => {
     await run(["users", "add", "maya"], [PASSWORD, PASSWORD]);
     const result = await run(["users", "remove", "maya", "--json"], ["maya"]);
     expect(result.code).toBe(0);
-    expect(result.stderr).toContain("That was the last account");
-    expect(result.stderr).toContain("only on this machine's loopback address");
+    expect(result.stderr).toContain(
+      "That was the last account: the studio starts only on 127.0.0.1 (never with a studioUrl on another host) until an account exists again.",
+    );
     expect(JSON.parse(result.stdout)).toEqual({
       ok: true,
       name: "maya",

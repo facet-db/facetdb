@@ -130,6 +130,8 @@ const studio: StudioAccess = {
     canAdd: () => Promise.resolve(false),
   },
   projectId: PROJECT,
+  operatorByAddress: true,
+  log: () => undefined,
 };
 
 type Notify = { readonly to: string };

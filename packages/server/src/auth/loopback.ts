@@ -59,3 +59,26 @@ export function fromThisMachine(request: Request, peer: Peer): boolean {
   const origin = request.headers.get("origin");
   return origin === null || hostOf(origin) === host;
 }
+
+/**
+ * A request that would be this machine's but for its `Origin`, which names another host: a loopback
+ * socket, a loopback `Host` and no proxy header. A page of the studio sends its own address as its
+ * Origin, so this is what a proxy in front looks like when it rewrites `Host` to the upstream's (as
+ * nginx's `proxy_pass` does) and sets no forwarding header. A page of another site open in a
+ * browser on this machine looks the same, which is why it is only ever reported, never trusted.
+ */
+export function proxiedWithoutHeader(request: Request, peer: Peer): boolean {
+  if (!isLoopbackAddress(peer.remoteAddress)) {
+    return false;
+  }
+  if (PROXY_HEADERS.some((name) => request.headers.has(name))) {
+    return false;
+  }
+  const host = hostOf(request.url);
+  if (host === undefined || !isLoopbackHost(new URL(request.url).hostname)) {
+    return false;
+  }
+  const origin = request.headers.get("origin");
+  const pageHost = origin === null ? undefined : hostOf(origin);
+  return pageHost !== undefined && pageHost !== host;
+}

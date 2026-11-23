@@ -150,6 +150,26 @@ export const MIGRATE_OPERATOR_ONLY: Words & { readonly code: string } = {
   fix: "Open the studio on that machine (facetdb studio), or run facetdb migrate --source <name> there, then restart facetdb worker.",
 };
 
+/**
+ * What every request is told when the config's `studioUrl` names another host: no address makes the
+ * operator there, so the studio adds nothing with an admin connection string, and the commands on
+ * the worker's machine are the way.
+ */
+export const NO_OPERATOR: Words & { readonly code: string } = {
+  code: "operator_only",
+  message:
+    "This studio is reached from other machines (studioUrl), so it never asks for an admin connection string.",
+  fix: "On the machine that runs facetdb worker, add the source to facetdb.config.ts (or start one with facetdb init), then run facetdb migrate --source <name>.",
+};
+
+/** The same for an added question's install. */
+export const MIGRATE_NO_OPERATOR: Words & { readonly code: string } = {
+  code: "operator_only",
+  message:
+    "This studio is reached from other machines (studioUrl), so it never asks for an admin connection string.",
+  fix: "On the machine that runs facetdb worker, run facetdb migrate --source <name>, then restart facetdb worker.",
+};
+
 const MIGRATE_UNAVAILABLE: Words & { readonly code: string } = {
   code: "setup_unavailable",
   message:

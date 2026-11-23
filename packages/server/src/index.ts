@@ -10,6 +10,7 @@ export { createApiKeys } from "./auth/api-keys.ts";
 export { isLoopbackAddress, isLoopbackHost } from "./auth/loopback.ts";
 export type { Peer } from "./auth/middleware.ts";
 export { OpenSurfaceError, requireAccountToServe } from "./auth/open-surface.ts";
+export { operatorKnownByAddress, studioUrlHost } from "./auth/operator.ts";
 export type { AddOutcome, Reviewers } from "./auth/reviewers.ts";
 export { createReviewers } from "./auth/reviewers.ts";
 export type { ReviewerLookup, Sessions, SignIn } from "./auth/sessions.ts";

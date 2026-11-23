@@ -190,6 +190,8 @@ function rig(door: PluginsDoor | undefined) {
         canAdd: () => Promise.resolve(false),
       },
       projectId: PROJECT,
+      operatorByAddress: true,
+      log: () => undefined,
     },
     newRequestId: () => "req-1",
   });

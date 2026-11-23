@@ -200,6 +200,7 @@ async function rig() {
     // The SDK signs nobody in: only the check API is called here.
     sessionSecret: "a-long-random-secret-for-tests-only",
     osUser: () => "tester",
+    operatorByAddress: true,
     log: () => undefined,
     worker: { forRecord: (_project, _name, key) => worker(key) },
     clock,

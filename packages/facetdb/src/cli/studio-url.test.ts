@@ -822,6 +822,8 @@ describe("the worker's alerts", () => {
   });
 
   it("link to the configured studioUrl even where a studio is served, not to the served address", async () => {
+    // A studioUrl on another host serves only once an account exists.
+    await store.users.add("maya", await hashPassword("a long enough password"));
     const config = listings("https://facetdb.example.com");
 
     expect(await modelFailingLink(config, ["--port", "4321"], install(true))).toBe(
@@ -974,26 +976,47 @@ describe("the worker's alerts", () => {
     expect(await linkOf("action_gave_up")).toBe(`${DOCS}/webhooks`);
   });
 
-  /** The studio's own HTTP door on this machine, as a browser's request arrives. */
+  /**
+   * The studio's own HTTP door on this machine, as a browser's request arrives; with `cookie`, the
+   * session it carries (a studioUrl on another host makes this machine sign in too).
+   */
   async function call(
     handler: HttpHandler,
     method: string,
     path: string,
     body?: unknown,
-  ): Promise<{ readonly status: number; readonly json: Record<string, unknown> }> {
+    cookie?: string,
+  ): Promise<{
+    readonly status: number;
+    readonly json: Record<string, unknown>;
+    readonly headers: Headers;
+  }> {
     const response = await handler(
       new Request(`http://localhost${path}`, {
         method,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(cookie === undefined ? {} : { cookie }),
+        },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
       { remoteAddress: "127.0.0.1" },
     );
-    return { status: response.status, json: (await response.json()) as Record<string, unknown> };
+    return {
+      status: response.status,
+      json: (await response.json()) as Record<string, unknown>,
+      headers: response.headers,
+    };
   }
 
-  /** A whole-set backfill asked for over HTTP while the worker runs, until its alert is recorded. */
-  async function backfillFinishedLink(config: ProjectConfig): Promise<string> {
+  /**
+   * A whole-set backfill asked for over HTTP while the worker runs, until its alert is recorded;
+   * `account` signs in first and sends its cookie with every call.
+   */
+  async function backfillFinishedLink(
+    config: ProjectConfig,
+    account?: { readonly name: string; readonly password: string },
+  ): Promise<string> {
     await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
     const stop = new AbortController();
     let handler: HttpHandler | undefined;
@@ -1006,19 +1029,34 @@ describe("the worker's alerts", () => {
     try {
       await vi.waitFor(() => expect(handler).toBeDefined(), { timeout: 10_000 });
       const door = handler as HttpHandler;
-      expect((await call(door, "POST", "/v1/sources/listings/backfill/estimate", {})).status).toBe(
-        202,
-      );
+      const signedIn =
+        account === undefined ? undefined : await call(door, "POST", "/v1/session", account);
+      const cookie = signedIn?.headers.get("set-cookie")?.split(";")[0];
+      expect(
+        (await call(door, "POST", "/v1/sources/listings/backfill/estimate", {}, cookie)).status,
+      ).toBe(202);
       let token: string | null = null;
       await vi.waitFor(
         async () => {
-          const status = await call(door, "GET", "/v1/sources/listings/backfill");
+          const status = await call(
+            door,
+            "GET",
+            "/v1/sources/listings/backfill",
+            undefined,
+            cookie,
+          );
           token = status.json["token"] as string | null;
           expect(token).not.toBeNull();
         },
         { timeout: 10_000 },
       );
-      const started = await call(door, "POST", "/v1/sources/listings/backfill/start", { token });
+      const started = await call(
+        door,
+        "POST",
+        "/v1/sources/listings/backfill/start",
+        { token },
+        cookie,
+      );
       expect(started.status, JSON.stringify(started.json)).toBe(200);
       await vi.waitFor(
         async () =>
@@ -1037,7 +1075,10 @@ describe("the worker's alerts", () => {
   });
 
   it("a backfill the studio started links to Sources of the configured studioUrl", async () => {
-    expect(await backfillFinishedLink(listings("https://facetdb.example.com"))).toBe(
+    // A studioUrl on another host: an account to serve with, and this machine signs in.
+    const maya = { name: "maya", password: "a long enough password" };
+    await store.users.add(maya.name, await hashPassword(maya.password));
+    expect(await backfillFinishedLink(listings("https://facetdb.example.com"), maya)).toBe(
       "https://facetdb.example.com/sources",
     );
   });

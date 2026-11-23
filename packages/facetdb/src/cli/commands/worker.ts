@@ -52,6 +52,7 @@ import {
   OpenSurfaceError,
   onlyRecord,
   openStudioBuild,
+  operatorKnownByAddress,
   outboxQueue,
   queueAction,
   requireAccountToServe,
@@ -123,6 +124,7 @@ import {
 } from "../store-door.ts";
 import { createAlertRaisers, type WatchedSource } from "./alert-raisers.ts";
 import { createBackfillJobs } from "./backfill-jobs.ts";
+import { bindWords } from "./bind-words.ts";
 import {
   configFileDoor,
   createFleet,
@@ -345,6 +347,12 @@ export type WorkerParts = {
    * opens the browser there.
    */
   readonly listening?: (host: string, port: number) => Promise<void>;
+  /**
+   * `dev`: this machine's user stays the operator whatever the config's `studioUrl` says, since dev
+   * serves 127.0.0.1 alone under a secret its source code may publish. Absent, a `studioUrl` on
+   * another host means nobody is the operator by address and every visitor signs in.
+   */
+  readonly operatorByAddress?: true;
 };
 
 /** What a run hands back under `--json`: what was answered per source, and whether HTTP was served. */
@@ -435,10 +443,12 @@ export async function runWorkers(
   // figure), every connector's and the backfill's, the lanes fitting inside it.
   const connections = connectionsOf(options, deps.env);
   const port = parsePort(options.port);
+  // The studioUrl that decides who is the operator by address; dev keeps its OS user.
+  const accessUrl = parts.operatorByAddress === true ? undefined : config.studioUrl;
   // Before anything starts: a surface open to other machines needs an account to sign in with.
   if (options.http) {
     try {
-      await requireAccountToServe(options.host, store.users);
+      await requireAccountToServe({ host: options.host, studioUrl: accessUrl }, store.users);
     } catch (error) {
       if (error instanceof OpenSurfaceError) {
         throw new CliError("no-account", error.message, error.fix);
@@ -1066,6 +1076,7 @@ export async function runWorkers(
         },
         sessionSecret: parts.sessionSecret,
         osUser: deps.osUser,
+        operatorByAddress: operatorKnownByAddress(accessUrl),
         // Sign-ins, refusals and accounts made: names and counts, never a password.
         log: (line) => print(line),
         worker: {
@@ -1327,6 +1338,9 @@ export async function runWorkers(
           ? `Serving the check API and the studio's endpoints on ${address}.`
           : `Serving the studio, its endpoints and the check API on ${address}.`,
       );
+      for (const line of bindWords(options.host, accessUrl)) {
+        print(line);
+      }
       await parts.listening?.(options.host, listener.port);
     } else if (!options.once) {
       // No route under --no-http; a source whose plugin takes webhooks relies on its poll.

@@ -85,6 +85,8 @@ const NO_STUDIO: StudioAccess = {
     canAdd: () => Promise.resolve(false),
   },
   projectId: "project-1",
+  operatorByAddress: true,
+  log: () => undefined,
 };
 
 const UNLIMITED: SpendingGate = {

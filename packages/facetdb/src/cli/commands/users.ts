@@ -30,7 +30,7 @@ type Action = (typeof ACTIONS)[number];
 
 /** What the studio does with no account, said wherever the last one goes or none exists. */
 const LOOPBACK_ONLY =
-  "the studio opens only on this machine's loopback address (127.0.0.1) until an account exists again";
+  "the studio starts only on 127.0.0.1 (never with a studioUrl on another host) until an account exists again";
 
 function usage(message: string, fix: string): CliError {
   return new CliError("usage", message, fix, EXIT_USAGE);
