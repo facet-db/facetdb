@@ -30,6 +30,10 @@ import { BACKFILL_REFRESH_MS, type BackfillRead, backfillKey, backfillQuery } fr
  * landed, and the next tick asks again all the same; a first read that fails is said in words with
  * what to do and asked again too.
  *
+ * An install's offer asks its added questions alone, never a job of other questions: the whole
+ * set's under a new version asks every question again of the records answered under the old one,
+ * which the Sources row says before its estimate.
+ *
  * The space is reserved: the strip's box, the words' lines, the actions and the status line are
  * there in every state, so the row does not jump as the state changes.
  */
@@ -50,6 +54,39 @@ const PAGED: ReadonlySet<BackfillState> = new Set([
   "paused",
   "failed",
 ]);
+
+/** A job asks the same questions as the offer, in any order; null (the whole set) never does. */
+function sameQuestions(asked: readonly string[] | null, offered: readonly string[]): boolean {
+  if (asked === null) {
+    return false;
+  }
+  const mine = new Set(offered);
+  const theirs = new Set(asked);
+  return mine.size === theirs.size && [...mine].every((name) => theirs.has(name));
+}
+
+/**
+ * A job of other questions than an install's offer, ended (the whole set's, which the install's
+ * reload stopped): not the offer's to resume or show, so the offer reads as no job yet.
+ */
+function noJobOfThese(job: BackfillStatus): BackfillStatus {
+  return {
+    ...job,
+    state: "idle",
+    estimate: null,
+    counts: null,
+    token: null,
+    expiresAt: null,
+    words: "",
+  };
+}
+
+/**
+ * The whole set's backfill under a version past the first: core queues every record answered under
+ * another version, and the worker asks it every question, so the row says so before the estimate.
+ */
+const ASKS_EVERY_QUESTION =
+  "Records answered under an earlier version of the questions are asked every question again.";
 
 /** "is_vehicle", "is_vehicle and colour", "is_vehicle, colour and year". */
 function listWords(names: readonly string[]): string {
@@ -213,14 +250,20 @@ export function BackfillControls({
   pages = "table",
   questions,
   known,
+  inForce,
 }: {
   readonly source: string;
   /** What the backfill pages through: a plugin source's scan, whose estimate says so; absent, a table. */
   readonly pages?: BackfillPages;
-  /** The added questions to ask alone (an install's offer); absent, the whole question set. */
+  /**
+   * The added questions to ask alone (an install's offer): never a job of other questions resumed
+   * or started from here. Absent, the whole question set.
+   */
   readonly questions?: readonly string[];
   /** What GET /v1/sources says of the source's backfill from its cursor: the words while no job lives. */
   readonly known?: SourceRow["backfill"];
+  /** The question-set version the worker answers under (GET /v1/config); null or absent, not known. */
+  readonly inForce?: number | null;
 }) {
   const api = useApi();
   const schedule = useSchedule();
@@ -234,7 +277,16 @@ export function BackfillControls({
   const [problem, setProblem] = useState<Error | null>(null);
 
   const read = status.data;
-  const job = read?.job;
+  // An install's offer asks its added questions alone ("for that question only"): a job of other
+  // questions is never resumed or started from it. Ended, it reads as no job; living, it shows as
+  // it is, with Stop and no Start.
+  const foreign =
+    questions !== undefined &&
+    read !== undefined &&
+    read.job.state !== "idle" &&
+    !sameQuestions(read.job.questions, questions);
+  const job =
+    read !== undefined && foreign && !LIVE.has(read.job.state) ? noJobOfThese(read.job) : read?.job;
   const live = job !== undefined && LIVE.has(job.state);
   const noJobs = job === undefined ? unavailable(status.error) : null;
   // A first read that failed (the worker away) is tried again too, so the row never sticks.
@@ -282,12 +334,23 @@ export function BackfillControls({
 
   const now = new Date(schedule.now());
   const busy = estimate.isPending || start.isPending || stop.isPending;
-  const token = job?.token ?? null;
+  // A start sends the waiting job's token: never one of a job of other questions than the offer's.
+  const token = foreign ? null : (job?.token ?? null);
   const resumesJob = job !== undefined && ENDED_PART_WAY.has(job.state);
   const resumes = resumesJob || (job?.state === "idle" && known?.state === "part-way");
-  // Resume asks for the stopped job's own questions: the worker keeps a place per subset, so a
-  // job of one added question goes on from its own page, not from the whole set's.
-  const asked = resumesJob ? (job.questions ?? undefined) : questions;
+  // The offer's estimate asks its questions, resuming a job of the same ones; the row's resumes a
+  // stopped job with its own questions: the worker keeps a place per subset, so a job of one added
+  // question goes on from its own page, not from the whole set's.
+  const asked = questions ?? (resumesJob ? (job.questions ?? undefined) : undefined);
+  // The whole set is asked: a job of it counted or waiting for Start, or the next press's estimate.
+  // Kept through the count, so the line stays put from the press to the estimate.
+  const wholeSet =
+    job !== undefined &&
+    (job.state === "estimating" || job.state === "waiting"
+      ? job.questions === null
+      : !live && asked === undefined);
+  const versionNote =
+    wholeSet && inForce !== undefined && inForce !== null && inForce > 1 ? ASKS_EVERY_QUESTION : "";
   // No job since the worker started: the cursor's own progress, as GET /v1/sources reads it.
   const fraction =
     job === undefined || job.state === "idle" ? (known?.fraction ?? null) : progressOf(job);
@@ -316,7 +379,16 @@ export function BackfillControls({
     home.data?.spending.status === "paused"
       ? "The worker is paused at the spending cap, so the records queued for it wait: raise the cap in Settings, which applies at once, or they are answered when the month resets."
       : "";
-  const next = [job === undefined ? (failed?.fix ?? "") : nextWords(job, now), pausedNote]
+  // A job of other questions still living: Start is not the offer's, Stop ends it. Said with what
+  // that job asks: the whole set, or its own questions.
+  const offerNext =
+    questions !== undefined && foreign && live && job.state !== "stopping"
+      ? `This backfill asks ${job.questions === null ? "every question" : listWords(job.questions)}. Stop it to ask ${listWords(questions)} alone.`
+      : null;
+  const next = [
+    job === undefined ? (failed?.fix ?? "") : (offerNext ?? nextWords(job, now)),
+    pausedNote,
+  ]
     .filter((words) => words !== "")
     .join(" ");
   const lastKnown =
@@ -340,6 +412,7 @@ export function BackfillControls({
           </span>
           <span className="font-medium">{heading}</span>
         </span>
+        {versionNote === "" ? null : <p className="m-0 max-w-[64ch] text-text-2">{versionNote}</p>}
         <p className="m-0 max-w-[64ch] text-text-2">{detail}</p>
         <p className="m-0 max-w-[64ch] text-text-2">{next}</p>
       </div>

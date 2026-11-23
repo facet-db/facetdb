@@ -40,7 +40,14 @@ function Line({ label, children }: { readonly label: string; readonly children: 
   );
 }
 
-function Row({ source }: { readonly source: SourceRow }) {
+function Row({
+  source,
+  inForce,
+}: {
+  readonly source: SourceRow;
+  /** The question-set version the worker answers the source under (GET /v1/config); null, not known yet. */
+  readonly inForce: number | null;
+}) {
   const id = useId();
   const { backfill } = source;
   return (
@@ -70,7 +77,12 @@ function Row({ source }: { readonly source: SourceRow }) {
           ) : (
             // A table pages through its rows, a plugin source through its plugin's scan: the same
             // controls over the same endpoints.
-            <BackfillControls source={source.name} pages={source.kind} known={backfill} />
+            <BackfillControls
+              source={source.name}
+              pages={source.kind}
+              known={backfill}
+              inForce={inForce}
+            />
           )}
         </Line>
         {source.login === null ? null : (
@@ -222,7 +234,11 @@ export function SourcesPage() {
       ) : null}
       <div className="grid">
         {sources.data.map((source) => (
-          <Row key={source.name} source={source} />
+          <Row
+            key={source.name}
+            source={source}
+            inForce={config.data?.versions[source.name]?.inForce ?? null}
+          />
         ))}
         {waiting.map((name) => (
           <WaitingRow
