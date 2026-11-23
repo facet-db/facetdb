@@ -58,6 +58,7 @@ describe("the backfill's wiring", () => {
           ask: () => Promise.reject(new Error("a whole-set run asks the model nothing")),
         },
         clock,
+        random: () => 0,
         channels: [],
         report: () => undefined,
       });

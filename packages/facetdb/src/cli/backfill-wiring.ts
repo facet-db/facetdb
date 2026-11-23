@@ -14,6 +14,7 @@ import {
   type SpendingGate,
   spendingGate,
 } from "@facetdb/core";
+import { createBackoff, createInFlightLimiter, createResilientProvider } from "@facetdb/model";
 import { type ProjectRef, type Store, sourceIdOf } from "@facetdb/postgres";
 import type { ProjectConfig, SourceConfig } from "../config/index.ts";
 import {
@@ -38,8 +39,11 @@ export type BackfillWiring = {
   readonly project: ProjectRef;
   readonly store: Store;
   readonly connector: Connector;
+  /** The bare provider: the wiring puts the worker's backoff and in-flight limit around it. */
   readonly provider: ModelProvider;
   readonly clock: Clock;
+  /** A number in [0, 1), as `Math.random`, for the backoff's jitter, injected as the worker's is. */
+  readonly random: () => number;
   /** The alert channels the config names, bound by the composition root; none without `alerts`. */
   readonly channels: readonly BoundChannel[];
   /** Told of each delivery that failed; the alert is recorded with it either way. */
@@ -221,7 +225,13 @@ export async function wireBackfill(wiring: BackfillWiring): Promise<BackfillDeps
     project: project.id,
     source: source.name,
     connector: wiring.connector,
-    worker: wiring.provider,
+    // An added question's requests go out as the worker's do: 429 and 529 backed off, at most 8 in
+    // flight and fewer after a 429. The worker's own backfill job is not wired here: it asks
+    // through the worker's wrapped provider.
+    worker: createResilientProvider(wiring.provider, {
+      backoff: createBackoff({ clock, random: wiring.random }),
+      limiter: createInFlightLimiter({ clock }),
+    }),
     clock,
     cursorStore: store.cursors,
     log: store.log(sourceId),

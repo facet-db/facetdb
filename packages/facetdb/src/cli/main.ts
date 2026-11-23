@@ -645,6 +645,7 @@ export function processDeps(
           connector,
           provider: provider(config, env, run.stopSignal, mode.plugins),
           clock,
+          random: deps.random,
           // The backfill's alerts go to the channels the config names; the command built the host
           // and checked them when the config loaded.
           channels:

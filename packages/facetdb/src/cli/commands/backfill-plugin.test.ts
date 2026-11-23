@@ -195,6 +195,7 @@ function run(
                 connector,
                 provider,
                 clock,
+                random: () => 0,
                 channels: [],
                 report: () => undefined,
               }),

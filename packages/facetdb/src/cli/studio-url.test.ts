@@ -513,6 +513,7 @@ describe("the alerts of a command that serves no studio", () => {
       connector: {} as never,
       provider: { ask: () => Promise.reject(new Error("never asked")) },
       clock,
+      random: () => 0,
       channels: [],
       report: () => undefined,
     });
