@@ -1,4 +1,5 @@
 import { isAbsolute, relative } from "node:path";
+import { PUBLIC_REPOSITORY } from "../../public-repository.ts";
 import {
   DATABASES_PAGE,
   databaseOf,
@@ -87,12 +88,12 @@ export const SKILL_METHODS = {
   plugin: [
     "claude plugin marketplace add typesafe-ai/skills",
     "claude plugin install typesafe@typesafe-ai",
-    "claude plugin marketplace add facetdb/facetdb",
+    `claude plugin marketplace add ${PUBLIC_REPOSITORY}`,
     "claude plugin install facetdb@facetdb",
   ],
   npx: [
     "npx skills add typesafe-ai/skills --skill typesafe-ai",
-    "npx skills add facetdb/facetdb --skill facetdb",
+    `npx skills add ${PUBLIC_REPOSITORY} --skill facetdb`,
   ],
 } as const;
 

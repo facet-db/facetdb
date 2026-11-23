@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB on SQLite files through Node's built-in node:sqlite and on libSQL servers (Turso, sqld) through @libsql/client: a trigger and the facetdb_jobs table, polled every second, with answers in inline columns.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/sqlite"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

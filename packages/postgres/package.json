@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB on Postgres: the trigger-and-jobs connector (inline columns or side table), the polling connector, and the FacetDB store for plugin and API sources. PGlite in development, any Postgres in production.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/postgres"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB's Telegram plugin: system alerts and record notifications to a Telegram chat.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "plugins/telegram"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

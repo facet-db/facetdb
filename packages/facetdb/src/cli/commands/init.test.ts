@@ -303,9 +303,10 @@ describe("facetdb init offers the agent skills", () => {
     // The offer: TypeSafe's two commands and FacetDB's, and the npx alternative.
     expect(result.stdout).toContain("claude plugin marketplace add typesafe-ai/skills");
     expect(result.stdout).toContain("claude plugin install typesafe@typesafe-ai");
+    expect(result.stdout).toContain("claude plugin marketplace add facet-db/facetdb");
     expect(result.stdout).toContain("claude plugin install facetdb@facetdb");
     expect(result.stdout).toContain("npx skills add typesafe-ai/skills --skill typesafe-ai");
-    expect(result.stdout).toContain("npx skills add facetdb/facetdb --skill facetdb");
+    expect(result.stdout).toContain("npx skills add facet-db/facetdb --skill facetdb");
     expect(result.stdout).toContain("TypeSafe asks for one install method per project");
     // After the answer, only the chosen method is repeated, as the thing to run.
     const chosen = result.stdout.slice(result.stdout.indexOf("Install the skills with the plugin"));
@@ -318,7 +319,7 @@ describe("facetdb init offers the agent skills", () => {
     const result = await run(flags, { answers: ["npx"], claudeOnPath: true });
     expect(result.code, result.stderr).toBe(0);
     const chosen = result.stdout.slice(result.stdout.indexOf("Install the skills with the npx"));
-    expect(chosen).toContain("npx skills add facetdb/facetdb --skill facetdb");
+    expect(chosen).toContain("npx skills add facet-db/facetdb --skill facetdb");
     expect(chosen).not.toContain("claude plugin");
   });
 

@@ -28,11 +28,11 @@ never both.
 
 ```bash
 # Claude Code's plugin manager
-claude plugin marketplace add facetdb/facetdb
+claude plugin marketplace add facet-db/facetdb
 claude plugin install facetdb@facetdb
 
 # any coding agent
-npx skills add facetdb/facetdb --skill facetdb
+npx skills add facet-db/facetdb --skill facetdb
 ```
 
 ## Never invent a field

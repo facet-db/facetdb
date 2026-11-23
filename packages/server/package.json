@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB HTTP surface: the check API for API sources, signed webhooks, and the review endpoints the dashboard and the terminal review share.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/server"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB model providers: the TypeSafe /v1/systemone client with backoff, compatible providers behind a base URL, and the scripted fake used by tests and dry runs.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/model"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB core: question sets, thresholds, decisions, record statuses, the worker and the connector, action and model-provider contracts. Pure TypeScript; every side effect enters through an injected adapter.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

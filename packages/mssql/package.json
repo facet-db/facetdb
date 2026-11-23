@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB on SQL Server 2016 and later and Azure SQL through tedious: a trigger and the facetdb_jobs table or Change Tracking, polled every second, with answers in inline columns or a side table.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/mssql"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

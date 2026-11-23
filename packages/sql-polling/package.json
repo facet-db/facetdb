@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB's polling connector for any SQL database: a state hash and a last-changed column read through the standard driver behind a dialect, every 10 seconds, proven on CockroachDB (postgres) and Oracle (oracledb in thin mode).",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/sql-polling"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

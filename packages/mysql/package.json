@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "FacetDB on MySQL 8 and MariaDB 10.5 and later through mysql2: a trigger and the facetdb_jobs table, polled every second, with answers in inline columns or a side table.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/mysql"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

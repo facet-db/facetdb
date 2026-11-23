@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "The facetdb package users install: the config DSL (facetdb, noul, choice, score), the plugin SDK under facetdb/plugin, the SDK client and the facetdb CLI.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "packages/facetdb"
+  },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

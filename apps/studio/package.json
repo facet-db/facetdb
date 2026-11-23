@@ -4,6 +4,11 @@
   "private": true,
   "license": "Apache-2.0",
   "description": "The FacetDB studio: the local dashboard and review screen, a React app the worker's HTTP surface serves.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/facet-db/facetdb.git",
+    "directory": "apps/studio"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
