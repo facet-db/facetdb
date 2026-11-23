@@ -275,8 +275,9 @@ export function requireReviewer(sessions: Sessions, projectId: string) {
 
 /**
  * `POST /v1/session` signs in and sets the cookie; `DELETE /v1/session` clears it. Public routes.
- * Sign-in still takes only the studio's own page or a program (`requireOwnPage`): a page of another
- * site must not be able to sign this browser in to an account it chose (login CSRF).
+ * Both still take only the studio's own page or a program (`requireOwnPage`): a page of another
+ * site must not be able to sign this browser in to an account it chose (login CSRF), nor sign the
+ * reviewer out.
  */
 export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
@@ -321,7 +322,7 @@ export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
     }
   });
 
-  route.delete("/", (c) => {
+  route.delete("/", requireOwnPage(), (c) => {
     deleteCookie(c, SESSION_COOKIE, cookieAttributes(fromThisMachine(c.req.raw, c.env)));
     return c.json({ signedOut: true });
   });
