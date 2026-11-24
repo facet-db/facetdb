@@ -156,6 +156,7 @@ import {
   registeredDatabases,
   UNAVAILABLE_SETUP_DOOR,
 } from "./setup-door.ts";
+import { cutProjectJson, restoreSourceCut } from "./url-settings-cut.ts";
 
 /**
  * `facetdb worker`: one process that answers every source of the config. Per table source it runs
@@ -1201,8 +1202,18 @@ export async function runWorkers(
         // last loaded, which only this package has, and Apply's write and reload.
         config: {
           projectId: project.id,
-          json: () => toProjectJson(fleet.config()),
-          validate: (draft) => judgeDraftSource(fleet.config(), draft, deps.env),
+          // Answered through the studio's one cut: every address in a plugin's, a plugin source's
+          // or an action's settings is its host, for every reviewer and the operator alike.
+          json: () => cutProjectJson(toProjectJson(fleet.config())),
+          // A draft that carries the cut answer back is judged with the file's own addresses.
+          validate: (draft) => {
+            const config = fleet.config();
+            return judgeDraftSource(
+              config,
+              restoreSourceCut(toProjectJson(config), draft),
+              deps.env,
+            );
+          },
           // The sources whose loop does not run the file as last loaded.
           pending: () => fleet.pending(),
           // The Questions page's version history: what the store keeps of each source, and the

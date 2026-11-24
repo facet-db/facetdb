@@ -8,19 +8,13 @@ import type {
   PluginsDoor,
 } from "@facetdb/server";
 import { toJSONSchema } from "zod";
-import {
-  formatPath,
-  type JsonValue,
-  type PluginSettings,
-  type ProjectConfig,
-} from "../../config/index.ts";
+import type { ProjectConfig } from "../../config/index.ts";
 import {
   BUILTIN_PLUGINS,
   type HostedPlugin,
   type PluginHost,
   type RegistryIndex,
   satisfies,
-  WEBHOOK_PLUGIN,
 } from "../../plugin/index.ts";
 import type { CliDeps } from "../program.ts";
 import {
@@ -31,6 +25,7 @@ import {
   readRegistry,
   registryAddress,
 } from "../registry/index.ts";
+import { cutSettings } from "./url-settings-cut.ts";
 
 /**
  * The CLI's door for the studio's Plugins page: the plugins the host loaded when the config did,
@@ -40,7 +35,9 @@ import {
  * is handed on as text, and the command beside an entry is built from its checked short name alone
  * (nothing is installed from a page). It also carries what the page draws and drafts with: each
  * plugin's key in `plugins`, whether it is built in, each entry's range held against this FacetDB,
- * and the built-in webhook's endpoints as their hosts alone, since an address can carry a token.
+ * and the built-in webhook's endpoints as their hosts alone, since an address can carry a token;
+ * every plugin's addresses are cut so (`url-settings-cut.ts`), the same cut `GET /v1/config` is
+ * answered with.
  */
 
 export { DEFAULT_REGISTRY, REGISTRY_TIMEOUT_MS, registryAddress };
@@ -102,58 +99,13 @@ function keyOf(hosted: HostedPlugin, options: PluginsDoorOptions): string {
   );
 }
 
-/** What a page may see of an address: its host, never the path or query a token can ride in. */
-function hostOf(address: string): string {
-  return URL.canParse(address) ? new URL(address).host : "an address that is not a URL";
-}
-
-/** Whether a setting is an object of settings, not a list or a single value. */
-function isEntries(value: JsonValue): value is { readonly [key: string]: JsonValue } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * The settings as the page sees them: as the file writes them, but each of the built-in webhook's
- * endpoint addresses cut to its host, since the rest of an address can hold a token; an endpoint
- * read from a variable stays the variable's name. `hostOnly` says where a cut was made.
- */
-function shownSettings(hosted: HostedPlugin): {
-  readonly values: PluginSettings;
-  readonly hostOnly: readonly string[];
-} {
-  const { settings } = hosted;
-  const endpoints = settings["endpoints"];
-  if (
-    hosted.packageName !== WEBHOOK_PLUGIN ||
-    typeof endpoints !== "object" ||
-    endpoints === null ||
-    Array.isArray(endpoints)
-  ) {
-    return { values: settings, hostOnly: [] };
-  }
-  const hostOnly: string[] = [];
-  const cut = Object.fromEntries(
-    Object.entries(endpoints).map(([name, endpoint]) => {
-      if (typeof endpoint === "string") {
-        hostOnly.push(formatPath(["endpoints", name]));
-        return [name, hostOf(endpoint)];
-      }
-      // `{ url, allowPrivate }`: its url cut as a written address is.
-      const url = isEntries(endpoint) ? endpoint["url"] : undefined;
-      if (isEntries(endpoint) && typeof url === "string") {
-        hostOnly.push(formatPath(["endpoints", name, "url"]));
-        return [name, { ...endpoint, url: hostOf(url) }];
-      }
-      return [name, endpoint];
-    }),
-  );
-  return { values: { ...settings, endpoints: cut }, hostOnly };
-}
-
 function installedOf(hosted: HostedPlugin, options: PluginsDoorOptions): InstalledPlugin {
   const { plugin } = hosted;
   const { manifest } = plugin;
-  const shown = shownSettings(hosted);
+  // Every plugin's settings through the studio's one cut: each address is its host, the built-in
+  // webhook's endpoints in either form and any other plugin's alike; a variable stays its name.
+  // `hostOnly` says where a cut was made.
+  const shown = cutSettings(hosted.settings);
   const provides: Record<PluginKind, readonly string[]> = {
     source: Object.keys(plugin.sources),
     action: Object.keys(plugin.actions),
@@ -175,7 +127,7 @@ function installedOf(hosted: HostedPlugin, options: PluginsDoorOptions): Install
     },
     settings: {
       schema: schemaOf(hosted),
-      values: shown.values,
+      values: shown.value,
       variables: hosted.variables.map(({ path, variable, secret }) => ({
         path,
         variable,

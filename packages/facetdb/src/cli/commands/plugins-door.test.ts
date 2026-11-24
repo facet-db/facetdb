@@ -382,11 +382,13 @@ describe("the installed plugins", () => {
     const { door, environment } = await doorWith(NO_NETWORK);
 
     const settings = door.installed()[0]?.settings;
+    // A community plugin's address is its host too, as the built-in webhook's is.
     expect(settings?.values).toEqual({
       repo: REPO_URL,
       auth: { token: { env: "GITHUB_TOKEN" } },
-      hooks: [{ url: "https://example.com/hook", secret: { env: "HOOK_SECRET" } }],
+      hooks: [{ url: "example.com", secret: { env: "HOOK_SECRET" } }],
     });
+    expect(settings?.hostOnly).toEqual(["hooks[0].url"]);
     expect(settings?.variables).toEqual([
       { path: "auth.token", variable: "GITHUB_TOKEN", secret: true, set: true },
       { path: "hooks[0].secret", variable: "HOOK_SECRET", secret: true, set: true },

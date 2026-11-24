@@ -44,6 +44,7 @@ import {
 import type { ReceiveOutcome, SettingsReload } from "../../plugin/index.ts";
 import { CliError } from "../program.ts";
 import { hasUrl, variableOf } from "./database.ts";
+import { restoreCut } from "./url-settings-cut.ts";
 
 /**
  * The worker's sources as a fleet that can take a new config while it runs. Each source has its own
@@ -1896,18 +1897,22 @@ export function configFileDoor(deps: {
       }
       throw error;
     }
+    // A draft built from the studio's cut answer carries a host where the file holds an address:
+    // the file's own goes back first, once, so the cap check, the diff and the write all judge the
+    // same draft, and Apply never writes the host.
+    const restored = restoreCut(config, draft);
     // A draft that loosens the spending cap is the operator's alone, judged against the stricter of
     // the cap in force and the file's as it loads now (a hand edit no reload has put in force),
     // here in the queue, so no reload or write comes between this and the write.
     if (!asker.operator) {
-      const changes = capLoosenings({ inForce: deps.spending(), file: config }, draft);
+      const changes = capLoosenings({ inForce: deps.spending(), file: config }, restored);
       if (changes.length > 0) {
         return { kind: "operator_only", changes };
       }
     }
     const planned = planApply(
       { path, text: read.text, config },
-      draft,
+      restored,
       deps.env,
       undefined,
       deps.plugins,

@@ -59,10 +59,9 @@ export type InstalledPlugin = {
     readonly values: JsonObject;
     readonly variables: readonly PluginVariableView[];
     /**
-     * Where `values` holds an address cut to its host, in `variables`' path form: the built-in
-     * webhook's endpoints, whose path or query can carry a token, so this answer never carries the
-     * rest of such an address. (`GET /v1/config`'s project JSON still holds
-     * `plugins.webhook.endpoints` whole: a follow-up.)
+     * Where `values` holds an address cut to its host, in `variables`' path form: any setting of
+     * any plugin that holds an address, whose userinfo, path or query can carry a token, so this
+     * answer never carries the rest of such an address. `GET /v1/config` answers the same cut.
      */
     readonly hostOnly: readonly string[];
   };
