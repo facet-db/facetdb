@@ -468,6 +468,8 @@ const alertsSchema = z.object({
       delivered: z.boolean(),
       /** Its channels were still being tried, or the worker stopped first: not known whether any took it. */
       pending: z.boolean(),
+      /** Sent to no channel on purpose, at most one message per 30 minutes. */
+      withheld: z.boolean().optional(),
       /** The channels whose quiet hours held it, named as `channels` names them. */
       held: z.array(
         z.object({ kind: z.string(), name: z.string().nullable(), address: z.string().nullable() }),

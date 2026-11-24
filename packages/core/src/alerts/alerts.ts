@@ -8,6 +8,7 @@ import {
   alertMessage,
   eventKey,
   FAILURE_WINDOW_MS,
+  HELD_AFTER_RESOLVE_KINDS,
   type ModelChange,
   modelChangedWords,
   resolvedMessage,
@@ -33,7 +34,33 @@ export type ActiveAlert = {
    * or another, and after a restart. Absent or null: nothing waits.
    */
   readonly lastTriedAt?: number | null;
+  /**
+   * A kind of `HELD_AFTER_RESOLVE_KINDS` only: when it was resolved. Its row is kept so
+   * `lastSentAt` holds the next raise's message to 30 minutes after it; the alert is not open.
+   * Absent or null: open, as every row of every other kind is.
+   */
+  readonly resolvedAt?: number | null;
+  /**
+   * This open period's raise was recorded and sent to no channel (inside 30 minutes of the last
+   * raise sent, `HELD_AFTER_RESOLVE_KINDS`): its resolve is recorded and sent to none.
+   */
+  readonly unsent?: true;
 };
+
+/** The alert a stored row holds open, if any: a row kept after its resolve holds none. */
+function openOf(row: ActiveAlert | undefined): ActiveAlert | undefined {
+  return row === undefined || (row.resolvedAt ?? null) !== null ? undefined : row;
+}
+
+/** The row a resolve keeps for a kind held after it: resolved at `at`, its last send kept. */
+function closed(active: ActiveAlert, at: number): ActiveAlert {
+  return {
+    event: active.event,
+    raisedAt: active.raisedAt,
+    lastSentAt: active.lastSentAt,
+    resolvedAt: at,
+  };
+}
 
 /**
  * How often channels are tried again for an event no channel has taken: a raise or a resolved
@@ -84,6 +111,21 @@ export type AlertRecord = {
    * channels answered: whether any took it is not known. Absent on every other line.
    */
   readonly pending?: true;
+  /**
+   * Sent to no channel on purpose, and so `delivered` false: a raise of a kind held after its
+   * resolve (`HELD_AFTER_RESOLVE_KINDS`) inside 30 minutes of its last message, or the end of such
+   * a raise. Absent on every other line.
+   */
+  readonly withheld?: true;
+};
+
+/** `Alerts.raise`: how one raise is sent. */
+export type RaiseOptions = {
+  /**
+   * Never held after a resolve (a source stopped that no wait mends): sent now whatever was sent
+   * before, and over an open alert whose raise was held.
+   */
+  readonly atOnce?: true;
 };
 
 /** What the channels made of a recorded line: `settle` writes it into the line and drops `pending`. */
@@ -261,9 +303,11 @@ export type AlertOutcome = {
   /**
    * `sent`: raised (or raised again after 30 minutes) and recorded. `suppressed`: the same event
    * was sent less than 30 minutes ago, or channels were tried for it less than `RETRY_EVERY_MS` ago
-   * and none took it (it was recorded then). `resolved`: the resolved message went out. `idle`:
-   * nothing was active under that key (or no channel took the resolved message, or the pace holds,
-   * so it stays active).
+   * and none took it (it was recorded then), or (`HELD_AFTER_RESOLVE_KINDS`) it was resolved since
+   * a raise sent less than 30 minutes ago, and is recorded open and sent to no channel. `resolved`:
+   * the resolved message went out (or, after such a raise, was recorded). `idle`: nothing was
+   * active under that key (or no channel took the resolved message, or the pace holds, so it stays
+   * active).
    */
   readonly status: "sent" | "suppressed" | "resolved" | "idle";
   /** Channels that refused the message; a failed delivery is reported, never swallowed. */
@@ -304,7 +348,13 @@ export type AlertSignals = {
 
 export type Alerts = {
   /** One alert per event key per 30 minutes until `resolve`. */
-  raise(event: AlertEvent): Promise<AlertOutcome>;
+  raise(event: AlertEvent, options?: RaiseOptions): Promise<AlertOutcome>;
+  /**
+   * Deletes the row a resolve kept for `key` (`HELD_AFTER_RESOLVE_KINDS`), never an open one: once
+   * its last message is 30 minutes old (nothing is held by it any more), or at once with `anyTime`
+   * (its source left the config). Read again just before the delete.
+   */
+  dropKept(key: string, options?: { readonly anyTime?: true }): Promise<void>;
   /**
    * Sends the resolved message once a channel takes it, and waits for it; later calls find nothing
    * active. A healthy model call does not wait: it starts the same delivery off its path.
@@ -520,8 +570,14 @@ export function createAlerts(deps: AlertsDeps): Alerts {
   const clearing = new Map<string, Promise<void>>();
   /** Raises per key, so a check that a raise overtook does not mark the key clear. */
   const raises = new Map<string, number>();
-  /** The raise per event key that is trying channels now; a raise of the same key meanwhile shares it. */
-  const sending = new Map<string, Promise<AlertOutcome>>();
+  /**
+   * The raise per event key that is trying channels now; a raise of the same key meanwhile shares
+   * it, unless it is `atOnce` and the one in flight is not: that one waits, then runs.
+   */
+  const sending = new Map<
+    string,
+    { readonly attempt: Promise<AlertOutcome>; readonly atOnce: boolean }
+  >();
   /** The resolved message per key on its way to the channels, off the record path. */
   const resolving = new Map<string, Promise<void>>();
   /**
@@ -612,22 +668,41 @@ export function createAlerts(deps: AlertsDeps): Alerts {
    * With no channel to try (none, or quiet hours hold it for each), each raise runs as it always
    * did.
    */
-  function raise(event: AlertEvent): Promise<AlertOutcome> {
+  function raise(event: AlertEvent, options: RaiseOptions = {}): Promise<AlertOutcome> {
     const key = eventKey(event);
     knownClear.delete(key);
     raises.set(key, (raises.get(key) ?? 0) + 1);
     const message = alertMessage(event);
     const now = clock.now();
     const route = routeOf(message.severity, now);
+    const atOnce = options.atOnce === true;
     if (route.to.length === 0) {
-      return raiseNow(key, event, message, route, now);
+      return raiseNow(key, event, message, route, now, atOnce);
     }
     const inFlight = sending.get(key);
-    if (inFlight !== undefined) {
-      return inFlight;
+    // A raise `atOnce` never takes the outcome of one that may be held; it waits for it, then runs
+    // itself.
+    if (inFlight !== undefined && (!atOnce || inFlight.atOnce)) {
+      return inFlight.attempt;
     }
-    const attempt = raiseNow(key, event, message, route, now).finally(() => sending.delete(key));
-    sending.set(key, attempt);
+    const started =
+      inFlight === undefined
+        ? raiseNow(key, event, message, route, now, atOnce)
+        : inFlight.attempt
+            .then(
+              () => undefined,
+              () => undefined,
+            )
+            .then(() => {
+              const at = clock.now();
+              return raiseNow(key, event, message, routeOf(message.severity, at), at, atOnce);
+            });
+    const attempt: Promise<AlertOutcome> = started.finally(() => {
+      if (sending.get(key)?.attempt === attempt) {
+        sending.delete(key);
+      }
+    });
+    sending.set(key, { attempt, atOnce });
     return attempt;
   }
 
@@ -642,9 +717,36 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     message: ChannelMessage,
     { to, held }: Route,
     now: number,
+    atOnce: boolean,
   ): Promise<AlertOutcome> {
-    const active = await store.getActive(key);
-    if (active?.lastSentAt != null && now - active.lastSentAt < ALERT_WINDOW_MS) {
+    const stored = await store.getActive(key);
+    const active = openOf(stored);
+    // A kind held after its resolve, raised again inside 30 minutes of its last raise sent:
+    // recorded and open, so the pages are true, withheld from every channel until the 30 minutes
+    // are over; a later raise of the same open alert sends it then. A raise `atOnce` is never held.
+    const lastSent = stored?.lastSentAt ?? null;
+    if (
+      !atOnce &&
+      active === undefined &&
+      stored !== undefined &&
+      lastSent !== null &&
+      now - lastSent < ALERT_WINDOW_MS
+    ) {
+      await store.append({
+        at: now,
+        key,
+        phase: "raised",
+        severity: message.severity,
+        event,
+        delivered: false,
+        withheld: true,
+      });
+      await store.setActive(key, { event, raisedAt: now, lastSentAt: lastSent, unsent: true });
+      return { status: "suppressed", failures: [] };
+    }
+    // A held raise is no message sent: one `atOnce` goes out over it.
+    const heldOver = atOnce && active?.unsent === true;
+    if (!heldOver && active?.lastSentAt != null && now - active.lastSentAt < ALERT_WINDOW_MS) {
       return { status: "suppressed", failures: [] };
     }
     // Tried less than 5 minutes ago and no channel took it: recorded then; nothing is tried, written
@@ -690,7 +792,7 @@ export function createAlerts(deps: AlertsDeps): Alerts {
   }
 
   async function resolve(key: string): Promise<AlertOutcome> {
-    const active = await store.getActive(key);
+    const active = openOf(await store.getActive(key));
     if (active === undefined) {
       return { status: "idle", failures: [] };
     }
@@ -708,6 +810,21 @@ export function createAlerts(deps: AlertsDeps): Alerts {
   async function resolveActive(key: string, active: ActiveAlert): Promise<AlertOutcome> {
     // Who hears that it is over is who heard of it: the channels that send the event's own severity.
     const now = clock.now();
+    const keeps = HELD_AFTER_RESOLVE_KINDS.includes(active.event.kind);
+    if (keeps && active.unsent === true) {
+      // Its raise reached no channel, so neither does its end: recorded, withheld.
+      await store.setActive(key, closed(active, now));
+      await store.append({
+        at: now,
+        key,
+        phase: "resolved",
+        severity: "information",
+        event: active.event,
+        delivered: false,
+        withheld: true,
+      });
+      return { status: "resolved", failures: [] };
+    }
     const { to, held } = routeOf(alertMessage(active.event).severity, now);
     if (to.length > 0) {
       if (waiting(active, now)) {
@@ -723,7 +840,8 @@ export function createAlerts(deps: AlertsDeps): Alerts {
       return { status: "idle", failures };
     }
     pacedUntil.delete(key);
-    await store.clearActive(key);
+    // A kind held after its resolve keeps its row, marked resolved, with its last send.
+    await (keeps ? store.setActive(key, closed(active, now)) : store.clearActive(key));
     await store.append({
       // A held line keeps the time it was held at, inside the quiet period its summary covers.
       at: held.length === 0 ? clock.now() : now,
@@ -794,7 +912,7 @@ export function createAlerts(deps: AlertsDeps): Alerts {
       return;
     }
     const raisedBefore = raises.get(key) ?? 0;
-    const active = await store.getActive(key);
+    const active = openOf(await store.getActive(key));
     const outcome = active === undefined ? undefined : await resolveActive(key, active);
     // A raise meanwhile reopened the key: it is not clear, whatever was read before it.
     if (
@@ -833,7 +951,7 @@ export function createAlerts(deps: AlertsDeps): Alerts {
         knownClear.add(key);
       }
     };
-    const active = await store.getActive(key);
+    const active = openOf(await store.getActive(key));
     if (active === undefined) {
       if ((raises.get(key) ?? 0) === raisedBefore) {
         knownClear.add(key);
@@ -1081,5 +1199,17 @@ export function createAlerts(deps: AlertsDeps): Alerts {
     channels = next;
   }
 
-  return { raise, resolve, resolveOpen, signals, drain, summarize, test, rebind };
+  async function dropKept(key: string, options: { readonly anyTime?: true } = {}): Promise<void> {
+    const row = await store.getActive(key);
+    if (row === undefined || openOf(row) !== undefined) {
+      return;
+    }
+    const lastSent = row.lastSentAt ?? null;
+    if (options.anyTime !== true && lastSent !== null && clock.now() - lastSent < ALERT_WINDOW_MS) {
+      return;
+    }
+    await store.clearActive(key);
+  }
+
+  return { raise, dropKept, resolve, resolveOpen, signals, drain, summarize, test, rebind };
 }

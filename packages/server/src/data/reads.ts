@@ -120,6 +120,8 @@ const alertRecord = z.object({
   // The channels whose quiet hours held the message; absent when none did.
   held: z.array(z.string()).exactOptional(),
   pending: z.literal(true).exactOptional(),
+  // Sent to no channel on purpose (one message per 30 minutes, across a resolve).
+  withheld: z.literal(true).exactOptional(),
 });
 
 const activeAlert = z.object({ event: alertEvent });

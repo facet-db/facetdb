@@ -217,6 +217,20 @@ describe("the Alerts page", () => {
     expect(screen.getAllByText("no channel took it")).toHaveLength(1);
   });
 
+  it("says a message sent to no channel on purpose was not sent, never that no channel took it", async () => {
+    const [first] = SAMPLE_ALERTS.events;
+    if (first === undefined) {
+      throw new Error("the sample has an event");
+    }
+    const lines: Alerts = {
+      ...SAMPLE_ALERTS,
+      events: [{ ...first, delivered: false, pending: false, withheld: true }],
+    };
+    renderStudio({ path: "/alerts", api: fakeApi({ alerts: () => Promise.resolve(lines) }) });
+    expect(await screen.findByText("not sent: one message per 30 minutes")).toBeInTheDocument();
+    expect(screen.queryByText("no channel took it")).toBeNull();
+  });
+
   it("says an alert the worker does resolve is not resolved while it is open", async () => {
     const [first, second] = SAMPLE_ALERTS.events;
     const open: Alerts = {

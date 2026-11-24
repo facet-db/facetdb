@@ -161,6 +161,8 @@ function Standing({ event, now }: { readonly event: AlertEvent; readonly now: Da
       ) : null}
       {event.pending ? (
         <span className="text-text-2">not yet known whether a channel took it</span>
+      ) : event.withheld === true ? (
+        <span className="text-text-2">not sent: one message per 30 minutes</span>
       ) : event.delivered || held !== null ? null : (
         <span className="text-text-2">no channel took it</span>
       )}

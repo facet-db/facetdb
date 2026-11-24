@@ -10,6 +10,7 @@ import {
   type PassReport,
   type QuestionSet,
   RETRY_EVERY_MS,
+  sourceStoppedEvent,
 } from "@facetdb/core";
 import { doctorVerdict, losesAccess, type SourceVerdict, versionChanges } from "@facetdb/server";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
@@ -17,9 +18,9 @@ import type { AppliedBy } from "./config-reload.ts";
 import { questionSetOf } from "./database.ts";
 
 /**
- * The two system alerts only the running worker can see: Connector lost access and Question set
- * changed. Both go through the worker's one `createAlerts`, so the 30-minute rule, the channels and
- * their pace are its own.
+ * The system alerts only the running worker can see: Connector lost access, Question set changed
+ * and Source stopped. Each goes through the worker's one `createAlerts`, so the 30-minute rule, the
+ * channels and their pace are its own.
  *
  * Connector lost access (critical, resolvable):
  *  - every `ACCESS_CHECK_EVERY_MS`, on the worker's clock and beside the passes, never inside one,
@@ -56,6 +57,29 @@ import { questionSetOf } from "./database.ts";
  *    nothing raised for it after (its last pass, a stop).
  * Under `--once` nothing here runs but the question-set raise: the run exits with a failed loop's
  * error, and could never resolve an alert it raised.
+ *
+ * Source stopped (critical, resolvable): a table or plugin source's loop that stopped by itself for
+ * any other reason than a refused login or credential (which raises Connector lost access alone)
+ * raises it at once, in Home's words for the stop (`sourceStoppedWords`): the fleet's words for the
+ * failure, hidden here again and quoted by core, and whether the worker keeps trying. A stopped
+ * source's failed try tells the same hook, with its new next try, so a source that stays stopped
+ * raises again (a refused login at a try raises lost access, as at a first stop). A stop a reload
+ * or the worker's own stop caused never reaches here (the fleet tells only a loop that stopped
+ * alone). It is resolved at the next look once a pass of the source begun after the alert has run
+ * (`ranAt`): the loop runs again, whether or not it had anything to write. An API source raises
+ * none: no look reads it, so its alert could never be resolved. The key is the source's, not the
+ * worker's: with two workers on one store, the stop of either raises the one alert, and a pass of
+ * either resolves it, since the source's records are then answered; the stopped worker's next
+ * failed try raises it again. Core holds every raise of this kind to one message per 30 minutes,
+ * across a resolve (`HELD_AFTER_RESOLVE_KINDS`), so a source that stops, runs and stops again, or
+ * two workers that raise and resolve it in turn, send one raise and one resolved message per 30
+ * minutes; the alert is recorded open and resolved in between, withheld. Two things keep a held
+ * raise from being the last word: a stop no wait mends is never held (sent at once), and every look
+ * raises again each source the fleet still holds stopped whose stop raised Source stopped, so a
+ * held raise goes out once its 30 minutes are over. A source whose first open failed at the
+ * worker's start never reached the fleet's stopped list and raises nothing (the worker does not
+ * start). The row a resolve keeps is deleted at the look once its 30 minutes are over, and at once
+ * when its source leaves the file.
  *
  * Question set changed (information): a loop that opens under a version higher than the one the
  * source ran before (the row in force it replaced, store migration 8) raises it once. The first
@@ -95,17 +119,24 @@ export type ReplacedSet = {
 };
 
 export type AlertRaisersDeps = {
-  readonly alerts: Pick<Alerts, "raise" | "resolve">;
+  readonly alerts: Pick<Alerts, "raise" | "resolve" | "dropKept">;
   /** The store's active alert of a key: what a look reads to know what raised it, and since when. */
   readonly active: AlertStore["getActive"];
   readonly clock: Pick<Clock, "now" | "sleep">;
   readonly project: string;
   readonly links: {
     readonly access: () => string;
+    readonly stopped: () => string;
     readonly questionSet: (source: string) => string;
   };
   /** The sources that run now, read at each look: the fleet's loops in force. */
   readonly sources: () => readonly WatchedSource[];
+  /**
+   * The sources the fleet holds stopped now (Home's door's list), each with its words and next try:
+   * read at each look, which raises their Source stopped again, so a raise held inside 30 minutes
+   * of the last one goes out once they are over even when nothing else raises it.
+   */
+  readonly stoppedSources: () => readonly ({ readonly source: string } & LoopStop)[];
   /**
    * Every part of the store's and each source's connection string hidden (the config in force):
    * what every word that came from a database passes through before it is kept or printed.
@@ -124,8 +155,11 @@ export type AlertRaisers = {
   look(signal?: AbortSignal): Promise<void>;
   /** A look every `ACCESS_CHECK_EVERY_MS` until `signal` aborts; no sleep of it is left after. */
   run(signal: AbortSignal): Promise<void>;
-  /** A loop stopped alone with `error` (the fleet's hook): raises at once for a refused login or credential. */
-  stopped(source: SourceConfig, error: unknown): void;
+  /**
+   * A loop stopped alone with `error` (the fleet's hook), `stop` its words and next try: raises
+   * Connector lost access at once for a refused login or credential, Source stopped for any other.
+   */
+  stopped(source: SourceConfig, error: unknown, stop: LoopStop): void;
   /**
    * A pass of a running loop went through: its records' refusals raise, a write without one is
    * proof, stamped with the pass's start (`startedAt`, this worker's clock), never with its end.
@@ -151,6 +185,9 @@ export type AlertRaisers = {
   /** Waits for every raise and resolve still on its way; never rejects. */
   settled(): Promise<void>;
 };
+
+/** A loop's stop as the fleet holds it: its failure in the fleet's words, and its next try (ms). */
+export type LoopStop = { readonly why: string; readonly retryAt: number | null };
 
 /** A refused login or right, by the database's own code (a boundary: only its code is read). */
 type Refusal = { readonly kind: "login" | "right"; readonly code: string };
@@ -328,6 +365,17 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
    * NTP (milliseconds apart) leave only a pass that began within that margin of the raise.
    */
   const provenAt = new Map<string, number>();
+  /**
+   * Per source, the start of the last pass its loop ran in this process, whatever it wrote: what
+   * resolves Source stopped. Forgotten at a stop of its loop. Compared with the alert's `raisedAt`
+   * as `provenAt` is, with the same margin between two machines' clocks.
+   */
+  const ranAt = new Map<string, number>();
+  /**
+   * The sources whose last stop told here raised Source stopped, not Connector lost access: the
+   * ones the look raises it again for while the fleet holds them stopped.
+   */
+  const raisedStopped = new Set<string>();
   /** Per source, the reviewer of the last Apply that wrote it and its set as that write made it. */
   const appliedBy = new Map<string, { readonly by: string; readonly set: string }>();
   /** Per source, when a pass's refusal last went to the alerts: at most one per `RETRY_EVERY_MS`. */
@@ -337,6 +385,9 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
 
   const lostKey = (source: string): string =>
     eventKey({ kind: "connector_lost_access", project, source, question: null });
+
+  const stoppedKey = (source: string): string =>
+    eventKey({ kind: "source_stopped", project, source, question: null });
 
   /** Whether a source is the file's: one taken out of it raises nothing more. */
   const listed = (name: string): boolean => inFile === undefined || inFile.has(name);
@@ -353,6 +404,28 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
     track(name, "the Connector lost access alert could not be raised", () =>
       alerts.raise(lostEvent(name, what, did, "refusal")),
     );
+  }
+
+  /**
+   * Source stopped: the fleet's words for the failure hidden here again, as every word from a
+   * database is, then quoted by core as a channel may show them. A stop no wait mends is no flap:
+   * sent at once, never held after a resolve, whatever was sent before.
+   */
+  function sendStopped(name: string, stop: LoopStop): Promise<unknown> {
+    return alerts.raise(
+      sourceStoppedEvent(
+        // Hidden before core quotes and cuts it, so no part of a secret is left at the cut.
+        { source: name, why: hide(stop.why), retryAt: stop.retryAt },
+        { project, link: links.stopped() },
+      ),
+      stop.retryAt === null ? { atOnce: true } : {},
+    );
+  }
+
+  /** Source stopped, off the caller's path. */
+  function raiseStopped(name: string, stop: LoopStop): void {
+    raisedStopped.add(name);
+    track(name, "the Source stopped alert could not be raised", () => sendStopped(name, stop));
   }
 
   /** Says a raise or a resolve that failed, its words hidden; nothing else is stopped by it. */
@@ -415,6 +488,17 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
     );
   }
 
+  /** Whether `proof` holds a time for the source after `since`. */
+  function after(proof: ReadonlyMap<string, number>, name: string, since: number): boolean {
+    const at = proof.get(name);
+    return at !== undefined && at > since;
+  }
+
+  /** Whether this process has proof the source works made after `since` (`provenAt`). */
+  function provenSince(name: string, since: number): boolean {
+    return after(provenAt, name, since);
+  }
+
   async function lookAt(source: WatchedSource): Promise<void> {
     const key = lostKey(source.name);
     if (source.kind === "table") {
@@ -435,10 +519,18 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
         );
         return;
       }
-    } else if (!provenAt.has(source.name)) {
-      // A plugin source has no doctor: with no read through it that answered, nothing to look up.
+    }
+    await resolveLost(source);
+    await resolveStopped(source.name);
+  }
+
+  /** A look's resolve of Connector lost access, once its doctor passes or a proof stands for it. */
+  async function resolveLost(source: WatchedSource): Promise<void> {
+    // A plugin source has no doctor: with no read through it that answered, nothing to look up.
+    if (source.kind === "plugin" && !provenAt.has(source.name)) {
       return;
     }
+    const key = lostKey(source.name);
     const active = await deps.active(key);
     if (active === undefined || !listed(source.name)) {
       return;
@@ -447,11 +539,36 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
     // (a right PostgreSQL's doctor does not read, a plugin's credential) waits for this process's
     // proof made after the alert began: a write before the refusal, or another worker's empty
     // passes, prove nothing.
-    if (source.kind === "plugin" || active.event.cause === "refusal") {
-      const at = provenAt.get(source.name);
-      if (at === undefined || at <= active.raisedAt) {
-        return;
-      }
+    if (
+      (source.kind === "plugin" || active.event.cause === "refusal") &&
+      !provenSince(source.name, active.raisedAt)
+    ) {
+      return;
+    }
+    await alerts.resolve(key);
+  }
+
+  /**
+   * A look's resolve of Source stopped: a pass of the source begun after the alert has run, so its
+   * loop runs again, whether or not it had a record to write (a source that comes back quiet is
+   * running). With no pass at all the store is not read. A row its resolve kept (`resolvedAt`)
+   * holds no open alert: it is deleted once its 30 minutes are over (`dropKept`).
+   */
+  async function resolveStopped(name: string): Promise<void> {
+    if (!ranAt.has(name)) {
+      return;
+    }
+    const key = stoppedKey(name);
+    const active = await deps.active(key);
+    if (active === undefined) {
+      return;
+    }
+    if ((active.resolvedAt ?? null) !== null) {
+      await alerts.dropKept(key);
+      return;
+    }
+    if (!listed(name) || !after(ranAt, name, active.raisedAt)) {
+      return;
     }
     await alerts.resolve(key);
   }
@@ -478,6 +595,36 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
           "the worker's check of its access could not be made or recorded",
           error,
         );
+      }
+    }
+    await raiseStoppedAgain(signal);
+  }
+
+  /**
+   * Each source the fleet still holds stopped whose stop raised Source stopped has it raised again,
+   * in the stop's present words: core's 30-minute rule keeps one already sent silent, and a raise
+   * held after a resolve goes out once its 30 minutes are over, though no failed try ever raises it
+   * again (a stop no wait mends, which no try follows).
+   */
+  async function raiseStoppedAgain(signal?: AbortSignal): Promise<void> {
+    let stops: readonly ({ readonly source: string } & LoopStop)[];
+    try {
+      stops = deps.stoppedSources();
+    } catch (error) {
+      failed("worker", "the stopped sources could not be listed for their alert", error);
+      return;
+    }
+    for (const stop of stops) {
+      if (signal?.aborted === true) {
+        return;
+      }
+      if (!raisedStopped.has(stop.source) || !listed(stop.source)) {
+        continue;
+      }
+      try {
+        await sendStopped(stop.source, stop);
+      } catch (error) {
+        failed(stop.source, "the Source stopped alert could not be raised", error);
       }
     }
   }
@@ -511,10 +658,13 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
       }
     },
 
-    stopped(source, error) {
+    stopped(source, error, stop) {
       const { name } = source;
       // What proved it before this failure proves nothing now.
       provenAt.delete(name);
+      ranAt.delete(name);
+      // Raised again by the look only when this stop raises Source stopped (`raiseStopped`).
+      raisedStopped.delete(name);
       // A loop stopping after its source left the file raises nothing that could stay open.
       if (!listed(name)) {
         return;
@@ -534,6 +684,9 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
       // which no look reads, so an alert raised for it could never be resolved.
       const refused = source.table === undefined ? undefined : refusalOf(error);
       if (refused === undefined) {
+        if (source.table !== undefined || source.source !== undefined) {
+          raiseStopped(name, stop);
+        }
         return;
       }
       const again =
@@ -549,6 +702,11 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
 
     passed(source, report) {
       const { name } = source;
+      // Any pass of a table or plugin source is its loop running again, whatever it claimed or
+      // wrote: Source stopped's proof, stamped with the pass's start.
+      if (source.table !== undefined || source.source !== undefined) {
+        ranAt.set(name, report.startedAt);
+      }
       // A table source's records only: the look that resolves reads table sources.
       if (source.table === undefined) {
         return;
@@ -595,19 +753,27 @@ export function createAlertRaisers(deps: AlertRaisersDeps): AlertRaisers {
 
     loaded(config, applied) {
       const names = new Set(config.sources.map((source) => source.name));
-      // A source taken out of the file is no longer read: its lost access, if any, is over, once
-      // what was on its way for it has landed.
+      // A source taken out of the file is no longer read: its lost access and its stop, if any, are
+      // over, once what was on its way for it has landed.
       for (const name of inFile ?? []) {
         if (names.has(name)) {
           continue;
         }
         provenAt.delete(name);
+        ranAt.delete(name);
         passRaisedAt.delete(name);
         appliedBy.delete(name);
         const before = [...inFlight];
         track(name, "its Connector lost access alert could not be resolved", async () => {
           await Promise.all(before);
           return alerts.resolve(lostKey(name));
+        });
+        raisedStopped.delete(name);
+        track(name, "its Source stopped alert could not be resolved", async () => {
+          await Promise.all(before);
+          await alerts.resolve(stoppedKey(name));
+          // Its row kept after the resolve holds nothing for a source no longer read.
+          await alerts.dropKept(stoppedKey(name), { anyTime: true });
         });
       }
       inFile = names;

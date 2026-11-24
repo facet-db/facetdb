@@ -380,6 +380,7 @@ describe("the kinds the code resolves", () => {
       "model_changed",
       "connector_lost_access",
       "action_credential_refused",
+      "source_stopped",
     ]);
     const lost = eventKey(eventOf("connector_lost_access"));
     expect((await alerts.resolve(lost)).status).toBe("resolved");
@@ -430,6 +431,7 @@ describe("severities", () => {
       question_set_changed: "information",
       action_gave_up: "warning",
       action_credential_refused: "warning",
+      source_stopped: "critical",
     });
   });
 });

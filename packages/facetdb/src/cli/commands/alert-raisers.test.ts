@@ -47,6 +47,9 @@ const PASSWORD = "s3cret-worker-pass";
 const SOURCE_URL = `postgres://facetdb_worker:${PASSWORD}@db.internal:5432/app`;
 const ACCESS_LINK = "https://studio.example.com/sources";
 
+/** A loop's stop as the fleet tells it: its words, and its next try 30 seconds on. */
+const STOP = { why: "connection reset", retryAt: START + 30_000 };
+
 const config: ProjectConfig = facetdb({
   model: "jev-1.14.0",
   sources: [
@@ -172,9 +175,11 @@ function setup(
     project: PROJECT,
     links: {
       access: () => ACCESS_LINK,
+      stopped: () => ACCESS_LINK,
       questionSet: (source) => `https://studio.example.com/questions?source=${source}`,
     },
     sources: () => state.sources,
+    stoppedSources: () => [],
     hide: (text) => hideSecrets(text, secretParts(SOURCE_URL)),
     print: (line) => lines.push(line),
     configPath: "/work/listings-app/facetdb.config.ts",
@@ -604,7 +609,7 @@ describe("Connector lost access at the failure of a loop", () => {
   it("raises a refused login at once, in fixed words with the database's code, never the driver's", async () => {
     const t = setup();
 
-    t.raisers.stopped(LISTINGS, refused("28P01"));
+    t.raisers.stopped(LISTINGS, refused("28P01"), STOP);
     await t.raisers.settled();
 
     expect(t.store.history.map((line) => line.event.what)).toEqual([
@@ -618,7 +623,7 @@ describe("Connector lost access at the failure of a loop", () => {
     expectNoSecret(JSON.stringify(t.store.history));
 
     // The same source failing again within 30 minutes is the same alert.
-    t.raisers.stopped(LISTINGS, refused("42501"));
+    t.raisers.stopped(LISTINGS, refused("42501"), STOP);
     await t.raisers.settled();
     expect(t.store.history).toHaveLength(1);
   });
@@ -665,7 +670,7 @@ describe("Connector lost access at the failure of a loop", () => {
     });
     expect(refusalOf(oracle)).toEqual({ kind: "login", code: "ORA-01017" });
 
-    t.raisers.stopped(LISTINGS, oracle);
+    t.raisers.stopped(LISTINGS, oracle, { why: "Oracle refused the login", retryAt: null });
     await t.raisers.settled();
     expect(t.store.history[0]?.event.did).toContain(
       "the worker tries it again on Check again or a restart",
@@ -673,7 +678,7 @@ describe("Connector lost access at the failure of a loop", () => {
     expectNoSecret(JSON.stringify(t.store.history));
   });
 
-  it("raises nothing for a loop that failed for another reason", async () => {
+  it("raises no lost access for a loop that failed for another reason: Source stopped is its alert", async () => {
     const t = setup();
     for (const error of [
       Object.assign(new Error("connection reset"), { code: "ECONNRESET" }),
@@ -683,10 +688,12 @@ describe("Connector lost access at the failure of a loop", () => {
       "a string thrown",
       { code: "a code with spaces and 28P01" },
     ]) {
-      t.raisers.stopped(LISTINGS, error);
+      t.raisers.stopped(LISTINGS, error, STOP);
+      await t.raisers.settled();
     }
-    await t.raisers.settled();
-    expect(t.store.history).toEqual([]);
+    // One stop after another, inside 30 minutes: the one alert.
+    expect(t.store.history.map((line) => line.event.kind)).toEqual(["source_stopped"]);
+    expect(t.store.active.has(lostKey)).toBe(false);
   });
 
   it("raises a plugin's refused credential in the source connector's words, and a SourceAccessLost in other words not at all", async () => {
@@ -698,10 +705,11 @@ describe("Connector lost access at the failure of a loop", () => {
       new SourceAccessLost(
         "the plugin @facetdb/tracker (source issues of issues) lost access: the service it reads refused its credential in watch; check the variable TRACKER_TOKEN and the rights granted to it",
       ),
+      STOP,
     );
     // One that reached the worker some other way, its message the plugin's own.
     const orders: SourceConfig = { ...LISTINGS, name: "orders" };
-    t.raisers.stopped(orders, new SourceAccessLost("token trk_s3cret-token revoked"));
+    t.raisers.stopped(orders, new SourceAccessLost("token trk_s3cret-token revoked"), STOP);
     await t.raisers.settled();
 
     expect(t.store.history.map((line) => line.event.what)).toEqual([
@@ -714,7 +722,7 @@ describe("Connector lost access at the failure of a loop", () => {
   it("says a raise it could not record, hidden, and stops nothing", async () => {
     const t = setup();
     t.store.down = true;
-    t.raisers.stopped(LISTINGS, refused("28P01"));
+    t.raisers.stopped(LISTINGS, refused("28P01"), STOP);
     await t.raisers.settled();
     expect(t.lines).toEqual([
       "listings: the Connector lost access alert could not be raised: the store at [hidden] is unreachable",
@@ -725,7 +733,7 @@ describe("Connector lost access at the failure of a loop", () => {
     const { source } = table(() => HEALTHY);
     const t = setup([source]);
     // PostgreSQL's doctor reads no rights: the loop's refused claim is what says one was revoked.
-    t.raisers.stopped(LISTINGS, refused("42501"));
+    t.raisers.stopped(LISTINGS, refused("42501"), STOP);
     await t.raisers.settled();
     expect(t.store.active.get(lostKey)?.event.cause).toBe("refusal");
 
@@ -753,7 +761,7 @@ describe("Connector lost access at the failure of a loop", () => {
   it("takes a logged answer written again for proof, as it writes the answer columns", async () => {
     const { source } = table(() => HEALTHY);
     const t = setup([source]);
-    t.raisers.stopped(LISTINGS, refused("42501"));
+    t.raisers.stopped(LISTINGS, refused("42501"), STOP);
     await t.raisers.settled();
     t.clock.advance(MINUTE);
     t.raisers.passed(LISTINGS, pass(t.clock.now(), { again: 1 }));
@@ -768,7 +776,7 @@ describe("Connector lost access at the failure of a loop", () => {
     t.clock.advance(MINUTE);
     // Another worker meets the refusal while this one's pass, begun a minute earlier, still runs.
     const other = setup([], { clock: t.clock, store: t.store });
-    other.raisers.stopped(LISTINGS, refused("42501"));
+    other.raisers.stopped(LISTINGS, refused("42501"), STOP);
     await other.raisers.settled();
     t.clock.advance(MINUTE);
     t.raisers.passed(LISTINGS, pass(began, { wrote: 1 }));
@@ -850,7 +858,7 @@ describe("Connector lost access at the failure of a loop", () => {
     let checks = HEALTHY;
     const { source } = table(() => checks);
     const t = setup([source]);
-    t.raisers.stopped(LISTINGS, refused("42501"));
+    t.raisers.stopped(LISTINGS, refused("42501"), STOP);
     await t.raisers.settled();
 
     // 31 minutes on the doctor fails too (the database unreachable a while): its raise is sent,
@@ -922,7 +930,7 @@ describe("Connector lost access at the failure of a loop", () => {
     const t = setup();
     const { table: _table, ...rest } = LISTINGS;
     const support: SourceConfig = { ...rest, name: "support", api: true };
-    t.raisers.stopped(support, refused("28P01"));
+    t.raisers.stopped(support, refused("28P01"), STOP);
     t.raisers.passed(
       support,
       pass(t.clock.now(), { failures: [{ key: "k", stage: "record", error: refused("42501") }] }),
@@ -934,7 +942,7 @@ describe("Connector lost access at the failure of a loop", () => {
   it("resolves the alert of a source taken out of the file, and raises nothing for it after", async () => {
     const t = setup();
     t.raisers.loaded(config);
-    t.raisers.stopped(LISTINGS, refused("28P01"));
+    t.raisers.stopped(LISTINGS, refused("28P01"), STOP);
     await t.raisers.settled();
     expect(t.store.active.has(lostKey)).toBe(true);
 
@@ -949,7 +957,7 @@ describe("Connector lost access at the failure of a loop", () => {
         failures: [{ key: "r1", stage: "record", error: refused("42501") }],
       }),
     );
-    t.raisers.stopped(LISTINGS, refused("28P01"));
+    t.raisers.stopped(LISTINGS, refused("28P01"), STOP);
     await t.raisers.settled();
     expect(t.store.history).toHaveLength(2);
     expect(t.store.active.has(lostKey)).toBe(false);
@@ -1015,7 +1023,7 @@ describe("a plugin source's lost access, resolved by its own reads", () => {
     const running = t.raisers.run(stop.signal);
     await vi.waitFor(() => expect(t.clock.pending()).toEqual([START + ACCESS_CHECK_EVERY_MS]));
 
-    t.raisers.stopped(ISSUES, lost());
+    t.raisers.stopped(ISSUES, lost(), STOP);
     await t.raisers.settled();
     await tick(t.clock);
     expect(t.store.active.has(issuesKey)).toBe(true);
@@ -1037,7 +1045,7 @@ describe("a plugin source's lost access, resolved by its own reads", () => {
     await vi.waitFor(() => expect(t.clock.pending()).toEqual([START + ACCESS_CHECK_EVERY_MS]));
     // A read that answered before the credential was refused proves nothing after it.
     t.raisers.proven("issues");
-    t.raisers.stopped(ISSUES, lost());
+    t.raisers.stopped(ISSUES, lost(), STOP);
     await t.raisers.settled();
 
     // An hour on, the source runs again and nothing changed in the service: no read, no proof.

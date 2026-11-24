@@ -41,6 +41,8 @@ export type Links = {
   readonly backfill: () => string;
   /** A source's connector lost access: Sources, else the docs page. */
   readonly access: () => string;
+  /** A source that stopped by itself: Sources, else the docs fix page. */
+  readonly stopped: () => string;
   /**
    * An action or a webhook that gave up: the Alerts page, which lists the event with its delivery
    * and last error (the studio shows no outbox of its own), else the docs page of that kind.
@@ -126,6 +128,7 @@ export function createLinks(base: StudioBase): Links {
     model: () => page("/", "worker"),
     backfill: () => page("/sources", "backfill"),
     access: () => page("/sources", "worker-login"),
+    stopped: () => page("/sources", "source-stopped"),
     gaveUp: (kind) => page("/alerts", kind === "action" ? "actions" : "webhooks"),
     credential: () => page("/alerts", "action-credential"),
     alerts: () => page("/alerts", "alerts"),

@@ -308,6 +308,7 @@ describe("GET /v1/alerts", () => {
           { kind: "slack", name: "#ops", address: "slack:#ops" },
           { kind: "hook", name: null, address: null },
         ],
+        withheld: false,
       },
       {
         at: "2026-11-04T22:10:00.000Z",
@@ -325,6 +326,7 @@ describe("GET /v1/alerts", () => {
         delivered: true,
         pending: false,
         held: [],
+        withheld: false,
       },
     ]);
     expect(JSON.stringify(json)).not.toContain("s3cret");
@@ -414,6 +416,46 @@ describe("GET /v1/alerts", () => {
         source: "issues",
         standing: { phase: "raised" },
       }),
+    ]);
+  });
+
+  it("lists a stopped source as Source stopped, open until a resolved message", async () => {
+    const stopped = event("source_stopped", {
+      source: "orders",
+      what: "orders stopped: connect ECONNREFUSED 10.0.0.7:5432.",
+      did: "The other sources keep running. Trying again at 2026-11-05 14:10 UTC.",
+      link: "https://studio.example.com/sources",
+    });
+    const t = rig({ history: [record("raised", NOW, stopped)] });
+
+    const events = (await t.get("/v1/alerts")).json["events"] as readonly Record<string, unknown>[];
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "source_stopped",
+        title: "Source stopped",
+        severity: "critical",
+        source: "orders",
+        standing: { phase: "open" },
+        withheld: false,
+      }),
+    ]);
+  });
+
+  it("says a raise sent to no channel on purpose is withheld, not delivered", async () => {
+    const stopped = event("source_stopped", {
+      source: "orders",
+      what: "orders stopped: connect ECONNREFUSED.",
+      did: "Retrying on its own.",
+    });
+    const t = rig({
+      history: [record("raised", NOW, stopped, { delivered: false, withheld: true })],
+    });
+
+    const events = (await t.get("/v1/alerts")).json["events"] as readonly Record<string, unknown>[];
+
+    expect(events).toEqual([
+      expect.objectContaining({ delivered: false, withheld: true, held: [], pending: false }),
     ]);
   });
 

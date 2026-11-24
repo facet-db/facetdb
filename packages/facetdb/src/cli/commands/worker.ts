@@ -827,7 +827,7 @@ export async function runWorkers(
     active: (key) => store.alerts.getActive(key),
     clock,
     project: project.id,
-    links: { access: links.access, questionSet: links.questionSet },
+    links: { access: links.access, stopped: links.stopped, questionSet: links.questionSet },
     sources: () =>
       fleet.loops().flatMap((loop): WatchedSource[] => {
         const { table } = loop;
@@ -838,6 +838,13 @@ export async function runWorkers(
           ? []
           : [{ kind: "table", name: loop.source.name, doctor: () => table.doctor() }];
       }),
+    // Home's door's stopped sources, each raised again at the look.
+    stoppedSources: () =>
+      fleet.stopped().map((entry) => ({
+        source: entry.source,
+        why: entry.why,
+        retryAt: entry.retryAt === null ? null : Date.parse(entry.retryAt),
+      })),
     hide: (text) => hideSecrets(text, secretsInForce()),
     print,
     configPath: options.config,
@@ -901,7 +908,7 @@ export async function runWorkers(
       };
     },
     failure: (source, error) => installMissing(source, options.config, error),
-    stoppedAlone: (source, error) => raisers.stopped(source, error),
+    stoppedAlone: (source, error, stop) => raisers.stopped(source, error, stop),
   });
   // This worker's own heartbeat row, and a look at the others' every 30 seconds beside the passes;
   // a failure of either is a line here and nothing more.

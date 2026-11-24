@@ -16,6 +16,7 @@ export type {
   DeadWorkers,
   HeldMessage,
   QuietSummaryState,
+  RaiseOptions,
   SummaryReport,
   WorkerBeat,
 } from "./alerts.ts";
@@ -34,7 +35,7 @@ export {
 } from "./alerts.ts";
 export type { WorkerWatch, WorkerWatchDeps, WorkerWatchStep } from "./dead-worker.ts";
 export { createWorkerWatch } from "./dead-worker.ts";
-export type { AlertEvent, AlertKind, AlertSeverity, ModelChange } from "./events.ts";
+export type { AlertEvent, AlertKind, AlertSeverity, ModelChange, SourceStop } from "./events.ts";
 export {
   ALERT_KINDS,
   ALERT_SEVERITY,
@@ -44,11 +45,17 @@ export {
   eventKey,
   FAILURE_WINDOW_MS,
   HEARTBEAT_LOSS_MS,
+  HELD_AFTER_RESOLVE_KINDS,
   MODEL_NAME_MAX,
   modelChangedWords,
   modelNameWords,
+  NOT_TRIED_AGAIN,
+  QUOTED_WORDS_MAX,
+  quotedWords,
   RESOLVABLE_ALERT_KINDS,
   resolvedMessage,
+  sourceStoppedEvent,
+  sourceStoppedWords,
   WORKER_BEAT_EVERY_MS,
   WORKER_CHECK_EVERY_MS,
   WORKER_NOT_RUNNING_WHAT,

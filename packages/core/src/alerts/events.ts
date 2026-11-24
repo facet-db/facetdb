@@ -1,4 +1,5 @@
 import type { ChannelMessage } from "../contracts/index.ts";
+import { whenUtc } from "../log/index.ts";
 
 /**
  * The system alerts FacetDB can observe. The review-queue and answer-drift alerts are FacetDB
@@ -20,6 +21,8 @@ export const ALERT_KINDS = [
   // A plugin's action answered 401, its credential refused; the row keeps its 24 hours of retries,
   // and a later delivered try of that plugin resolves it.
   "action_credential_refused",
+  // A table or plugin source's loop stopped by itself; a later pass of it that works resolves it.
+  "source_stopped",
 ] as const;
 
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -34,14 +37,27 @@ export type AlertSeverity = ChannelMessage["severity"];
  * not say it is "not resolved". A kind that gains a resolve path is added here.
  * `worker_not_running` is not one: it is raised once for a worker that is gone, whose row is taken
  * as it is raised, and nothing later says it is back. `action_credential_refused` is resolved by
- * the outbox's next delivered try of that plugin on that source.
+ * the outbox's next delivered try of that plugin on that source. `source_stopped` is resolved at
+ * the worker's 5-minute look once a pass of the source begun after the alert has run: its loop runs
+ * again.
  */
 export const RESOLVABLE_ALERT_KINDS: readonly AlertKind[] = [
   "model_failing",
   "model_changed",
   "connector_lost_access",
   "action_credential_refused",
+  "source_stopped",
 ];
+
+/**
+ * The kinds whose raise is sent no sooner than `ALERT_WINDOW_MS` after the last raise sent for the
+ * same key, even when the alert was resolved in between: a source that stops, runs and stops again
+ * every few minutes is said once per 30 minutes, not once per stop. Their resolve keeps the key's
+ * row, marked resolved, so the time of the last raise sent outlives it; a raise inside that time is
+ * recorded (open on the Alerts page) and sent to no channel, and so is its resolve. Every other
+ * kind's resolve clears its row, as before.
+ */
+export const HELD_AFTER_RESOLVE_KINDS: readonly AlertKind[] = ["source_stopped"];
 
 /** The Severity column of the system alerts. */
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
@@ -56,6 +72,7 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   question_set_changed: "information",
   action_gave_up: "warning",
   action_credential_refused: "warning",
+  source_stopped: "critical",
 };
 
 /** No heartbeat for this long and the worker is not running. */
@@ -90,7 +107,84 @@ export const ALERT_TITLES: Readonly<Record<AlertKind, string>> = {
   question_set_changed: "Question set changed",
   action_gave_up: "Action gave up",
   action_credential_refused: "Action credential refused",
+  source_stopped: "Source stopped",
 };
+
+/** A source whose loop stopped by itself, as the worker's fleet holds it. */
+export type SourceStop = {
+  readonly source: string;
+  /** The failure in words, every secret already hidden. */
+  readonly why: string;
+  /** When the worker tries it again, ms since the epoch; null when no wait mends it. */
+  readonly retryAt: number | null;
+};
+
+/** What a stopped source says when no wait mends it, on Home and in the alert alike. */
+export const NOT_TRIED_AGAIN =
+  "Not tried again until it is fixed: then Check again on the Sources page, or restart facetdb worker.";
+
+/**
+ * What a stopped source says, Home's sentence and the Source stopped alert's from this one
+ * function: what stopped and why, and what comes next. They differ in one thing: Home is read live,
+ * so `live` names the next try's time; an alert is read later, when that time may have passed, so
+ * it says only that FacetDB keeps trying. A stop no wait mends says so in both.
+ */
+export function sourceStoppedWords(
+  stop: SourceStop,
+  live: boolean,
+): { readonly what: string; readonly next: string } {
+  return {
+    what: `${stop.source} stopped: ${stop.why.replace(/\.$/, "")}.`,
+    next:
+      stop.retryAt === null
+        ? NOT_TRIED_AGAIN
+        : live
+          ? `Trying again at ${whenUtc(new Date(stop.retryAt))}.`
+          : "Retrying on its own.",
+  };
+}
+
+/** The longest stretch of a failure's words an alert quotes, in characters. */
+export const QUOTED_WORDS_MAX = 300;
+
+/**
+ * What a quoted sentence keeps: letters, digits, spaces, ordinary punctuation, and the characters
+ * that carry meaning in a failure's words: `_` (`facetdb_jobs`, `ER_ACCESS_DENIED_ERROR`) and `@`
+ * (a plugin's scope); brackets only as the `[hidden]` marker (`HIDDEN`). Everything else goes:
+ * control and format characters, `<…>`, `[…]`, backticks, `*`, `~`, `&`, `#`, `|`. Escaping what a channel reads as
+ * markup is each channel's own job; this keeps the words plain and nothing in them a link.
+ */
+const NOT_A_SENTENCE = /[^\p{L}\p{N} .,:;()'"/+=%?!@_-]/gu;
+
+/** The marker hidden words leave (`hideSecrets`): the only brackets a quoted sentence keeps. */
+const HIDDEN = "[hidden]";
+
+/**
+ * Words a driver or a plugin chose, as an alert may quote them, the sibling of `modelNameWords` for
+ * a sentence: on one line, only plain text and ordinary punctuation, nothing link-shaped left to
+ * autolink (`://`, an address of four numbers, a dot before a letter are defanged), then cut at
+ * `QUOTED_WORDS_MAX` characters, never inside one. Connection strings are the caller's to hide
+ * first; this keeps what is left from being a link, a mention or markup.
+ */
+export function quotedWords(text: string): string {
+  // Brackets go but in the literal marker: `[text](target)` is a link on a Markdown channel. A
+  // marker followed by `(` is set apart, so it cannot be the text of a link either.
+  const plain = text
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\s]+/gu, " ")
+    .split(HIDDEN)
+    .map((part) => part.replace(NOT_A_SENTENCE, ""))
+    .join(HIDDEN)
+    .replaceAll(`${HIDDEN}(`, `${HIDDEN} (`)
+    .replace(/ {2,}/g, " ")
+    .trim();
+  const characters = [...defanged(plain)];
+  if (characters.length === 0) {
+    return "its error has nothing printable";
+  }
+  return characters.length <= QUOTED_WORDS_MAX
+    ? characters.join("")
+    : `${characters.slice(0, QUOTED_WORDS_MAX - 1).join("")}…`;
+}
 
 /**
  * A response that named another model than the one its question-set version is held to: the
@@ -220,6 +314,37 @@ export function eventKey(
   ].join("|");
 }
 
+/**
+ * The Source stopped alert: what stopped and why, the failure's words quoted (`quotedWords`) as a
+ * third-party channel may show them, and what FacetDB does: keeps trying, or, for a stop no wait
+ * mends, waits for the fix (`sourceStoppedWords`, as an alert says it).
+ */
+export function sourceStoppedEvent(
+  stop: SourceStop,
+  where: { readonly project: string; readonly link: string },
+): AlertEvent {
+  const { what, next } = sourceStoppedWords({ ...stop, why: quotedWords(stop.why) }, false);
+  return {
+    kind: "source_stopped",
+    what,
+    project: where.project,
+    source: stop.source,
+    question: null,
+    did: next,
+    link: where.link,
+  };
+}
+
+/**
+ * What the resolved message says happened: a stopped source's own short line, never its old cause;
+ * every other kind's raise again, marked resolved.
+ */
+function resolvedWhat(event: AlertEvent): string {
+  return event.kind === "source_stopped"
+    ? `${event.source} runs again.`
+    : `Resolved: ${event.what}`;
+}
+
 function placeOf(event: AlertEvent): string {
   const question = event.question === null ? "all questions" : `question ${event.question}`;
   return `Project ${event.project}, source ${event.source}, ${question}.`;
@@ -240,7 +365,7 @@ export function resolvedMessage(event: AlertEvent): ChannelMessage {
   return {
     kind: "system-alert",
     severity: "information",
-    text: `Resolved: ${event.what} ${placeOf(event)}`,
+    text: `${resolvedWhat(event)} ${placeOf(event)}`,
     link: event.link,
   };
 }

@@ -229,11 +229,18 @@ export type FleetDeps = {
    */
   readonly failure?: (source: string, error: unknown) => unknown;
   /**
-   * Told once of each loop that stopped alone, with what it threw, after the fleet took it out of
-   * the running loops (a refused login or credential raises Connector lost access). It must return
-   * at once; a hook that throws is said and changes nothing of the stop.
+   * Told once of each loop that stopped alone, and of each failed try of a stopped source, with
+   * what it threw and the stop as Home's door names it (its words and next try, null when none
+   * comes), after the fleet timed its next try and before it prints the stop (a refused login or
+   * credential raises Connector lost access; any other stop raises Source stopped). Never told of a
+   * stop a reload or the worker's own stop caused. It must return at once; a hook that throws is
+   * said and changes nothing of the stop.
    */
-  readonly stoppedAlone?: (source: SourceConfig, error: unknown) => void;
+  readonly stoppedAlone?: (
+    source: SourceConfig,
+    error: unknown,
+    stop: { readonly why: string; readonly retryAt: number | null },
+  ) => void;
 };
 
 export type Fleet = {
@@ -897,24 +904,36 @@ export function createFleet(deps: FleetDeps): Fleet {
       outage: slot.loop.outage,
     };
     stopped.set(name, entry);
-    try {
-      deps.stoppedAlone?.(slot.loop.source, error);
-    } catch {
-      // Fixed words: what the hook threw is not shown, as anything near a loop's failure may quote
-      // a driver's words and the connection string in them.
-      deps.print(`${name}: the alert its stop raises could not be told; its error is not shown`);
-    }
     const closed = retire(slot);
     closing.add(closed);
     void closed.then(() => closing.delete(closed));
     if (error instanceof EngineRefusal) {
+      tell(entry, error, null);
       refuse(name, entry, deps.failure === undefined ? error : deps.failure(name, error));
       return;
     }
     const retryAt = schedule(name, entry);
+    tell(entry, error, retryAt);
     deps.print(
       `${name} stopped: ${why}. The other sources keep running; the worker tries ${name} again at ${clockTime(retryAt)}.`,
     );
+  }
+
+  /**
+   * Tells the hook of a stop alone or of a stopped source's failed try, with its words and its next
+   * try (null when none comes), before anything is printed: a print that throws never keeps the
+   * alert from being raised.
+   */
+  function tell(entry: Stopped, error: unknown, retryAt: number | null): void {
+    try {
+      deps.stoppedAlone?.(entry.source, error, { why: entry.why, retryAt });
+    } catch {
+      // Fixed words: what the hook threw is not shown, as anything near a loop's failure may quote
+      // a driver's words and the connection string in them.
+      deps.print(
+        `${entry.source.name}: the alert its stop raises could not be told; its error is not shown`,
+      );
+    }
   }
 
   /**
@@ -1003,10 +1022,14 @@ export function createFleet(deps: FleetDeps): Fleet {
     /** Kept stopped: tried again after the next wait, or not at all for a refusal. */
     const failedAgain = (why: string, error?: unknown) => {
       entry.why = why;
+      // A failed try is told as a stop is, with its next try, so a source that stays stopped is
+      // alerted again, and a login refused at a try raises lost access.
       if (error instanceof CliError || error instanceof EngineRefusal) {
+        tell(entry, error, null);
         refuse(name, entry, error);
       } else {
         const retryAt = schedule(name, entry);
+        tell(entry, error, retryAt);
         deps.print(
           `${name}: could not start again (${why}); the worker tries it again at ${clockTime(retryAt)}.`,
         );

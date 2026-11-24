@@ -156,6 +156,11 @@ export type AlertEventView = {
    * it in the summary sent when their hours end. Empty when none held it.
    */
   readonly held: readonly HeldChannelView[];
+  /**
+   * Sent to no channel on purpose, `delivered` false for that reason: a raise inside 30 minutes of
+   * its alert's last message, across a resolve, or the end of such a raise.
+   */
+  readonly withheld: boolean;
 };
 
 /** A channel that held a message, named as the channel list names it. */
@@ -285,6 +290,7 @@ export function eventsOf(records: readonly AlertRecord[]): readonly AlertEventVi
         delivered: record.delivered,
         pending: record.pending === true,
         held: (record.held ?? []).map(heldChannelView),
+        withheld: record.withheld === true,
       };
     });
 }

@@ -8,8 +8,8 @@ import {
   monthOf,
   readableTokenCounts,
   type SpendingCap,
+  sourceStoppedWords,
   WORKER_NOT_RUNNING_WHAT,
-  whenUtc,
 } from "@facetdb/core";
 import { Hono } from "hono";
 import type { AppEnv } from "../auth/middleware.ts";
@@ -233,17 +233,26 @@ function failingWords(sources: readonly SourceState[]): string {
 
 /**
  * The title of Home's state when a source's loop failed and it stopped alone, and no failure the
- * alerts name comes first. It is no alert kind: the worker raises "connector lost access" for a
- * stop only when its login or credential was refused, and Home names it from the doctor's verdict.
+ * alerts name comes first. The stop also raises the Source stopped alert, unless its login or
+ * credential was refused: that raises Connector lost access alone, which Home names from the
+ * doctor's verdict.
  */
 export const SOURCE_STOPPED_TITLE = "A source stopped";
 
-/** Times in the house form, as the worker's own lines say them: `YYYY-MM-DD HH:MM UTC`. */
+/**
+ * The Source stopped alert's own words (`sourceStoppedWords`), read live: the next try's time in
+ * the house form, where the alert, read later, says only that FacetDB keeps trying.
+ */
 function stoppedWords(stopped: StoppedSource): string {
-  const said = `${stopped.source} stopped: ${stopped.why.replace(/\.$/, "")}.`;
-  return stopped.retryAt === null
-    ? `${said} Not tried again until it is fixed: then Check again on the Sources page, or restart facetdb worker.`
-    : `${said} Trying again at ${whenUtc(new Date(stopped.retryAt))}.`;
+  const { what, next } = sourceStoppedWords(
+    {
+      source: stopped.source,
+      why: stopped.why,
+      retryAt: stopped.retryAt === null ? null : Date.parse(stopped.retryAt),
+    },
+    true,
+  );
+  return `${what} ${next}`;
 }
 
 function sourcesCheck(
