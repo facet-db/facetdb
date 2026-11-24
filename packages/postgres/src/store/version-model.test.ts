@@ -113,7 +113,7 @@ describe("store migration 11", () => {
 
     expect(await migrateStore(client)).toEqual([]);
 
-    expect(SCHEMA_VERSION).toBe(11);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(11);
     expect(await storeVersion(client.query)).toEqual({
       kind: "found",
       newest: SCHEMA_VERSION,

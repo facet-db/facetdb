@@ -625,8 +625,17 @@ export function createWorker(deps: WorkerDeps): Worker {
       }
       // A held source's probe is spent here, as its request goes: of the lanes that came this far
       // together, one asks and the others wait, and a probe whose record needed no call spent
-      // nothing, so the next record that needs one asks.
-      if (!heldModel.mayAsk()) {
+      // nothing, so the next record that needs one asks. The probe is claimed in the store, so of
+      // every worker of the fleet one asks; a claim that fails frees the record's reservation
+      // before the failure is reported.
+      let mayAsk: boolean;
+      try {
+        mayAsk = await heldModel.mayAsk();
+      } catch (error) {
+        await release(report, row.key, reservation);
+        throw error;
+      }
+      if (!mayAsk) {
         await release(report, row.key, reservation);
         report.waiting.push(row.key);
         return "release";

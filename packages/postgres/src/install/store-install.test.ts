@@ -170,14 +170,20 @@ describe("the install script and the store", () => {
     // The append-only logs, by name: the decision log and the question-set versions.
     expect(byTable.get("decisions")).toEqual(["INSERT", "SELECT"]);
     expect(byTable.get("question_set_versions")).toEqual(["INSERT", "SELECT"]);
-    // Store migration 11: of the logs' columns, the worker updates a version's model alone.
+    // Of the logs' columns, the worker updates a version's model (store migration 11) and its hold
+    // (store migration 12) alone.
     expect(
       await world.client.query(
         `select table_name, column_name from information_schema.column_privileges
           where table_schema = 'facetdb' and grantee = 'facetdb_worker' and privilege_type = 'UPDATE'
-            and table_name in ('decisions', 'question_set_versions')`,
+            and table_name in ('decisions', 'question_set_versions')
+          order by column_name`,
       ),
-    ).toEqual([{ table_name: "question_set_versions", column_name: "answered_by" }]);
+    ).toEqual([
+      { table_name: "question_set_versions", column_name: "answered_by" },
+      { table_name: "question_set_versions", column_name: "held_by" },
+      { table_name: "question_set_versions", column_name: "probe_at" },
+    ]);
     // The reviewer accounts, by name: read-only; the queue and the run log are rows.
     expect(byTable.get("users")).toEqual(["SELECT"]);
     expect(byTable.get("reviews")).toEqual(["DELETE", "INSERT", "SELECT", "UPDATE"]);

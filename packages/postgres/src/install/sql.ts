@@ -40,6 +40,7 @@ import {
   STORE_SEQUENCES,
   STORE_TABLES,
   STORE_VERSION_TABLE,
+  STORE_WORKER_HOLD_COLUMNS,
   STORE_WORKER_READ_ONLY_TABLES,
   STORE_WORKER_SET_ONCE_COLUMN,
   STORE_WORKER_UPSERT_TABLES,
@@ -769,6 +770,13 @@ end $$`,
     plain(
       "grants",
       `grant update (${quoteIdent(STORE_WORKER_SET_ONCE_COLUMN.column)}) on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_WORKER_SET_ONCE_COLUMN.table)} to ${worker}`,
+      "store",
+    ),
+    // Store migration 12: a version's hold, set, cleared and its probe claimed by the workers.
+    // Update on those columns alone, after the revoke, as the model's.
+    plain(
+      "grants",
+      `grant update (${STORE_WORKER_HOLD_COLUMNS.columns.map((column) => quoteIdent(column)).join(", ")}) on ${quoteIdent(SCHEMA)}.${quoteIdent(STORE_WORKER_HOLD_COLUMNS.table)} to ${worker}`,
       "store",
     ),
     plain(

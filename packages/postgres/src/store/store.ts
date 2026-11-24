@@ -48,6 +48,12 @@ import {
 } from "./secrets.ts";
 import { sourceIdOf } from "./source-id.ts";
 import { createUsersStore, type UsersStore } from "./users.ts";
+import {
+  claimVersionProbe,
+  clearVersionHold,
+  readVersionHold,
+  setVersionHold,
+} from "./version-hold.ts";
 
 export type StoreOptions = {
   /**
@@ -139,7 +145,8 @@ export type Store = {
    * the source's version lock, the one `record` takes: of two workers that open the same new
    * version at once, one is answered the old version and the other the new one, so the worker's
    * Question set changed alert is raised once. `answeredBy` is core's `VersionModels`: the model a
-   * version is held to, set by its first answer.
+   * version is held to, set by its first answer; with `readHold`, `setHold`, `clearHold` and
+   * `claimProbe`, the version's hold every worker of the store shares (store migration 12).
    */
   questionSets: VersionModels & {
     latest(sourceId: string): Promise<QuestionSetVersion | undefined>;
@@ -316,6 +323,12 @@ export async function createStore(options: StoreOptions): Promise<Store> {
         inForce: (sourceId) => readQuestionSetInForce(client.query, sourceId),
         answeredBy: (sourceId, version, named) =>
           answerVersionModel(client.query, sourceId, version, named),
+        readHold: (sourceId, version) => readVersionHold(client.query, sourceId, version),
+        setHold: (sourceId, version, named, probeAt) =>
+          setVersionHold(client.query, sourceId, version, named, probeAt),
+        clearHold: (sourceId, version) => clearVersionHold(client.query, sourceId, version),
+        claimProbe: (sourceId, version, now, next) =>
+          claimVersionProbe(client.query, sourceId, version, now, next),
         run: (sourceId, version, questionSet) =>
           client.transaction(async (query) => {
             await query("select pg_advisory_xact_lock(hashtext($1))", [`question_set:${sourceId}`]);

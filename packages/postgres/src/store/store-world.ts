@@ -66,10 +66,23 @@ export async function newStore(
 }
 
 /**
+ * Takes migration 12 back off a migrated store (a version's hold), with its version row, for a test
+ * building an older store; version-hold.test.ts proves it alone.
+ */
+export async function takeBackMigration12(client: SqlClient): Promise<void> {
+  await client.query(
+    `alter table facetdb.question_set_versions drop column held_by, drop column probe_at`,
+  );
+  await client.query(`delete from facetdb.store_migrations where version = 12`);
+}
+
+/**
  * Takes migration 11 back off a migrated store (a version's model), with its version row, for a
- * test building an older store; version-model.test.ts proves it alone.
+ * test building an older store; version-model.test.ts proves it alone. Migration 12 goes first,
+ * with its version row.
  */
 export async function takeBackMigration11(client: SqlClient): Promise<void> {
+  await takeBackMigration12(client);
   await client.query(`alter table facetdb.question_set_versions drop column answered_by`);
   await client.query(`delete from facetdb.store_migrations where version = 11`);
 }

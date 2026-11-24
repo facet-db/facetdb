@@ -61,4 +61,47 @@ export type VersionModels = {
    * its name. A version the store does not keep is an error.
    */
   answeredBy(sourceId: string, version: number, named: string): Promise<string>;
+  /**
+   * The version's hold, so a worker that starts while its source is held starts held: null while no
+   * response has named another model, or since one named the held model again. A version the store
+   * does not keep is an error.
+   */
+  readHold(sourceId: string, version: number): Promise<VersionHold | null>;
+  /**
+   * Holds the version, in one statement: the name the response gave, and `probeAt` as the next
+   * probe's time unless the version is already held, whose probe time is kept, so every worker of a
+   * fleet keeps one probe time. Answers the probe time the store holds. A version the store does
+   * not keep is an error.
+   */
+  setHold(sourceId: string, version: number, named: string, probeAt: number): Promise<number>;
+  /** Lets the version go, in one statement: a response named the held model again. */
+  clearHold(sourceId: string, version: number): Promise<void>;
+  /**
+   * Claims the held version's probe at `now`, in one statement that moves the probe time to
+   * `next` only where it is `now` or earlier: of several workers asking at once, one is answered
+   * `claimed`. A version the store does not keep is an error.
+   */
+  claimProbe(sourceId: string, version: number, now: number, next: number): Promise<ProbeClaim>;
 };
+
+/** A held version as the store keeps it. */
+export type VersionHold = {
+  /** The model the version is held to: the one its first answer named. */
+  readonly held: string;
+  /** The model the holding response named instead. */
+  readonly named: string;
+  /** When the next probe may be asked (ms, on the workers' clock). */
+  readonly probeAt: number;
+};
+
+/** How a probe claim ended. */
+export type ProbeClaim =
+  /** This worker asks the probe; the next one is due at the `next` it passed. */
+  | { readonly kind: "claimed" }
+  /**
+   * Another worker took the probe, or its time has not come: the store's probe time as this
+   * statement read it (at or before `now` when the other claim committed while it ran).
+   */
+  | { readonly kind: "taken"; readonly probeAt: number }
+  /** No longer held: a response named the held model again. */
+  | { readonly kind: "released" };

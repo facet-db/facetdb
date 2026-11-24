@@ -119,12 +119,12 @@ async function rig() {
   });
   const spend = countingGate();
   /** A source's loop under `version`: its worker and the held model it shares, as the CLI opens one. */
-  const loopAt = (
+  const loopAt = async (
     version: number,
     questionSet = SCAM_ONLY,
     options: { readonly actions?: WorkerDeps["actions"]; readonly heldModel?: HeldModel } = {},
   ) => {
-    const heldModel = options.heldModel ?? holdModel(models, SOURCE_ID, version, clock);
+    const heldModel = options.heldModel ?? (await holdModel(models, SOURCE_ID, version, clock));
     const worker = createWorker({
       connector,
       provider,
@@ -178,7 +178,7 @@ async function untilQuiet(worker: { runOnce(): Promise<{ readonly claimed: numbe
 describe("a response naming another model than its version's", () => {
   it("never reaches the log or the record, and the record waits in the queue for the held model", async () => {
     const r = await rig();
-    const { worker, heldModel } = r.loopAt(3);
+    const { worker, heldModel } = await r.loopAt(3);
     r.edit(["a"]);
     expect((await worker.runOnce()).written).toEqual(["a"]);
     // The version's first answer named the model it is held to.
@@ -214,7 +214,7 @@ describe("a response naming another model than its version's", () => {
 
   it("@timing holds the source: one paid call per 5 minutes while 30 wait, all asked once the held model answers", async () => {
     const r = await rig();
-    const { worker } = r.loopAt(3);
+    const { worker } = await r.loopAt(3);
     r.edit(["a"]);
     await worker.runOnce();
 
@@ -280,7 +280,7 @@ describe("a response naming another model than its version's", () => {
 
   it("asks every waiting record when a reload starts the loop under a new version, which holds its own name", async () => {
     const r = await rig();
-    const old = r.loopAt(3);
+    const old = await r.loopAt(3);
     r.edit(["a"]);
     await old.worker.runOnce();
     r.provider.served = OTHER;
@@ -292,7 +292,7 @@ describe("a response naming another model than its version's", () => {
 
     // The fix the alert names: facetdb.config.ts names the model the server serves, and the reload
     // opens the source's loop under a new version, with nothing handed over but the queue.
-    const reloaded = r.loopAt(4, { ...SCAM_ONLY, model: OTHER });
+    const reloaded = await r.loopAt(4, { ...SCAM_ONLY, model: OTHER });
     const before = r.provider.requests.length;
     // Every waiting record, the ones asked once already among them.
     await untilQuiet(reloaded.worker);
@@ -320,7 +320,7 @@ describe("a response naming another model than its version's", () => {
           ? Promise.reject(new ActionNotQueued("the store refused the action row"))
           : Promise.resolve(),
     };
-    const { worker, heldModel } = r.loopAt(3, SCAM_ONLY, { actions: [refusing] });
+    const { worker, heldModel } = await r.loopAt(3, SCAM_ONLY, { actions: [refusing] });
     r.edit(["a"]);
     expect((await worker.runOnce()).written).toEqual(["a"]);
     r.provider.served = OTHER;
@@ -343,7 +343,7 @@ describe("a response naming another model than its version's", () => {
 
   it("lets a check call see the hold and never take the loop's probe", async () => {
     const r = await rig();
-    const loop = r.loopAt(3);
+    const loop = await r.loopAt(3);
     r.edit(["a"]);
     await loop.worker.runOnce();
     r.provider.served = OTHER;
@@ -353,7 +353,7 @@ describe("a response naming another model than its version's", () => {
     const before = r.provider.requests.length;
 
     // A check call's worker over the loop's held model, at the very time its probe is due.
-    const check = r.loopAt(3, SCAM_ONLY, { heldModel: withoutProbe(loop.heldModel) });
+    const check = await r.loopAt(3, SCAM_ONLY, { heldModel: withoutProbe(loop.heldModel) });
     const pass = await check.worker.runOnce();
     expect(pass.claimed).toBe(0);
     expect(pass.heldUntil).toBe(loop.heldModel.probeAt);
@@ -367,7 +367,7 @@ describe("a response naming another model than its version's", () => {
 
   it("passes a response naming the held model with no extra request and no store call after the first", async () => {
     const r = await rig();
-    const { worker } = r.loopAt(3);
+    const { worker } = await r.loopAt(3);
     r.edit(["a", "b", "c", "d", "e"]);
     // Five lanes answer at once: their first answers share the one store call.
     expect((await worker.runOnce()).written).toHaveLength(5);
@@ -382,11 +382,11 @@ describe("a response naming another model than its version's", () => {
     const r = await rig();
     const keys = ["a", "b", "c"];
     r.edit(keys);
-    await r.loopAt(3).worker.runOnce();
+    await (await r.loopAt(3)).worker.runOnce();
     // The added question's version 4 was first answered by the held model, which is now swapped.
     r.models.held.set(`${SOURCE_ID}@v4`, HELD);
     r.provider.served = OTHER;
-    const loop = r.loopAt(4, SCAM_AND_SPAM);
+    const loop = await r.loopAt(4, SCAM_AND_SPAM);
     const before = keys.map((key) => r.db.decisionOf(key));
     const logged = await r.log.count();
     const asked = r.provider.requests.length;

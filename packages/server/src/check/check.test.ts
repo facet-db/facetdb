@@ -540,7 +540,7 @@ describe("POST /v1/check when the answer does not come", () => {
     // The loop's held model, on a clock of its own started where the rig's starts: version 1 was
     // first answered by jev-1.14.0, and a minute later the server answered as another model.
     const loopClock = new FakeClock(1_700_000_000_000);
-    const loop = holdModel(new FakeVersionModels(), SOURCE_ID, 1, loopClock);
+    const loop = await holdModel(new FakeVersionModels(), SOURCE_ID, 1, loopClock);
     await loop.check("jev-1.14.0");
     loopClock.advance(60_000);
     await loop.check("strands-decider-7b");

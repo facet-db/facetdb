@@ -600,8 +600,8 @@ export async function runWorkers(
   /**
    * Registers a source and records its question set: a new version only when the set's content
    * changed (`store.questionSets.record`), at start and when a reload restarts it. The set in force
-   * is written apart, by `inForce`, once the whole loop has opened. The loop's held model is read
-   * from the store at its first answer, never here.
+   * is written apart, by `inForce`, once the whole loop has opened. The loop's hold is read here,
+   * before its first claim: a source another worker holds opens held.
    */
   async function start(
     source: SourceConfig,
@@ -610,7 +610,8 @@ export async function runWorkers(
   ): Promise<{ readonly version: number; readonly heldModel: HeldModel }> {
     await store.ensureSource({ projectId: project.id, name: source.name, kind });
     const { version } = await store.questionSets.record(idOf(source), questionSet);
-    return { version, heldModel: holdModel(store.questionSets, idOf(source), version, clock) };
+    const heldModel = await holdModel(store.questionSets, idOf(source), version, clock);
+    return { version, heldModel };
   }
 
   /**

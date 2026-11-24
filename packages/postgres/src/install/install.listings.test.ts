@@ -81,11 +81,16 @@ describe("the printed install script and the store's tables", () => {
           storeGrants.filter((statement) => statement.endsWith(`to "${WORKER_ROLE}"`)),
           storeGrants.filter((statement) => !statement.endsWith(`to "${WORKER_ROLE}"`)),
         ];
-        // One grant per store object, and store migration 11's one column: a version's model, the
-        // only column of an append-only log the worker updates.
-        const setOnce = `grant update ("answered_by") on "facetdb"."question_set_versions" to "${WORKER_ROLE}"`;
-        expect(toWorker).toContain(setOnce);
-        expect(toWorker.filter((statement) => statement !== setOnce)).toHaveLength(
+        // One grant per store object, and the columns of an append-only log the worker updates: a
+        // version's model (store migration 11) and its hold (store migration 12).
+        const columns = [
+          `grant update ("answered_by") on "facetdb"."question_set_versions" to "${WORKER_ROLE}"`,
+          `grant update ("held_by", "probe_at") on "facetdb"."question_set_versions" to "${WORKER_ROLE}"`,
+        ];
+        for (const grant of columns) {
+          expect(toWorker).toContain(grant);
+        }
+        expect(toWorker.filter((statement) => !columns.includes(statement))).toHaveLength(
           storeNames.length,
         );
         for (const statement of storeGrants) {

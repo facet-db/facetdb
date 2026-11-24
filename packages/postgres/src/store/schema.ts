@@ -502,6 +502,25 @@ end $$`,
       ),
     ],
   },
+  {
+    version: 12,
+    statements: [
+      // A version's hold, kept in the store so a restarted or second worker starts held and one
+      // probe serves every worker: the name the holding response gave, and when the next probe may
+      // go (ms on the workers' clock). Both null while the version is not held. Nullable, with no
+      // default: adding them rewrites no row and takes only the brief lock an added column takes.
+      unlessColumn(
+        "facetdb.question_set_versions",
+        "held_by",
+        `alter table facetdb.question_set_versions add column held_by text`,
+      ),
+      unlessColumn(
+        "facetdb.question_set_versions",
+        "probe_at",
+        `alter table facetdb.question_set_versions add column probe_at bigint`,
+      ),
+    ],
+  },
 ];
 
 /** The migration that rekeys every source id to `<project>:<name>`. */
@@ -573,7 +592,8 @@ export const STORE_TABLES: readonly string[] = [
  * The store's append-only logs: the decision log and the question-set versions are only ever read
  * and inserted into (a correction is a new row), so the worker login holds select and insert on
  * them and nothing more. Only the admin's `uninstall
- * --purge` deletes from them. The one exception is a column, `STORE_WORKER_SET_ONCE_COLUMN`.
+ * --purge` deletes from them. The exceptions are columns: `STORE_WORKER_SET_ONCE_COLUMN` and
+ * `STORE_WORKER_HOLD_COLUMNS`.
  */
 export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versions", "decisions"];
 
@@ -584,6 +604,15 @@ export const STORE_APPEND_ONLY_TABLES: readonly string[] = ["question_set_versio
 export const STORE_WORKER_SET_ONCE_COLUMN = {
   table: "question_set_versions",
   column: "answered_by",
+} as const;
+
+/**
+ * A version's hold (store migration 12): set, cleared and its probe claimed by the workers, so the
+ * worker login holds update on these columns of the versions too, and on no other.
+ */
+export const STORE_WORKER_HOLD_COLUMNS = {
+  table: "question_set_versions",
+  columns: ["held_by", "probe_at"],
 } as const;
 
 /**

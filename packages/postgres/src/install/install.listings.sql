@@ -474,6 +474,26 @@ end $$;
 
 insert into facetdb.store_migrations (version) values (11) on conflict (version) do nothing;
 
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.question_set_versions') and attname = 'held_by'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.question_set_versions add column held_by text;
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_attribute
+                  where attrelid = to_regclass('facetdb.question_set_versions') and attname = 'probe_at'
+                    and attnum > 0 and not attisdropped) then
+    alter table facetdb.question_set_versions add column probe_at bigint;
+  end if;
+end $$;
+
+insert into facetdb.store_migrations (version) values (12) on conflict (version) do nothing;
+
 create table if not exists "facetdb"."table_owners" (
   table_schema text not null,
   table_name text not null,
@@ -699,6 +719,8 @@ begin
 end $$;
 
 grant update ("answered_by") on "facetdb"."question_set_versions" to "facetdb_worker";
+
+grant update ("held_by", "probe_at") on "facetdb"."question_set_versions" to "facetdb_worker";
 
 grant select on "facetdb"."store_migrations" to "facetdb_worker";
 
