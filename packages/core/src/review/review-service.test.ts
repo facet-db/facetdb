@@ -344,7 +344,7 @@ describe("decide: one door for a person's decision", () => {
     expect(t.queue.rows).toEqual([]);
     expect(t.notify.calls).toEqual([]);
     // Nothing to undo: the refused decision never stood.
-    expect(await t.service.undo("alice")).toEqual({ kind: "nothing" });
+    expect(await t.service.undo("alice", refOf(card), "scam")).toEqual({ kind: "nothing" });
   });
 
   it("refuses when the record changes between the read and the write: logged, not standing, card withdrawn", async () => {
@@ -432,7 +432,7 @@ describe("two viewers on different cards never collide", () => {
     expect(await reviewers("r2")).toEqual(["bob"]);
 
     // Alice's undo takes back her decision on r1 and leaves Bob's on r2 alone.
-    const undone = await t.service.undo("alice");
+    const undone = await t.service.undo("alice", refOf(alices), "scam");
     expect(undone).toMatchObject({ kind: "undone", status: "needs_review" });
     expect(t.db.decisionOf("r1")?.status).toBe("needs_review");
     expect(t.db.decisionOf("r2")?.status).toBe("done");
@@ -449,7 +449,7 @@ describe("undo: a logged withdrawal by the same reviewer", () => {
     expect(t.db.decisionOf("r1")?.status).toBe("done");
     t.clock.advance(5_000);
 
-    const result = await t.service.undo("alice");
+    const result = await t.service.undo("alice", refOf(card), "scam");
 
     expect(result).toEqual({
       kind: "undone",
@@ -485,8 +485,12 @@ describe("undo: a logged withdrawal by the same reviewer", () => {
     await t.service.decide("alice", ref, "scam", true);
     await t.service.decide("alice", ref, "team", "tech");
 
-    expect(await t.service.undo("alice")).toMatchObject({ kind: "undone", status: "needs_review" });
-    expect(await t.service.undo("alice")).toEqual({ kind: "nothing" });
+    expect(await t.service.undo("alice", ref, "team")).toMatchObject({
+      kind: "undone",
+      status: "needs_review",
+    });
+    expect(await t.service.undo("alice", ref, "team")).toEqual({ kind: "nothing" });
+    expect(await t.service.undo("alice", ref, "scam")).toEqual({ kind: "nothing" });
 
     // The first decision still stands; only the last was taken back.
     expect(t.db.decisionOf("r1")?.decisions["scam"]).toMatchObject({ value: true });
@@ -499,7 +503,10 @@ describe("undo: a logged withdrawal by the same reviewer", () => {
 
   it("has nothing to undo for a viewer who decided nothing", async () => {
     const t = setup();
-    expect(await t.service.undo("alice")).toEqual({ kind: "nothing" });
+    const hash = await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    expect(
+      await t.service.undo("alice", { source: SOURCE, key: "r1", stateHash: hash }, "scam"),
+    ).toEqual({ kind: "nothing" });
   });
 
   it("refuses an undo once the record changed: the decision already stopped standing", async () => {
@@ -509,11 +516,11 @@ describe("undo: a logged withdrawal by the same reviewer", () => {
     await t.service.decide("alice", refOf(card), "scam", true);
     t.db.edit("r1", { body: "Cheap car, edited" });
 
-    expect(await t.service.undo("alice")).toMatchObject({
+    expect(await t.service.undo("alice", refOf(card), "scam")).toMatchObject({
       kind: "stale",
       reason: expect.stringMatching(/edited/),
     });
-    expect(await t.service.undo("alice")).toEqual({ kind: "nothing" });
+    expect(await t.service.undo("alice", refOf(card), "scam")).toEqual({ kind: "nothing" });
     expect((await t.history("r1")).filter((entry) => entry.kind === "human")).toHaveLength(1);
   });
 
@@ -522,7 +529,7 @@ describe("undo: a logged withdrawal by the same reviewer", () => {
     await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
     const card = await openOrFail(t.service, "alice");
     await t.service.decide("alice", refOf(card), "scam", true);
-    const undone = await t.service.undo("alice");
+    const undone = await t.service.undo("alice", refOf(card), "scam");
     if (undone.kind !== "undone" || undone.card === null) {
       throw new Error("the undo did not return the card");
     }

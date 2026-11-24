@@ -643,6 +643,66 @@ describe("facetdb review: the keys", () => {
     expect(lockOf(w, "r1")).toBeNull();
   });
 
+  it("u names this session's own decision: one made since in another window under the same name is not taken back", async () => {
+    const w = world();
+    await w.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    const r2 = await w.seed("r2", "A flat", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    // While the terminal shows r2, a studio tab of the same OS user decides it.
+    const elsewhere = async () => {
+      await w.service.decide(REVIEWER, { source: SOURCE, key: "r2", stateHash: r2 }, "scam", true);
+    };
+
+    const result = await w.run([], ["y", { probe: elsewhere }, "u", "q"]);
+
+    // The words, unwrapped from the terminal's width.
+    expect(result.stdout.replace(/\s+/g, " ")).toContain(
+      "Nothing to undo: that decision is not your last one, and only your last decision can be taken back.",
+    );
+    expect((await w.humans("r1")).map((entry) => isWithdrawal(entry.value))).toEqual([false]);
+    expect((await w.humans("r2")).map((entry) => isWithdrawal(entry.value))).toEqual([false]);
+    // The other window's decision is still its own to take back.
+    expect(
+      await w.service.undo(REVIEWER, { source: SOURCE, key: "r2", stateHash: r2 }, "scam"),
+    ).toMatchObject({ kind: "undone" });
+  });
+
+  it("u while another reviewer holds the card takes nothing back and can be pressed again", async () => {
+    const w = world();
+    await w.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: UNSURE_TEAM });
+    const bobTakes = async () => {
+      await w.queue.release(SOURCE, "r1", REVIEWER);
+      await w.queue.lock(SOURCE, "r1", "bob", w.clock.now());
+    };
+    const bobLetsGo = () => w.queue.release(SOURCE, "r1", "bob");
+
+    const result = await w.run([], ["y", { probe: bobTakes }, "u", { probe: bobLetsGo }, "u", "q"]);
+
+    const said = result.stdout.replace(/\s+/g, " ");
+    expect(said).toMatch(/Not undone: bob holds this card until .*\. Press u again after that\./);
+    expect(said).toContain("Took back your last decision. It is logged as withdrawn.");
+    expect((await w.humans("r1")).map((entry) => isWithdrawal(entry.value))).toEqual([false, true]);
+  });
+
+  it("at the end of the review, u on a card another reviewer holds offers the undo again", async () => {
+    const w = world();
+    await w.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: UNSURE_TEAM });
+    const bobTakes = async () => {
+      await w.queue.lock(SOURCE, "r1", "bob", w.clock.now());
+    };
+    const bobLetsGo = () => w.queue.release(SOURCE, "r1", "bob");
+
+    // y decides scam, s skips the card, and the queue holds nothing else: the review is over.
+    const result = await w.run(
+      [],
+      ["y", "s", { probe: bobTakes }, "u", { probe: bobLetsGo }, "u", "q"],
+    );
+
+    const said = result.stdout.replace(/\s+/g, " ");
+    expect(said).toMatch(/Not undone: bob holds this card until .*\. Press u again after that\./);
+    expect(said).toContain("Took back your last decision. It is logged as withdrawn.");
+    expect((await w.humans("r1")).map((entry) => isWithdrawal(entry.value))).toEqual([false, true]);
+  });
+
   it("q quits and releases the lock; so do ctrl-c and the end of the input", async () => {
     for (const ending of [["q"], ["ctrl-c"], ["ctrl-d"], []]) {
       const w = world();

@@ -67,6 +67,15 @@ const decideBody = z.strictObject({
 const DECIDE_SHAPE =
   '{"source", "stateHash", "question", "value", "note"} with source and stateHash as the card said them, value true or false for a yes-or-no question and an option or level name otherwise, and note optional';
 
+/** The decision an undo takes back, as the card and the decision said it: the key rides in the body. */
+const undoBody = z.strictObject({
+  ...cardBody,
+  key: z.string().min(1),
+  question: z.string().min(1),
+});
+const UNDO_SHAPE =
+  '{"source", "key", "stateHash", "question"}: the card and the question of your last decision, as the card said them';
+
 async function parsed<Schema extends z.ZodType>(
   schema: Schema,
   request: { json(): Promise<unknown> },
@@ -201,14 +210,22 @@ export function reviewRoutes(service: ReviewEndpointService): Hono<AppEnv> {
     }
   });
 
-  // The undo is the reviewer's last decision of this session: no body, nothing to name.
+  // The undo names the decision it takes back: every tab of a reviewer, and the OS user, share one
+  // name, so only the page or terminal that made the decision can name it.
   route.post("/review/undo", async (c) => {
-    const outcome = await service.undo(c.get("reviewer"));
+    const body = await parsed(undoBody, c.req, UNDO_SHAPE);
+    const outcome = await service.undo(
+      c.get("reviewer"),
+      { source: body.source, key: body.key, stateHash: body.stateHash },
+      body.question,
+    );
     switch (outcome.kind) {
       case "undone": {
         const { kind: _kind, ...undone } = outcome;
         return c.json(undone);
       }
+      case "held":
+        throw held(outcome.by, outcome.until);
       case "nothing":
         throw new ApiError(
           409,
@@ -220,9 +237,11 @@ export function reviewRoutes(service: ReviewEndpointService): Hono<AppEnv> {
         throw new ApiError(
           409,
           "cannot_undo",
-          `Your last decision stands: ${outcome.reason}.`,
+          `Nothing was undone: ${outcome.reason}.`,
           "Open the next card with POST /v1/review/open; to change a decision after that, decide the record again from its card.",
         );
+      case "unknown_source":
+        throw unknownSource(outcome.source, outcome.known);
     }
   });
 

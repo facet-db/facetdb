@@ -125,8 +125,9 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
   let decisions = 0;
   let skipped = 0;
   let undone = 0;
-  // Whether a decision of this session can still be taken back (the service remembers one).
-  let canUndo = false;
+  // The decision of this session that `u` can still take back, named to the service by its card and
+  // question: a decision made in another window under the same name is not this one.
+  let lastDecision: { readonly card: CardRef; readonly question: string } | undefined;
   // A key typed while the last one was handled must not decide the next question.
   let settle = true;
 
@@ -183,7 +184,7 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
    * back, `q` or the end of the input finishes.
    */
   async function finish(end: SessionEnd): Promise<void> {
-    if (!canUndo) {
+    if (lastDecision === undefined) {
       state.ended = end;
       return;
     }
@@ -202,11 +203,16 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
       }
       const typed = event.key.toLowerCase();
       if (typed === "u") {
-        await undo(undefined);
-        // A card that came back is in hand and the review goes on; otherwise it is over.
-        if (state.current === undefined) {
-          state.ended = end;
+        const stillUndoable = await undo(undefined);
+        // A card that came back is in hand and the review goes on; a decision still there to take
+        // back (another reviewer held its card) is offered again; otherwise it is over.
+        if (state.current !== undefined) {
+          return;
         }
+        if (stillUndoable) {
+          continue;
+        }
+        state.ended = end;
         return;
       }
       if (typed === "q" || typed === "ctrl-c" || typed === "ctrl-d") {
@@ -285,7 +291,7 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
     switch (result.kind) {
       case "decided": {
         decisions += 1;
-        canUndo = true;
+        lastDecision = { card: refOf(shown.card), question: name };
         const words = `${name}: ${chosenWords(value)}. Written to the record and logged for ${reviewer}.`;
         say(`${words}\n`);
         for (const failure of result.failures) {
@@ -339,21 +345,38 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
     state.current = undefined;
   }
 
-  /** `shown` is the card in hand, if any: it is let go of when undo brings another one back. */
-  async function undo(shown: Shown | undefined): Promise<void> {
-    const result = await service.undo(reviewer);
+  /**
+   * `shown` is the card in hand, if any: it is let go of when undo brings another one back. True
+   * when the decision can still be taken back: another reviewer held its card, so nothing was.
+   */
+  async function undo(shown: Shown | undefined): Promise<boolean> {
+    const named = lastDecision;
+    if (named === undefined) {
+      say(
+        "Nothing to undo: only your last decision of this session can be taken back, and only once.\n",
+      );
+      return false;
+    }
+    const result = await service.undo(reviewer, named.card, named.question);
     settle = true;
-    // Whatever it said, the service has forgotten the decision: only the last one, once.
-    canUndo = false;
+    if (result.kind === "held") {
+      // Nothing was written, and the decision can still be taken back once their hold ends.
+      say(
+        `Not undone: ${oneLine(result.by)} holds this card until ${whenUtc(result.until)}. Press u again after that.\n`,
+      );
+      return true;
+    }
+    // Whatever else it said, the decision can no longer be taken back: only the last one, once.
+    lastDecision = undefined;
     switch (result.kind) {
       case "nothing":
         say(
           "Nothing to undo: only your last decision of this session can be taken back, and only once.\n",
         );
-        return;
+        return false;
       case "stale":
         say(`Nothing to undo: ${result.reason}.\n`);
-        return;
+        return false;
       case "undone": {
         undone += 1;
         say("Took back your last decision. It is logged as withdrawn.\n");
@@ -364,14 +387,14 @@ export async function reviewSession(deps: SessionDeps): Promise<SessionResult> {
           say(
             "The card did not come back to you: the thresholds decide it now, or another reviewer has it.\n",
           );
-          return;
+          return false;
         }
         if (shown !== undefined && idOf(result.card) !== idOf(shown.card)) {
           await service.release(reviewer, shown.card);
         }
         state.current = hold(result.card);
         show(state.current);
-        return;
+        return false;
       }
     }
   }

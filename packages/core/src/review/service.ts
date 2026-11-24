@@ -117,9 +117,10 @@ export type DecideResult =
  * What an undo did. `undone`: the withdrawal was logged and written, the actions ran again, and
  * the card is back in the queue, opened for the viewer (`card`, null when the thresholds now decide
  * the question or another reviewer holds it). `nothing`: the viewer has no decision of this
- * session left to undo (only the last one can be, once). `stale`: the decision no longer stands
- * (the record changed, or another decision replaced it), so there is nothing to take back; `reason`
- * says which, in words.
+ * session left to undo (only the last one can be, once). `stale`: the decision named is not the
+ * viewer's last one, or it no longer stands (the record changed, or another decision replaced it),
+ * so there is nothing to take back; `reason` says which, in words. `held`: another reviewer holds
+ * the card; nothing was written and the decision can still be undone once they let it go.
  */
 export type UndoResult =
   | {
@@ -129,13 +130,16 @@ export type UndoResult =
       readonly failures: readonly ReviewActionFailure[];
     }
   | { readonly kind: "nothing" }
-  | { readonly kind: "stale"; readonly reason: string };
+  | { readonly kind: "stale"; readonly reason: string }
+  | { readonly kind: "held"; readonly by: string; readonly until: Date };
 
 // The reasons a card or an undo no longer applies, in the words the screen and the terminal show.
 const EDITED =
   "the record was edited while the card was open, so it left the queue to be asked again";
 const REASKED =
   "the record is waiting for the model to answer it again, so its card left the queue";
+const NOT_LAST =
+  "that decision is not your last one, and only your last decision can be taken back";
 
 /**
  * What opening a named card did. `opened`: locked for the viewer. `held`: another reviewer's lease
@@ -166,8 +170,13 @@ export type ReviewService = {
   skip(viewer: string, card: CardRef): Promise<void>;
   /** Lets go of the viewer's lease, so another reviewer may open the card. */
   release(viewer: string, card: CardRef): Promise<void>;
-  /** Takes back the viewer's last decision of this session. */
-  undo(viewer: string): Promise<UndoResult>;
+  /**
+   * Takes back the viewer's last decision of this session, named by the card and the question it
+   * decided: refused unless they are that decision, and while another reviewer holds the card.
+   */
+  undo(viewer: string, card: CardRef, question: string): Promise<UndoResult>;
+  /** The viewer signed out: their last decision can no longer be undone. */
+  forget(viewer: string): void;
 };
 
 /** The viewer's last decision of this session: what an undo takes back. */
@@ -216,11 +225,16 @@ type Source = {
  * The review screen's and the terminal's one door to human decisions. Every decision and every undo
  * goes through `applyHumanDecision`, which logs first and writes second under the hash check; the
  * service never writes a decision around it. The undo memory is the viewer's last decision while
- * this service runs: a session's.
+ * this service runs: a session's. It is kept by the viewer's name, which is all a request carries
+ * (the studio's cookie is the same in every tab, and the OS user has none), so an undo names the
+ * decision it takes back, as the page or terminal that made it remembers it, and is refused for any
+ * other.
  */
 export function createReviewService(deps: ReviewServiceDeps): ReviewService {
   const { queue, clock } = deps;
   const lastDecisions = new Map<string, LastDecision>();
+  /** Each viewer's undo in flight: a second one waits for it, so a decision is withdrawn once. */
+  const undoing = new Map<string, Promise<unknown>>();
 
   function sourceOf(source: string): Source | undefined {
     const log = deps.log.get(source);
@@ -660,22 +674,102 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     await queue.release(card.source, card.key, viewer);
   }
 
-  async function undo(viewer: string): Promise<UndoResult> {
+  /**
+   * One viewer's undos run one after another: two tabs sending the same last decision at once would
+   * otherwise both pass the memory and the log's check before either withdrawal landed, and log it
+   * twice. The second finds the memory spent.
+   */
+  function undo(viewer: string, card: CardRef, question: string): Promise<UndoResult> {
+    const before = undoing.get(viewer) ?? Promise.resolve();
+    const run = before.then(() => undoLast(viewer, card, question));
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    undoing.set(viewer, settled);
+    void settled.then(() => {
+      if (undoing.get(viewer) === settled) {
+        undoing.delete(viewer);
+      }
+    });
+    return run;
+  }
+
+  function forget(viewer: string): void {
+    lastDecisions.delete(viewer);
+  }
+
+  /**
+   * The card's lease for an undo, taken before anything is written: the viewer's own, renewed; or
+   * taken now when theirs ended and nobody else holds the card (`taken`, so an undo that writes
+   * nothing lets go of it again); or none when the card left the queue (the decision closed the
+   * record), which the withdrawal brings back. `held` while another reviewer's lease is live.
+   */
+  async function leaseForUndo(
+    viewer: string,
+    card: CardRef,
+  ): Promise<
+    | { readonly kind: "held"; readonly by: string; readonly until: Date }
+    | { readonly kind: "leased"; readonly taken: boolean }
+  > {
+    const nowMs = clock.now();
+    const renewed = await queue.renew(card.source, card.key, viewer, nowMs);
+    if (renewed.kind === "held") {
+      return renewed;
+    }
+    if (renewed.kind !== "lost") {
+      return { kind: "leased", taken: false };
+    }
+    const locked = await queue.lock(card.source, card.key, viewer, nowMs);
+    if (locked.kind === "held") {
+      return locked;
+    }
+    return { kind: "leased", taken: locked.kind === "locked" };
+  }
+
+  async function undoLast(viewer: string, card: CardRef, question: string): Promise<UndoResult> {
     const last = lastDecisions.get(viewer);
     if (last === undefined) {
       return { kind: "nothing" };
     }
-    const { card, question } = last;
+    if (
+      last.card.source !== card.source ||
+      last.card.key !== card.key ||
+      last.card.stateHash !== card.stateHash ||
+      last.question !== question
+    ) {
+      // Nothing is written and the memory stays: the page or terminal that made it may still ask.
+      return { kind: "stale", reason: NOT_LAST };
+    }
+    /** Spends the memory, unless a newer decision of the viewer replaced it meanwhile. */
+    const spend = () => {
+      if (lastDecisions.get(viewer) === last) {
+        lastDecisions.delete(viewer);
+      }
+    };
     const source = requireSource(card.source);
+    const lease = await leaseForUndo(viewer, card);
+    if (lease.kind === "held") {
+      // Nothing written, and the memory kept: the undo can be asked again once their hold ends.
+      return lease;
+    }
+    /** An undo that writes nothing gives back a lease it took itself; the viewer's own stays. */
+    const letGo = async () => {
+      if (lease.taken) {
+        await queue.release(card.source, card.key, viewer);
+      }
+    };
     // The decision may have closed the record, so a done record is taken back too.
     const loaded = await load(source, card, ["needs_review", "done"]);
     if ("stale" in loaded) {
-      lastDecisions.delete(viewer);
+      spend();
+      await letGo();
       return { kind: "stale", reason: loaded.stale };
     }
     const standing = standingHuman(loaded.history, question, card.stateHash);
     if (standing?.reviewer !== viewer || standing.at.getTime() !== last.at.getTime()) {
-      lastDecisions.delete(viewer);
+      spend();
+      await letGo();
       return {
         kind: "stale",
         reason: "another decision on this question replaced yours, so there is nothing to undo",
@@ -693,16 +787,17 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     };
     // Only the last decision of the session can be undone, and only once: spent as the withdrawal
     // lands, before the queue follows it, and in any case once the door returns.
-    const applied = await apply(source, card, withdrawal, loaded, () => {
-      lastDecisions.delete(viewer);
-    });
-    lastDecisions.delete(viewer);
+    const applied = await apply(source, card, withdrawal, loaded, spend);
+    spend();
     if (applied === undefined) {
+      await letGo();
       return { kind: "stale", reason: EDITED };
     }
     const written = applied.decision;
     let reopened: OpenedCard | null = null;
     if (written.status === "needs_review") {
+      // The viewer's lease, renewed; or, for a card the decision had closed, taken now that the
+      // withdrawal put it back (another reviewer may have opened it in between: then it is theirs).
       const lock = await queue.lock(card.source, card.key, viewer, clock.now());
       if (lock.kind === "locked") {
         // The card shows what the last write was judged on: a newer answer's questions with it.
@@ -724,7 +819,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     return { kind: "undone", status: written.status, card: reopened, failures };
   }
 
-  return { open, openKey, renew, decide, skip, release, undo };
+  return { open, openKey, renew, decide, skip, release, undo, forget };
 }
 
 function hasOpenQuestion(decisions: Readonly<Record<string, Decision>>): boolean {

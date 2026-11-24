@@ -1759,9 +1759,10 @@ export function fakeApi(answers: Partial<ApiClient> = {}): FakeApi {
       noted("reviewRelease", card);
       return answer.reviewRelease(card);
     },
-    reviewUndo: () => {
-      calls.push("reviewUndo");
-      return answer.reviewUndo();
+    reviewUndo: (card, question) => {
+      calls.push(`reviewUndo ${card.key} ${question}`);
+      noted("reviewUndo", card);
+      return answer.reviewUndo(card, question);
     },
     home: () => {
       calls.push("home");

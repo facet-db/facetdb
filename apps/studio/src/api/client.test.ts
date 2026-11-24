@@ -166,15 +166,20 @@ describe("the review calls", () => {
     expect(t.sent.map((one) => one.init?.keepalive === true)).toEqual([false, false, false, true]);
   });
 
-  it("undoes with an empty body and refuses an answer that is not a card", async () => {
+  it("undoes the decision it names and refuses an answer that is not a card", async () => {
     const t = recording(() => json({ status: "needs_review", card: null, failedActions: [] }));
-    expect(await createApiClient(t.fetch).reviewUndo()).toEqual({
+    const card = { source: "support_messages", key: "a/b 1", stateHash: "h-1" };
+    expect(await createApiClient(t.fetch).reviewUndo(card, "urgency")).toEqual({
       status: "needs_review",
       card: null,
       failedActions: [],
     });
     expect(t.sent.map((one) => [one.init?.method, one.path, one.init?.body])).toEqual([
-      ["POST", "/v1/review/undo", "{}"],
+      [
+        "POST",
+        "/v1/review/undo",
+        '{"source":"support_messages","stateHash":"h-1","key":"a/b 1","question":"urgency"}',
+      ],
     ]);
     const wrong = recording(() => json({ card: { source: "x" } }));
     await expect(createApiClient(wrong.fetch).reviewOpen()).rejects.toMatchObject({

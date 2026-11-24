@@ -192,7 +192,9 @@ export type UndoOutcome =
       readonly failedActions: readonly string[];
     }
   | { readonly kind: "nothing" }
-  | { readonly kind: "stale"; readonly reason: string };
+  | { readonly kind: "stale"; readonly reason: string }
+  | { readonly kind: "held"; readonly by: string; readonly until: string }
+  | UnknownSource;
 
 /**
  * The review endpoints' one service. The `viewer` of every call is the reviewer's name from the
@@ -207,7 +209,10 @@ export type ReviewEndpointService = {
   decide(viewer: string, card: CardTarget, decision: DecisionInput): Promise<DecideOutcome>;
   skip(viewer: string, card: CardTarget): Promise<LetGoOutcome>;
   release(viewer: string, card: CardTarget): Promise<LetGoOutcome>;
-  undo(viewer: string): Promise<UndoOutcome>;
+  /** Takes back the reviewer's last decision, named by its card and question. */
+  undo(viewer: string, card: CardTarget, question: string): Promise<UndoOutcome>;
+  /** The reviewer signed out: nothing of theirs is left to undo. */
+  forget(viewer: string): void;
 };
 
 const iso = (at: Date) => at.toISOString();
@@ -464,8 +469,12 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
     return { kind: "done" };
   }
 
-  async function undo(viewer: string): Promise<UndoOutcome> {
-    const result = await core.undo(viewer);
+  async function undo(viewer: string, card: CardTarget, question: string): Promise<UndoOutcome> {
+    const resolved = target(card);
+    if ("kind" in resolved) {
+      return resolved;
+    }
+    const result = await core.undo(viewer, cardRef(card, resolved.source), question);
     switch (result.kind) {
       case "undone":
         return {
@@ -474,13 +483,19 @@ export function createReviewEndpointService(deps: ReviewEndpointDeps): ReviewEnd
           card: result.card === null ? null : cardView(result.card),
           failedActions: result.failures.map((failure) => failure.action),
         };
+      case "held":
+        return { kind: "held", by: result.by, until: iso(result.until) };
       case "nothing":
       case "stale":
         return result;
     }
   }
 
-  return { queue, open, renew, decide, skip, release, undo };
+  function forget(viewer: string): void {
+    core.forget(viewer);
+  }
+
+  return { queue, open, renew, decide, skip, release, undo, forget };
 }
 
 /** The top option and every option with the probability the model gave it. */

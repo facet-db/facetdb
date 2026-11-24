@@ -23,8 +23,8 @@ import { plainTimes, RENEW_EVERY_MS, valueWords } from "./words.ts";
  * - The hold is renewed every minute while the card is open. The renewal
  *   stops when the card is left or its hold is lost, and a lost hold is said in words at once.
  * - The card is released when the reviewer leaves, quits, changes the filter or the page closes.
- * - `u` undoes only a decision this page made: the page remembers its last one and offers nothing
- *   else (the server's undo memory follows the reviewer's name, not the session).
+ * - `u` undoes only a decision this page made: the page remembers its last one and names it to the
+ *   server, which refuses any but the reviewer's last decision.
  */
 
 /** A line the page says: a confirmation, or a warning that needs reading. */
@@ -71,7 +71,7 @@ export type ReviewCalls = {
   ) => Promise<ReviewDecided>;
   readonly skip: (card: ReviewCardId) => Promise<void>;
   readonly release: (card: ReviewCardId) => Promise<void>;
-  readonly undo: () => Promise<ReviewUndone>;
+  readonly undo: (card: ReviewCardId, question: string) => Promise<ReviewUndone>;
 };
 
 export type ReviewDeps = {
@@ -104,9 +104,9 @@ type Life = {
   /** The card to give back once what was in flight when the page was left has settled. */
   giveBack: ReviewCardId | null;
 };
+/** The page's own last decision: the card it was made on and its question, what an undo names. */
 type LastDecision = {
-  readonly source: string;
-  readonly key: string;
+  readonly card: ReviewCardId;
   readonly question: string;
   readonly said: string;
 };
@@ -391,7 +391,7 @@ export function createReviewController(deps: () => ReviewDeps) {
     const wasDecided = card.decided.some((one) => one.name === question);
     const taken = standing !== undefined && !wasDecided && standing.value === value;
     if (taken) {
-      remember({ source: card.source, key: card.key, question, said: valueWords(value) });
+      remember({ card: idOf(card), question, said: valueWords(value) });
       deps().counted();
       notify(
         "information",
@@ -495,7 +495,7 @@ export function createReviewController(deps: () => ReviewDeps) {
         }
         return;
       }
-      remember({ source: card.source, key: card.key, question, said: valueWords(value) });
+      remember({ card: idOf(card), question, said: valueWords(value) });
       deps().counted();
       const reviewer = deps().reviewer();
       let words = `${question}: ${valueWords(value)}. Written to the record and logged for ${reviewer ?? "you"}.`;
@@ -578,9 +578,14 @@ export function createReviewController(deps: () => ReviewDeps) {
       }
       let result: ReviewUndone;
       try {
-        result = await deps().calls.undo();
+        result = await deps().calls.undo(before.card, before.question);
       } catch (error) {
         if (mine.cancelled || needsSignIn(error)) {
+          return;
+        }
+        if (error instanceof ApiError && error.code === "card_held") {
+          // Nothing was taken back, and the decision still can be once their hold ends.
+          notify("warning", `${plainTimes(error.message)} Press u again after that.`);
           return;
         }
         if (error instanceof ApiError && ["nothing_to_undo", "cannot_undo"].includes(error.code)) {
@@ -599,26 +604,8 @@ export function createReviewController(deps: () => ReviewDeps) {
       remember(null);
       deps().counted();
       const { card } = result;
-      const ownWords = `Undid your decision on ${before.question} (${before.said}) for ${before.source} ${before.key}. The record is back in review.`;
-      let words = ownWords;
-      if (card !== null) {
-        // What the surface undid is what its answer shows open again that the page did not know
-        // to be open: the question it names is not always the one this page decided last.
-        const onScreen = state.screen.kind === "card" ? state.screen.card : null;
-        const knownOpen =
-          onScreen !== null && sameRecord(onScreen, card)
-            ? onScreen.open.map((one) => one.name)
-            : [];
-        const undone = card.open.map((one) => one.name).filter((name) => !knownOpen.includes(name));
-        const ours =
-          sameRecord(card, before) && (undone.length === 0 || undone.includes(before.question));
-        if (!ours) {
-          const names = (undone.length === 0 ? card.open.map((one) => one.name) : undone).join(
-            ", ",
-          );
-          words = `Undid the decision on ${names} of ${card.source} ${card.key}${sameRecord(card, before) ? "" : ": it was made in another window"}. The record is back in review.`;
-        }
-      }
+      // The server takes back only the decision named, so the words are this page's own.
+      let words = `Undid your decision on ${before.question} (${before.said}) for ${before.card.source} ${before.card.key}. The record is back in review.`;
       if (result.failedActions.length > 0) {
         words += ` These actions failed afterwards: ${result.failedActions.join(", ")}.`;
       }

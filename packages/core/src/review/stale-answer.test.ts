@@ -466,7 +466,7 @@ describe("a person's decision while a newer answer is logged at the card's state
       ),
     );
 
-    const result = await t.service.undo("alice");
+    const result = await t.service.undo("alice", ref, "scam");
 
     expect(result).toMatchObject({ kind: "undone", status: "needs_review" });
     if (result.kind !== "undone") {

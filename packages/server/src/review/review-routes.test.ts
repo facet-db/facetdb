@@ -263,6 +263,13 @@ async function openCard(t: World, as: "os" | "maya" = "os") {
 
 const cardOf = (card: { stateHash: string }) => ({ source: SOURCE, stateHash: card.stateHash });
 
+/** An undo's body: the card and the question of the decision it takes back. */
+const undoOf = (card: { key: string; stateHash: string }, question: string) => ({
+  ...cardOf(card),
+  key: card.key,
+  question,
+});
+
 describe("who may review", () => {
   it("answers a request from elsewhere without a session with the sign-in error, on every route", async () => {
     const t = setup();
@@ -270,7 +277,10 @@ describe("who may review", () => {
     const sent = await Promise.all([
       t.send("GET", "/v1/review/queue", { as: "nobody" }),
       t.send("POST", "/v1/review/open", { body: {}, as: "nobody" }),
-      t.send("POST", "/v1/review/undo", { as: "nobody" }),
+      t.send("POST", "/v1/review/undo", {
+        body: { ...target, key: "r1", question: "scam" },
+        as: "nobody",
+      }),
       t.send("POST", "/v1/review/r1/renew", { body: target, as: "nobody" }),
       t.send("POST", "/v1/review/r1/decide", {
         body: { ...target, question: "scam", value: true },
@@ -966,7 +976,7 @@ describe("POST /v1/review/undo", () => {
     });
     expect(t.db.decisionOf("r1")?.status).toBe("done");
 
-    const undone = await t.send("POST", "/v1/review/undo");
+    const undone = await t.send("POST", "/v1/review/undo", { body: undoOf(card, "scam") });
 
     expect(undone.status).toBe(200);
     expect(undone.body).toMatchObject({
@@ -988,24 +998,31 @@ describe("POST /v1/review/undo", () => {
     // The actions ran again with the reopened record.
     expect(t.notify.calls.at(-1)?.record.status).toBe("needs_review");
     // Only the last decision, once.
-    const again = await t.send("POST", "/v1/review/undo");
+    const again = await t.send("POST", "/v1/review/undo", { body: undoOf(card, "scam") });
     expect(again.status).toBe(409);
     expect(again.body).toEqual(error("nothing_to_undo"));
   });
 
   it("has nothing to undo for a reviewer who decided nothing, whoever else did", async () => {
     const t = setup();
-    expect(await t.send("POST", "/v1/review/undo")).toMatchObject({
+    const hash = await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
+    expect(
+      await t.send("POST", "/v1/review/undo", {
+        body: undoOf({ key: "r1", stateHash: hash }, "scam"),
+      }),
+    ).toMatchObject({
       status: 409,
       body: error("nothing_to_undo"),
     });
-    await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
     const card = await openCard(t);
     await t.send("POST", "/v1/review/r1/decide", {
       body: { ...cardOf(card), question: "scam", value: true },
     });
 
-    const maya = await t.send("POST", "/v1/review/undo", { as: "maya" });
+    const maya = await t.send("POST", "/v1/review/undo", {
+      body: undoOf(card, "scam"),
+      as: "maya",
+    });
 
     expect(maya.status).toBe(409);
     expect(maya.body).toEqual(error("nothing_to_undo"));
@@ -1021,7 +1038,7 @@ describe("POST /v1/review/undo", () => {
     });
     t.db.edit("r1", { body: "Cheap car, edited" });
 
-    const undone = await t.send("POST", "/v1/review/undo");
+    const undone = await t.send("POST", "/v1/review/undo", { body: undoOf(card, "scam") });
 
     expect(undone.status).toBe(409);
     expect(undone.body).toEqual(error("cannot_undo"));
@@ -1064,7 +1081,7 @@ describe("a review write from a page of another site", () => {
     expect(own.status).toBe(200);
   });
 
-  it("undoes nothing, though undo takes no body", async () => {
+  it("undoes nothing, though the page's own body is sent", async () => {
     const t = setup();
     await t.seed("r1", "Cheap car", { scam: UNSURE_SCAM, team: SURE_BILLING });
     const card = await openCard(t, "maya");
@@ -1074,6 +1091,7 @@ describe("a review write from a page of another site", () => {
     });
     for (const forged of FORGED) {
       const undone = await t.send("POST", "/v1/review/undo", {
+        body: undoOf(card, "scam"),
         as: "maya",
         headers: forged.headers,
       });
@@ -1084,6 +1102,7 @@ describe("a review write from a page of another site", () => {
     }
     expect(t.db.decisionOf("r1")?.status).toBe("done");
     const own = await t.send("POST", "/v1/review/undo", {
+      body: undoOf(card, "scam"),
       as: "maya",
       headers: { "sec-fetch-site": "same-origin" },
     });
@@ -1110,7 +1129,7 @@ describe("no state for a card the reviewer does not hold", () => {
       }),
       await t.send("POST", "/v1/review/r1/skip", { body: cardOf(card), as: "maya" }),
       await t.send("POST", "/v1/review/r1/release", { body: cardOf(card), as: "maya" }),
-      await t.send("POST", "/v1/review/undo", { as: "maya" }),
+      await t.send("POST", "/v1/review/undo", { body: undoOf(card, "scam"), as: "maya" }),
       // The holder's own calls that are not the card: the queue lists it without its state, and
       // a decision answers the status alone.
       await t.send("GET", "/v1/review/queue"),

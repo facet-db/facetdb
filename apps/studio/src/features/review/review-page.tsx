@@ -41,7 +41,10 @@ function useReviewController(): ReviewController {
   });
   const skip = useMutation({ mutationFn: (card: ReviewCardId) => api.reviewSkip(card) });
   const release = useMutation({ mutationFn: (card: ReviewCardId) => api.reviewRelease(card) });
-  const undo = useMutation({ mutationFn: () => api.reviewUndo() });
+  const undo = useMutation({
+    mutationFn: (ask: { readonly card: ReviewCardId; readonly question: string }) =>
+      api.reviewUndo(ask.card, ask.question),
+  });
 
   const latest: ReviewDeps = {
     calls: {
@@ -50,7 +53,7 @@ function useReviewController(): ReviewController {
       decide: (card, decision) => decide.mutateAsync({ card, decision }),
       skip: skip.mutateAsync,
       release: release.mutateAsync,
-      undo: () => undo.mutateAsync(),
+      undo: (card, question) => undo.mutateAsync({ card, question }),
     },
     // A page that is closing cannot wait for the answer: the call asks the browser to finish it.
     closing: (card) => {

@@ -901,7 +901,7 @@ describe("what the page does on each refusal", () => {
     expect(button("Undo")).toBeEnabled();
     await user.keyboard("u");
     expect(await screen.findByText(/Undid your decision on urgency \(low\)/)).toBeInTheDocument();
-    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo"]);
+    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo 5521 urgency"]);
   });
 
   it("does not send the note of a decision that was taken after all with the next question's", async () => {
@@ -1032,7 +1032,9 @@ describe("undo", () => {
     expect(
       await screen.findByText(/Undid your decision on urgency \(low\) for support_messages 5521\./),
     ).toBeInTheDocument();
-    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo"]);
+    // The page names its own decision: the card it was made on and its question.
+    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo 5521 urgency"]);
+    expect(api.refs).toContain("reviewUndo support_messages/5521@h-5521");
     // The card is back with both questions open, and the card shown before is given back.
     expect(await screen.findByText("Charged twice")).toBeInTheDocument();
     expect(calls(api, "reviewRelease")).toEqual(["reviewRelease 5522"]);
@@ -1051,32 +1053,34 @@ describe("undo", () => {
     expect(await screen.findByText(/The card is not yours to hold now/)).toBeInTheDocument();
   });
 
-  it("says when the surface undid a decision made in another window", async () => {
-    const { user } = await openReview({
-      reviewDecide: () => Promise.resolve(STILL_OPEN),
-      reviewUndo: () =>
-        Promise.resolve({ status: "needs_review", card: NEXT_CARD, failedActions: [] }),
-    });
-    await user.keyboard("3");
-    await screen.findByText(/1 question is left/);
-    await user.keyboard("u");
-    expect(await screen.findByText(/it was made in another window/)).toBeInTheDocument();
-  });
-
-  it("shows the surface's refusal and offers no second undo", async () => {
-    const { user } = await openReview({
+  it("keeps the undo while another reviewer holds the card, and says so", async () => {
+    const { api, user } = await openReview({
       reviewDecide: () => Promise.resolve(STILL_OPEN),
       reviewUndo: () =>
         Promise.reject(
-          refusal(409, "cannot_undo", "Your last decision stands: the record changed."),
+          refusal(409, "card_held", "maya is reviewing this card until 2026-11-06T12:20:00.000Z."),
         ),
     });
     await user.keyboard("3");
     await screen.findByText(/1 question is left/);
     await user.keyboard("u");
     expect(
-      await screen.findByText(/Your last decision stands: the record changed\./),
+      await screen.findByText(/maya is reviewing this card until .*Press u again after that\./),
     ).toBeInTheDocument();
+    expect(button("Undo")).toBeEnabled();
+    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo 5521 urgency"]);
+  });
+
+  it("shows the surface's refusal and offers no second undo", async () => {
+    const { user } = await openReview({
+      reviewDecide: () => Promise.resolve(STILL_OPEN),
+      reviewUndo: () =>
+        Promise.reject(refusal(409, "cannot_undo", "Nothing was undone: the record changed.")),
+    });
+    await user.keyboard("3");
+    await screen.findByText(/1 question is left/);
+    await user.keyboard("u");
+    expect(await screen.findByText(/Nothing was undone: the record changed\./)).toBeInTheDocument();
     expect(button("Undo")).toBeDisabled();
   });
 });
@@ -1469,22 +1473,26 @@ describe("the top bar when the worker cannot be reached", () => {
   });
 });
 
-describe("undo names what the surface undid", () => {
-  it("names another question of the same record when the surface undid that one", async () => {
-    const spam = { ...REFUND, name: "is_spam", instructions: "Is it spam?" };
-    const undone: ReviewCard = { ...SAMPLE_CARD, open: [REFUND, spam] };
-    const { user } = await openReview({
-      reviewDecide: () => Promise.resolve(STILL_OPEN),
-      reviewUndo: () =>
-        Promise.resolve({ status: "needs_review", card: undone, failedActions: [] }),
+describe("undo names the page's own last decision", () => {
+  it("sends the card and question of the last decision this page made, not an earlier one", async () => {
+    const answers = [() => Promise.resolve(STILL_OPEN), () => Promise.resolve(DONE)];
+    let asked = 0;
+    const { api, user } = await openReview({
+      reviewOpen: scripted(SAMPLE_CARD, NEXT_CARD),
+      reviewDecide: () => answers[asked++]?.() ?? Promise.resolve(DONE),
     });
     await user.keyboard("3");
     await screen.findByText(/1 question is left/);
+    await user.keyboard("y");
+    await screen.findByText("Where is my order");
     await user.keyboard("u");
     expect(
-      await screen.findByText(/Undid the decision on is_spam of support_messages 5521\./),
+      await screen.findByText(
+        /Undid your decision on wants_refund \(yes\) for support_messages 5521\./,
+      ),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Undid your decision on urgency/)).toBeNull();
+    expect(calls(api, "reviewUndo")).toEqual(["reviewUndo 5521 wants_refund"]);
+    expect(api.refs).toContain("reviewUndo support_messages/5521@h-5521");
   });
 });
 

@@ -171,6 +171,7 @@ function rig() {
       skip: reached("review.skip"),
       release: reached("review.release"),
       undo: reached("review.undo"),
+      forget: reached("review.forget"),
     },
     setup: {
       access: reached("setup.access"),

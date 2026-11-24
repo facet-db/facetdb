@@ -1164,7 +1164,8 @@ export type ApiClient = {
   readonly reviewSkip: (card: ReviewCardId) => Promise<void>;
   /** Also sent as the page closes, so it asks the browser to finish the request after the page is gone. */
   readonly reviewRelease: (card: ReviewCardId) => Promise<void>;
-  readonly reviewUndo: () => Promise<ReviewUndone>;
+  /** Takes back the page's own last decision, named by its card and question. */
+  readonly reviewUndo: (card: ReviewCardId, question: string) => Promise<ReviewUndone>;
   readonly home: () => Promise<Home>;
   readonly signIn: (name: string, password: string) => Promise<SignedIn>;
   readonly signOut: () => Promise<void>;
@@ -1388,7 +1389,8 @@ export function createApiClient(fetch: Fetch): ApiClient {
     reviewRelease: async (card) => {
       await call(releasedSchema, "POST", `/review/${keyPath(card)}/release`, idBody(card), true);
     },
-    reviewUndo: () => call(undoneSchema, "POST", "/review/undo", {}),
+    reviewUndo: (card, question) =>
+      call(undoneSchema, "POST", "/review/undo", { ...idBody(card), key: card.key, question }),
     home: () => call(homeSchema, "GET", "/home"),
     signIn: (name, password) => call(signedInSchema, "POST", "/session", { name, password }),
     signOut: async () => {

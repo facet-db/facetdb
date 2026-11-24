@@ -95,7 +95,13 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // the contract: a request answered by an earlier group never reaches a later group's middleware.
   //  1. Public: signing in and out (the cookie is the credential, and the password is checked).
   app.use(`/${API_VERSION}/session/*`, byAddress);
-  app.route(`/${API_VERSION}/session`, sessionRoutes(deps.studio.sessions));
+  // A sign-out ends the reviewer's undo too: the review service forgets their last decision.
+  app.route(
+    `/${API_VERSION}/session`,
+    sessionRoutes(deps.studio.sessions, (reviewer) => {
+      deps.review.forget(reviewer);
+    }),
+  );
   //  2. A project API key (`facetdb keys add`): the SDK and other servers calling the check API.
   //     Any route a program calls with a key joins this group, with `requireApiKey` on its path.
   app.use(`/${API_VERSION}/check/*`, requireApiKey(deps.keys));

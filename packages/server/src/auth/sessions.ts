@@ -289,9 +289,14 @@ export function requireReviewer(sessions: Sessions, projectId: string) {
  * `POST /v1/session` signs in and sets the cookie; `DELETE /v1/session` clears it. Public routes.
  * Both still take only the studio's own page or a program (`requireOwnPage`): a page of another
  * site must not be able to sign this browser in to an account it chose (login CSRF), nor sign the
- * reviewer out.
+ * reviewer out. `signedOut` hears the name of the reviewer a sign-out ends, the one a good session
+ * cookie vouches for (their last decision can no longer be undone); a request with no cookie, the
+ * OS user's on this machine, ends no session and names nobody.
  */
-export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
+export function sessionRoutes(
+  sessions: Sessions,
+  signedOut: (reviewer: string) => void,
+): Hono<AppEnv> {
   const route = new Hono<AppEnv>();
 
   route.post("/", requireOwnPage(), async (c) => {
@@ -334,7 +339,17 @@ export function sessionRoutes(sessions: Sessions): Hono<AppEnv> {
     }
   });
 
-  route.delete("/", requireOwnPage(), (c) => {
+  route.delete("/", requireOwnPage(), async (c) => {
+    const cookie = getCookie(c, SESSION_COOKIE);
+    if (cookie !== undefined) {
+      const found = await sessions.reviewerFor({
+        local: c.get("byAddress") === "this-machine",
+        cookie,
+      });
+      if (found.kind === "reviewer") {
+        signedOut(found.name);
+      }
+    }
     deleteCookie(c, SESSION_COOKIE, cookieAttributes(c.get("byAddress")));
     return c.json({ signedOut: true });
   });

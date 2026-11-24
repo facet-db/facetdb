@@ -448,7 +448,10 @@ describe("operator-by-address: a route mounted where addressCheck never ran", ()
     });
     // `byAddress` is never set: no `addressCheck` in front of either route.
     const app = new Hono<AppEnv>();
-    app.route("/v1/session", sessionRoutes(sessions));
+    app.route(
+      "/v1/session",
+      sessionRoutes(sessions, () => undefined),
+    );
     app.get("/open/operator", (c) => c.json({ operator: isOperator(c) }));
     app.use("/v1/*", requireReviewer(sessions, PROJECT));
     app.get("/v1/reviewer", (c) => c.json({ reviewer: c.get("reviewer") }));
