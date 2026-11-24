@@ -152,6 +152,47 @@ function poolerSuffix(url: string): string | undefined {
   return WORKER_LOGIN.exec(username)?.[1];
 }
 
+/** SQLSTATE `invalid_password`: the server, or a pooler in front of it, refused the password. */
+const INVALID_PASSWORD = "28P01";
+
+/**
+ * Whether the server refused the password of a URL that logs in as the worker login (read by the
+ * driver's code, a boundary; by its words too, for a pooler that sends another code): the login
+ * exists with another password, which migrate never changes.
+ */
+function workerPasswordRefused(error: unknown, url: string): boolean {
+  let username: string;
+  try {
+    username = decodeURIComponent(new URL(url).username);
+  } catch {
+    return false;
+  }
+  const refused =
+    sqlState(error) === INVALID_PASSWORD ||
+    (error instanceof Error && /password authentication failed/i.test(error.message));
+  return refused && WORKER_LOGIN.test(username);
+}
+
+/** A Supabase pooler host (Supavisor), which keeps a login's credentials for a while. */
+function supabasePooler(url: string): boolean {
+  try {
+    return new URL(url).hostname.endsWith(".pooler.supabase.com");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The fix for a refused worker password, in migrate's words for a login it found: the admin's
+ * statement takes the password from the variable, so no password is ever in the words.
+ */
+function refusedPasswordFix(subject: string, url: string): string {
+  const pooler = supabasePooler(url)
+    ? " (Supabase's pooler may refuse the new password for a few minutes after that)"
+    : "";
+  return `facetdb migrate keeps the password of a worker login it finds; if ${subject} has another one, run this as the admin: alter role ${WORKER_ROLE} password '<the password in ${subject}>'${pooler}`;
+}
+
 /** The database check, and the distance worth a warning line of its own. */
 async function databaseCheck(
   connect: SqlConnect,
@@ -196,7 +237,9 @@ async function databaseCheck(
         : {}),
     };
   } catch (error) {
-    const fix = `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`;
+    const fix = workerPasswordRefused(error, url)
+      ? refusedPasswordFix(subject, url)
+      : `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`;
     if (connectTimedOut(error)) {
       return {
         check: {

@@ -194,6 +194,17 @@ export function tableTargets(
 }
 
 /**
+ * Whether the sources a command was asked for (every one, or the one `--source` names) all keep
+ * their records in the FacetDB store, so there is no table to touch: `facetdb migrate` then runs
+ * the store's step alone. False for a `--source` the config does not name, which `tableTargets`
+ * refuses in its own words.
+ */
+export function readsNoTable(config: ProjectConfig, only: string | undefined): boolean {
+  const asked = config.sources.filter((source) => only === undefined || source.name === only);
+  return asked.length > 0 && asked.every((source) => source.table === undefined);
+}
+
+/**
  * The one table source a command that reads or answers rows works on: the one `--source` names, or
  * the only one the config has. Several and no `--source` is a bad invocation that lists the names.
  */

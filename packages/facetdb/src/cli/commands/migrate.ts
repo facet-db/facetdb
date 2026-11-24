@@ -6,9 +6,15 @@ import type {
   EngineTarget,
   PlanResult,
 } from "@facetdb/core";
-import type { SourceConfig } from "../../config/index.ts";
+import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
-import { asCliError, CliError, databaseLabel, defineCommand } from "../program.ts";
+import {
+  asCliError,
+  CliError,
+  type CommandContext,
+  databaseLabel,
+  defineCommand,
+} from "../program.ts";
 import {
   rebuildReviewCards,
   requireStoreRunnable,
@@ -27,8 +33,10 @@ import {
   adminRun,
   engineTarget,
   loadProjectConfig,
+  type ProjectRef,
   projectRef,
   questionSetOf,
+  readsNoTable,
   type TableTarget,
   tableTargets,
   variableOf,
@@ -50,7 +58,9 @@ import {
  * and change nothing. So no statement holds a lock on a customer's table while the store's
  * migrations run. The store's step is said as it runs, and a source's failure after it says the
  * store moved. Every line names the table as its engine does (`DatabaseEngine.label`):
- * `public.listings` on Postgres, `dbo.listings` on SQL Server, `listings` on MySQL.
+ * `public.listings` on Postgres, `dbo.listings` on SQL Server, `listings` on MySQL. Sources that
+ * read no table (a plugin or API source) have the store's step alone, and a Postgres install says
+ * whether it created the worker login or found it and kept its password.
  */
 
 type MigrateOptions = {
@@ -274,6 +284,152 @@ function afterStoreMigrated(
   );
 }
 
+/**
+ * The project an install refusal names as the table's owner, when it is that refusal: every engine
+ * says it in the Postgres engine's words (`<table> already carries FacetDB columns from another
+ * project (<owner>); one table belongs to one project.`; MongoDB's of a collection), whether its
+ * plan refused or its run stopped at the owner check. Undefined for any other error.
+ */
+const ANOTHER_PROJECT =
+  /from another project \((.+)\); one (?:table|collection) belongs to one project\./;
+
+/**
+ * Another project's table, with the fix a copied project needs: a project is named after its folder
+ * (`projectRef`), so the same project copied into a folder of another name is another project to
+ * the table. Both names are folder names, never a path. Any other error as it came.
+ */
+function withFolderFix(error: unknown, project: ProjectRef): unknown {
+  const owner = error instanceof CliError ? ANOTHER_PROJECT.exec(error.message)?.[1] : undefined;
+  if (owner === undefined || !(error instanceof CliError)) {
+    return error;
+  }
+  return new CliError(
+    error.code,
+    error.message,
+    `this project is named after its folder (${project.name}): if it is ${owner} under another folder name, rename the folder back to ${owner} and run facetdb migrate again`,
+    error.exit,
+    error.details,
+  );
+}
+
+/** An install that ran, and the source it ran for. */
+type Installed = { readonly plan: EnginePlan; readonly source: SourceConfig };
+
+/**
+ * What migrate says of the worker login once a Postgres install ran: created with the password in
+ * the source's connection string, or found and left as it was (other projects on the server may
+ * share it), with the statement an admin runs to give it the new one. The plan that ran tells
+ * which: only a plan that creates the login holds the `secret` statement. Neither line holds a
+ * password: the statement names the variable to take it from.
+ */
+export function workerLoginLine(ran: readonly Installed[]): string | undefined {
+  const created = ran.find((item) =>
+    item.plan.statements.some((statement) => statement.secret === true),
+  );
+  if (created !== undefined) {
+    return `Created the worker login ${WORKER_LOGIN} with the password in ${variableOf(created.source)}.`;
+  }
+  const [first] = ran;
+  if (first === undefined) {
+    return undefined;
+  }
+  const variable = variableOf(first.source);
+  return `Found the worker login ${WORKER_LOGIN} and kept its password. If ${variable} has another one, run this as the admin: alter role ${WORKER_LOGIN} password '<the password in ${variable}>';`;
+}
+
+/** The confirmation before anything runs, on `where`; anything but yes runs nothing. */
+async function confirmRun(deps: CommandContext<MigrateOptions>["deps"], where: string) {
+  const answer = await deps.io.prompt(`Run the SQL above on ${where}? Type yes to continue: `);
+  if (answer.trim().toLowerCase() !== "yes") {
+    throw new CliError(
+      "not-confirmed",
+      "the SQL was not confirmed, so nothing was run",
+      "run facetdb migrate again and type yes, or pass --yes once you have read the SQL",
+    );
+  }
+}
+
+/**
+ * Once the store holds the review queue (migration 6), the records decided needs_review before it
+ * existed get their cards, once per project of the store, for every source of the config; said when
+ * there were any.
+ */
+async function listWaitingCards(
+  { deps, print }: Pick<CommandContext<MigrateOptions>, "deps" | "print">,
+  storeUrl: string,
+  project: ProjectRef,
+  config: ProjectConfig,
+): Promise<void> {
+  const waiting = await rebuildReviewCards(
+    deps.connect,
+    storeUrl,
+    project.id,
+    new Map(
+      config.sources.map((source) => [
+        storeSourceId(project.id, source.name),
+        questionSetOf(config, source),
+      ]),
+    ),
+  );
+  if (waiting !== undefined && waiting > 0) {
+    print(
+      `Listed ${waiting} record(s) decided before the review queue existed: they wait for review.`,
+    );
+  }
+}
+
+/**
+ * `facetdb migrate` when the sources asked for read no table: a plugin or API source keeps its
+ * records and answers in the FacetDB store, so the run is the store's step alone, on
+ * `DATABASE_URL`, shown first and confirmed as a full run is. A store already current says so and
+ * asks nothing; no admin connection string is asked for, since no source's database is touched.
+ */
+async function migrateStoreAlone(
+  context: Pick<CommandContext<MigrateOptions>, "options" | "deps" | "print">,
+  config: ProjectConfig,
+  project: ProjectRef,
+) {
+  const { options, deps, print } = context;
+  const storeUrl = requireStoreUrl(deps.env, options.allowInsecure === true);
+  const store = await showStoreMigration(deps.connect, storeUrl);
+  print(`-- store: ${store.label}`);
+  print(store.current ? STORE_CURRENT : store.script);
+  for (const note of store.notes) {
+    print(noteLine(note));
+  }
+  const secretWarning = storeSecretWarning(deps.env);
+  if (secretWarning !== undefined) {
+    deps.io.stderr(`${secretWarning}\n`);
+  }
+  const summary = (applied: boolean) => ({
+    ok: true,
+    dryRun: options.dryRun,
+    store: {
+      database: store.label,
+      current: store.current,
+      sql: store.script,
+      applied: applied && !store.current,
+    },
+    sources: [],
+  });
+  if (options.dryRun) {
+    print("Dry run: nothing was changed.");
+    return summary(false);
+  }
+  if (store.current) {
+    print(`The FacetDB store on ${store.label} was current: nothing ran there.`);
+  } else {
+    requireStoreRunnable(store, "store");
+    if (!options.yes) {
+      await confirmRun(deps, store.label);
+    }
+    await runStoreMigration(deps.connect, storeUrl, store, "store");
+    print(`Migrated the FacetDB store on ${store.label}.`);
+  }
+  await listWaitingCards(context, storeUrl, project, config);
+  return summary(true);
+}
+
 export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
   description:
     "Runs install for every source: answer columns, jobs table, change capture. Prints the SQL first",
@@ -295,8 +451,11 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
   ],
   run: async ({ options, deps, print }) => {
     const config = await loadProjectConfig(deps, options.config);
-    const targets = tableTargets(config, options.source);
     const project = projectRef(deps.projectDir);
+    if (readsNoTable(config, options.source)) {
+      return migrateStoreAlone({ options, deps, print }, config, project);
+    }
+    const targets = tableTargets(config, options.source);
     const allowInsecure = options.allowInsecure === true;
     const [first] = targets;
     if (first === undefined) {
@@ -314,8 +473,13 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     const shown: Shown[] = [];
     for (const target of targets) {
       const own = engineTarget(config, target, project);
-      // The install first: its refusal (another project's table) is migrate's, in its own words.
-      const install = await planInstall(engine, target, own, url, engineDeps);
+      // The install first: its refusal (another project's table) is migrate's, in its own words,
+      // with the fix for a project copied into a folder of another name.
+      const install = await planInstall(engine, target, own, url, engineDeps).catch(
+        (error: unknown) => {
+          throw withFolderFix(error, project);
+        },
+      );
       const prune = options.prune ? await planPrune(engine, own, url, engineDeps) : undefined;
       shown.push({
         target,
@@ -403,14 +567,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         store.current || sameDatabase(storeUrl, url, deps.env)
           ? databaseLabel(url)
           : `${store.label} and ${databaseLabel(url)}`;
-      const answer = await deps.io.prompt(`Run the SQL above on ${where}? Type yes to continue: `);
-      if (answer.trim().toLowerCase() !== "yes") {
-        throw new CliError(
-          "not-confirmed",
-          "the SQL was not confirmed, so nothing was run",
-          "run facetdb migrate again and type yes, or pass --yes once you have read the SQL",
-        );
-      }
+      await confirmRun(deps, where);
     }
     // The store first, in its own transaction committed before any source's begins: the source's
     // worker writes its log there from its first record, and a store migration that builds an index
@@ -425,6 +582,7 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       print(`Migrated the FacetDB store on ${store.label}.`);
     }
     const installed: string[] = [];
+    const ran: Installed[] = [];
     for (const item of shown) {
       // The prune first, from the catalog it was shown from, then install.
       let pruned: EnginePlan | undefined;
@@ -439,10 +597,12 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
           ...engineDeps,
           ...("password" in login ? { workerPassword: login.password } : {}),
         });
+        ran.push({ plan: install, source: item.target.source });
       } catch (error) {
+        const worded = withFolderFix(error, project);
         throw migratedStore === undefined
-          ? error
-          : afterStoreMigrated(error, migratedStore, installed);
+          ? worded
+          : afterStoreMigrated(worded, migratedStore, installed);
       }
       installed.push(item.label);
       const lines = pruned === undefined ? [] : pruneLines(pruned, true);
@@ -452,25 +612,14 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
       }
       print(`Installed on ${item.label} (source ${item.target.source.name}).`);
     }
-    // The store now holds the review queue (migration 6, in the store's part or the engine's plan);
-    // the records decided needs_review before it existed get their cards, once per project of the
-    // store, for every source of the config.
-    const waiting = await rebuildReviewCards(
-      deps.connect,
-      storeUrl,
-      project.id,
-      new Map(
-        config.sources.map((source) => [
-          storeSourceId(project.id, source.name),
-          questionSetOf(config, source),
-        ]),
-      ),
-    );
-    if (waiting !== undefined && waiting > 0) {
-      print(
-        `Listed ${waiting} record(s) decided before the review queue existed: they wait for review.`,
-      );
+    // The worker login is the server's, so it is said once for the run; on Postgres only, whose
+    // statement the line gives (the other engines have no such line yet).
+    const loginLine = engine.name === "postgres" ? workerLoginLine(ran) : undefined;
+    if (loginLine !== undefined) {
+      print(loginLine);
     }
+    // The store now holds the review queue (migration 6, in the store's part or the engine's plan).
+    await listWaitingCards({ deps, print }, storeUrl, project, config);
     return summary(true);
   },
 });

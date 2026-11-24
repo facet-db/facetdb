@@ -807,10 +807,10 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     expect(real.prompts).toEqual([
       "Run the SQL above on localhost:5432/facetdb and localhost:5432/app? Type yes to continue: ",
     ]);
-    // Each part is said as it runs: the store's first, then the source's.
+    // Each part is said as it runs: the store's first, then the source's, then the login.
     const after = real.stdout.slice(real.stdout.indexOf("Migrated the FacetDB store"));
     expect(after).toBe(
-      "Migrated the FacetDB store on localhost:5432/facetdb.\nInstalled on public.listings (source listings).\n",
+      "Migrated the FacetDB store on localhost:5432/facetdb.\nInstalled on public.listings (source listings).\nCreated the worker login facetdb_worker with the password in LISTINGS_URL.\n",
     );
     expect(await columns()).toEqual(expect.arrayContaining(["is_scam", "category"]));
     const versions = await world.client.query(
