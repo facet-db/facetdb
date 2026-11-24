@@ -8,11 +8,13 @@ import type {
   PluginsDoor,
 } from "@facetdb/server";
 import { toJSONSchema } from "zod";
-import type { ProjectConfig } from "../../config/index.ts";
+import { type ProjectConfig, pluginVariables } from "../../config/index.ts";
 import {
   BUILTIN_PLUGINS,
   type HostedPlugin,
   type PluginHost,
+  packageNames,
+  pluginNamesOf,
   type RegistryIndex,
   satisfies,
 } from "../../plugin/index.ts";
@@ -25,6 +27,7 @@ import {
   readRegistry,
   registryAddress,
 } from "../registry/index.ts";
+import { dependenciesOf, installed, isSet } from "./restart-wait.ts";
 import { cutSettings } from "./url-settings-cut.ts";
 
 /**
@@ -37,7 +40,9 @@ import { cutSettings } from "./url-settings-cut.ts";
  * plugin's key in `plugins`, whether it is built in, each entry's range held against this FacetDB,
  * and the built-in webhook's endpoints as their hosts alone, since an address can carry a token;
  * every plugin's addresses are cut so (`url-settings-cut.ts`), the same cut `GET /v1/config` is
- * answered with.
+ * answered with. An entry whose package the project depends on, is installed and the config file
+ * names, but which the worker did not load when it started, says it loads at the next start, and
+ * which of the variables the file names for it are not set (`nextStart`).
  */
 
 export { DEFAULT_REGISTRY, REGISTRY_TIMEOUT_MS, registryAddress };
@@ -63,14 +68,94 @@ export type PluginsDoorOptions = {
   readonly fetch: CliDeps["fetch"];
   /** `CliDeps.abortAfter`. */
   readonly abortAfter: (ms: number) => AbortSignal;
-  /** `CliDeps.workspace`: a registry that is a file is read from the project's directory. */
+  /**
+   * `CliDeps.workspace`: a registry that is a file is read from the project's directory, and so is
+   * the project's package.json.
+   */
   readonly workspace: Pick<CliDeps["workspace"], "peek" | "lines">;
+  /** The project's directory: node_modules is looked for from here up, as Node resolves a package. */
+  readonly projectDir: string;
+  /**
+   * The config file as it loads now (the worker's `--config`), read only when an entry's package is
+   * a dependency, installed and not hosted: which plugins a start would load. Absent where the
+   * worker has no file, and then no entry waits for a restart.
+   */
+  readonly file?: () => Promise<ProjectConfig>;
   readonly clock: Clock;
 };
 
-function isSet(env: PluginsDoorOptions["env"], variable: string): boolean {
-  const value = env[variable];
-  return value !== undefined && value !== "";
+/**
+ * The names `config` uses for `entry`'s package (its `plugins` key, an action's, a channel's kind):
+ * that package itself, or its short name where that name is the first of its packages the project
+ * depends on, as the loader reads one.
+ */
+function namesFor(
+  used: readonly string[],
+  entry: RegistryIndex["plugins"][number],
+  dependencies: ReadonlySet<string>,
+): readonly string[] {
+  return used.filter(
+    (name) =>
+      name === entry.package ||
+      (name === entry.name &&
+        packageNames(name).find((candidate) => dependencies.has(candidate)) === entry.package),
+  );
+}
+
+type NextStart = { readonly unset: readonly string[] };
+
+/**
+ * The entries the worker loads at its next start and not before, by package, each with the
+ * variables the file names for it that are not set where the worker runs (a start would stop on
+ * them): a dependency in package.json, installed under node_modules, named by the config file, its
+ * range holding, not hosted now. The file is loaded only when some entry could be one; a file that
+ * does not load names nothing, since a start would stop on it.
+ */
+async function nextStarts(
+  entries: readonly RegistryIndex["plugins"][number][],
+  hosted: ReadonlySet<string>,
+  options: PluginsDoorOptions,
+): Promise<ReadonlyMap<string, NextStart>> {
+  const none = new Map<string, NextStart>();
+  const file = options.file;
+  if (file === undefined) {
+    return none;
+  }
+  const dependencies = await dependenciesOf(options.workspace);
+  const candidates: RegistryIndex["plugins"][number][] = [];
+  for (const entry of entries) {
+    if (
+      dependencies.has(entry.package) &&
+      !hosted.has(entry.package) &&
+      satisfies(options.coreVersion, entry.facetdb) &&
+      (await installed(options.workspace, options.projectDir, entry.package))
+    ) {
+      candidates.push(entry);
+    }
+  }
+  if (candidates.length === 0) {
+    return none;
+  }
+  let config: ProjectConfig;
+  try {
+    config = await file();
+  } catch {
+    return none;
+  }
+  const used = pluginNamesOf(config);
+  const variables = pluginVariables(config);
+  return new Map(
+    candidates.flatMap((entry): (readonly [string, NextStart])[] => {
+      const named = namesFor(used, entry, dependencies);
+      if (named.length === 0) {
+        return [];
+      }
+      const unset = variables
+        .filter(({ plugin, variable }) => named.includes(plugin) && !isSet(options.env, variable))
+        .map(({ variable }) => variable);
+      return [[entry.package, { unset: [...new Set(unset)] }]];
+    }),
+  );
 }
 
 /** The settings schema as zod writes it for a form (what a file may hold), or null when it cannot. */
@@ -194,22 +279,23 @@ export function createPluginsDoor(options: PluginsDoorOptions): PluginsDoor {
       }
       const hosted = new Set(options.host.all().map((plugin) => plugin.packageName));
       const words = (search ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-      const plugins: GalleryEntry[] = result.index.plugins
-        .filter((entry) => matches(entry, words))
-        .map((entry) => ({
-          name: entry.name,
-          package: entry.package,
-          description: entry.description,
-          kinds: entry.kinds,
-          facetdb: entry.facetdb,
-          holds: satisfies(options.coreVersion, entry.facetdb),
-          verified: entry.verified,
-          downloads: entry.downloads,
-          homepage: entry.homepage ?? null,
-          installed: hosted.has(entry.package),
-          // The reader checked the name against the short-name rule: nothing else goes in the line.
-          command: `facetdb add ${entry.name}`,
-        }));
+      const matching = result.index.plugins.filter((entry) => matches(entry, words));
+      const waiting = await nextStarts(matching, hosted, options);
+      const plugins: GalleryEntry[] = matching.map((entry) => ({
+        name: entry.name,
+        package: entry.package,
+        description: entry.description,
+        kinds: entry.kinds,
+        facetdb: entry.facetdb,
+        holds: satisfies(options.coreVersion, entry.facetdb),
+        verified: entry.verified,
+        downloads: entry.downloads,
+        homepage: entry.homepage ?? null,
+        installed: hosted.has(entry.package),
+        nextStart: waiting.get(entry.package) ?? null,
+        // The reader checked the name against the short-name rule: nothing else goes in the line.
+        command: `facetdb add ${entry.name}`,
+      }));
       return { reachable: true, address, plugins };
     },
   };

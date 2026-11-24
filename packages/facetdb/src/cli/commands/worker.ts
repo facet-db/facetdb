@@ -154,6 +154,7 @@ import { installRuns, readInstall } from "./install-check.ts";
 import { createMigrateDoor, UNAVAILABLE_MIGRATE_DOOR } from "./migrate-door.ts";
 import { presetKeyOf } from "./model-provider.ts";
 import { createPluginsDoor, registryAddress } from "./plugins-door.ts";
+import { restartWords, waitingPlugins } from "./restart-wait.ts";
 import {
   createSetupDoor,
   type DoorDatabases,
@@ -987,6 +988,14 @@ export async function runWorkers(
   const configFile = options.once ? undefined : parts.configFile;
   // Apply and the setup flow write the one file, one write at a time.
   const writes = fileQueue();
+  // A file naming a plugin this worker did not load waits for a restart, for both doors that write
+  // it; read from the files and the host in force, never by loading a plugin.
+  const restartWait = (config: ProjectConfig) =>
+    restartWords(waitingPlugins(plugins.current(), config), {
+      files: deps.workspace,
+      projectDir: deps.projectDir,
+      env: deps.env,
+    });
   let listener: HttpListener | undefined;
   /** Under --once, the first source that failed: the command exits with it at the end. */
   let onceFailure: { readonly error: unknown } | undefined;
@@ -1192,6 +1201,9 @@ export async function runWorkers(
           fetch: deps.fetch,
           abortAfter: deps.abortAfter,
           workspace: deps.workspace,
+          projectDir: deps.projectDir,
+          // Which plugins the file names, for the gallery's "loads at the next restart".
+          ...(configFile === undefined ? {} : { file: () => configFile.load({ quiet: true }) }),
           clock,
         }),
         // A plugin source's webhook, handed to the loop in force of the source it names.
@@ -1251,6 +1263,7 @@ export async function runWorkers(
                     coreVersion: VERSION,
                     projectDir: deps.projectDir,
                   }),
+                  restartWait,
                   // An Apply's reviewer is who a question set its write changes is by, handed to
                   // that reload's own load and no other.
                   reload: (applied) => fleet.reload(applied),
@@ -1279,6 +1292,7 @@ export async function runWorkers(
                 },
                 reload: () => fleet.reload(),
                 serial: writes,
+                restartWait,
                 provider,
                 spending,
                 print,

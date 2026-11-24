@@ -479,7 +479,7 @@ function resolve(host: PluginHost, binding: ChannelBinding, index: number, env: 
     throw new PluginHostError(
       "plugin-not-installed",
       `${at} (${binding.address}) names the channel "${binding.kind}", and no plugin of that name was loaded when this worker started`,
-      `run facetdb add ${binding.kind} in the project, then start facetdb worker again; or take ${binding.address} out of alerts.channels`,
+      `restart facetdb worker to load it (if it is not installed, run facetdb add ${binding.kind} in the project first), or take ${binding.address} out of alerts.channels`,
     );
   }
   const entry = entryOf(hosted, binding, at);

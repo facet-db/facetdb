@@ -345,6 +345,9 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
         );
       case "unreadable":
         throw new ApiError(409, "config_unreadable", outcome.message, outcome.fix);
+      // The file, not the draft, names a plugin the worker loads only at its restart.
+      case "waits_for_restart":
+        throw new ApiError(409, "waits_for_restart", outcome.message, outcome.fix);
       case "reverted":
         throw new ApiError(409, "apply_reverted", outcome.message, outcome.fix);
       case "uncommitted":

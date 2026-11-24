@@ -441,7 +441,7 @@ describe("a reload puts the file's channels and plugin settings in force with no
         loaded: false,
         message:
           'facetdb.config.ts loads, but the alert channels it names cannot be put in force: alerts.channels[1] (slack:#ops) names the channel "slack", and no plugin of that name was loaded when this worker started, so the worker keeps running on the config it had.',
-        fix: "Run facetdb add slack in the project, then start facetdb worker again; or take slack:#ops out of alerts.channels; then apply again, or Check again.",
+        fix: "Restart facetdb worker to load it (if it is not installed, run facetdb add slack in the project first), or take slack:#ops out of alerts.channels; then apply again, or Check again.",
       },
     });
     expect(await channelsInForce()).toEqual({ addresses: ["pager:ops"], differ: false });

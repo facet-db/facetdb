@@ -1881,6 +1881,15 @@ export function configFileDoor(deps: {
    * (`draftPlugins`); absent, such a draft is refused.
    */
   readonly plugins?: DraftPlugins;
+  /**
+   * Why nothing can be applied until the worker restarts (`restartWords` over `waitingPlugins`):
+   * the project as a draft would leave it names, in `plugins` or as a channel, a plugin the worker
+   * did not load, which the reload after the write would refuse the whole file for. Undefined when
+   * none; absent, nothing is judged so.
+   */
+  readonly restartWait?: (
+    config: ProjectConfig,
+  ) => Promise<{ readonly message: string; readonly fix: string } | undefined>;
   /** After an Apply's write, told who applied which source; Check again tells nothing. */
   readonly reload: (applied?: AppliedBy) => Promise<ReloadSummary>;
   /**
@@ -1897,7 +1906,10 @@ export function configFileDoor(deps: {
     asker: Asker,
   ): Promise<
     | { readonly ok: true; readonly plan: ApplyPlan }
-    | Extract<FileDiff, { readonly kind: "invalid" | "unreadable" | "operator_only" }>
+    | Extract<
+        FileDiff,
+        { readonly kind: "invalid" | "unreadable" | "operator_only" | "waits_for_restart" }
+      >
   > {
     const read = await files.read(path);
     if (read.kind !== "file") {
@@ -1946,6 +1958,15 @@ export function configFileDoor(deps: {
       undefined,
       deps.plugins,
     );
+    // A file that names a plugin the worker did not load is refused whole by the reload after any
+    // write, so nothing is planned until a restart, in words of its own: the draft is not the
+    // problem. Judged on the project as the draft would leave it (a draft that takes such a channel
+    // out is planned), or on the file as it is when the draft is refused; a draft that adds such a
+    // plugin to a file naming none keeps its own refusal.
+    const waits = await deps.restartWait?.(planned.ok ? planned.plan.config : config);
+    if (waits !== undefined) {
+      return { kind: "waits_for_restart", ...waits };
+    }
     return planned.ok ? planned : { kind: "invalid", issues: planned.issues };
   }
 

@@ -6,15 +6,23 @@ import { useApi, useDeps } from "../../deps.tsx";
 import { BOX, Bracketed } from "./box.tsx";
 import { galleryQuery } from "./queries.ts";
 import { WorkerProblem } from "./WorkerProblem.tsx";
-import { addCommand, countWords, kindsWords, notMadeForWords, registryFailure } from "./words.ts";
+import {
+  addCommand,
+  countWords,
+  kindsWords,
+  listWords,
+  notMadeForWords,
+  registryFailure,
+} from "./words.ts";
 
 /**
  * The gallery: the registry's entries as a full grid of ruled cells, never filled cards, under a
  * search the worker answers (every word, anywhere in an entry). Each cell: the name, "Verified" on
  * a verified entry alone, what it provides, the registry's description (text from outside, shown as
- * text), its npm downloads last month, and "Installed", or a range that does not hold, or the
- * `facetdb add` command with Copy. Nothing installs from the page. A registry that cannot be read
- * says so with the address tried and the terminal's way.
+ * text), its npm downloads last month, and "Installed", or a range that does not hold, or "Loads at
+ * the next restart" or "Set <VARIABLE>, then restart", or the `facetdb add` command with Copy.
+ * Nothing installs from the page. A registry that cannot be read says so with the address tried and
+ * the terminal's way.
  */
 
 const SEARCH_MAX = 100;
@@ -101,6 +109,19 @@ function Cell({ entry, facetdb }: { readonly entry: GalleryEntry; readonly facet
           <StatusWord status="done" label="Installed" size="small" />
         ) : !entry.holds ? (
           <StatusWord status="error" label={notMadeForWords(facetdb)} size="small" />
+        ) : entry.nextStart !== null ? (
+          // Installed and in the config, not in the running worker: a worker loads plugin code only
+          // when it starts, so no command is offered, only what is left to do.
+          <StatusWord
+            status="pending"
+            label={
+              entry.nextStart.unset.length === 0
+                ? "Loads at the next restart"
+                : `Set ${listWords(entry.nextStart.unset)}, then restart`
+            }
+            size="small"
+            wrap
+          />
         ) : command === null ? null : (
           <CopyCommand command={command} />
         )}
@@ -194,8 +215,8 @@ export function Gallery({
         <>
           <div className="mt-1.5 mb-4.5 grid max-w-[68ch] gap-1 text-text-2">
             <p className="m-0">
-              To install one, run its command in the project's folder, then add the lines it prints
-              to facetdb.config.ts.
+              To install one, run its command in the project's folder, add the lines it prints to
+              facetdb.config.ts, and restart the worker.
             </p>
             <p className="m-0">
               A plugin runs inside your worker with its access. Verified ones were reviewed by the

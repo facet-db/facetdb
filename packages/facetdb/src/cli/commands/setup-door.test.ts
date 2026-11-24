@@ -17,12 +17,15 @@ import {
   type ProjectConfig,
   planApply,
 } from "../../config/index.ts";
+import { VERSION } from "../../index.ts";
+import { BUILTIN_PLUGINS, createPluginHost } from "../../plugin/index.ts";
 import { lazyEngine } from "../engines.ts";
-import { runInProcess } from "../program.ts";
+import { runInProcess, type Workspace } from "../program.ts";
 import { CURRENT_STORE, type SqlConnect, storeAtVersions } from "../testing.ts";
 import { fileQueue } from "./config-reload.ts";
 import { COMMANDS } from "./index.ts";
 import { STORE_CURRENT } from "./migrate.ts";
+import { restartWords, waitingPlugins } from "./restart-wait.ts";
 import { createSetupDoor, registeredDatabases } from "./setup-door.ts";
 
 /**
@@ -126,7 +129,16 @@ class SetupEngine extends FakeEngine {
   }
 }
 
-function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
+function rig(
+  extraEnv: Readonly<Record<string, string>> = {},
+  more: {
+    /** The file as it loads (CONFIG unless given). */
+    readonly config?: ProjectConfig;
+    /** The worker's judgment of what waits for its restart. */
+    readonly restartWait?: Parameters<typeof createSetupDoor>[0]["restartWait"];
+  } = {},
+): Rig {
+  const fileConfig = more.config ?? CONFIG;
   const clock = new FakeClock(Date.parse("2026-11-06T12:00:00Z"));
   const database = new FakeDatabase({ fields: ["title"], clock });
   for (const [key, title] of [
@@ -175,7 +187,7 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
   });
   const writes: string[] = [];
   const files = {
-    text: TEXT,
+    text: configFileSource(fileConfig),
     git: { kind: "clean" } as GitState,
     writes,
     read() {
@@ -248,7 +260,8 @@ function rig(extraEnv: Readonly<Record<string, string>> = {}): Rig {
     allowInsecureStore: false,
     path: PATH,
     files,
-    load: () => Promise.resolve(CONFIG),
+    load: () => Promise.resolve(fileConfig),
+    ...(more.restartWait === undefined ? {} : { restartWait: more.restartWait }),
     reload: () => {
       reloads.push(1);
       return reloadFails.failing
@@ -460,6 +473,65 @@ describe("the setup door's plan", () => {
       actions: [{ plugin: "slack", action: "post", settings: {} }],
     });
     expect(withActions).toMatchObject({ kind: "invalid" });
+  });
+
+  it("refuses, before any SQL is shown or run, while the file names a plugin the worker did not load", async () => {
+    // The file after `facetdb add slack` and its lines pasted; the worker started with no plugin.
+    const withSlack: ProjectConfig = { ...CONFIG, plugins: { slack: {} } };
+    const started = await createPluginHost({
+      config: CONFIG,
+      env: ENV,
+      projectDir: PROJECT_DIR,
+      coreVersion: VERSION,
+      importModule: () => Promise.reject(new Error("the worker started with no plugin")),
+      builtins: BUILTIN_PLUGINS,
+    });
+    const installedSlack: Pick<Workspace, "peek" | "lines"> = {
+      peek: (path) =>
+        Promise.resolve(
+          path === "node_modules/@facetdb/slack/package.json"
+            ? { kind: "file", firstLine: "{" }
+            : { kind: "none" },
+        ),
+      lines: async function* () {
+        yield JSON.stringify({ name: "@facetdb/slack", version: "0.3.0" });
+      },
+    };
+    const t = rig(
+      {},
+      {
+        config: withSlack,
+        restartWait: (config) =>
+          restartWords(waitingPlugins(started, config), {
+            files: installedSlack,
+            projectDir: PROJECT_DIR,
+            env: ENV,
+          }),
+      },
+    );
+    expect(await t.door.plan(ADMIN, DRAFT)).toEqual({
+      kind: "refused",
+      code: "waits_for_restart",
+      message:
+        "facetdb.config.ts names the plugin slack, which loads when facetdb worker restarts; nothing can be applied until then.",
+      fix: "Whoever runs the worker: restart it, or take plugins.slack out of the file.",
+    });
+    expect(t.files.writes).toEqual([]);
+    expect(t.engine.runs).toEqual([]);
+    expect(t.installs).toEqual([]);
+    // The file naming only what the worker loaded: planned as before.
+    const clean = rig(
+      {},
+      {
+        restartWait: (config) =>
+          restartWords(waitingPlugins(started, config), {
+            files: installedSlack,
+            projectDir: PROJECT_DIR,
+            env: ENV,
+          }),
+      },
+    );
+    expect(await clean.door.plan(ADMIN, DRAFT)).toMatchObject({ kind: "planned" });
   });
 });
 

@@ -53,6 +53,13 @@ export function notMadeForFix(facetdb: string): string {
     : `; this project runs ${facetdb}. Install a release made for ${release}, or ask the plugin's author for one.`;
 }
 
+/** Names in a sentence: "A", "A and B", "A, B and C". */
+export function listWords(names: readonly string[]): string {
+  return names.length <= 1
+    ? (names[0] ?? "")
+    : `${names.slice(0, -1).join(", ")} and ${names.at(-1) as string}`;
+}
+
 const ORDINALS = [
   "first",
   "second",

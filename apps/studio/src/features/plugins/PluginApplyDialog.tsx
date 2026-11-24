@@ -12,8 +12,8 @@ import { INSTALLED_PLUGINS_KEY, installedPluginsQuery } from "./queries.ts";
  * draft makes to facetdb.config.ts, asked without `confirm` (nothing is written), and the write is
  * the second step that sends the plan that diff named. One write per plan; `force` only when the
  * person ticked it; a file changed since the diff shows the new diff. The reload after the write
- * puts the settings in force with no restart and says so in its own words; the plugins are then
- * read again.
+ * puts a loaded plugin's settings in force and says so in its own words; the plugins are then read
+ * again. A plugin the worker did not load waits for a restart: the diff is refused with that step.
  */
 
 type Found = "reading" | "written" | "not-written" | "unreachable" | null;
@@ -134,9 +134,10 @@ function PluginApplyBody({
       ) : null}
       {data === undefined || diff.isFetching ? null : data.changed ? (
         <>
-          <p className="m-0 text-text-2">
-            {`Writes ${data.path}. The worker reloads it with no restart.`}
-          </p>
+          {/* What the write does, and no promise of what the reload will: its own words follow
+              the write. A diff is shown only for plugins the worker loaded; one that
+              names any other is refused before it, with the restart that loads it. */}
+          <p className="m-0 text-text-2">{`Writes ${data.path}.`}</p>
           <DiffText diff={data} />
         </>
       ) : (

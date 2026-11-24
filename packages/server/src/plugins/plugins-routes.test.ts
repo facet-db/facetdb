@@ -130,6 +130,7 @@ const REACHABLE: Gallery = {
       downloads: 1200,
       homepage: "https://example.com/github",
       installed: true,
+      nextStart: null,
       command: "facetdb add github",
     },
   ],

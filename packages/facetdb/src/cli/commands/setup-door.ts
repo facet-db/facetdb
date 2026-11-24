@@ -94,6 +94,14 @@ export type SetupDoorDeps = InstallDeps & {
   readonly reload: () => Promise<ReloadSummary>;
   /** One file write at a time, shared with Apply's door. */
   readonly serial: <Result>(work: () => Promise<Result>) => Promise<Result>;
+  /**
+   * Why nothing can be applied until the worker restarts, as Apply's door judges it
+   * (`configFileDoor`'s `restartWait`): the file names a plugin the worker did not load, so the
+   * reload after the setup's write would put the write back. Absent, nothing is judged so.
+   */
+  readonly restartWait?: (
+    config: ProjectConfig,
+  ) => Promise<{ readonly message: string; readonly fix: string } | undefined>;
   /** The workers' model, behind their backoff and in-flight limit, and their spending gate. */
   readonly provider: ModelProvider;
   readonly spending: SpendingGate;
@@ -487,6 +495,12 @@ export function createSetupDoor(deps: SetupDoorDeps): SetupDoor {
         variable,
       },
     );
+    // The write would be put back by the reload, which refuses a file naming a plugin the worker
+    // did not load; refused before anything is shown or run, in Apply's own words.
+    const waits = await deps.restartWait?.(planned.ok ? planned.plan.config : now.config);
+    if (waits !== undefined) {
+      return { kind: "refused", code: "waits_for_restart", ...waits };
+    }
     if (!planned.ok) {
       const hide = hidingValue(draft);
       return {

@@ -83,6 +83,15 @@ export type GalleryEntry = {
   readonly homepage: string | null;
   /** Whether the worker hosts a plugin from this entry's package. */
   readonly installed: boolean;
+  /**
+   * Set when the worker loads this entry's package at its next start and not before: the project's
+   * package.json lists it in `dependencies`, it is installed under node_modules, the config file
+   * names it, its range holds, and the running worker did not load it; `unset` names the variables
+   * the file names for it that are not set where the worker runs, which a start would stop on
+   * (names only, never a value). Read from those files alone, never by loading the plugin. Null
+   * otherwise.
+   */
+  readonly nextStart: { readonly unset: readonly string[] } | null;
   /** `facetdb add <name>`, built from the checked short name alone. */
   readonly command: string;
 };

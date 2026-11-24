@@ -87,6 +87,7 @@ export {
   importFromProject,
   livePluginHost,
   PluginHostError,
+  pluginNamesOf,
 } from "./host.ts";
 export type { SettingsInForce, SettingsReload } from "./in-force.ts";
 export { createSettingsInForce, draftPlugins } from "./in-force.ts";

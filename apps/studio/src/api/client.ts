@@ -1134,6 +1134,11 @@ const galleryEntrySchema = z.object({
   verified: z.boolean(),
   downloads: z.number().int().min(0),
   installed: z.boolean(),
+  /**
+   * Installed, named by the config file, not loaded by the running worker: it loads at the next
+   * start, once each variable in `unset` (names only) is set. Null otherwise.
+   */
+  nextStart: z.object({ unset: z.array(z.string()) }).nullable(),
   // The answer's `command` is not read: the page builds `facetdb add <name>` from a short name.
 });
 export type GalleryEntry = z.infer<typeof galleryEntrySchema>;

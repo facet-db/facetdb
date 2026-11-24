@@ -163,6 +163,10 @@ type Setup = {
   readonly abortAfter?: (ms: number) => AbortSignal;
   /** Files of the project's directory, by path: a registry that is a file is read from here. */
   readonly files?: Readonly<Record<string, string>>;
+  /** The config file as it loads now; absent, the door is given none. */
+  readonly file?: () => Promise<ProjectConfig>;
+  /** Files with what `peek` says is there: `other` is a link, never read through. */
+  readonly modules?: Readonly<Record<string, { text: string; kind: "file" | "other" }>>;
 };
 
 async function doorWith(net: ReturnType<typeof network>, setup: Setup = {}) {
@@ -186,14 +190,20 @@ async function doorWith(net: ReturnType<typeof network>, setup: Setup = {}) {
     workspace: {
       peek: (path) =>
         Promise.resolve(
-          setup.files !== undefined && path in setup.files
-            ? { kind: "file", firstLine: "{" }
-            : { kind: "none" },
+          setup.modules?.[path] !== undefined
+            ? setup.modules[path].kind === "other"
+              ? { kind: "other" }
+              : { kind: "file", firstLine: "{" }
+            : setup.files !== undefined && path in setup.files
+              ? { kind: "file", firstLine: "{" }
+              : { kind: "none" },
         ),
       lines: async function* (path) {
-        yield* (setup.files?.[path] ?? "").split("\n");
+        yield* (setup.modules?.[path]?.text ?? setup.files?.[path] ?? "").split("\n");
       },
     },
+    projectDir: PROJECT_DIR,
+    ...(setup.file === undefined ? {} : { file: setup.file }),
     clock,
   });
   return { door, clock, environment, timeouts };
@@ -481,6 +491,7 @@ describe("the gallery", () => {
           downloads: 4200,
           homepage: null,
           installed: true,
+          nextStart: null,
           command: "facetdb add github",
         },
         {
@@ -494,6 +505,7 @@ describe("the gallery", () => {
           downloads: 10,
           homepage: null,
           installed: true,
+          nextStart: null,
           command: "facetdb add slack",
         },
         {
@@ -507,6 +519,7 @@ describe("the gallery", () => {
           downloads: 10,
           homepage: "https://example.com/zendesk",
           installed: false,
+          nextStart: null,
           command: "facetdb add zendesk",
         },
       ],
@@ -784,6 +797,205 @@ describe("the gallery", () => {
 
     expect(await door.gallery(undefined)).toMatchObject({
       plugins: [{ name: "github", installed: false }],
+    });
+  });
+
+  describe("waits for the next start", () => {
+    const WAITING_INDEX = indexText([
+      entry("github"),
+      entry("zendesk", { package: "facetdb-plugin-zendesk" }),
+      entry("telegram"),
+      entry("intercom"),
+      entry("linear", { facetdb: ">=9.0.0" }),
+      entry("pager"),
+      entry("mailer"),
+    ]);
+    /** What `facetdb add` leaves in package.json: the hosted github, and the rest the worker never loaded. */
+    const PACKAGE_JSON = JSON.stringify({
+      name: "shop",
+      dependencies: {
+        "@facetdb/github": "^1.2.0",
+        "facetdb-plugin-zendesk": "^0.1.0",
+        "@facetdb/telegram": "^0.2.0",
+        "@facetdb/linear": "^0.1.0",
+        "@facetdb/intercom": "^0.1.0",
+        "@facetdb/pager": "^0.1.0",
+      },
+      // Not installed where the worker runs in production: never said to load.
+      devDependencies: { "@facetdb/mailer": "^0.1.0" },
+    });
+    /** Each package's own package.json, as an install leaves it. */
+    function modules(...packages: readonly string[]): Record<string, string> {
+      return Object.fromEntries(
+        packages.map((name) => [
+          `node_modules/${name}/package.json`,
+          JSON.stringify({ name, version: "0.1.0" }),
+        ]),
+      );
+    }
+    const INSTALLED = modules(
+      "facetdb-plugin-zendesk",
+      "@facetdb/telegram",
+      "@facetdb/linear",
+      "@facetdb/intercom",
+      "@facetdb/mailer",
+    );
+    /**
+     * The file as it loads now: github, zendesk by its short name with a variable, telegram's
+     * channel, linear, pager (not installed) and mailer; intercom nowhere.
+     */
+    function fileNaming(): ProjectConfig {
+      return facetdb({
+        model: "jev-1.14.0",
+        plugins: {
+          github: { repo: REPO_URL },
+          slack: {},
+          zendesk: { token: env("ZENDESK_TOKEN") },
+          linear: {},
+          pager: {},
+          mailer: {},
+        },
+        alerts: { channels: ["telegram:-1001234567890"] },
+        sources: [
+          { name: "tickets", api: true, read: ["body"], questions: { urgent: noul("Urgent?") } },
+        ],
+      });
+    }
+
+    it("only for an installed dependency the file names, its range holding, that the worker did not load, with the variables still unset", async () => {
+      const { door } = await doorWith(
+        network(() => new Response(WAITING_INDEX)),
+        {
+          files: { "package.json": PACKAGE_JSON, ...INSTALLED },
+          file: () => Promise.resolve(fileNaming()),
+        },
+      );
+
+      const gallery = await door.gallery(undefined);
+      expect(gallery).toMatchObject({
+        plugins: [
+          // Hosted: in force now, never told to restart.
+          { name: "github", installed: true, nextStart: null },
+          // Named by its short name, with a variable not set where the worker runs: set it first.
+          { name: "zendesk", installed: false, nextStart: { unset: ["ZENDESK_TOKEN"] } },
+          // Named by an alert channel's kind.
+          { name: "telegram", installed: false, nextStart: { unset: [] } },
+          // Installed but named nowhere in the file: a restart would not load it.
+          { name: "intercom", installed: false, nextStart: null },
+          // Named and installed, but made for another FacetDB: a start refuses it.
+          { name: "linear", installed: false, holds: false, nextStart: null },
+          // In package.json but not under node_modules: not installed, its command stays.
+          { name: "pager", installed: false, nextStart: null },
+          // A dev dependency: not what a worker's install carries.
+          { name: "mailer", installed: false, nextStart: null },
+        ],
+      });
+      // A variable is its name alone.
+      expect(JSON.stringify(gallery)).not.toContain(TOKEN);
+    });
+
+    it("says nothing of a variable once it is set", async () => {
+      const { door } = await doorWith(
+        network(
+          () => new Response(indexText([entry("zendesk", { package: "facetdb-plugin-zendesk" })])),
+        ),
+        {
+          environment: { GITHUB_TOKEN: TOKEN, HOOK_SECRET, ZENDESK_TOKEN: "zd-value" },
+          files: { "package.json": PACKAGE_JSON, ...INSTALLED },
+          file: () => Promise.resolve(fileNaming()),
+        },
+      );
+      const gallery = await door.gallery(undefined);
+      expect(gallery).toMatchObject({ plugins: [{ nextStart: { unset: [] } }] });
+      expect(JSON.stringify(gallery)).not.toContain("zd-value");
+    });
+
+    it("counts a package as installed only where its own package.json names it, never through a link", async () => {
+      const index = indexText([entry("telegram")]);
+      const withModule = (text: string | undefined, kind: "file" | "other" = "file") =>
+        doorWith(
+          network(() => new Response(index)),
+          {
+            files: { "package.json": PACKAGE_JSON },
+            file: () => Promise.resolve(fileNaming()),
+            ...(text === undefined
+              ? {}
+              : { modules: { "node_modules/@facetdb/telegram/package.json": { text, kind } } }),
+          },
+        );
+      for (const [text, kind] of [
+        ["{ not json", "file"],
+        [JSON.stringify({ name: "@facetdb/other" }), "file"],
+        [JSON.stringify({ name: "@facetdb/telegram" }), "other"],
+      ] as const) {
+        const { door } = await withModule(text, kind);
+        expect(await door.gallery(undefined), `${text} ${kind}`).toMatchObject({
+          plugins: [{ nextStart: null }],
+        });
+      }
+      const { door } = await withModule(JSON.stringify({ name: "@facetdb/telegram" }));
+      expect(await door.gallery(undefined)).toMatchObject({
+        plugins: [{ nextStart: { unset: [] } }],
+      });
+    });
+
+    it("reads a short name as the loader does: the @facetdb package before facetdb-plugin-", async () => {
+      // The registry lists facetdb-plugin-zendesk; the project also depends on @facetdb/zendesk,
+      // which the file's `zendesk` loads instead, so the listed package is not what loads.
+      const { door } = await doorWith(
+        network(
+          () => new Response(indexText([entry("zendesk", { package: "facetdb-plugin-zendesk" })])),
+        ),
+        {
+          files: {
+            "package.json": JSON.stringify({
+              dependencies: { "@facetdb/zendesk": "1.0.0", "facetdb-plugin-zendesk": "1.0.0" },
+            }),
+            ...modules("@facetdb/zendesk", "facetdb-plugin-zendesk"),
+          },
+          file: () => Promise.resolve(fileNaming()),
+        },
+      );
+      expect(await door.gallery(undefined)).toMatchObject({
+        plugins: [{ package: "facetdb-plugin-zendesk", nextStart: null }],
+      });
+    });
+
+    it("says none with no package.json, an unreadable one, a file that does not load, or no file, and loads the file only for a candidate", async () => {
+      let loads = 0;
+      const file = () => {
+        loads += 1;
+        return Promise.resolve(fileNaming());
+      };
+      const none = (answer: unknown) =>
+        (answer as { plugins: { nextStart: unknown }[] }).plugins.every(
+          (one) => one.nextStart === null,
+        );
+      const net = () => network(() => new Response(WAITING_INDEX));
+
+      expect(none(await (await doorWith(net(), { file })).door.gallery(undefined))).toBe(true);
+      const unreadable = await doorWith(net(), {
+        files: { "package.json": "{ not json", ...INSTALLED },
+        file,
+      });
+      expect(none(await unreadable.door.gallery(undefined))).toBe(true);
+      const onlyHosted = await doorWith(net(), {
+        files: { "package.json": JSON.stringify({ dependencies: { "@facetdb/github": "1" } }) },
+        file,
+      });
+      expect(none(await onlyHosted.door.gallery(undefined))).toBe(true);
+      // Nothing installed the worker lacks: the file was never loaded.
+      expect(loads).toBe(0);
+
+      const broken = await doorWith(net(), {
+        files: { "package.json": PACKAGE_JSON, ...INSTALLED },
+        file: () => Promise.reject(new Error("facetdb.config.ts does not load")),
+      });
+      expect(none(await broken.door.gallery(undefined))).toBe(true);
+      const noFile = await doorWith(net(), {
+        files: { "package.json": PACKAGE_JSON, ...INSTALLED },
+      });
+      expect(none(await noFile.door.gallery(undefined))).toBe(true);
     });
   });
 

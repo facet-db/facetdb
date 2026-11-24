@@ -270,6 +270,16 @@ function usesOf(config: ProjectConfig): Use[] {
   });
 }
 
+/**
+ * Every name the config uses for a plugin (a `plugins` key, the provider's, a plugin source's, an
+ * action's, an alert channel's kind), each once: the plugins a worker started on it would load.
+ * Read from the config alone; no plugin is imported (the Plugins page's "loads at the next
+ * restart").
+ */
+export function pluginNamesOf(config: ProjectConfig): readonly string[] {
+  return usesOf(config).map((use) => use.name);
+}
+
 async function find(
   use: Use,
   importModule: LoadPluginOptions["importModule"],
@@ -644,7 +654,7 @@ export function rehost(
       throw new PluginHostError(
         "plugin-not-installed",
         `${at} names the plugin "${key}", which this worker did not load when it started`,
-        `run facetdb add ${shortName(key) ?? key} in ${options.projectDir} if it is not installed, then restart facetdb worker; or take ${at} out of the config`,
+        `restart facetdb worker to load it (if it is not installed, run facetdb add ${shortName(key) ?? key} in the project first), or take ${at} out of the config`,
       );
     }
     const first = keyOf.get(hosted.packageName);

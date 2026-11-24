@@ -36,6 +36,9 @@ type AddOptions = {
   readonly search?: string;
 };
 
+/** The last line after an install: the one step that puts the plugin into a worker. */
+const RESTART_LINE = "Restart facetdb worker to load it.";
+
 const REGISTRY_FIX =
   "if it says to upgrade facetdb, upgrade it; otherwise check the address and your network, or read another copy of the index with --registry <url or file> (or the FACETDB_REGISTRY variable)";
 
@@ -582,6 +585,9 @@ async function add(
           ? ""
           : ` Set ${lines.variables.join(" and ")} where the worker runs, then run facetdb doctor.`
       }`,
+      // A worker loads plugin code only when it starts (how a plugin reaches a running worker): a
+      // new plugin, or a new version of one it runs, waits for the restart.
+      RESTART_LINE,
     ]
       .map((text) => plain(text))
       .join("\n"),

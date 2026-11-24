@@ -258,7 +258,16 @@ export type FileDiff =
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
   /** The file is missing, is a link, or does not load as it is now. */
   | ({ readonly kind: "unreadable" } & Words)
+  | WaitsForRestart
   | OperatorOnly;
+
+/**
+ * The file names a plugin the running worker did not load: the reload after any write would refuse
+ * the whole file and the write would be put back, so no draft is planned or written until whoever
+ * runs the worker restarts it or takes the plugin out of the file. Not the draft's problem, so
+ * never `invalid`.
+ */
+export type WaitsForRestart = { readonly kind: "waits_for_restart" } & Words;
 
 /** How a confirmed apply went. */
 export type FileApply =
@@ -276,6 +285,7 @@ export type FileApply =
   | ({ readonly kind: "uncommitted" } & UncommittedWords)
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
   | ({ readonly kind: "unreadable" } & Words)
+  | WaitsForRestart
   | OperatorOnly;
 
 /**

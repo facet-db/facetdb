@@ -96,6 +96,7 @@ describe("the first-party plugins as the Plugins page receives them", () => {
         peek: () => Promise.resolve({ kind: "none" }),
         lines: async function* () {},
       },
+      projectDir: "/work/shop",
       clock: new FakeClock(0),
     });
 

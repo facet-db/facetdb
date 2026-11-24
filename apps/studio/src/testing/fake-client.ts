@@ -1464,9 +1464,12 @@ export const SAMPLE_PLUGINS: InstalledPlugins = {
 /** One registry entry as the gallery endpoint answers it. */
 function galleryEntry(
   name: string,
-  more: Omit<GalleryEntry, "name" | "holds"> & { readonly holds?: boolean },
+  more: Omit<GalleryEntry, "name" | "holds" | "nextStart"> & {
+    readonly holds?: boolean;
+    readonly nextStart?: GalleryEntry["nextStart"];
+  },
 ): GalleryEntry {
-  return { name, holds: true, ...more };
+  return { name, holds: true, nextStart: null, ...more };
 }
 
 export const SAMPLE_GALLERY: Gallery = {
