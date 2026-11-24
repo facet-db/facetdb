@@ -75,9 +75,9 @@ const ENDPOINT_NAME_RULE =
  * name what to write), and, unless `allowPrivate`, not on this machine or a private network. The
  * words never quote the address, one may carry a token in its query: only its host.
  *
- * What this sees is the host as written. A public name that resolves to a private address, or a
- * receiver that redirects to one, is judged when the delivery is sent, never here. `written` is
- * where the address sits, so the fix reads as the user writes it there: an endpoint of
+ * What this sees is the host as written. A public name that resolves to a private address is judged
+ * when the delivery is sent (`createPinnedFetch`), never here; a redirect is never followed.
+ * `written` is where the address sits, so the fix reads as the user writes it there: an endpoint of
  * `plugins.webhook.endpoints`, or a `webhook({ url })` action.
  */
 export function endpointProblem(
@@ -380,6 +380,45 @@ export function webhookRefusal(
     }
   }
   return named.has(row.endpoint) ? undefined : WEBHOOK_ENDPOINT_GONE;
+}
+
+/**
+ * Whether the config in force allows `endpoint`, an outbox row's address, to be on this machine or
+ * a private network: a row stores no flag, so it is the flag written beside that same address, in a
+ * `webhook({ url })` (its `else` under its own flag, `sendInvocation`) or in an endpoint of the
+ * built-in's settings. One place that writes the address with `allowPrivate: true` says the
+ * receiver is the user's: allowed. An address the config no longer names, or names with no flag, is
+ * not.
+ */
+export function webhookAllowsPrivate(
+  config: ProjectConfig,
+  host: PluginHost,
+  endpoint: string,
+): boolean {
+  for (const source of config.sources) {
+    for (const call of source.actions.filter(isWebhookSend)) {
+      const running = sendInvocation(call.config);
+      const otherwise = running["else"];
+      for (const written of [running, isSettings(otherwise) ? otherwise : undefined]) {
+        if (written?.["url"] === endpoint && written["allowPrivate"] === true) {
+          return true;
+        }
+      }
+    }
+  }
+  if (host.plugin(WEBHOOK_PLUGIN)?.plugin === BUILTIN_WEBHOOK) {
+    const settings = host.contextFor(WEBHOOK_PLUGIN, NEVER).config as Settings;
+    for (const written of Object.values(settings.endpoints)) {
+      if (
+        typeof written !== "string" &&
+        written.url === endpoint &&
+        written.allowPrivate === true
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /** Why a webhook row is closed unsent: its endpoint is no longer configured. No address in it. */

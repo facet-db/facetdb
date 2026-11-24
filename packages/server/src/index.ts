@@ -249,6 +249,13 @@ export {
   retryAfterDelayMs,
   retryDelayMs,
 } from "./webhooks/outbox.ts";
+export type {
+  PinnedFetchDeps,
+  Resolve,
+  ResolvedAddress,
+  ResolveOptions,
+} from "./webhooks/pinned-fetch.ts";
+export { createPinnedFetch, PrivateAddressRefused } from "./webhooks/pinned-fetch.ts";
 export { isPrivateAddress, isPrivateHost } from "./webhooks/private-address.ts";
 export type { Verification } from "./webhooks/sign.ts";
 export { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "./webhooks/sign.ts";

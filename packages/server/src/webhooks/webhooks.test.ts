@@ -34,6 +34,7 @@ import {
   type WebhookFetch,
   type WebhookGaveUp,
 } from "./outbox.ts";
+import { PrivateAddressRefused } from "./pinned-fetch.ts";
 import { receiveFacetdbWebhook } from "./receiver.ts";
 import { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "./sign.ts";
 
@@ -597,6 +598,50 @@ describe("outbox delivery", () => {
     await broken.deliverDue(START + 30_000);
     expect(t.receiver.calls).toHaveLength(calls);
     expect((await t.row(id))["last_error"]).toBe("the signing secret could not be read");
+  });
+
+  it("@timing counts a private address the fetch refused as a failed attempt, retried, in words naming the address alone", async () => {
+    const t = await rig();
+    const endpoint = `${ENDPOINT}?token=s3cret`;
+    const id = await t.outbox.enqueue({ projectId: PROJECT, endpoint, payload: {} });
+    const handed: boolean[] = [];
+    const asked: { readonly projectId: string; readonly endpoint: string }[] = [];
+    let refuse = true;
+    const send: WebhookFetch = (_url, init) => {
+      handed.push(init.allowPrivate);
+      return refuse
+        ? Promise.reject(new PrivateAddressRefused("10.0.0.5", true))
+        : Promise.resolve({ status: 204 });
+    };
+    const loop = (allowPrivate?: (row: { projectId: string; endpoint: string }) => boolean) =>
+      createOutbox({
+        client: t.client,
+        clock: t.clock,
+        fetch: send,
+        abortAfter: t.timers.abortAfter,
+        secretFor: () => Promise.resolve(SECRET),
+        onGiveUp: () => Promise.resolve(),
+        ...(allowPrivate === undefined ? {} : { allowPrivate }),
+      });
+
+    // No allowance given: the fetch is told so, refuses, and the row waits for its retry.
+    expect(await loop().deliverDue(START)).toMatchObject({ retrying: [id], gaveUp: [] });
+    const stored = await t.row(id);
+    expect(stored["last_error"]).toBe(
+      "the endpoint's host resolved to 10.0.0.5, a private address this endpoint does not allow: if the receiver is yours, set allowPrivate: true beside its url",
+    );
+    expect(JSON.stringify(stored)).not.toMatch(/token|s3cret|hooks\.example\.com/);
+    expect(Number(stored["next_attempt_at"])).toBe(START + 10_000);
+
+    // The config comes to allow it: the next attempt hands the fetch the allowance it was asked.
+    refuse = false;
+    const allowing = loop((row) => {
+      asked.push(row);
+      return true;
+    });
+    expect(await allowing.deliverDue(START + 10_000)).toMatchObject({ delivered: [id] });
+    expect(handed).toEqual([false, true]);
+    expect(asked).toEqual([{ projectId: PROJECT, endpoint }]);
   });
 
   it("@timing hands a due webhook to one loop only, and retries it after the lease if the loop died", async () => {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { accessSync, constants, existsSync } from "node:fs";
 import {
   access,
@@ -27,6 +28,7 @@ import {
   createPostgresEngine,
   createStore,
 } from "@facetdb/postgres";
+import { createPinnedFetch } from "@facetdb/server";
 import { loadConfig, type ProjectConfig, type SourceConfig } from "../config/index.ts";
 import { VERSION } from "../index.ts";
 import {
@@ -589,7 +591,18 @@ export function processDeps(
       }
     },
     stopSignal: run.stopSignal,
-    webhookFetch: (url, init) => globalThis.fetch(url, init),
+    // A webhook connects only to an address its one lookup judged (the system resolver, as the
+    // socket would have asked it), a private one refused unless its endpoint allows it. The
+    // socket's hints (ADDRCONFIG) reach getaddrinfo; both families are asked for and judged.
+    webhookFetch: createPinnedFetch({
+      resolve: (hostname, options) =>
+        dnsLookup(hostname, {
+          all: true,
+          verbatim: true,
+          ...(options.hints === undefined ? {} : { hints: options.hints }),
+        }),
+      userAgent: `facetdb/${VERSION}`,
+    }),
     fetch: (url, init) => globalThis.fetch(url, init),
     // Unref'd by the platform: a pending timeout keeps no idle process alive.
     abortAfter: (ms) => AbortSignal.timeout(ms),

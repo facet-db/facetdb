@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Clock } from "@facetdb/core";
+import { PrivateAddressRefused } from "./pinned-fetch.ts";
 import { sign, WEBHOOK_SIGNATURE_HEADER } from "./sign.ts";
 
 type SqlRow = Readonly<Record<string, unknown>>;
@@ -58,6 +59,12 @@ export type WebhookFetch = (
     readonly redirect: "manual";
     /** Aborted when the send outlives the outbox's timeout; the real `fetch` honours it. */
     readonly signal: AbortSignal;
+    /**
+     * Whether this endpoint may be on this machine or a private network (its config's
+     * `allowPrivate`). The real fetch (`createPinnedFetch`) refuses a private address otherwise,
+     * with `PrivateAddressRefused`.
+     */
+    readonly allowPrivate: boolean;
   },
 ) => Promise<{ readonly status: number }>;
 
@@ -405,6 +412,16 @@ export type OutboxDeps = {
     readonly plugin: string;
     readonly endpoint: string;
   }) => string | undefined;
+  /**
+   * Whether a webhook's endpoint may be on this machine or a private network, asked at each attempt
+   * of every webhook row, a plugin's or not, and handed to `fetch` as `allowPrivate`. A row stores
+   * no flag: the worker finds it by the row's address in the config in force. Absent, or answering
+   * false, a private address is refused.
+   */
+  readonly allowPrivate?: (row: {
+    readonly projectId: string;
+    readonly endpoint: string;
+  }) => boolean;
 };
 
 /**
@@ -1061,12 +1078,19 @@ export function createOutbox(deps: OutboxDeps): Outbox {
           body: row.payload,
           redirect: "manual",
           signal,
+          allowPrivate: deps.allowPrivate?.({ projectId: row.projectId, endpoint }) === true,
         });
       });
       return response.status >= 200 && response.status < 300
         ? undefined
         : `the receiver answered ${response.status}`;
     } catch (error) {
+      // Refused before any connection, in words that name the address alone. A failed attempt like
+      // any other: retried, as the name may resolve elsewhere later or the config come to allow it,
+      // and given up 24 hours after it was queued.
+      if (error instanceof PrivateAddressRefused) {
+        return error.message;
+      }
       if (error instanceof TimedOut) {
         return sending
           ? `the receiver did not answer within ${timeoutMs} ms`

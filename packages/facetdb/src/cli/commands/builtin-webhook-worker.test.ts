@@ -114,6 +114,8 @@ type Call = {
   readonly url: string;
   readonly headers: Record<string, string>;
   readonly body: string;
+  /** Whether the worker told the fetch this endpoint may be private. */
+  readonly allowPrivate: boolean;
 };
 
 let world: PgliteWorld;
@@ -191,7 +193,12 @@ function run(
       clock,
       random: () => 0.5,
       webhookFetch: (url, init) => {
-        calls.push({ url, headers: { ...init.headers }, body: init.body });
+        calls.push({
+          url,
+          headers: { ...init.headers },
+          body: init.body,
+          allowPrivate: init.allowPrivate,
+        });
         return Promise.resolve({ status });
       },
       abortAfter: () => new AbortController().signal,
@@ -329,6 +336,39 @@ describe("facetdb worker sends what the built-in webhook queues (builtin-webhook
       "select count(*)::int as n from facetdb.webhook_outbox where record_key = 'r1'",
     );
     expect(rows[0]?.["n"]).toBe(1);
+  });
+
+  it("tells the send an endpoint may be private only when the config in force writes allowPrivate: true beside it", async () => {
+    await world.client.query("insert into public.listings (id, title) values ('r1', 'A red car')");
+    const withActions = (actions: ProjectConfig["sources"][number]["actions"]): ProjectConfig => {
+      const base = configWith();
+      return {
+        ...base,
+        sources: base.sources.map((source) => ({ ...source, actions })),
+      };
+    };
+
+    // A public endpoint: no allowance. The send fails, so the row waits for its retry.
+    status = 500;
+    const first = await run(
+      ["worker", "--once", "--no-http"],
+      withActions([webhook({ url: HOOK })]),
+    );
+    expect(first.code, first.stderr).toBe(0);
+    expect(calls.map((call) => [call.url, call.allowPrivate])).toEqual([[HOOK, false]]);
+
+    // The row's address now named with the flag: its retry is sent with the allowance.
+    status = 204;
+    clock.advance(60_000);
+    const allowed = await run(
+      ["worker", "--once", "--no-http"],
+      withActions([webhook({ url: HOOK, allowPrivate: true })]),
+    );
+    expect(allowed.code, allowed.stderr).toBe(0);
+    expect(calls.map((call) => [call.url, call.allowPrivate])).toEqual([
+      [HOOK, false],
+      [HOOK, true],
+    ]);
   });
 
   it("closes unsent a waiting delivery whose endpoint the config no longer names", async () => {

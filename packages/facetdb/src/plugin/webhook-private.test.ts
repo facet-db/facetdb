@@ -29,6 +29,7 @@ import {
   endpointProblem,
   PluginHostError,
   WEBHOOK_PLUGIN,
+  webhookAllowsPrivate,
   webhookRefusal,
   withOutbox,
 } from "./index.ts";
@@ -105,6 +106,7 @@ const PRIVATE: readonly (readonly [written: string, host: string, form: string])
   ["[64:ff9b::a9fe:a9fe]", "[64:ff9b::a9fe:a9fe]", "NAT64 of the metadata address"],
   ["[64:ff9b:1::1]", "[64:ff9b:1::1]", "NAT64 for local use"],
   ["[2002:a9fe:a9fe::1]", "[2002:a9fe:a9fe::1]", "6to4 of the metadata address"],
+  ["[2001:0:4136:e378:8000:63bf:80ff:fffe]", "[2001:0:4136:e378:8000:63bf:80ff:fffe]", "Teredo"],
   ["[fc00::1]", "[fc00::1]", "unique local"],
   ["[fd12:3456:789a::1]", "[fd12:3456:789a::1]", "unique local fd"],
   ["[fe80::1]", "[fe80::1]", "link-local"],
@@ -638,12 +640,21 @@ describe("the classifier the send reuses", () => {
       "2002:7f00:1::",
       "fe80::1%eth0",
       "fd00::1",
+      // Teredo, its client 127.0.0.1 obfuscated in the last 32 bits: the whole of 2001::/32.
+      "2001:0:4136:e378:8000:63bf:80ff:fffe",
+      "2001::1",
       "not an address",
     ];
     for (const address of privateOnes) {
       expect(isPrivateAddress(address), address).toBe(true);
     }
-    for (const address of ["8.8.8.8", "2606:4700::1111", "::ffff:8.8.8.8", "2002:808:808::"]) {
+    for (const address of [
+      "8.8.8.8",
+      "2606:4700::1111",
+      "::ffff:8.8.8.8",
+      "2002:808:808::",
+      "2001:4860:4860::8888",
+    ]) {
       expect(isPrivateAddress(address), address).toBe(false);
     }
   });
@@ -653,5 +664,30 @@ describe("the classifier the send reuses", () => {
     expect(isPrivateHost("Metadata.Google.Internal.")).toBe(true);
     expect(isPrivateHost("hooks.example.com")).toBe(false);
     expect(isPrivateHost("127.0.0.1.nip.io")).toBe(false);
+  });
+
+  it("allows a private address at the send only for an address the config in force writes with allowPrivate: true", async () => {
+    const when = '{ status: "done" }';
+    const opsUrl = `http://127.0.0.1:4040${TAIL}`;
+    const actionUrl = `https://10.0.0.5${TAIL}`;
+    const elseUrl = `https://10.0.0.6${TAIL}`;
+    const publicUrl = `https://hooks.example.com${TAIL}`;
+    const rebinding = `https://127.0.0.1.nip.io${TAIL}`;
+    const config = await loaded(
+      configText(`ops: { url: ${text(opsUrl)}, allowPrivate: true }, plain: ${text(publicUrl)}`, [
+        `webhook({ url: ${text(actionUrl)}, allowPrivate: true })`,
+        `webhook({ url: ${text(publicUrl)}, when: ${when}, else: { url: ${text(elseUrl)}, allowPrivate: true } })`,
+        `webhook({ url: ${text(rebinding)} })`,
+      ]),
+    );
+    const host = await hostFor(config);
+
+    for (const allowed of [opsUrl, actionUrl, elseUrl]) {
+      expect(webhookAllowsPrivate(config, host, allowed), allowed).toBe(true);
+    }
+    // Named with no flag, named only in another spelling, or not named at all: not allowed.
+    for (const barred of [publicUrl, rebinding, `https://10.0.0.5${TAIL}#x`, "https://10.0.0.7/"]) {
+      expect(webhookAllowsPrivate(config, host, barred), barred).toBe(false);
+    }
   });
 });

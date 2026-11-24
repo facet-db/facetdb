@@ -38,6 +38,9 @@ const IPV6_RANGES: readonly (readonly [string, number])[] = [
   ["fec0::", 10], // site-local, deprecated but still routed by some stacks
   ["ff00::", 8], // multicast
   ["64:ff9b:1::", 48], // NAT64 for local use (RFC 8215)
+  // Teredo: a tunnel whose client IPv4 sits obfuscated in the last 32 bits, which can hide
+  // 127.0.0.1 or 10.0.0.5; no webhook receiver lives behind one, so the whole range is refused.
+  ["2001::", 32],
 ];
 
 const blocked = new BlockList();

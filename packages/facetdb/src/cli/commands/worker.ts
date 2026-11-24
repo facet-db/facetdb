@@ -93,6 +93,7 @@ import {
   summaryFailureLine,
   summaryUnmarkedLine,
   type WebhookOutbox,
+  webhookAllowsPrivate,
   webhookRefusal,
   webhookSecret,
   withOutbox,
@@ -1045,6 +1046,11 @@ export async function runWorkers(
       // A webhook the built-in queued is sent only to an endpoint the config in force still names;
       // one queued under an older config, or by a review from a stale copy, is closed.
       refuseWebhook: (row) => webhookRefusal(fleet.config(), plugins, row),
+      // Every webhook row, a plugin's or one queued by an older version with none, is sent to a
+      // private address only when the config in force writes its address with allowPrivate: true;
+      // the fetch (`createPinnedFetch` at the composition root) judges it.
+      allowPrivate: (row) =>
+        row.projectId === project.id && webhookAllowsPrivate(fleet.config(), plugins, row.endpoint),
       // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
       // worker's other alerts are; one that cannot be raised is the outbox's to retry.
       onGiveUp: async (event, _signal, lastError) => {

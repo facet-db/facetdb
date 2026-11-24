@@ -41,6 +41,7 @@ export {
   WEBHOOK_ENDPOINT_GONE,
   WEBHOOK_PLUGIN,
   WEBHOOK_SECRET_VARIABLE,
+  webhookAllowsPrivate,
   webhookRefusal,
   webhookSecret,
   withOutbox,
