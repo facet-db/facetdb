@@ -22,6 +22,8 @@ import type { EngineEntry } from "./program.ts";
 // `migrate` is the deprecated pre-058 path: the oracle the CLI's one-database script is compared
 // with, byte for byte (migrate.test.ts).
 export {
+  // postgres.js itself: doctor's test on a real socket proves its connect timeout reaches it.
+  connectPostgres,
   createStore,
   // The trigger install's statements and the polling dialect: `facetdb types` ties its column
   // nullability to them (types-install.test.ts).

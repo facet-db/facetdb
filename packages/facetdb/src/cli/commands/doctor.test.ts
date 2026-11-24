@@ -1,5 +1,5 @@
 import { type DoctorCheck, HEARTBEAT_LOSS_MS } from "@facetdb/core";
-import { FakeClock, FakeEngine } from "@facetdb/core/testing";
+import { FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider, type FakeProvider } from "@facetdb/model";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -19,6 +19,7 @@ import {
   postgresEngines,
   readingDatabaseUrl,
   type SqlConnect,
+  SteppedClock,
   WORKER_ROLE,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
@@ -63,7 +64,8 @@ function configWith(
 }
 
 let world: PgliteWorld;
-const clock = new FakeClock(START);
+// Its sleeps end only when a test moves it: each doctor step's 10-second bound waits.
+const clock = new SteppedClock(START);
 
 /**
  * One installed database for the whole file, built once by the real `facetdb migrate` (installing

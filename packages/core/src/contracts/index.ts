@@ -25,6 +25,7 @@ export type { DecisionLog, LogPage, VersionModels } from "./decision-log.ts";
 export type {
   DatabaseEngine,
   DoctorCheck,
+  DoctorDeps,
   EngineDeps,
   EngineObject,
   EnginePlan,

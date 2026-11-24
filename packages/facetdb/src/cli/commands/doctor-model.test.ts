@@ -1,5 +1,4 @@
 import type { ModelProvider, ProviderRequest } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
@@ -8,6 +7,7 @@ import {
   createStore,
   type PgliteWorld,
   type SqlConnect,
+  SteppedClock,
   sourceIdOf,
 } from "../testing.ts";
 import { questionSetOf } from "./database.ts";
@@ -35,7 +35,8 @@ const HELD = "jev-1.14.0";
 /** The model `orders` sets for itself. */
 const OWN = "jev-1.13.0";
 const OTHER = "strands-decider-7b";
-const clock = new FakeClock(10_000_000);
+// Its sleeps end only when a test moves it: each doctor step's 10-second bound waits.
+const clock = new SteppedClock(10_000_000);
 
 function configNaming(model: string, ordersModel = OWN): ProjectConfig {
   return facetdb({

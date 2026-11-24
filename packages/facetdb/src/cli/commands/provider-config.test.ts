@@ -29,6 +29,7 @@ import {
   type PgliteWorld,
   postgresEngines,
   resetPgliteWorld,
+  SteppedClock,
   sourceIdOf,
   TEST_SECRET,
 } from "../testing.ts";
@@ -296,7 +297,8 @@ function run(
           stopSignal: () => new AbortController().signal,
           plugins,
         }),
-      clock,
+      // Its sleeps end only when moved: each doctor step's 10-second bound waits.
+      clock: new SteppedClock(0),
     },
     COMMANDS,
   );

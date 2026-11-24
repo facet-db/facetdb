@@ -4,6 +4,7 @@ import {
   modelNameWords,
   type Question,
 } from "@facetdb/core";
+import { createBackoff, RetryableError } from "@facetdb/model";
 import {
   ConfigError,
   type PluginProviderRef,
@@ -36,6 +37,7 @@ import {
   heldVersions,
   pollingStoreClash,
   STORE_SECRET_VARIABLE,
+  STORE_VARIABLE,
   sameDatabase,
   secretCheck,
   storeCheck,
@@ -114,6 +116,10 @@ export type CheckLine = CheckResult & {
 export type DoctorEnvironment = {
   readonly deps: CliDeps;
   readonly options: DoctorOptions;
+  /** A step's bound in milliseconds: `DOCTOR_STEP_MS` unless a test passes a shorter one. */
+  readonly stepMs?: number;
+  /** How long a connection may take to open, in seconds: the step's bound unless a test passes one. */
+  readonly connectTimeoutSeconds?: number;
 };
 
 const ok = (detail: string): CheckResult => ({ status: "ok", detail });
@@ -154,6 +160,145 @@ const SECRET = {
 
 /** The store group's own check: the store reachable and at this FacetDB's schema version. */
 const STORE_LABEL = "store";
+
+/**
+ * How long one step of a run may take, in milliseconds: the config, a source's engine checks, the
+ * heartbeat, the model, the store. Past it, the checks of the step that had not ended fail saying
+ * so and the run goes on; each connection a step opens may take as long to open
+ * (`DoctorDeps.connectTimeoutSeconds`; the Postgres engine's own default is the same 10 seconds,
+ * `DOCTOR_CONNECT_TIMEOUT_S` in packages/postgres/src/engine/doctor.ts).
+ */
+export const DOCTOR_STEP_MS = 10_000;
+
+/** A number of seconds in words: `1 second`, `0.5 seconds`, `10 seconds`. */
+const secondsWords = (seconds: number) => `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+
+/** A run of the checks: the command's environment, its bounds, and the servers that never answered. */
+type Run = DoctorEnvironment & {
+  readonly stepMs: number;
+  readonly connectTimeoutSeconds: number;
+  /**
+   * The login, host, port and database (never the password) of each connection string whose
+   * server never answered a step: a later step asks it nothing and fails at once. A pooler host
+   * serving other databases or logins is still asked for those.
+   */
+  readonly silent: Set<string>;
+};
+
+/** `within 10 seconds`, from the run's own bound. */
+const within = (run: Run) => `within ${secondsWords(run.stepMs / 1000)}`;
+
+/** What a connection string reaches, as `login@host:port/database`; none for one `new URL` cannot read. */
+function serverKeyOf(url: string | undefined): string | undefined {
+  if (url === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.host === "" ? undefined : `${parsed.username}@${parsed.host}${parsed.pathname}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The run never asks this connection string's server anything more. */
+function markSilent(run: Run, url: string | undefined): void {
+  const key = serverKeyOf(url);
+  if (key !== undefined) {
+    run.silent.add(key);
+  }
+}
+
+/** A step's server that never answered, naming its host and never its connection string. */
+function notAnswered(run: Run, url: string | undefined): string {
+  let host = "";
+  try {
+    host = url === undefined ? "" : new URL(url).host;
+  } catch {
+    // Not a URL `new URL` reads: the words name no host.
+  }
+  return `${host === "" ? "the database server" : `the server at ${host}`} did not answer ${within(run)}`;
+}
+
+/** The fix for a server that never answered: its address, and what may stand in the way. */
+const notAnsweredFix = (variable: string) =>
+  `check the host and port in ${variable}, and that the database accepts connections from this machine (a firewall or an allow-list)`;
+
+/** A check that had not ended when its step ran out, its server having answered the ones before. */
+const notFinished = (run: Run, name: string) =>
+  `the ${labelOf(name)} check did not finish ${within(run)}`;
+
+const NOT_FINISHED_FIX =
+  "the database answered but this check was slow: run facetdb doctor again, and if it repeats, look at the server's load";
+
+/**
+ * Runs one step against the run's bound on its clock: what it ended with, or `late` when the
+ * clock got there first. The timer is cleared on every exit; a step given up on runs on unheard,
+ * and what it ends with is dropped. Given the connection string it reaches, a server that never
+ * answered an earlier step is not asked again (`late` at once). A clock whose wait ends at once
+ * (a fake that moves time on `sleep`, or one that never moves) would make every step late: that is
+ * a wiring error, and it throws instead of reporting answering servers as silent.
+ */
+async function bounded<T>(
+  run: Run,
+  work: () => Promise<T>,
+  url?: string,
+): Promise<{ readonly value: T } | "late"> {
+  const key = serverKeyOf(url);
+  if (key !== undefined && run.silent.has(key)) {
+    return "late";
+  }
+  const { clock } = run.deps;
+  const timer = new AbortController();
+  const started = clock.now();
+  try {
+    const deadline = clock.sleep(run.stepMs, timer.signal).then(() => "late" as const);
+    if (clock.now() - started >= run.stepMs) {
+      throw new DoctorClockError(run);
+    }
+    const ended = await Promise.race([work().then((value) => ({ value })), deadline]);
+    if (ended === "late" && clock.now() - started < run.stepMs / 2) {
+      throw new DoctorClockError(run);
+    }
+    return ended;
+  } finally {
+    timer.abort();
+  }
+}
+
+/** A clock whose waits end at once, refused by `bounded`: a wiring error, never a check's failure. */
+class DoctorClockError extends Error {
+  constructor(run: Run) {
+    super(
+      `doctor's clock ended a ${secondsWords(run.stepMs / 1000)} wait without that time passing on it, so every step would read as unanswered: give doctor a clock whose sleeps wait (the process clock, or SteppedClock in a test)`,
+    );
+    this.name = "DoctorClockError";
+  }
+}
+
+/** The driver a step reaches the store with: every connection opens within the run's connect bound. */
+function stepDriver(run: Run): {
+  readonly connect: CliDeps["connect"];
+  /** Ends every connection the step opened: a step given up on holds none after the run. */
+  readonly release: () => void;
+} {
+  const opened: ReturnType<CliDeps["connect"]>[] = [];
+  return {
+    connect: (url, options) => {
+      const client = run.deps.connect(url, {
+        ...options,
+        connectTimeoutSeconds: run.connectTimeoutSeconds,
+      });
+      opened.push(client);
+      return client;
+    },
+    release: () => {
+      for (const client of opened) {
+        client.close().catch(() => undefined);
+      }
+    },
+  };
+}
 
 /**
  * The worker's connection string when the source has none to read its database from: Postgres's
@@ -427,7 +572,7 @@ function modelKeys({ deps }: DoctorEnvironment, config: ProjectConfig): (string 
 
 /** The provider answers one tiny question; `--offline` skips the network. */
 async function modelReachable(
-  environment: DoctorEnvironment,
+  environment: Run,
   config: ProjectConfig,
   plugins: PluginHost | undefined,
 ): Promise<Reached> {
@@ -440,29 +585,62 @@ async function modelReachable(
   if (environment.options.offline) {
     return skip(`skipped because of --offline${unrun}`);
   }
+  const leave = "or run facetdb doctor --offline to leave this check out";
+  let fix: string;
+  if (chosen !== undefined) {
+    fix = `check ${chosen.variable} and that ${chosen.address ?? "the provider's address"} is running and reachable from this machine, ${leave}`;
+  } else if (config.provider !== undefined) {
+    fix = `check the settings and variables of the plugin that supplies ${config.provider}, and that its service is reachable from this machine, ${leave}`;
+  } else if (config.modelUrl === undefined) {
+    fix = `check TYPESAFE_API_KEY and this machine's network access to TypeSafe, ${leave}`;
+  } else {
+    fix = `check that ${config.modelUrl} is running and reachable from this machine, ${leave}`;
+  }
+  // A 429 or 529 is retried as the worker retries it, within the step; the last one heard says why
+  // the question did not get through.
+  const heard: { refusal?: RetryableError } = {};
+  const backoff = createBackoff({ clock: environment.deps.clock, random: environment.deps.random });
   try {
-    const named = await ping(environment, config, plugins, config.model);
+    const answered = await bounded(environment, () =>
+      backoff.run(
+        () => ping(environment, config, plugins, config.model),
+        (refusal) => {
+          heard.refusal = refusal;
+        },
+      ),
+    );
+    if (answered === "late") {
+      return heard.refusal === undefined
+        ? fail(`the model did not answer a test question ${within(environment)}${unrun}`, fix)
+        : fail(`${rateLimited(heard.refusal, environment)}${unrun}`, RATE_LIMITED_FIX);
+    }
+    const named = answered.value;
     return { ...ok(`${modelNameWords(named)} answered a test question${unrun}`), named };
   } catch (error) {
-    const keys = modelKeys(environment, config);
-    const leave = "or run facetdb doctor --offline to leave this check out";
-    let fix: string;
-    if (chosen !== undefined) {
-      fix = `check ${chosen.variable} and that ${chosen.address ?? "the provider's address"} is running and reachable from this machine, ${leave}`;
-    } else if (config.provider !== undefined) {
-      fix = `check the settings and variables of the plugin that supplies ${config.provider}, and that its service is reachable from this machine, ${leave}`;
-    } else if (config.modelUrl === undefined) {
-      fix = `check TYPESAFE_API_KEY and this machine's network access to TypeSafe, ${leave}`;
-    } else {
-      fix = `check that ${config.modelUrl} is running and reachable from this machine, ${leave}`;
+    if (error instanceof DoctorClockError) {
+      throw error;
     }
+    if (error instanceof RetryableError) {
+      return fail(`${rateLimited(error, environment)}${unrun}`, RATE_LIMITED_FIX);
+    }
+    const keys = modelKeys(environment, config);
     return fail(`the model did not answer: ${plainMessage(error, keys)}${unrun}`, fix);
   }
 }
 
+/** The model answered, with a rate limit or an overload, every time it was asked within the step. */
+function rateLimited(refusal: RetryableError, run: Run): string {
+  const said =
+    refusal.status === 429 ? "it is rate limiting this project (429)" : "it is overloaded (529)";
+  return `the model answered that ${said}, and the test question did not get through ${within(run)}`;
+}
+
+const RATE_LIMITED_FIX =
+  "wait a minute and run facetdb doctor again; a worker running now may be using the project's whole rate limit";
+
 /** The model's two checks, the second only once the first passed. */
 async function modelLines(
-  environment: DoctorEnvironment,
+  environment: Run,
   config: ProjectConfig,
   plugins: PluginHost | undefined,
 ): Promise<readonly CheckLine[]> {
@@ -494,7 +672,7 @@ const MODEL_NAME = { id: "model-name", label: "model name" } as const;
  * server chose are quoted as `modelNameWords` says.
  */
 async function modelNameNotes(
-  environment: DoctorEnvironment,
+  environment: Run,
   config: ProjectConfig,
   plugins: PluginHost | undefined,
   named: string,
@@ -509,13 +687,27 @@ async function modelNameNotes(
       ),
     );
   }
-  const read = await heldVersions(
-    deps.connect,
-    deps.env,
-    projectRef(deps.projectDir).id,
-    config.sources.map((source) => source.name),
-    options.allowInsecure,
+  const store = storeUrlOf(deps.env);
+  const driver = stepDriver(environment);
+  const held = await bounded(
+    environment,
+    () =>
+      heldVersions(
+        driver.connect,
+        deps.env,
+        projectRef(deps.projectDir).id,
+        config.sources.map((source) => source.name),
+        options.allowInsecure,
+      ),
+    store,
   );
+  if (held === "late") {
+    // One plain select that never came back: its server never answered.
+    driver.release();
+    markSilent(environment, store);
+  }
+  const read: Awaited<ReturnType<typeof heldVersions>> =
+    held === "late" ? { kind: "unreadable", why: notAnswered(environment, store) } : held.value;
   if (read.kind === "unreadable") {
     notes.push(
       note(
@@ -543,8 +735,17 @@ async function modelNameNotes(
     let answer = answers.get(model);
     if (answer === undefined) {
       try {
-        answer = { named: await ping(environment, config, plugins, model) };
+        const answered = await bounded(environment, () =>
+          ping(environment, config, plugins, model),
+        );
+        answer =
+          answered === "late"
+            ? { failed: `none came ${within(environment)}` }
+            : { named: answered.value };
       } catch (error) {
+        if (error instanceof DoctorClockError) {
+          throw error;
+        }
         answer = { failed: plainMessage(error, modelKeys(environment, config)) };
       }
       answers.set(model, answer);
@@ -599,6 +800,48 @@ function tableSourcesOf(config: ProjectConfig, env: CliDeps["env"]): readonly Ta
 }
 
 /**
+ * A source's checks when its engine's did not end within a step. The ones the engine reported as
+ * they ended keep their own lines; each one left fails. When none ended, the server never answered:
+ * each says so with the fix for its address, and the run asks it nothing more. When some did, the
+ * server answered and a later check was slow: each one left says it did not finish. The heartbeat
+ * is among them only where the engine would read it, the store being this source's database;
+ * elsewhere the store door reads it, as its own step. An engine that reports nothing as it goes
+ * (every engine but Postgres's) is judged as a whole.
+ */
+function lateChecks(
+  run: Run,
+  engine: DatabaseEngine,
+  table: TableSource,
+  url: string,
+  reported: readonly DoctorCheck[],
+): readonly DoctorCheck[] {
+  const left = engine.checks
+    .map((check) => check.name)
+    .filter(
+      (name) =>
+        (name !== "worker" || table.sharesStore) && !reported.some((done) => done.name === name),
+    );
+  const source = `"${table.source.name}"`;
+  if (reported.length === 0) {
+    markSilent(run, url);
+    const detail = `${source}: ${notAnswered(run, url)}`;
+    const fix = notAnsweredFix(variableOf(table.source));
+    return left.map((name): DoctorCheck => ({ name, status: "fail", detail, fix }));
+  }
+  return [
+    ...reported,
+    ...left.map(
+      (name): DoctorCheck => ({
+        name,
+        status: "fail",
+        detail: `${source}: ${notFinished(run, name)}`,
+        fix: NOT_FINISHED_FIX,
+      }),
+    ),
+  ];
+}
+
+/**
  * A table source's checks from its engine (database, distance, pooler, install), and the engine's
  * heartbeat line apart: it is the report's only when the store is this source's database. Never
  * throws: a source with no connection string, one that reads the store's variable for a database
@@ -606,7 +849,7 @@ function tableSourcesOf(config: ProjectConfig, env: CliDeps["env"]): readonly Ta
  * not installed) fails the database check, and the other sources and the store are still checked.
  */
 async function sourceLines(
-  environment: DoctorEnvironment,
+  environment: Run,
   config: ProjectConfig,
   table: TableSource,
   scrub: (text: string) => string,
@@ -674,11 +917,28 @@ async function sourceLines(
     { source, ...splitTable(source.table ?? "") },
     projectRef(deps.projectDir),
   );
-  const checks = await engine.doctor(target, url, {
-    clock: deps.clock,
-    allowInsecure: options.allowInsecure === true,
-    storeShared: table.sharesStore,
-  });
+  const reported: DoctorCheck[] = [];
+  const answered = await bounded(
+    environment,
+    () =>
+      engine.doctor(target, url, {
+        clock: deps.clock,
+        allowInsecure: options.allowInsecure === true,
+        storeShared: table.sharesStore,
+        connectTimeoutSeconds: environment.connectTimeoutSeconds,
+        onCheck: (check) => {
+          reported.push(check);
+        },
+      }),
+    url,
+  );
+  const checks =
+    answered === "late"
+      ? lateChecks(environment, engine, table, url, [...reported])
+      : answered.value;
+  if (checks.some((check) => check.silent === true)) {
+    markSilent(environment, url);
+  }
   const worker = checks.find((check) => check.name === "worker" && check.status !== "skip");
   return {
     lines: [
@@ -699,7 +959,7 @@ async function sourceLines(
 }
 
 /** The lines when no source reads a table: nothing to reach or install, the store's pooler alone. */
-async function noTableLines(environment: DoctorEnvironment): Promise<readonly CheckLine[]> {
+async function noTableLines(environment: Run): Promise<readonly CheckLine[]> {
   const { deps, options } = environment;
   const store = storeUrlOf(deps.env);
   // A store URL the TLS rule refuses is the heartbeat check's failure: never probed here.
@@ -707,7 +967,7 @@ async function noTableLines(environment: DoctorEnvironment): Promise<readonly Ch
     store === undefined ||
     storeUrlProblem(store, options.allowInsecure, deps.env["PGHOST"]) !== undefined
       ? undefined
-      : await storePoolerCheck(deps.connect, store);
+      : await storeStep(environment, "pooler", (connect) => storePoolerCheck(connect, store));
   return [
     line(
       { id: "database", label: "database" },
@@ -725,48 +985,145 @@ async function noTableLines(environment: DoctorEnvironment): Promise<readonly Ch
 
 /** The store group's lines: reachable and current, its pooler, the worker's heartbeat, the secret. */
 async function storeLines(
-  environment: DoctorEnvironment,
+  environment: Run,
   scrub: (text: string) => string,
 ): Promise<readonly CheckLine[]> {
   const { deps, options } = environment;
   const group = "store";
-  const reached = fromCheck(
-    await storeCheck(deps.connect, deps.env, options.allowInsecure),
-    scrub,
-    group,
-  );
   const store = storeUrlOf(deps.env);
-  const pooler =
-    reached.status === "ok" && store !== undefined
-      ? fromCheck(await storePoolerCheck(deps.connect, store), scrub, group)
-      : line(
+  // The store reachable and current, then its pooler: one step. The store check is kept as soon as
+  // it ends, so a slow pooler probe never turns an answered store into a failure.
+  const driver = stepDriver(environment);
+  const ended: { reached?: DoctorCheck } = {};
+  const answered = await bounded(
+    environment,
+    async () => {
+      const reached = await storeCheck(driver.connect, deps.env, options.allowInsecure);
+      ended.reached = reached;
+      return {
+        reached,
+        pooler:
+          reached.status === "ok" && store !== undefined
+            ? await storePoolerCheck(driver.connect, store)
+            : undefined,
+      };
+    },
+    store,
+  );
+  let reached: DoctorCheck;
+  let pooler: DoctorCheck | undefined;
+  if (answered !== "late") {
+    ({ reached, pooler } = answered.value);
+    if (reached.silent === true) {
+      markSilent(environment, store);
+    }
+  } else if (ended.reached === undefined) {
+    driver.release();
+    markSilent(environment, store);
+    reached = storeNotAnswered(environment, STORE_LABEL, store);
+    pooler = storeNotAnswered(environment, "pooler", store);
+  } else {
+    driver.release();
+    reached = ended.reached;
+    pooler = storeNotFinished(environment, "pooler");
+  }
+  return [
+    fromCheck(reached, scrub, group),
+    pooler === undefined
+      ? line(
           { id: "pooler", label: "pooler" },
           skip(`not checked: the ${STORE_LABEL} check did not pass`),
           group,
-        );
-  return [
-    reached,
-    pooler,
+        )
+      : fromCheck(pooler, scrub, group),
     fromCheck(await heartbeat(environment), scrub, group),
     line(SECRET, secretCheck(deps.env), group),
   ];
 }
 
+/** A store check whose step ended before the store's server answered anything. */
+function storeNotAnswered(run: Run, name: string, url: string | undefined): DoctorCheck {
+  return {
+    name,
+    status: "fail",
+    detail: `the FacetDB store: ${notAnswered(run, url)}`,
+    fix: notAnsweredFix(STORE_VARIABLE),
+  };
+}
+
+/** A store check whose step ended after the store had answered the check before it. */
+function storeNotFinished(run: Run, name: string): DoctorCheck {
+  return {
+    name,
+    status: "fail",
+    detail: `the FacetDB store: ${notFinished(run, name)}`,
+    fix: NOT_FINISHED_FIX,
+  };
+}
+
+/**
+ * One store door check, one statement on one connection, as a step of its own: its result, or,
+ * past the step's bound, its server never answered: the connection is ended and the server is
+ * asked nothing more in the run.
+ */
+async function storeStep(
+  run: Run,
+  name: string,
+  check: (connect: CliDeps["connect"]) => Promise<DoctorCheck>,
+): Promise<DoctorCheck> {
+  const store = storeUrlOf(run.deps.env);
+  const driver = stepDriver(run);
+  const answered = await bounded(run, () => check(driver.connect), store);
+  if (answered === "late") {
+    driver.release();
+    markSilent(run, store);
+    return storeNotAnswered(run, name, store);
+  }
+  if (answered.value.silent === true) {
+    markSilent(run, store);
+  }
+  return answered.value;
+}
+
 /** The worker's heartbeat, read from the store by the store door. */
-function heartbeat({ deps, options }: DoctorEnvironment): Promise<DoctorCheck> {
-  return heartbeatCheck(
-    deps.connect,
-    deps.env,
-    deps.clock,
-    projectRef(deps.projectDir).id,
-    options.allowInsecure,
+function heartbeat(run: Run): Promise<DoctorCheck> {
+  const { deps, options } = run;
+  return storeStep(run, "worker", (connect) =>
+    heartbeatCheck(
+      connect,
+      deps.env,
+      deps.clock,
+      projectRef(deps.projectDir).id,
+      options.allowInsecure,
+    ),
   );
 }
 
-/** Runs every check in order. A check never throws: what goes wrong inside one is that check's failure. */
-export async function runChecks(environment: DoctorEnvironment): Promise<readonly CheckLine[]> {
+/**
+ * Runs every check in order. A check never throws: what goes wrong inside one is that check's
+ * failure. Each step ends within `DOCTOR_STEP_MS`, so a server that never answers is a failed check
+ * in its own words, and the steps after it still run.
+ */
+export async function runChecks(command: DoctorEnvironment): Promise<readonly CheckLine[]> {
+  const stepMs = command.stepMs ?? DOCTOR_STEP_MS;
+  const environment: Run = {
+    ...command,
+    stepMs,
+    connectTimeoutSeconds: command.connectTimeoutSeconds ?? stepMs / 1000,
+    silent: new Set(),
+  };
   const { deps } = environment;
-  const loaded = await configLoads(environment);
+  const configured = await bounded(environment, () => configLoads(environment));
+  const path = environment.options.config;
+  const loaded: Awaited<ReturnType<typeof configLoads>> =
+    configured === "late"
+      ? {
+          result: fail(
+            `${path} did not load ${within(environment)}`,
+            `check that ${path} and the plugins it names load without waiting on the network, then run facetdb doctor again`,
+          ),
+        }
+      : configured.value;
   const lines: CheckLine[] = [line(CONFIG_CHECK, loaded.result)];
   const { config, plugins } = loaded;
   if (config === undefined) {
@@ -877,7 +1234,7 @@ export const doctorCommand = defineCommand<DoctorOptions>("doctor", {
     ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
-    const environment: DoctorEnvironment = { deps, options };
+    const environment: DoctorEnvironment = { deps, options, ...deps.doctorBounds };
     if (options.dryRun) {
       const entries = await planned(deps.engines);
       for (const [index, entry] of entries.entries()) {

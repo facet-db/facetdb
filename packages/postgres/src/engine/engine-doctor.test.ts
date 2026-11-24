@@ -11,6 +11,7 @@ import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SqlConnect } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
+import { DOCTOR_CONNECT_TIMEOUT_S } from "./doctor.ts";
 import { createPostgresEngine } from "./engine.ts";
 
 /**
@@ -318,6 +319,161 @@ describe("doctor", () => {
       detail: `"listings": LISTINGS_URL reaches db.example.com without TLS, so the password in it would travel in the clear`,
       fix: "add ?sslmode=require to LISTINGS_URL, or pass --allow-insecure if that network is trusted",
     });
+  });
+});
+
+describe("doctor's connect timeout", () => {
+  it("opens every connection with the 10-second connect timeout, not the driver's 30", async () => {
+    await installed();
+    const opened: unknown[] = [];
+    const login = as("facetdb_worker");
+    const recording = createPostgresEngine({
+      connect: (url, options) => {
+        opened.push(options);
+        return login(url, options);
+      },
+      pgHost: undefined,
+    });
+    const checks = await recording.doctor(target(), WORKER_URL, shared);
+    expect(checks.slice(0, 4)).toEqual([DATABASE_OK, POOLER_OK, CAPTURE_OK, INSTALL_OK]);
+    expect(DOCTOR_CONNECT_TIMEOUT_S).toBe(10);
+    // The database, the pooler (one connection, kept for its two runs), the catalog, the heartbeat.
+    expect(opened).toEqual([
+      { connectTimeoutSeconds: 10 },
+      { max: 1, connectTimeoutSeconds: 10 },
+      { connectTimeoutSeconds: 10 },
+      { connectTimeoutSeconds: 10 },
+    ]);
+  });
+
+  it("reports each check as it ends, in order, and opens with the timeout it is given", async () => {
+    await installed();
+    const opened: unknown[] = [];
+    const reported: string[] = [];
+    const login = as("facetdb_worker");
+    // Each report is read against what the engine has asked by then: a check is reported once it
+    // ended, before the next one opens its connection.
+    const recording = createPostgresEngine({
+      connect: (url, options) => {
+        opened.push(options);
+        reported.push(`open ${opened.length}`);
+        return login(url, options);
+      },
+      pgHost: undefined,
+    });
+    const checks = await recording.doctor(target(), WORKER_URL, {
+      ...shared,
+      connectTimeoutSeconds: 2.5,
+      onCheck: (check) => {
+        reported.push(check.name);
+      },
+    });
+    expect(reported).toEqual([
+      "open 1",
+      "database",
+      "open 2",
+      "pooler",
+      "open 3",
+      "capture",
+      "install",
+      "open 4",
+      "worker",
+    ]);
+    expect(checks.map((check) => check.name)).toEqual([
+      "database",
+      "pooler",
+      "capture",
+      "install",
+      "worker",
+    ]);
+    expect(opened).toEqual([
+      { connectTimeoutSeconds: 2.5 },
+      { max: 1, connectTimeoutSeconds: 2.5 },
+      { connectTimeoutSeconds: 2.5 },
+      { connectTimeoutSeconds: 2.5 },
+    ]);
+  });
+
+  it("says a server that let the connection time out in plain words, and asks the store in it nothing more", async () => {
+    const remote = "postgres://facetdb_worker:s3cret-worker-password@db.example.com:5432/app";
+    const opened: string[] = [];
+    // What postgres.js throws once connect_timeout passes (read by its code alone, at the boundary).
+    const timedOut = Object.assign(new Error("write CONNECT_TIMEOUT db.example.com:5432"), {
+      code: "CONNECT_TIMEOUT",
+    });
+    const silent = createPostgresEngine({
+      connect: (url) => {
+        opened.push(url);
+        return {
+          query: () => Promise.reject(timedOut),
+          transaction: () => Promise.reject(timedOut),
+          pipeline: () => Promise.reject(timedOut),
+          close: () => Promise.resolve(),
+        };
+      },
+      pgHost: undefined,
+    });
+    const checks = await silent.doctor(target(), remote, { ...shared, allowInsecure: true });
+    expect(checks).toEqual([
+      {
+        name: "database",
+        status: "fail",
+        detail: `"listings": the server at db.example.com:5432 did not answer within 10 seconds`,
+        fix: "check the host, port, user and password in the source's connection string, and that the database accepts connections from this machine (a firewall or an allow-list)",
+        unreachable: true,
+        // It said nothing at all: a run asks this server nothing more.
+        silent: true,
+      },
+      { name: "pooler", status: "skip", detail: "not checked: the database check did not pass" },
+      { name: "capture", status: "skip", detail: "not checked: the database check did not pass" },
+      { name: "install", status: "skip", detail: "not checked: the database check did not pass" },
+      {
+        name: "worker",
+        status: "fail",
+        detail:
+          "the store is in the same database: the server at db.example.com:5432 did not answer within 10 seconds",
+        fix: "check the host and port in DATABASE_URL, and that the database accepts connections from this machine (a firewall or an allow-list)",
+      },
+    ]);
+    // One connection: the heartbeat, in the same silent server, would hold a second for 10 seconds.
+    expect(opened).toHaveLength(1);
+    expect(JSON.stringify(checks)).not.toContain("CONNECT_TIMEOUT");
+    expect(JSON.stringify(checks)).not.toContain("s3cret-worker-password");
+  });
+
+  it("says a connection that timed out after the first in the same plain words", async () => {
+    await installed();
+    const login = as("facetdb_worker");
+    let opened = 0;
+    const timedOut = Object.assign(new Error("write CONNECT_TIMEOUT localhost:5432"), {
+      code: "CONNECT_TIMEOUT",
+    });
+    // The database check's connection answers; every later one times out.
+    const flaky = createPostgresEngine({
+      connect: (url, options) => {
+        opened += 1;
+        return opened === 1
+          ? login(url, options)
+          : {
+              query: () => Promise.reject(timedOut),
+              transaction: () => Promise.reject(timedOut),
+              pipeline: () => Promise.reject(timedOut),
+              close: () => Promise.resolve(),
+            };
+      },
+      pgHost: undefined,
+    });
+    const checks = await flaky.doctor(target(), WORKER_URL, shared);
+    const words = "the server at localhost did not answer within 10 seconds";
+    expect(checks.find((check) => check.name === "pooler")?.detail).toBe(
+      `"listings" on localhost/app: a prepared statement could not be run: ${words}`,
+    );
+    expect(checks.find((check) => check.name === "capture")?.detail).toBe(
+      `listings: the catalog could not be read as facetdb_worker: ${words}`,
+    );
+    expect(checks.find((check) => check.name === "worker")?.detail).toBe(
+      `the store could not be read: ${words}`,
+    );
   });
 });
 

@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import type { DoctorCheck } from "@facetdb/core";
-import { FakeClock, FakeEngine } from "@facetdb/core/testing";
+import { FakeEngine } from "@facetdb/core/testing";
 import { createFakeProvider } from "@facetdb/model";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, type ProjectConfig } from "../../config/index.ts";
@@ -18,6 +18,7 @@ import {
   freshPglite,
   type PgliteWorld,
   type SqlConnect,
+  SteppedClock,
 } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
@@ -484,7 +485,8 @@ describe("a MySQL user reaches a config and a green doctor from the prompts alon
   const MYSQL_URL = "mysql://facetdb_worker:s3cret-mysql-password@localhost:3306/shop";
   const STORE_URL = "postgres://facetdb_store:s3cret-store-password@localhost:5432/facetdb";
   const SECRET = "a-long-random-secret-for-the-init-tests";
-  const clock = new FakeClock(10_000_000);
+  // Its sleeps end only when moved: each doctor step's 10-second bound waits.
+  const clock = new SteppedClock(10_000_000);
   /** What the MySQL engine's doctor reports on a healthy install, under its own check names. */
   const MYSQL_CHECKS: readonly DoctorCheck[] = [
     {

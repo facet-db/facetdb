@@ -1,5 +1,4 @@
 import { STATE_HASH_COLUMN } from "@facetdb/core";
-import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { runInProcess } from "../program.ts";
@@ -9,6 +8,7 @@ import {
   pollingEngines,
   resetPgliteWorld,
   type SqlConnect,
+  SteppedClock,
   storeScript,
   storeStepStatements,
   WORKER_ROLE,
@@ -90,7 +90,8 @@ function run(
       loadConfig: () => Promise.resolve(options.config ?? polling()),
       engines: pollingEngines(options.engineConnect ?? world.connect),
       connect: world.connect,
-      clock: new FakeClock(START),
+      // Its sleeps end only when moved: each doctor step's 10-second bound waits.
+      clock: new SteppedClock(START),
       ...(options.answers === undefined ? {} : { answers: options.answers }),
     },
     COMMANDS,

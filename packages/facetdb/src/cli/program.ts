@@ -205,6 +205,12 @@ export type CliDeps = {
    */
   readonly importPlugin: (specifier: string) => Promise<unknown>;
   /**
+   * `facetdb doctor`'s bounds: a step's deadline in milliseconds and a connection's open timeout in
+   * seconds. Tests only, so a test on a real socket takes a second; the composition root never
+   * passes it, and doctor keeps its 10 seconds.
+   */
+  readonly doctorBounds?: { readonly stepMs: number; readonly connectTimeoutSeconds: number };
+  /**
    * The database engines a source's connection string picks from by its scheme (`cli/engines.ts`),
    * each loaded on first use only, so a driver no source needs is never imported: the composition
    * root registers the Postgres engine, other engines append theirs. A command reaches a source's

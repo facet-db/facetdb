@@ -738,6 +738,22 @@ async function sourceConnector(
   );
 }
 
+/**
+ * The commands whose process ends as soon as their output is written: `facetdb doctor` gives up on
+ * a step that does not answer in time, and what it gave up on (a socket an engine opened, a model
+ * request with no timeout of its own) must not hold the process after the summary.
+ */
+const ENDS_ONCE_PRINTED: ReadonlySet<string> = new Set(["doctor"]);
+
+/** Resolves once everything written to `stream` so far has been handed to the system. */
+function flushed(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    stream.write("", () => {
+      resolve();
+    });
+  });
+}
+
 async function main(): Promise<void> {
   // Installed once, before anything is loaded: the config file's typeless-package warning never
   // reaches Node's printer, which prints every other warning as it always does (cli/warnings.ts).
@@ -752,9 +768,14 @@ async function main(): Promise<void> {
   });
   const output = quietOnClosedPipe({ stdout: process.stdout, stderr: process.stderr }, ending.end);
   const deps = processDeps({ output, stopSignal: ending.stopSignal });
+  const argv = process.argv.slice(2);
   try {
-    const code = await runProgram(process.argv.slice(2), deps, COMMANDS);
+    const code = await runProgram(argv, deps, COMMANDS);
     process.exitCode = ending.pipeClosed() ? 0 : code;
+    if (ENDS_ONCE_PRINTED.has(argv[0] ?? "")) {
+      await Promise.all([flushed(process.stdout), flushed(process.stderr)]);
+      process.exit();
+    }
   } catch (error) {
     // The program reports every command's errors itself; this is a failure of the program.
     const message = error instanceof Error ? error.message : String(error);

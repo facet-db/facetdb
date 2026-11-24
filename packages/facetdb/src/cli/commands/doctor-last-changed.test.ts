@@ -3,6 +3,7 @@ import { FakeEngine } from "@facetdb/core/testing";
 import { describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig, type SourceInput } from "../../config/index.ts";
 import { type EngineEntry, runInProcess } from "../program.ts";
+import { SteppedClock } from "../testing.ts";
 import { COMMANDS } from "./index.ts";
 
 /**
@@ -60,6 +61,8 @@ async function engineLineOf(config: ProjectConfig): Promise<string> {
       connect: (url) => {
         throw new Error(`a connection was opened to ${url}`);
       },
+      // Its sleeps end only when moved: each doctor step's 10-second bound waits.
+      clock: new SteppedClock(0),
     },
     COMMANDS,
   );

@@ -1,6 +1,8 @@
 import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS, type QuestionSet } from "@facetdb/core";
 import {
   AmbiguousHostError,
+  connectTimedOut,
+  DOCTOR_CONNECT_TIMEOUT_S,
   deleteCursorsSql,
   LOCK_TIMEOUT,
   PlaintextUrlError,
@@ -18,6 +20,7 @@ import {
   STORE_NEWER_STATE,
   StoreBusyError,
   type StoreLog,
+  serverDidNotAnswer,
   sourceIdOf,
   storePurgeRefusal,
   storePurgeStatements,
@@ -648,13 +651,26 @@ const fail = (name: string, detail: string, fix: string): DoctorCheck => ({
 const DATABASE_URL_FIX =
   "set DATABASE_URL to the connection string of the database FacetDB keeps its store in";
 
-/** Opens a connection, runs `work` and closes it, whatever happens. */
+/**
+ * A driver error as a doctor check says it: a connection that timed out in plain words naming the
+ * host, any other with the store's URL and secret blanked.
+ */
+function doctorWords(error: unknown, url: string, env: Env): string {
+  return connectTimedOut(error)
+    ? serverDidNotAnswer(url)
+    : plainMessage(error, [url, env[SECRET_VARIABLE]]);
+}
+
+/**
+ * Opens a connection, runs `work` and closes it, whatever happens. A doctor check's: it may take
+ * the engine's doctor's 10 seconds to open, not the driver's 30.
+ */
 async function withConnection<T>(
   connect: SqlConnect,
   url: string,
   work: (query: ReturnType<SqlConnect>["query"]) => Promise<T>,
 ): Promise<T> {
-  const client = connect(url);
+  const client = connect(url, { connectTimeoutSeconds: DOCTOR_CONNECT_TIMEOUT_S });
   try {
     return await work(client.query);
   } finally {
@@ -712,11 +728,13 @@ export async function storeCheck(
           "run facetdb migrate with the admin credential: it brings the store to this version",
         );
   } catch (error) {
-    return fail(
+    const unread = fail(
       "store",
-      `the FacetDB store on ${label} could not be read: ${plainMessage(error, [url, env[SECRET_VARIABLE]])}`,
+      `the FacetDB store on ${label} could not be read: ${doctorWords(error, url, env)}`,
       "check the host, port, user and password in DATABASE_URL, and that the database accepts connections from this machine (a firewall or an allow-list)",
     );
+    // A server that let the connection time out is asked nothing more in the run.
+    return connectTimedOut(error) ? { ...unread, silent: true } : unread;
   }
 }
 
@@ -757,7 +775,7 @@ async function transactionPooler(connect: SqlConnect, url: string): Promise<stri
   if (supabaseTransactionPort(url)) {
     return "port 6543 of a Supabase host is its transaction-mode pooler";
   }
-  const client = connect(url, { max: 1 });
+  const client = connect(url, { max: 1, connectTimeoutSeconds: DOCTOR_CONNECT_TIMEOUT_S });
   try {
     const first = await client.query(POOLER_PROBE, [1]);
     const second = await client.query(POOLER_PROBE, [2]);
@@ -798,7 +816,7 @@ export async function storePoolerCheck(connect: SqlConnect, url: string): Promis
   } catch (error) {
     return fail(
       "pooler",
-      `${where}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
+      `${where}: a prepared statement could not be run: ${doctorWords(error, url, {})}`,
       STORE_POOLER_FIX,
     );
   }
@@ -845,7 +863,7 @@ export async function heartbeatCheck(
     const at = rows[0]?.["at"];
     last = at === undefined ? undefined : Number(at);
   } catch (error) {
-    const message = plainMessage(error, [url, env[SECRET_VARIABLE]]);
+    const message = doctorWords(error, url, env);
     if (/permission denied/i.test(message)) {
       return fail(
         "worker",
@@ -860,7 +878,8 @@ export async function heartbeatCheck(
         "run facetdb migrate with the admin credential: it installs the store's tables, and the worker only uses them",
       );
     }
-    return fail("worker", `the store could not be read: ${message}`, DATABASE_URL_FIX);
+    const unread = fail("worker", `the store could not be read: ${message}`, DATABASE_URL_FIX);
+    return connectTimedOut(error) ? { ...unread, silent: true } : unread;
   }
   if (last === undefined) {
     return fail(
@@ -935,7 +954,7 @@ export async function heldVersions(
     }));
     return { kind: "read", versions };
   } catch (error) {
-    return { kind: "unreadable", why: plainMessage(error, [url, env[SECRET_VARIABLE]]) };
+    return { kind: "unreadable", why: doctorWords(error, url, env) };
   }
 }
 

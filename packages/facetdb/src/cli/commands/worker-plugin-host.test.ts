@@ -1,3 +1,4 @@
+import type { Clock } from "@facetdb/core";
 import { describe, expect, it } from "vitest";
 import { actionCall, env, facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
@@ -13,6 +14,8 @@ import { COMMANDS } from "./index.ts";
  */
 
 const PROJECT_DIR = "/work/shop";
+/** A clock whose sleeps never end: each doctor step's 10-second bound waits. */
+const clock: Clock = { now: () => 1_700_000_000_000, sleep: () => new Promise(() => undefined) };
 const GITHUB_TOKEN = "ghp_s3cret-github-token";
 const OTHER_TOKEN = "xoxb-s3cret-other-token";
 /** Not JSON, with characters JSON escapes: a parse error would quote its start. */
@@ -88,6 +91,7 @@ function run(argv: readonly string[], config: ProjectConfig, environment = ENV) 
     {
       projectDir: PROJECT_DIR,
       env: environment,
+      clock,
       setEnv: () => undefined,
       loadConfig: () => Promise.resolve(config),
       connect: (url) => {

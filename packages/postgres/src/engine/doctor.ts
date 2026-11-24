@@ -1,6 +1,7 @@
 import {
   type Clock,
   type DoctorCheck,
+  type DoctorDeps,
   type EngineDeps,
   type EngineTarget,
   HEARTBEAT_LOSS_MS,
@@ -84,6 +85,45 @@ async function roundTripMs(clock: Clock, query: SqlQuery): Promise<number> {
   return Math.round(median(first, second, third));
 }
 
+/**
+ * How long each of doctor's connections may take to open, in seconds, where the driver's own
+ * default is 30: the CLI gives each step of `facetdb doctor` 10 seconds (`DOCTOR_STEP_MS`,
+ * cli/commands/doctor.ts), so a server that never answers ends the connection within that step too,
+ * and no socket outlives the run.
+ */
+export const DOCTOR_CONNECT_TIMEOUT_S = 10;
+
+/** Whether the driver gave up opening a connection (postgres.js's `CONNECT_TIMEOUT`), read at the boundary. */
+export function connectTimedOut(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "CONNECT_TIMEOUT"
+  );
+}
+
+/** A number of seconds in words: `1 second`, `0.5 seconds`, `10 seconds`. */
+export function secondsWords(seconds: number): string {
+  return `${seconds} ${seconds === 1 ? "second" : "seconds"}`;
+}
+
+/** A server that did not answer, in plain words naming its host, never the URL or the driver's words. */
+export function serverDidNotAnswer(url: string, seconds = DOCTOR_CONNECT_TIMEOUT_S): string {
+  let host = "";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // Not a URL `new URL` reads: the words name no host.
+  }
+  return `${host === "" ? "the database server" : `the server at ${host}`} did not answer within ${secondsWords(seconds)}`;
+}
+
+/** A driver error as a check says it: a connection that timed out in plain words, else its message. */
+function errorWords(error: unknown, url: string, seconds: number): string {
+  return connectTimedOut(error) ? serverDidNotAnswer(url, seconds) : plainMessage(error, [url]);
+}
+
 /** Opens a connection, runs `work` and closes it, whatever happens. */
 async function withConnection<T>(
   connect: SqlConnect,
@@ -119,6 +159,7 @@ async function databaseCheck(
   url: string,
   deps: EngineDeps,
   pgHost: string | undefined,
+  seconds: number,
 ): Promise<{ readonly check: DoctorCheck; readonly warning?: string }> {
   const subject = subjectOf(target);
   const insecure = urlProblem(url, subject, deps.allowInsecure, pgHost);
@@ -155,12 +196,22 @@ async function databaseCheck(
         : {}),
     };
   } catch (error) {
+    const fix = `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`;
+    if (connectTimedOut(error)) {
+      return {
+        check: {
+          ...fail("database", `"${target.source}": ${serverDidNotAnswer(url, seconds)}`, fix),
+          unreachable: true,
+          silent: true,
+        },
+      };
+    }
     return {
       check: {
         ...fail(
           "database",
           `"${target.source}" cannot connect to ${databaseLabel(url)}: ${plainMessage(error, [url])}`,
-          `check the host, port, user and password in ${subject}, and that the database accepts connections from this machine (a firewall or an allow-list)`,
+          fix,
         ),
         unreachable: true,
       },
@@ -229,6 +280,7 @@ async function poolerCheck(
   connect: SqlConnect,
   target: EngineTarget,
   url: string,
+  seconds: number,
 ): Promise<DoctorCheck> {
   const where = `"${target.source}" on ${databaseLabel(url)}`;
   const fix = poolerFix(subjectOf(target));
@@ -247,7 +299,7 @@ async function poolerCheck(
   } catch (error) {
     return fail(
       "pooler",
-      `${where}: a prepared statement could not be run: ${plainMessage(error, [url])}`,
+      `${where}: a prepared statement could not be run: ${errorWords(error, url, seconds)}`,
       fix,
     );
   }
@@ -340,6 +392,7 @@ async function installChecks(
   connect: SqlConnect,
   target: EngineTarget,
   url: string,
+  seconds: number,
 ): Promise<readonly [capture: DoctorCheck, install: DoctorCheck]> {
   const said = (problems: readonly string[]) =>
     problems.map((problem) => `${target.source}: ${problem}`).join("; ");
@@ -347,7 +400,7 @@ async function installChecks(
   try {
     facts = await withConnection(connect, url, (query) => catalogFacts(query, target));
   } catch (error) {
-    const unread = `the catalog could not be read as ${WORKER_ROLE}: ${plainMessage(error, [url])}`;
+    const unread = `the catalog could not be read as ${WORKER_ROLE}: ${errorWords(error, url, seconds)}`;
     return [
       fail("capture", said([unread]), REINSTALL),
       skip("install", `not checked: the catalog could not be read as ${WORKER_ROLE}`),
@@ -395,6 +448,7 @@ async function heartbeatCheck(
   url: string,
   deps: EngineDeps,
   pgHost: string | undefined,
+  seconds: number,
 ): Promise<DoctorCheck> {
   if (!deps.storeShared) {
     return {
@@ -418,7 +472,7 @@ async function heartbeatCheck(
     const at = rows[0]?.["at"];
     last = at === undefined ? undefined : Number(at);
   } catch (error) {
-    const message = plainMessage(error, [url]);
+    const message = errorWords(error, url, seconds);
     if (/permission denied/i.test(message)) {
       return fail(
         "worker",
@@ -453,29 +507,50 @@ async function heartbeatCheck(
 }
 
 /**
- * Every check of the source in order, never throwing: what goes wrong inside one is its failure.
- * A check an earlier failure left nothing to look at is skipped, as the CLI skips it today.
+ * Every check of the source in order, never throwing: what goes wrong inside one is its failure. A
+ * check an earlier failure left nothing to look at is skipped, as the CLI skips it today. Each
+ * check goes to `deps.onCheck` as it ends, so a run that gives up on a slow catalog keeps the
+ * checks that answered; every connection opens within `deps.connectTimeoutSeconds`.
  */
 export async function doctorChecks(
   connect: SqlConnect,
   pgHost: string | undefined,
   target: EngineTarget,
   url: string,
-  deps: EngineDeps,
+  deps: DoctorDeps,
 ): Promise<readonly DoctorCheck[]> {
-  const database = await databaseCheck(connect, target, url, deps, pgHost);
+  const seconds = deps.connectTimeoutSeconds ?? DOCTOR_CONNECT_TIMEOUT_S;
+  const timed: SqlConnect = (to, options) =>
+    connect(to, { ...options, connectTimeoutSeconds: seconds });
+  const checks: DoctorCheck[] = [];
+  const report = (check: DoctorCheck) => {
+    checks.push(check);
+    deps.onCheck?.(check);
+  };
+  const database = await databaseCheck(timed, target, url, deps, pgHost, seconds);
+  report(database.check);
+  if (database.warning !== undefined) {
+    report({ name: "distance", status: "warn", detail: database.warning });
+  }
   const reached = database.check.status === "ok";
   const skipped = (name: string): DoctorCheck =>
     skip(name, "not checked: the database check did not pass");
-  return [
-    database.check,
-    ...(database.warning === undefined
-      ? []
-      : [{ name: "distance", status: "warn", detail: database.warning } satisfies DoctorCheck]),
-    reached ? await poolerCheck(connect, target, url) : skipped("pooler"),
-    ...(reached
-      ? await installChecks(connect, target, url)
-      : [skipped("capture"), skipped("install")]),
-    await heartbeatCheck(connect, target, url, deps, pgHost),
-  ];
+  report(reached ? await poolerCheck(timed, target, url, seconds) : skipped("pooler"));
+  const [capture, install] = reached
+    ? await installChecks(timed, target, url, seconds)
+    : [skipped("capture"), skipped("install")];
+  report(capture);
+  report(install);
+  // The store is this database, whose server just let a connection time out: asked again, it would
+  // hold a socket open for another wait after the CLI's step gave up.
+  report(
+    database.check.silent === true && deps.storeShared
+      ? fail(
+          "worker",
+          `the store is in the same database: ${serverDidNotAnswer(url, seconds)}`,
+          "check the host and port in DATABASE_URL, and that the database accepts connections from this machine (a firewall or an allow-list)",
+        )
+      : await heartbeatCheck(timed, target, url, deps, pgHost, seconds),
+  );
+  return checks;
 }

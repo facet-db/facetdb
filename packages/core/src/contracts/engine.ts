@@ -334,6 +334,26 @@ export type DoctorCheck = {
    * until the string does, which the worker's environment fixes at its start.
    */
   readonly unreachable?: true;
+  /**
+   * An `unreachable` reach check whose server let the connection time out: it said nothing at all,
+   * so doctor asks that server nothing more in the run. Unset for a refusal.
+   */
+  readonly silent?: true;
+};
+
+/**
+ * What `doctor` is given besides `EngineDeps`. Both are optional: an engine that ignores them still
+ * works, and the CLI then judges its checks as one step.
+ */
+export type DoctorDeps = EngineDeps & {
+  /**
+   * Called with each check as it ends, in the order of the list `doctor` returns, so a run that
+   * gives up on a slow step keeps the checks that answered. An engine that never calls it is
+   * judged as a whole: a step past its bound fails every check.
+   */
+  readonly onCheck?: (check: DoctorCheck) => void;
+  /** How long each connection may take to open, in seconds; the engine's own default when absent. */
+  readonly connectTimeoutSeconds?: number;
 };
 
 /** What every call that reaches a database is given, besides the target and the URL. */
@@ -586,7 +606,7 @@ export type DatabaseEngine = {
    */
   open(target: EngineTarget, url: string, options: OpenOptions): Promise<OpenConnector>;
   /** doctor's checks of a source under the worker login's `url`, in order. Nothing is changed. */
-  doctor(target: EngineTarget, url: string, deps: EngineDeps): Promise<readonly DoctorCheck[]>;
+  doctor(target: EngineTarget, url: string, deps: DoctorDeps): Promise<readonly DoctorCheck[]>;
   /**
    * The tables the admin `url` may read, and with `options.table` that table's columns, key and
    * sample rows (the studio's setup flow, before any source exists). One connection with a short
