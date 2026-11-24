@@ -177,22 +177,33 @@ type LastDecision = {
   readonly at: Date;
 };
 
-/** A card's record as the source holds it now, checked against the state the card shows. */
-type Loaded = {
-  readonly row: ReadRow;
-  readonly status: RecordStatus;
+/** What a card is judged on: one logged answer at its state, and what the thresholds make of it. */
+type Judged = {
   readonly answer: AnswerEntry;
-  readonly history: readonly LogEntry[];
   /**
    * The questions the card is judged on, in question-set order: those of the set in force that the
-   * latest answer has (all of them unless a question was added after the answer was logged).
+   * answer has (all of them unless a question was added after the answer was logged).
    */
   readonly questions: readonly Question[];
   /** The thresholds' decisions alone, what the people's standing decisions are laid over. */
   readonly byThresholds: Readonly<Record<string, Decision>>;
+};
+
+/** A card's record as the source holds it now, checked against the state the card shows. */
+type Loaded = Judged & {
+  readonly row: ReadRow;
+  readonly status: RecordStatus;
+  /** The history the latest answer, `answer`, was read from. */
+  readonly history: readonly LogEntry[];
   /** The decisions with the people's standing decisions laid over them. */
   readonly decisions: Readonly<Record<string, Decision>>;
 };
+
+/**
+ * What a person's entry landed as: the last write's decision, and what it was judged on, the card's
+ * answer or one logged at its state while the entry was written.
+ */
+type Applied = Judged & { readonly decision: RecordDecision };
 
 type Source = {
   readonly log: DecisionLog;
@@ -270,28 +281,39 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (answer === undefined || answer.stateHash !== card.stateHash) {
       return { stale: REASKED };
     }
-    // An answer that predates a question added since has no word on it: that is no staleness (the
-    // backfill of the added question answers it, and the card follows). The card is judged on the
-    // questions the answer has, and a question the set no longer has is not among them. Only an
-    // answer with none of the set's questions leaves the card with nothing to judge.
-    const answered = answeredSet(questionSet, answer);
-    if (answered.questions.length === 0) {
+    const judged = judge(questionSet, answer);
+    if (judged === undefined) {
       return { stale: REASKED };
     }
-    const byThresholds = decideRecord(answered, answered.thresholds, answer, []);
-    const decisions = decideRecord(answered, answered.thresholds, answer, history);
-    if (byThresholds === undefined || decisions === undefined) {
-      throw new Error(`the answer for "${card.key}" lacks a question it was narrowed to`);
-    }
-    return {
-      row,
-      status: current.status,
+    const decisions = decideRecord(
+      { ...questionSet, questions: judged.questions },
+      questionSet.thresholds,
       answer,
       history,
-      questions: answered.questions,
-      byThresholds,
-      decisions,
-    };
+    );
+    if (decisions === undefined) {
+      throw new Error(`the answer for "${card.key}" lacks a question it was narrowed to`);
+    }
+    return { row, status: current.status, history, ...judged, decisions };
+  }
+
+  /**
+   * What a card is judged on from one logged answer: the questions of the set in force that the
+   * answer has, and their thresholds' decisions alone. An answer that predates a question added
+   * since has no word on it: that is no staleness (the backfill of the added question answers it,
+   * and the card follows), and a question the set no longer has is not among them. Undefined when
+   * the answer has none of the set's questions: nothing on the card can be judged on it.
+   */
+  function judge(questionSet: QuestionSet, answer: AnswerEntry): Judged | undefined {
+    const answered = answeredSet(questionSet, answer);
+    if (answered.questions.length === 0) {
+      return undefined;
+    }
+    const byThresholds = decideRecord(answered, answered.thresholds, answer, []);
+    if (byThresholds === undefined) {
+      throw new Error(`the answer for "${answer.key}" lacks a question it was narrowed to`);
+    }
+    return { answer, questions: answered.questions, byThresholds };
   }
 
   /** The history's last model call: what `DecisionLog.latestAnswer` reads, without the read. */
@@ -369,17 +391,35 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
 
   /**
    * The one door: `applyHumanDecision` logs `entry`, then writes every standing decision under the
-   * hash check. Returns what landed, or undefined when the record changed before the write.
+   * hash check. Returns what landed last, or undefined when the record changed before the write.
+   *
+   * When a model answer was logged at the card's state after the card was loaded (a backfill's
+   * merge of an added question), the decision is written again judged on that answer: its questions
+   * and its thresholds' decisions, every person's standing decision laid over them, done only when
+   * every one of its questions is decided. The queue follows each write that lands, before the read
+   * after it, with the answer that write was judged on (as the worker's writer does): a follow
+   * after the loop would take out the card a newer answer's own write put back after that read.
+   * `landed` runs once, at the first write that lands, before its follow.
    */
   async function apply(
     source: Source,
+    card: CardRef,
     entry: HumanEntry,
     loaded: Loaded,
-  ): Promise<RecordDecision | undefined> {
-    const writes: RecordDecision[] = [];
-    const write: DecisionWriter = (key, decision, expectedHash) => {
-      writes.push(decision);
-      return source.connector.write(key, decision, expectedHash);
+    landed: () => void = () => undefined,
+  ): Promise<Applied | undefined> {
+    let judged: Judged = loaded;
+    let last: Applied | undefined;
+    const write: DecisionWriter = async (key, decision, expectedHash) => {
+      const result = await source.connector.write(key, decision, expectedHash);
+      if (result.written) {
+        if (last === undefined) {
+          landed();
+        }
+        last = { ...judged, decision };
+        await followQueue(card, decision, judged.answer);
+      }
+      return result;
     };
     const result = await applyHumanDecision(
       entry,
@@ -395,11 +435,24 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       source.log,
       write,
       // The history just loaded stands in for the first re-read: the read after the write still
-      // catches a person's decision logged meanwhile.
+      // catches a person's decision, or a model answer at this state, logged meanwhile.
       loaded.history,
+      (answer) => {
+        // Judged with this service's own question set, as `load` judges the card: a review session
+        // started before the version that added a question still leaves that question out, even
+        // when the newer answer has it.
+        const next = judge(source.questions.questionSet, answer);
+        if (next === undefined) {
+          return undefined;
+        }
+        // `applyHumanDecision` writes from what this returns next, so the follow names its answer.
+        judged = next;
+        return { questions: next.questions, decisions: next.byThresholds, answers: answer.answers };
+      },
     );
-    // The last write is the one that landed: `applyHumanDecision` writes again only after a landed one.
-    return result.written ? writes.at(-1) : undefined;
+    // `applyHumanDecision` writes again only after a landed write, so a written result's last
+    // write is the one that landed last.
+    return result.written ? last : undefined;
   }
 
   /**
@@ -573,15 +626,17 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       version,
       at: new Date(clock.now()),
     };
-    const written = await apply(source, entry, loaded);
-    if (written === undefined) {
+    // The undo memory is set once the decision is in the row, before the queue follows it.
+    const applied = await apply(source, card, entry, loaded, () => {
+      lastDecisions.set(viewer, { card, question, at: entry.at });
+    });
+    if (applied === undefined) {
       // Edited between the read and the write: the decision is logged at a state it no longer has,
       // so it does not stand, and the card leaves the queue.
       await queue.withdraw(card.source, card.key, card.stateHash);
       return { kind: "stale", reason: EDITED };
     }
-    lastDecisions.set(viewer, { card, question, at: entry.at });
-    await followQueue(card, written, loaded.answer);
+    const written = applied.decision;
     const failures = await runActions(
       source,
       loaded.row,
@@ -636,18 +691,27 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       version: source.questions.version,
       at: new Date(clock.now()),
     };
-    const written = await apply(source, withdrawal, loaded);
-    // Only the last decision of the session can be undone, and only once.
+    // Only the last decision of the session can be undone, and only once: spent as the withdrawal
+    // lands, before the queue follows it, and in any case once the door returns.
+    const applied = await apply(source, card, withdrawal, loaded, () => {
+      lastDecisions.delete(viewer);
+    });
     lastDecisions.delete(viewer);
-    if (written === undefined) {
+    if (applied === undefined) {
       return { kind: "stale", reason: EDITED };
     }
-    await followQueue(card, written, loaded.answer);
+    const written = applied.decision;
     let reopened: OpenedCard | null = null;
     if (written.status === "needs_review") {
       const lock = await queue.lock(card.source, card.key, viewer, clock.now());
       if (lock.kind === "locked") {
-        reopened = cardOf(card, loaded, written.decisions, lock.until);
+        // The card shows what the last write was judged on: a newer answer's questions with it.
+        reopened = cardOf(
+          card,
+          { row: loaded.row, answer: applied.answer, questions: applied.questions },
+          written.decisions,
+          lock.until,
+        );
       }
     }
     const failures = await runActions(

@@ -3,6 +3,7 @@ import type { Question } from "../questions/index.ts";
 import { type RecordStatus, transition } from "../records/index.ts";
 import { type Answer, choiceConfidence, type Decision } from "../thresholds/index.ts";
 import {
+  type AnswerEntry,
   type HumanDecisionEntry,
   type HumanEntry,
   type HumanValue,
@@ -113,6 +114,19 @@ export type ReviewedRecord = {
   readonly answers: Readonly<Record<string, Answer>>;
 };
 
+/** What a card is judged on, built from one logged answer: the part of a `ReviewedRecord` it sets. */
+type ReviewedAnswer = Pick<ReviewedRecord, "questions" | "decisions" | "answers">;
+
+/**
+ * Builds what the card is judged on from a model answer logged at the card's state after the card
+ * was loaded (a backfill's merge of an added question, or the worker asking again at an unchanged
+ * state): the questions of the set that answer has, their thresholds' decisions alone, and its
+ * answers. Undefined when the answer has none of the set's questions, so nothing on the card can be
+ * judged on it. `applyHumanDecision` calls it just before the write it decides from what it
+ * returns.
+ */
+type ReloadRecord = (answer: AnswerEntry) => ReviewedAnswer | undefined;
+
 export type HumanResult = {
   readonly written: boolean;
   readonly status: RecordStatus;
@@ -144,6 +158,14 @@ export async function applyHumanDecision(
    * Either way the re-read after each write stands, so a decision logged meanwhile is written too.
    */
   before?: readonly LogEntry[],
+  /**
+   * How to judge the card again on a model answer logged at its state after the history the last
+   * write was made from. Without it a newer answer is not looked for, as before. It counts answers
+   * from `before`. A caller passing `reload` without `before` cannot see an answer appended between
+   * its own read and the append: the first history is then the read after the append, which already
+   * holds that answer, so it is not counted as newer than `record`'s.
+   */
+  reload?: ReloadRecord,
 ): Promise<HumanResult> {
   if (isHumanDecision(entry) && record.status !== "needs_review") {
     throw new Error(
@@ -173,19 +195,59 @@ export async function applyHumanDecision(
   // decision logged between that read and this append is carried back by the second write,
   // one round trip later; only a death between the two writes leaves the row short of it until
   // the card is opened again (the same class as a logged, unwritten decision).
+  //
+  // The same read also looks for a model answer logged at the card's state since that history (a
+  // backfill merging an added question into the answer, or the worker asking again at an unchanged
+  // state). Written from the card alone, the record would be judged on the older answer's questions
+  // and could be written done over a question the newer one left open. So the card is judged again
+  // on the newer answer (`reload`): its questions, its thresholds' decisions, every person's
+  // decision standing at this state laid over them, and the write is made again. The answer's own
+  // writer reads the log after its write too and carries this person's entry, so whichever write
+  // lands last carries both.
+  let judged = record;
   let history = before === undefined ? await log.history(record.key) : [...before, entry];
   for (;;) {
-    const { decisions, status } = withPeople(record, history);
+    const { decisions, status } = withPeople(judged, history);
     const result = await write(record.key, { decisions, status, reviewed: true }, record.hash);
     if (!result.written) {
       return { written: false, status };
     }
     const after = await log.history(record.key);
-    if (humanCount(after) === humanCount(history)) {
+    const newer = reload === undefined ? undefined : newerAnswer(after, history, record.hash);
+    // A newer answer with nothing on the card to judge on it (none of the set's questions) is no
+    // reason to stop looking: the people's entries are checked as without it, and a person's entry
+    // logged meanwhile is still written again from the card held. Only when neither applies does
+    // the loop end.
+    const reloaded = newer === undefined ? undefined : reload?.(newer);
+    if (reloaded !== undefined) {
+      judged = { ...judged, ...reloaded };
+    } else if (humanCount(after) === humanCount(history)) {
       return { written: true, status };
     }
     history = after;
   }
+}
+
+/**
+ * The model answer logged since `decidedFrom` that the record now stands on at `hash`: the latest
+ * answer of `after`, when `after` holds more answers than `decidedFrom` and the latest is at that
+ * state. An answer at another state is not newer at this one: the record changed, and the hash
+ * check refuses a write made for the old state.
+ */
+function newerAnswer(
+  after: readonly LogEntry[],
+  decidedFrom: readonly LogEntry[],
+  hash: string,
+): AnswerEntry | undefined {
+  if (answerCount(after) === answerCount(decidedFrom)) {
+    return undefined;
+  }
+  const latest = after.findLast((entry): entry is AnswerEntry => entry.kind === "answer");
+  return latest !== undefined && latest.stateHash === hash ? latest : undefined;
+}
+
+function answerCount(history: readonly LogEntry[]): number {
+  return history.filter((entry) => entry.kind === "answer").length;
 }
 
 /** The card's decisions with every person's decision standing in `history` laid over them. */
