@@ -92,6 +92,7 @@ function rig(installed: Installed = CANNOT_TELL) {
     beat: () => Promise.resolve(),
     clock: NEVER_SLEEPS,
     print: () => undefined,
+    hide: (text) => text,
     onPass: () => () => undefined,
   });
   return { fleet, state };

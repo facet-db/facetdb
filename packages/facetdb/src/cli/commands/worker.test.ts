@@ -336,6 +336,7 @@ describe("facetdb worker", () => {
         Object.assign(new Error("max clients reached in session mode"), {
           code: "EMAXCONNSESSION",
         }),
+        (text) => text,
       );
       expect(refusal).toMatchObject({
         code: "too-many-connections",
@@ -347,6 +348,7 @@ describe("facetdb worker", () => {
           "listings",
           "facetdb.config.ts",
           Object.assign(new Error("x"), { code: "53300" }),
+          (text) => text,
         ),
       ).toMatchObject({ code: "too-many-connections" });
     });
@@ -1144,6 +1146,7 @@ describe("the worker's outbox loop", () => {
       },
       clock,
       (text) => printed.push(text),
+      (text) => text,
       () =>
         new Promise<SummaryReport>((resolve, reject) => {
           ticks.push({ resolve, reject });
@@ -1232,6 +1235,7 @@ describe("the worker's outbox loop", () => {
       },
       new FakeClock(START),
       (text) => printed.push(text),
+      (text) => text,
     );
 
     expect(passes).toBe(3);
@@ -1279,6 +1283,7 @@ describe("the worker's outbox loop", () => {
       },
       new FakeClock(START),
       (text) => printed.push(text),
+      (text) => text,
     );
 
     expect(printed).toEqual([
@@ -1320,6 +1325,7 @@ describe("the worker's outbox loop", () => {
       },
       new FakeClock(START),
       (text) => printed.push(text),
+      (text) => text,
     );
 
     expect(printed).toEqual([

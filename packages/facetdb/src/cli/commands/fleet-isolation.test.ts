@@ -17,10 +17,12 @@ import {
   freshHeldModel,
 } from "@facetdb/core/testing";
 import { createFakeProvider, createOutagePolicy, DEFAULT_RETRY_EVERY_MS } from "@facetdb/model";
+import { secretParts } from "@facetdb/server";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { facetdb, noul, type ProjectConfig } from "../../config/index.ts";
 import { lazyEngine } from "../engines.ts";
 import { runInProcess } from "../program.ts";
+import { createHide } from "../secret-words.ts";
 import {
   createPgliteWorld,
   createStore,
@@ -263,6 +265,7 @@ function rig() {
     beat: () => Promise.resolve(),
     clock,
     print: (line) => lines.push(line),
+    hide: createHide(() => secretParts(URL)),
     onPass: () => () => undefined,
   });
 

@@ -20,12 +20,10 @@ import {
   capLoosenings,
   type FileApply,
   type FileDiff,
-  hideSecrets,
   type PendingSource,
   type ReloadSummary,
   type SourceReload,
   type SpendingSettings,
-  secretParts,
   type TableFacts,
 } from "@facetdb/server";
 import {
@@ -43,6 +41,7 @@ import {
 } from "../../config/index.ts";
 import type { ReceiveOutcome, SettingsReload } from "../../plugin/index.ts";
 import { CliError } from "../program.ts";
+import { type Hide, outsideWords } from "../secret-words.ts";
 import { hasUrl, variableOf } from "./database.ts";
 import { restoreCut } from "./url-settings-cut.ts";
 
@@ -225,6 +224,12 @@ export type FleetDeps = {
   /** `now` times a stopped source's next try. */
   readonly clock: Pick<Clock, "sleep" | "now">;
   readonly print: (line: string) => void;
+  /**
+   * The worker's one hide (`createHide` over `secretsOf`). Every word a driver, a plugin or a check
+   * gave passes through it before it is printed, kept as a stopped source's why, or put in the
+   * words a reload, `pending()` and `stopped()` serve the studio.
+   */
+  readonly hide: Hide;
   /** Sees each pass of a source's loop. */
   readonly onPass: (loop: SourceLoop) => (report: PassReport) => void;
   /**
@@ -556,8 +561,14 @@ function checkAgainStarts(reason: NotStarted): boolean {
 
 const NEW_AND_NOT_ANSWERED = "new in facetdb.config.ts and not answered yet";
 
-/** What a reload says of a source new in the file that it did not start, and what to do. */
-function notStartedMessage(name: string, reason: NotStarted): string {
+/**
+ * What a reload says of a source new in the file that it did not start, and what to do. The
+ * sentence is FacetDB's and stays whole; only the words from outside go through `hide`. A reason's
+ * `why` was hidden when it was worded (`messageOf`, `wordsOf`, `failureWords`), a refusal's message
+ * and fix are the CLI's own, and the engine's reading (`missing`, a cannot-tell `why`) is hidden
+ * here.
+ */
+function notStartedMessage(name: string, reason: NotStarted, hide: Hide): string {
   switch (reason.kind) {
     case "api":
       return `${NEW_AND_NOT_ANSWERED}: it answers through POST /v1/check, whose sources are set when the worker starts, so restart facetdb worker.`;
@@ -576,11 +587,11 @@ function notStartedMessage(name: string, reason: NotStarted): string {
     case "failed":
       return `${NEW_AND_NOT_ANSWERED}: its install is in its database, and it could not be started (${reason.why}). Check it with facetdb doctor, then ${reason.rightsRead ? "Check again or restart facetdb worker" : "restart facetdb worker"}.`;
     case "missing":
-      return `${NEW_AND_NOT_ANSWERED}: its database does not hold its install (${reason.missing}). Run facetdb migrate --source ${name} on this machine, then ${reason.rightsRead ? "Check again" : "restart facetdb worker"}.`;
+      return `${NEW_AND_NOT_ANSWERED}: its database does not hold its install (${hide(reason.missing)}). Run facetdb migrate --source ${name} on this machine, then ${reason.rightsRead ? "Check again" : "restart facetdb worker"}.`;
     case "unread":
       return `${NEW_AND_NOT_ANSWERED}: its database could not be read to check its install (${reason.why}). Check again once the database answers; facetdb doctor says what is wrong.`;
     case "cannot-tell":
-      return `${NEW_AND_NOT_ANSWERED}: its install cannot be checked from here (${reason.why}), so it waits for a restart. Run facetdb migrate --source ${name} if the install did not finish, then restart facetdb worker.`;
+      return `${NEW_AND_NOT_ANSWERED}: its install cannot be checked from here (${hide(reason.why)}), so it waits for a restart. Run facetdb migrate --source ${name} if the install did not finish, then restart facetdb worker.`;
     case "stopped":
       return reason.retryAt === null
         ? `stopped at ${clockTime(reason.at)}: ${reason.why}. The other sources keep answering; no wait mends this, so fix it, then Check again or restart facetdb worker.`
@@ -594,21 +605,18 @@ function clockTime(ms: number): string {
 }
 
 /**
- * A loop's failure in words, scrubbed of the source's connection string (its whole string, its
- * password and credentials, its user and its host) as the setup and migrate doors scrub a driver's
- * words: a driver message often names them, and these words reach the log, Home and the Sources
- * page. `failure` is the worker's wording of the error, when it has one; the "the source "x"
- * stopped: " that wording begins with is left out, as every line names the source itself, and so is
- * a closing full stop.
+ * A loop's failure in words, the words from outside through the worker's one hide (every connection
+ * string and secret variable in force, not this source's string alone): a driver message often
+ * names them, and these words reach the log, Home and the Sources page. `failure` is the worker's
+ * wording of the error, when it has one: a `CliError` is FacetDB's own sentence, whose outside
+ * words were hidden when it was built (`installMissing`), and stays whole; any other error is a
+ * driver's, an engine's or a plugin's, and is hidden. The "the source "x" stopped: " that wording
+ * begins with is left out, as every line names the source itself, and so is a closing full stop.
  */
-export function failureWords(source: SourceConfig, failure: unknown): string {
-  const said = wordsOf(failure);
-  const words =
-    source.database === undefined || source.database === ""
-      ? said
-      : hideSecrets(said, secretParts(source.database));
+export function failureWords(source: SourceConfig, failure: unknown, hide: Hide): string {
   const prefix = `the source "${source.name}" stopped: `;
-  return (words.startsWith(prefix) ? words.slice(prefix.length) : words).replace(/\.$/, "");
+  const said = wordsOf(failure, hide);
+  return (said.startsWith(prefix) ? said.slice(prefix.length) : said).replace(/\.$/, "");
 }
 
 /** What a reload says of a source new in the file that it started. */
@@ -635,22 +643,27 @@ function switchedMessage(questions: readonly string[], version: number): string 
   return `the columns of ${namesOf(questions)} are in its database and the worker login may write them: it finishes the batch in hand, then answers with version ${version}; nothing already answered is asked again.`;
 }
 
-/** What a reload says of a source whose added questions it does not switch to, and what to do. */
+/**
+ * What a reload says of a source whose added questions it does not switch to, and what to do. The
+ * sentence is FacetDB's; the engine's reading (`missing`, a cannot-tell `why`) goes through `hide`,
+ * a read's `why` was hidden when it was worded, a refusal is the CLI's own.
+ */
 function addedMessage(
   name: string,
   questions: readonly string[],
   check: Unswitched,
   version: number | null,
+  hide: Hide,
 ): string {
   const keeps = `so it keeps answering with version ${version}`;
   const one = questions.length === 1;
   switch (check.kind) {
     case "missing":
-      return `${namesOf(questions)} ${one ? "is" : "are"} not installed in its database yet (${check.missing}), ${keeps}. Install ${one ? "it" : "them"} from the Questions page, or run facetdb migrate --source ${name}, then Check again.`;
+      return `${namesOf(questions)} ${one ? "is" : "are"} not installed in its database yet (${hide(check.missing)}), ${keeps}. Install ${one ? "it" : "them"} from the Questions page, or run facetdb migrate --source ${name}, then Check again.`;
     case "unread":
       return `its database could not be read to check ${namesOf(questions)} (${check.why}), ${keeps}. Check again once the database answers; facetdb doctor says what is wrong.`;
     case "cannot-tell":
-      return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and ${check.why}, ${keeps} until you run facetdb migrate --source ${name} and restart facetdb worker.`;
+      return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and ${hide(check.why)}, ${keeps} until you run facetdb migrate --source ${name} and restart facetdb worker.`;
     case "refused":
       return `${namesOf(questions)} ${one ? "needs its columns" : "need their columns"}, and the worker cannot check them (${check.message}; ${check.fix}), ${keeps} until you restart facetdb worker.`;
   }
@@ -683,13 +696,17 @@ function migrateHelps(reason: NotStarted): boolean {
   }
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * An error in words (`outsideWords`): the CLI's own sentence whole, anyone else's words through the
+ * one hide.
+ */
+function messageOf(error: unknown, hide: Hide): string {
+  return outsideWords(error, hide);
 }
 
-/** An error in words, with its fix when the CLI's own check refused (the start's checks). */
-function wordsOf(error: unknown): string {
-  return error instanceof CliError ? `${error.message}; ${error.fix}` : messageOf(error);
+/** `messageOf`, with its fix when the CLI's own check refused (the start's checks). */
+function wordsOf(error: unknown, hide: Hide): string {
+  return error instanceof CliError ? `${error.message}; ${error.fix}` : messageOf(error, hide);
 }
 
 type Slot = {
@@ -864,11 +881,12 @@ export function createFleet(deps: FleetDeps): Fleet {
     return current;
   }
 
-  /** A loop's failure as the worker words it, scrubbed (`failureWords`). */
+  /** A loop's failure as the worker words it, hidden (`failureWords`). */
   function whyOf(source: SourceConfig, error: unknown): string {
     return failureWords(
       source,
       deps.failure === undefined ? error : deps.failure(source.name, error),
+      deps.hide,
     );
   }
 
@@ -1048,11 +1066,12 @@ export function createFleet(deps: FleetDeps): Fleet {
       } catch (error) {
         return stopping()
           ? { kind: "skipped" }
-          : failedAgain(failureWords(entry.source, error), error);
+          : failedAgain(failureWords(entry.source, error, deps.hide), error);
       }
       if (check.kind === "missing") {
+        // FacetDB's sentence around the engine's reading, which alone is hidden.
         return failedAgain(
-          failureWords(entry.source, `its database does not hold its install: ${check.missing}`),
+          `its database does not hold its install: ${deps.hide(check.missing)}`.replace(/\.$/, ""),
         );
       }
     }
@@ -1069,7 +1088,7 @@ export function createFleet(deps: FleetDeps): Fleet {
       try {
         await fresh.close();
       } catch (error) {
-        deps.print(`${name}: closing its connection failed: ${messageOf(error)}`);
+        deps.print(`${name}: closing its connection failed: ${messageOf(error, deps.hide)}`);
       }
       return { kind: "skipped" };
     }
@@ -1116,7 +1135,7 @@ export function createFleet(deps: FleetDeps): Fleet {
       await slot.loop.close();
     } catch (error) {
       deps.print(
-        `${slot.loop.source.name}: closing its previous connection failed: ${messageOf(error)}`,
+        `${slot.loop.source.name}: closing its previous connection failed: ${messageOf(error, deps.hide)}`,
       );
     }
   }
@@ -1125,7 +1144,9 @@ export function createFleet(deps: FleetDeps): Fleet {
     try {
       await deps.beat(source);
     } catch (error) {
-      deps.print(`the heartbeat could not be saved during the reload: ${messageOf(error)}`);
+      deps.print(
+        `the heartbeat could not be saved during the reload: ${messageOf(error, deps.hide)}`,
+      );
     }
   }
 
@@ -1193,10 +1214,11 @@ export function createFleet(deps: FleetDeps): Fleet {
     try {
       next = await deps.load();
     } catch (error) {
+      // The loader's own words stay whole; anything else that failed is hidden.
       const message =
         error instanceof ConfigError
           ? error.message
-          : `facetdb.config.ts could not be loaded: ${messageOf(error)}`;
+          : `facetdb.config.ts could not be loaded: ${messageOf(error, deps.hide)}`;
       deps.print(
         `${message}\nThe worker keeps running on the config it had; fix facetdb.config.ts, then apply again or restart facetdb worker.`,
       );
@@ -1255,7 +1277,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           source: source.name,
           outcome: "failed",
           version,
-          message: `could not start with what the file now says (${messageOf(error)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
+          message: `could not start with what the file now says (${messageOf(error, deps.hide)}), so it keeps answering with version ${version}; check it with facetdb doctor, then restart facetdb worker.`,
         });
         return;
       }
@@ -1280,7 +1302,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           source: source.name,
           outcome: "not-started",
           version: null,
-          message: notStartedMessage(source.name, reason),
+          message: notStartedMessage(source.name, reason, deps.hide),
         });
       };
       if (source.api) {
@@ -1308,7 +1330,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           notStarted(
             error instanceof CliError
               ? { kind: "plugin-refused", message: error.message, fix: error.fix }
-              : { kind: "failed", why: wordsOf(error), rightsRead: true },
+              : { kind: "failed", why: wordsOf(error, deps.hide), rightsRead: true },
           );
           return;
         }
@@ -1316,7 +1338,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           try {
             await opened.close();
           } catch (error) {
-            deps.print(`${source.name}: closing it failed: ${messageOf(error)}`);
+            deps.print(`${source.name}: closing it failed: ${messageOf(error, deps.hide)}`);
           }
           notStarted({ kind: "stopping" });
           return;
@@ -1356,7 +1378,7 @@ export function createFleet(deps: FleetDeps): Fleet {
         check =
           error instanceof CliError
             ? { kind: "refused", message: error.message, fix: error.fix }
-            : { kind: "unread", why: messageOf(error) };
+            : { kind: "unread", why: messageOf(error, deps.hide) };
       }
       if (check.kind !== "holds") {
         notStarted(check);
@@ -1372,7 +1394,11 @@ export function createFleet(deps: FleetDeps): Fleet {
       try {
         fresh = await deps.open(source, next);
       } catch (error) {
-        notStarted({ kind: "failed", why: wordsOf(error), rightsRead: check.rightsRead });
+        notStarted({
+          kind: "failed",
+          why: wordsOf(error, deps.hide),
+          rightsRead: check.rightsRead,
+        });
         return;
       }
       // A stop that came during the open: the connection is closed again and the loop never put
@@ -1381,7 +1407,9 @@ export function createFleet(deps: FleetDeps): Fleet {
         try {
           await fresh.close();
         } catch (error) {
-          deps.print(`${source.name}: closing its connection failed: ${messageOf(error)}`);
+          deps.print(
+            `${source.name}: closing its connection failed: ${messageOf(error, deps.hide)}`,
+          );
         }
         notStarted({ kind: "stopping" });
         return;
@@ -1440,6 +1468,7 @@ export function createFleet(deps: FleetDeps): Fleet {
                     tried.kind === "stopped"
                       ? { kind: "stopped", why: entry.why, at: entry.at, retryAt: entry.retryAt }
                       : { kind: "stopping" },
+                    deps.hide,
                   ),
                 },
           );
@@ -1491,7 +1520,7 @@ export function createFleet(deps: FleetDeps): Fleet {
             check =
               error instanceof CliError
                 ? { kind: "refused", message: error.message, fix: error.fix }
-                : { kind: "unread", why: messageOf(error) };
+                : { kind: "unread", why: messageOf(error, deps.hide) };
           }
           if (check.kind !== "holds") {
             unswitched.set(step.name, { file: sourceKey(next, step.source), check });
@@ -1499,7 +1528,7 @@ export function createFleet(deps: FleetDeps): Fleet {
               source: step.name,
               outcome: "kept",
               version,
-              message: addedMessage(step.name, step.questions, check, version),
+              message: addedMessage(step.name, step.questions, check, version, deps.hide),
             });
             break;
           }
@@ -1585,7 +1614,7 @@ export function createFleet(deps: FleetDeps): Fleet {
           pending.push({
             source: step.name,
             outcome: "not-started",
-            message: notStartedMessage(step.name, reason),
+            message: notStartedMessage(step.name, reason, deps.hide),
             migrate: migrateHelps(reason),
             added: [],
             removed: [],
@@ -1608,7 +1637,7 @@ export function createFleet(deps: FleetDeps): Fleet {
         pending.push({
           source: step.name,
           outcome: "not-started",
-          message: notStartedMessage(step.name, reason),
+          message: notStartedMessage(step.name, reason, deps.hide),
           migrate: migrateHelps(reason),
           added: [],
           removed: [],
@@ -1625,7 +1654,7 @@ export function createFleet(deps: FleetDeps): Fleet {
         pending.push({
           source: step.name,
           outcome: "kept",
-          message: addedMessage(step.name, step.questions, check, version),
+          message: addedMessage(step.name, step.questions, check, version, deps.hide),
           migrate: true,
           added: [...step.questions],
           removed: [],

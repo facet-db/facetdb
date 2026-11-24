@@ -534,6 +534,7 @@ describe("the reload after the door's run", () => {
       // The swap's heartbeat waits for ever: nothing here runs the loops.
       clock: { sleep: () => new Promise(() => undefined), now: () => 0 },
       print: () => undefined,
+      hide: (text) => text,
       onPass: () => () => undefined,
     });
     await fleet.open(RUNS);

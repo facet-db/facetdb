@@ -84,6 +84,51 @@ export function secretParts(url: string): readonly SecretPart[] {
     .sort((a, b) => b.text.length - a.text.length);
 }
 
+/**
+ * A path segment at least this long reads as a token, not a word: the shortest hook tokens in use
+ * (a Slack hook's last segment) are 24 characters, while the words an API path is made of (`v1`,
+ * `services`, `webhooks`, `incoming-webhooks`) stay under 20.
+ */
+const TOKEN_SEGMENT = 20;
+
+/**
+ * The parts of a secret value that is not a connection string: an API key, a signing secret, a
+ * plugin's token or the address of a webhook. The value as written, trimmed and URL-encoded; for an
+ * address, also its password, each query value whose key reads as a credential (`SECRET_PARAMETER`,
+ * as `secretParts` hides a string's), and its path when one of its segments is long enough to be a
+ * token (`TOKEN_SEGMENT`), with each such segment: `?v=2` and `/v1` stay readable. Every part is a
+ * secret: a short one is hidden only where it stands as a word of its own, as `secretParts` hides a
+ * short password.
+ */
+export function secretValueParts(value: string): readonly SecretPart[] {
+  const texts = new Set([value, value.trim(), encodeURIComponent(value.trim())]);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value.trim()) && URL.canParse(value.trim())) {
+    const parsed = new URL(value.trim());
+    texts.add(parsed.password);
+    texts.add(decoded(parsed.password));
+    const tokens = parsed.pathname
+      .split("/")
+      .filter((segment) => decoded(segment).length >= TOKEN_SEGMENT);
+    if (tokens.length > 0) {
+      texts.add(parsed.pathname);
+      for (const token of tokens) {
+        texts.add(token);
+        texts.add(decoded(token));
+      }
+    }
+    for (const [key, query] of parsed.searchParams) {
+      if (SECRET_PARAMETER.test(key)) {
+        texts.add(query);
+        texts.add(encodeURIComponent(query));
+      }
+    }
+  }
+  return [...texts]
+    .filter((text) => text !== "" && text !== "/")
+    .map((text) => ({ text, bounded: text.length < HIDDEN_ANYWHERE }))
+    .sort((a, b) => b.text.length - a.text.length);
+}
+
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** `text` with every part hidden, the longest first so a part inside another goes with it. */

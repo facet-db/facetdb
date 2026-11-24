@@ -254,6 +254,7 @@ function rig(initial: ProjectConfig = PROJECT) {
     },
     clock,
     print: (line) => lines.push(line),
+    hide: (text) => text,
     onPass: () => () => undefined,
   });
 

@@ -564,6 +564,7 @@ function fleetRig(shared?: { readonly clock: SteppedClock; readonly store: FakeA
     beat: () => Promise.resolve(),
     clock: t.clock,
     print: (line) => t.lines.push(line),
+    hide: (text) => hideSecrets(text, secretParts(SOURCE_URL)),
     onPass: (loop) => (report) => t.raisers.passed(loop.source, report),
     stoppedAlone: (source, error, stop) => {
       told.push(`told: ${source.name}`);

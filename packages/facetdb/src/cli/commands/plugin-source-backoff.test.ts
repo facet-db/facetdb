@@ -158,6 +158,7 @@ function rig() {
     beat: () => Promise.resolve(),
     clock,
     print: (line) => lines.push(line),
+    hide: (text) => text,
     onPass: () => () => undefined,
   });
 

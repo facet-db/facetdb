@@ -3,6 +3,7 @@ import { isIPv4, isIPv6 } from "node:net";
 import { resolve } from "node:path";
 import {
   type ActionStep,
+  type AlertEvent,
   type Connector,
   createAlerts,
   createPreviewService,
@@ -36,7 +37,9 @@ import {
 } from "@facetdb/model";
 import {
   type AlertFailure,
+  CREDENTIAL_WORDS_WITHHELD,
   type CredentialAlertFailure,
+  type CredentialLink,
   createCheckStore,
   createOutbox,
   createServer,
@@ -45,20 +48,19 @@ import {
   credentialSubject,
   DeliveryPassFailed,
   type DeliveryReport,
+  type GaveUpLink,
   gaveUpAlert,
   gaveUpHow,
   gaveUpSubject,
-  hideSecrets,
   OpenSurfaceError,
+  type OutboxDeps,
   onlyRecord,
   openStudioBuild,
   operatorKnownByAddress,
   outboxQueue,
   queueAction,
   requireAccountToServe,
-  type SecretPart,
   type StudioBuild,
-  secretParts,
   type TableFacts,
 } from "@facetdb/server";
 import {
@@ -107,6 +109,7 @@ import {
 import { engineFor, keyWords, openConnector, requireUsableUrl, tableKeyText } from "../engines.ts";
 import { alertScope, createLinks, hostInUrl, servedStudioUrl } from "../links.ts";
 import {
+  asCliError,
   type CliDeps,
   CliError,
   type CommandContext,
@@ -116,6 +119,7 @@ import {
   type OpenStore,
   type StoreClient,
 } from "../program.ts";
+import { type Hide, hideOverLoads, outsideWords } from "../secret-words.ts";
 import {
   requireStoreSecret,
   requireUsableStoreUrl,
@@ -193,10 +197,6 @@ const WATCH_FAILURES: Readonly<Record<WorkerWatchStep, string>> = {
   check: "the other workers' rows could not be read",
   alert: "the alert for a worker that stopped could not be raised",
 };
-
-function errorWords(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * The pool of the worker's store client and of each table source's client: a connection per lane in
@@ -474,6 +474,12 @@ export async function runWorkers(
    * then each reload's that put a plugin's changed settings in force.
    */
   const plugins = livePluginHost(parts.plugins);
+  /**
+   * The one hide, over the secrets of every config this process loads (the start's, then each
+   * reload's): every word a driver, a plugin or a check gave passes it before a reader sees it.
+   */
+  const { hide, loaded: remember } = hideOverLoads({ env: deps.env, plugins });
+  remember(config);
   /** The channels of `from` bound to the plugins of `host`, delivering through this process. */
   const bindFor = (from: ProjectConfig, host: PluginHost) =>
     bindChannels({
@@ -491,7 +497,8 @@ export async function runWorkers(
     store: store.alerts,
     clock,
     channels: bindFor(config, parts.plugins),
-    report: (failure) => print(deliveryFailureLine(failure)),
+    // A channel's kept words pass the one hide on their way to the line.
+    report: (failure) => print(deliveryFailureLine({ ...failure, error: hide(failure.error) })),
   });
   /**
    * The channels and plugin settings in force, which a reload replaces with the file's when they
@@ -802,10 +809,7 @@ export async function runWorkers(
     }
     for (const failure of report.failures) {
       // A driver's words can quote a connection string.
-      const message = hideSecrets(
-        failure.error instanceof Error ? failure.error.message : String(failure.error),
-        secretsInForce(),
-      );
+      const message = outsideWords(failure.error, hide);
       print(
         failure.stage === "log"
           ? `${entry.source}: the decision log could not be read: ${message}`
@@ -814,15 +818,6 @@ export async function runWorkers(
     }
   };
 
-  /**
-   * The parts of every connection string a driver's words may name (the store's, each source's of
-   * the file in force, so one a reload added is hidden too): hidden from every printed line and
-   * every alert that carries words a database gave.
-   */
-  const secretsInForce = (): readonly SecretPart[] =>
-    [deps.env[STORE_VARIABLE], ...fleet.config().sources.map((source) => source.database)]
-      .filter((url): url is string => url !== undefined && url !== "")
-      .flatMap((url) => secretParts(url));
   // Connector lost access, read every 5 minutes from each running table source's doctor and raised
   // at a loop's refused login or credential, and Question set changed at an open.
   const raisers = createAlertRaisers({
@@ -848,7 +843,7 @@ export async function runWorkers(
         why: entry.why,
         retryAt: entry.retryAt === null ? null : Date.parse(entry.retryAt),
       })),
-    hide: (text) => hideSecrets(text, secretsInForce()),
+    hide,
     print,
     configPath: options.config,
   });
@@ -890,14 +885,21 @@ export async function runWorkers(
       projectInForce = next;
       raisers.loaded(next, applied);
     },
-    // A reload's channels and plugin settings, put in force or kept with the reason.
-    settings: (next) => settings.reload(next),
+    // A reload's channels and plugin settings, put in force or kept with the reason; the secrets of
+    // the plugin settings it put in force are hidden from then on.
+    settings: (next) => {
+      const reloaded = settings.reload(next);
+      remember(next);
+      return reloaded;
+    },
+    // The file's secrets are hidden from its load on, before any of it is in force.
     load: () => {
       if (parts.configFile === undefined) {
         return Promise.reject(new Error("this worker has no config file to reload"));
       }
-      return parts.configFile.load();
+      return parts.configFile.load().then(remember);
     },
+    hide,
     beat: (source) => alerts.signals(alertScope(project.id, source, links.worker)).beat(),
     clock,
     print,
@@ -910,7 +912,7 @@ export async function runWorkers(
         raisers.passed(loop.source, report);
       };
     },
-    failure: (source, error) => installMissing(source, options.config, error),
+    failure: (source, error) => installMissing(source, options.config, error, hide),
     stoppedAlone: (source, error, stop) => raisers.stopped(source, error, stop),
   });
   // This worker's own heartbeat row, and a look at the others' every 30 seconds beside the passes;
@@ -924,11 +926,8 @@ export async function runWorkers(
     // Read when the alert is raised: Home with a studio, the docs page with none.
     link: links.worker,
     report: (error, step) => {
-      // A driver's words often name the connection string (the store's, a source's) that failed;
-      // the sources are the file's in force now, so one a reload added is hidden too.
-      print(
-        `worker heartbeat: ${WATCH_FAILURES[step]}: ${hideSecrets(errorWords(error), secretsInForce())}`,
-      );
+      // A driver's words often name the connection string (the store's, a source's) that failed.
+      print(`worker heartbeat: ${WATCH_FAILURES[step]}: ${outsideWords(error, hide)}`);
     },
   });
   // The studio's backfills: jobs inside this worker under the loop in force, asking through the
@@ -1054,17 +1053,18 @@ export async function runWorkers(
       allowPrivate: (row) =>
         row.projectId === project.id && webhookAllowsPrivate(fleet.config(), plugins, row.endpoint),
       // An action or a webhook given up on is the `action_gave_up` alert, recorded and sent as the
-      // worker's other alerts are; one that cannot be raised is the outbox's to retry.
-      onGiveUp: async (event, _signal, lastError) => {
-        await alerts.raise(gaveUpAlert(event, lastError, links.gaveUp));
-      },
-      // An action whose service refused its plugin's credential (a 401) keeps its 24 hours of
-      // retries and raises Action credential refused, one per plugin of a source; that plugin's
-      // next delivered try on the source resolves it: once per key in flight, and with no store
-      // read while this worker knows the key clear (core's `resolveOpen`).
-      onCredentialRefused: async (event, _signal, lastError) => {
-        await alerts.raise(credentialRefusedAlert(event, lastError, links.credential));
-      },
+      // worker's other alerts are; one that cannot be raised is the outbox's to retry. An action
+      // whose service refused its plugin's credential (a 401) keeps its 24 hours of retries and
+      // raises Action credential refused, one per plugin of a source; that plugin's next delivered
+      // try on the source resolves it: once per key in flight, and with no store read while this
+      // worker knows the key clear (core's `resolveOpen`). The last error each quotes passes the
+      // one hide (`outboxAlerts`).
+      ...outboxAlerts({
+        raise: (event) => alerts.raise(event),
+        gaveUp: links.gaveUp,
+        credential: links.credential,
+        hide,
+      }),
       onActionDelivered: (event) => alerts.resolveOpen(credentialRefusedKey(event)),
       // A plugin's action row runs here, through the plugins this worker loaded, on the record read
       // through its source's loop in force; only this project's rows are taken.
@@ -1224,8 +1224,13 @@ export async function runWorkers(
                 name: source.name,
                 inForce: fleet.loop(source.name)?.version ?? null,
               })),
-            read: (name, limit) =>
-              store.questionSets.history(storeSourceId(project.id, name), limit),
+            // A store that cannot be read is logged by the server in its own words around the
+            // driver's, which are hidden here first.
+            read: withHiddenFailure(
+              (name: string, limit: number) =>
+                store.questionSets.history(storeSourceId(project.id, name), limit),
+              hide,
+            ),
           },
           ...(configFile === undefined
             ? {}
@@ -1315,7 +1320,8 @@ export async function runWorkers(
               connector: loop.connector,
               provider,
               spending,
-              log: (line) => print(`${name}: preview: ${line}`),
+              // Its lines can quote a store driver's words.
+              log: previewLine(print, `${name}: preview: `, hide),
               clock,
               ...maxStateTokens,
             }).preview,
@@ -1327,7 +1333,7 @@ export async function runWorkers(
               decisions: store.log(idOf(source)),
               provider,
               spending,
-              note: (line) => print(`${name}: test: ${line}`),
+              note: previewLine(print, `${name}: test: `, hide),
               clock,
               ...maxStateTokens,
             }).testQuestionSet,
@@ -1395,9 +1401,9 @@ export async function runWorkers(
             // A source that fails stops alone; the others finish their pass, and the command exits
             // with the first failure. Nothing is tried again under --once. Each failing source says
             // its own error, scrubbed of its connection string.
-            const worded = installMissing(loop.source.name, options.config, error);
+            const worded = installMissing(loop.source.name, options.config, error, hide);
             onceFailure ??= { error: worded };
-            print(`${loop.source.name} stopped: ${failureWords(loop.source, worded)}.`);
+            print(`${loop.source.name} stopped: ${failureWords(loop.source, worded, hide)}.`);
             print(
               `${loop.source.name} stopped; the other sources finish their pass, then the worker exits with its error.`,
             );
@@ -1417,7 +1423,7 @@ export async function runWorkers(
           }
         }
       }
-      await deliverPass(() => outbox.deliverDue(clock.now()), print);
+      await deliverPass(() => outbox.deliverDue(clock.now()), print, hide);
     } else {
       // A loop that fails stops alone and is tried again; the fleet's run rejects only for a
       // failure of the fleet itself, which stops the rest.
@@ -1441,6 +1447,7 @@ export async function runWorkers(
           () => outbox.deliverDue(clock.now()),
           clock,
           print,
+          hide,
           () => alerts.summarize({ project: project.id, link: links.alerts() }),
         ),
         // This worker's row every 15 seconds, a look at the others' every 30; on the clock, beside
@@ -1471,6 +1478,10 @@ export async function runWorkers(
     if (onceFailure !== undefined) {
       throw onceFailure.error;
     }
+  } catch (error) {
+    // What the command prints of the error the run ends with (a source's under --once, the last
+    // refusal of a fleet with nothing left to run) holds no secret either.
+    throw hiddenError(error, hide);
   } finally {
     // A --once run that threw leaves no timer behind; its row stays (see above).
     onceBeats.abort();
@@ -1481,9 +1492,13 @@ export async function runWorkers(
     // delivery off, so this waits no longer than the channel's bound.
     await alerts.drain();
     await listener?.close();
-    // Before the connectors and the store close: every job's page in hand settled and saved.
-    await jobs?.close();
-    await fleet.close();
+    // Before the connectors and the store close: every job's page in hand settled and saved. A
+    // connection that fails to close says so in a driver's words: hidden too.
+    const hidden = (error: unknown): never => {
+      throw hiddenError(error, hide);
+    };
+    await jobs?.close().catch(hidden);
+    await fleet.close().catch(hidden);
   }
   return {
     ok: true,
@@ -1498,6 +1513,78 @@ export async function runWorkers(
 }
 
 /**
+ * An error a run ends with, as the command will print it (`asCliError`). A `CliError` is FacetDB's
+ * own sentence and fix (its outside words were hidden when it was built: `installMissing`) and is
+ * left as it is; any other error's message is a driver's or an engine's, hidden, under the CLI's
+ * own fix. The error itself when nothing in it was hidden, so its kind reaches the caller.
+ */
+function hiddenError(error: unknown, hide: Hide): unknown {
+  if (error instanceof CliError) {
+    return error;
+  }
+  const worded = asCliError(error);
+  const message = outsideWords(error, hide);
+  return message === worded.message
+    ? error
+    : new CliError(worded.code, message, worded.fix, worded.exit, worded.details);
+}
+
+/**
+ * The outbox's alert hooks, the last error each alert quotes (to every channel, the Alerts page and
+ * Home) through the one hide. A credential refusal whose plugin words were withheld is compared
+ * with FacetDB's fixed sentence before anything is hidden, so it is still known for what it is.
+ */
+export function outboxAlerts(deps: {
+  readonly raise: (event: AlertEvent) => Promise<unknown>;
+  readonly gaveUp: GaveUpLink;
+  readonly credential: CredentialLink;
+  readonly hide: Hide;
+}): Required<Pick<OutboxDeps, "onGiveUp" | "onCredentialRefused">> {
+  const { hide } = deps;
+  return {
+    onGiveUp: async (event, _signal, lastError) => {
+      await deps.raise(gaveUpAlert(event, hide(lastError), deps.gaveUp));
+    },
+    onCredentialRefused: async (event, _signal, lastError) => {
+      const words = lastError === CREDENTIAL_WORDS_WITHHELD ? lastError : hide(lastError);
+      await deps.raise(credentialRefusedAlert(event, words, deps.credential));
+    },
+  };
+}
+
+/**
+ * `call`, whose failure is a store driver's: its words are hidden before the server puts them in
+ * its own sentence (the config door's log line of a version history it could not read).
+ */
+export function withHiddenFailure<Args extends readonly unknown[], Result>(
+  call: (...args: Args) => Promise<Result>,
+  hide: Hide,
+): (...args: Args) => Promise<Result> {
+  return (...args) =>
+    call(...args).catch((error: unknown) => {
+      throw new Error(outsideWords(error, hide));
+    });
+}
+
+/**
+ * The line core's preview or test service logs, which is its own words, a colon, then an error's
+ * (`the reservation is left to its lease: …`): the error's words, after the first colon, through
+ * the one hide; core's words and `lead` stay whole.
+ */
+export function previewLine(
+  print: (text: string) => void,
+  lead: string,
+  hide: Hide,
+): (line: string) => void {
+  return (line) => {
+    const at = line.indexOf(": ");
+    print(
+      at === -1 ? `${lead}${line}` : `${lead}${line.slice(0, at + 2)}${hide(line.slice(at + 2))}`,
+    );
+  };
+}
+
+/**
  * What the loop prints when a pass of the outbox fails (in fixed text): a driver's message can name
  * the store's connection string, so it is not printed.
  */
@@ -1508,10 +1595,13 @@ export const OUTBOX_PASS_FAILED =
 export const SUMMARY_PASS_FAILED =
   "quiet hours: the summaries of the alerts they held could not be read or written in the store (the database's own words are not printed, as they can name its connection string); FacetDB tries again in 2 seconds";
 
-/** Prints what one tick of the quiet-hours summaries came to: a line for each part. */
-function printSummaries(report: SummaryReport, print: (text: string) => void): void {
+/**
+ * Prints what one tick of the quiet-hours summaries came to: a line for each part, a channel's kept
+ * words through the one hide.
+ */
+function printSummaries(report: SummaryReport, print: (text: string) => void, hide: Hide): void {
   for (const failure of report.failures) {
-    print(summaryFailureLine(failure));
+    print(summaryFailureLine({ ...failure, error: hide(failure.error) }));
   }
   for (const channel of report.unmarked) {
     print(summaryUnmarkedLine(channel));
@@ -1534,6 +1624,8 @@ export async function deliverUntil(
   deliver: () => Promise<OutboxPassReport>,
   clock: { sleep(ms: number): Promise<void> },
   print: (text: string) => void,
+  /** The worker's one hide, for the words a failure printed here quotes. */
+  hide: Hide,
   summarize: () => Promise<SummaryReport> = () =>
     Promise.resolve({ failures: [], unmarked: [], storeFailed: false }),
 ): Promise<void> {
@@ -1547,14 +1639,14 @@ export async function deliverUntil(
   let summarizing: Promise<void> | undefined;
   while (!signal.aborted) {
     try {
-      await deliverPass(deliver, print);
+      await deliverPass(deliver, print, hide);
     } catch {
       print(OUTBOX_PASS_FAILED);
     }
     summarizing ??= Promise.resolve()
       .then(summarize)
       .then(
-        (report) => printSummaries(report, print),
+        (report) => printSummaries(report, print, hide),
         () => print(SUMMARY_PASS_FAILED),
       )
       .finally(() => {
@@ -1573,12 +1665,13 @@ export async function deliverUntil(
 async function deliverPass(
   deliver: () => Promise<OutboxPassReport>,
   print: (text: string) => void,
+  hide: Hide,
 ): Promise<void> {
   try {
-    printAlertFailures(await deliver(), print);
+    printAlertFailures(await deliver(), print, hide);
   } catch (error) {
     if (error instanceof DeliveryPassFailed) {
-      printAlertFailures(error.report, print);
+      printAlertFailures(error.report, print, hide);
       throw error.cause;
     }
     throw error;
@@ -1593,9 +1686,13 @@ type OutboxPassReport = Pick<DeliveryReport, "alertFailures"> &
   Partial<Pick<DeliveryReport, "credentialAlertFailures">>;
 
 /** Every alert of a delivery pass that could not be raised or resolved, one line each, none dropped. */
-function printAlertFailures(report: OutboxPassReport, print: (text: string) => void): void {
+function printAlertFailures(
+  report: OutboxPassReport,
+  print: (text: string) => void,
+  hide: Hide,
+): void {
   for (const failure of report.alertFailures) {
-    print(alertFailureLine(failure));
+    print(alertFailureLine(failure, hide));
   }
   for (const failure of report.credentialAlertFailures ?? []) {
     print(credentialAlertFailureLine(failure));
@@ -1614,9 +1711,12 @@ function credentialAlertFailureLine(failure: CredentialAlertFailure): string {
     : `Action credential refused for ${whose} could not be resolved after a delivered try. The plugin's next delivered try on that source resolves it.`;
 }
 
-/** One alert that did not go out, in plain words: which webhook, why, and what happens next. */
-function alertFailureLine({ event, error, final }: AlertFailure): string {
-  const reason = error instanceof Error ? error.message : String(error);
+/**
+ * One alert that did not go out, in plain words: which webhook, why, and what happens next. The why
+ * is a store driver's or a channel's own words, so it goes through the one hide.
+ */
+function alertFailureLine({ event, error, final }: AlertFailure, hide: Hide): string {
+  const reason = outsideWords(error, hide);
   const row = "host" in event ? "webhook" : "action";
   return `${gaveUpSubject(event)} (delivery ${event.deliveryId}) was given up ${gaveUpHow(event)}, and its alert could not be raised: ${reason}. ${
     final
@@ -1643,17 +1743,23 @@ const TOO_MANY_CONNECTIONS = new Set(["53300", "EMAXCONNSESSION"]);
 
 /**
  * A loop's failure as the run reports it: one on a missing table or column names the source and how
- * to find out which, the database's words kept; anything else is left as it is. The worker starts
- * as it always did: nothing is checked before the first claim.
+ * to find out which, the database's words kept, through the one hide (the sentence is FacetDB's,
+ * the driver's words alone are hidden); anything else is left as it is. The worker starts as it
+ * always did: nothing is checked before the first claim.
  */
-export function installMissing(source: string, configPath: string, error: unknown): unknown {
+export function installMissing(
+  source: string,
+  configPath: string,
+  error: unknown,
+  hide: Hide,
+): unknown {
   const code =
     typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
   if (typeof code === "string" && TOO_MANY_CONNECTIONS.has(code)) {
     // Seen in a real run: a Supabase session pooler's 15 sessions per login, held by one studio
     // with its backfill beside a process just closed, stopped the studio with the driver's words
     // and "run facetdb doctor" as the fix.
-    const said = error instanceof Error ? error.message : String(error);
+    const said = outsideWords(error, hide);
     return new CliError(
       "too-many-connections",
       `the source "${source}" stopped: its database allows no more connections for the worker login (${said})`,
@@ -1663,7 +1769,7 @@ export function installMissing(source: string, configPath: string, error: unknow
   if (typeof code !== "string" || !MISSING_OBJECT.has(code)) {
     return error;
   }
-  const said = error instanceof Error ? error.message : String(error);
+  const said = outsideWords(error, hide);
   return new CliError(
     "missing-object",
     `the source "${source}" stopped: a table or a column it uses is not there (${said})`,
