@@ -496,40 +496,46 @@ describe("writeRegistryIndex", () => {
   }
 
   const known: Fetch = async () => new Response(JSON.stringify({ downloads: 5 }));
+  const ui = fileURLToPath(new URL("../../../ui", import.meta.url));
+
+  /** The build with the network, through the given `fetch`, at the given time. */
+  function build(folder: string, fetch: Fetch, now: Date) {
+    return writeRegistryIndex({ folder, ui, fetch, offline: false, now: () => now });
+  }
 
   it("writes the index, and a second run with nothing changed leaves the file alone", async () => {
     const folder = await folderWith({ "acme.json": entryText() });
-    const first = await writeRegistryIndex({ folder, fetch: known, now: () => NOW });
-    expect(first.written).toBe(true);
+    const first = await build(folder, known, NOW);
+    expect(first.written).toContain("index.json");
     const text = await readFile(join(folder, "index.json"), "utf8");
     expect(readRegistryIndex(text).plugins[0]?.downloads).toBe(5);
 
     const later = new Date("2026-12-01T00:00:00.000Z");
-    const second = await writeRegistryIndex({ folder, fetch: known, now: () => later });
-    expect(second.written).toBe(false);
+    const second = await build(folder, known, later);
+    expect(second.written).toEqual([]);
     expect(await readFile(join(folder, "index.json"), "utf8")).toBe(text);
   });
 
   it("rewrites it when a figure or an entry changed", async () => {
     const folder = await folderWith({ "acme.json": entryText() });
-    await writeRegistryIndex({ folder, fetch: known, now: () => NOW });
+    await build(folder, known, NOW);
     const more: Fetch = async () => new Response(JSON.stringify({ downloads: 6 }));
     const later = new Date("2026-12-01T00:00:00.000Z");
-    const result = await writeRegistryIndex({ folder, fetch: more, now: () => later });
-    expect(result.written).toBe(true);
+    const result = await build(folder, more, later);
+    expect(result.written).toEqual(["index.json", "index.html"]);
     expect(result.index.generatedAt).toBe("2026-12-01T00:00:00.000Z");
   });
 
   it("replaces an index that no longer reads", async () => {
     const folder = await folderWith({ "acme.json": entryText() });
     await writeFile(join(folder, "index.json"), '{ "old": true }');
-    const result = await writeRegistryIndex({ folder, fetch: known, now: () => NOW });
-    expect(result.written).toBe(true);
+    const result = await build(folder, known, NOW);
+    expect(result.written).toContain("index.json");
   });
 
   it("names a file that is not an entry file, and writes nothing", async () => {
     const folder = await folderWith({ "acme.json": entryText(), "notes.txt": "hi" });
-    await expect(writeRegistryIndex({ folder, fetch: known, now: () => NOW })).rejects.toThrow(
+    await expect(build(folder, known, NOW)).rejects.toThrow(
       /registry\/plugins\/notes\.txt: is not an entry file; an entry file ends in \.json/,
     );
     expect(await readdir(folder)).toEqual(["plugins"]);
@@ -537,7 +543,7 @@ describe("writeRegistryIndex", () => {
 
   it("names the bad entry file by its path in the registry folder", async () => {
     const folder = await folderWith({ "acme.json": entryText({ kinds: [] }) });
-    await expect(writeRegistryIndex({ folder, fetch: known, now: () => NOW })).rejects.toThrow(
+    await expect(build(folder, known, NOW)).rejects.toThrow(
       /registry\/plugins\/acme\.json: kinds must name at least one kind/,
     );
   });

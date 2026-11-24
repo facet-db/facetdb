@@ -16,7 +16,8 @@
     "src/**/e2e/**",
     "src/**/fixtures/**",
     "src/cli/testing.ts",
-    "src/plugin/registry-build.ts"
+    "src/plugin/registry-build.ts",
+    "src/plugin/registry-page.ts"
   ],
   "references": [
     { "path": "../core/tsconfig.build.json" },

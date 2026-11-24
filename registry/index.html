@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-4hUHTCdSpEgwPGeav57AC0+x140m5XAtYA4NxVEENtc='; script-src 'sha256-WOd46v//BAkrfVOVr1wku2zzb4Ix8twsaCTIwTpe1hI='; font-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>FacetDB plugins</title>
+<style>
+/* FacetDB's design tokens. The only file in packages/ui that names a color or a
+   face; every component and stylesheet reads these variables (tokens.test.ts holds it to that).
+   Dark first: a warm near-black ink the amber belongs to. Light is the same roles on a neutral
+   paper, picked by prefers-color-scheme and overridden by data-theme on the root (the rail's
+   switch). */
+
+/* The faces, self-hosted (no third-party font requests); the files and their OFL
+   copies sit in packages/ui/fonts/, whose README names them. */
+@font-face {
+  font-family: "Schibsted Grotesk";
+  src: url("fonts/schibsted-grotesk-variable.woff2") format("woff2");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Martian Mono";
+  src: url("fonts/martian-mono-variable.woff2") format("woff2");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Colors: one role per line of the brief's table */
+  --canvas: #141311;
+  --surface: #1a1815;
+  --surface-2: #23201b;
+  --hairline: #2f2b25;
+  --text: #f3f1ec;
+  --text-2: #b5afa3;
+  /* The mockups' value: the brief's #837c70 reads 4.49:1 on the canvas, under its own 4.5:1 rule */
+  --text-3: #8c8577;
+  --facet: #ffb020;
+  --facet-ink: #1a1200;
+  --facet-text: #ffb020;
+  --yes: #4ade80;
+  --no: #fb7185;
+  --review: #ffb020;
+  --pending: #9a9388;
+  --skipped: #5e584f;
+  --dither-ink: #f3f1ec;
+
+  /* Type: one family for everything read, one for everything measured */
+  --font-text: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-measured: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /* Martian Mono's widths: figures inline at 87.5%, the wide cut for the big figures */
+  --font-measured-inline: 87.5%;
+  --font-measured-wide: 112.5%;
+
+  /* Space and shape: a 4 px grid, square corners everywhere */
+  --space: 4px;
+  --radius: 0;
+
+  /* Motion: state, layout, the column fill and the interval between its cells */
+  --motion-state: 150ms;
+  --motion-layout: 250ms;
+  --motion-fill: 600ms;
+  --motion-fill-step: 40ms;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --canvas: #f3f2ef;
+    --surface: #ffffff;
+    --surface-2: #e9e7e2;
+    --hairline: #d6d2ca;
+    --text: #171512;
+    --text-2: #5a554c;
+    --text-3: #726d60;
+    --facet: #ffb020;
+    --facet-ink: #1a1200;
+    --facet-text: #8a4b00;
+    --yes: #15803d;
+    --no: #be123c;
+    --review: #b45309;
+    --pending: #6b655a;
+    --skipped: #9a948a;
+    --dither-ink: #171512;
+  }
+}
+
+/* The rail's switch: the same light values chosen by hand (tokens.test.ts keeps the two equal) */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --canvas: #f3f2ef;
+  --surface: #ffffff;
+  --surface-2: #e9e7e2;
+  --hairline: #d6d2ca;
+  --text: #171512;
+  --text-2: #5a554c;
+  --text-3: #726d60;
+  --facet: #ffb020;
+  --facet-ink: #1a1200;
+  --facet-text: #8a4b00;
+  --yes: #15803d;
+  --no: #be123c;
+  --review: #b45309;
+  --pending: #6b655a;
+  --skipped: #9a948a;
+  --dither-ink: #171512;
+}
+
+/* Reduced motion: every transition reads its duration from these tokens, so zeroing them stills
+   the page and the column fill renders at once. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-state: 0ms;
+    --motion-layout: 0ms;
+    --motion-fill: 0ms;
+    --motion-fill-step: 0ms;
+  }
+}
+
+.search[hidden],
+.gallery[hidden],
+.gallery > article[hidden] {
+  display: none;
+}
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-text);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 40px 16px 64px;
+}
+@media (min-width: 720px) {
+  main {
+    padding: 56px 32px 80px;
+  }
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: 16px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+a {
+  color: var(--facet-text);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+code,
+.figure {
+  font-family: var(--font-measured);
+  font-stretch: var(--font-measured-inline);
+  font-size: 12.5px;
+}
+.lede {
+  display: grid;
+  gap: 4px;
+  max-width: 68ch;
+  margin: 8px 0 24px;
+  color: var(--text-2);
+}
+.lede code {
+  overflow-wrap: anywhere;
+}
+.search {
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+  margin-bottom: 12px;
+}
+.search .field {
+  display: block;
+}
+.search label {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.search input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.search input:hover {
+  border-color: var(--text-3);
+}
+.count {
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  border-top: 1px solid var(--hairline);
+  border-left: 1px solid var(--hairline);
+}
+.gallery > article {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 18px 20px 20px;
+  border-right: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+}
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.small {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.description {
+  overflow-wrap: anywhere;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--hairline);
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: var(--text-3);
+}
+.cmd {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  margin-top: 6px;
+}
+.cmd code {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--hairline);
+  overflow-wrap: anywhere;
+}
+.cmd code:not(:last-child) {
+  border-right: 0;
+}
+button {
+  height: 30px;
+  padding: 0 16px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--motion-state);
+}
+button:hover {
+  border-color: var(--text-3);
+}
+.note {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+a,
+button,
+.search .field {
+  position: relative;
+}
+a::after,
+button::after,
+.search .field::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-state);
+  background:
+    linear-gradient(var(--facet-text), var(--facet-text)) left top / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left top / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right top / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right top / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left bottom / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) left bottom / 2px 10px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right bottom / 10px 2px no-repeat,
+    linear-gradient(var(--facet-text), var(--facet-text)) right bottom / 2px 10px no-repeat;
+}
+a:focus-visible,
+button:focus-visible,
+.search input:focus-visible {
+  outline: 2px solid transparent;
+}
+a:focus-visible::after,
+button:focus-visible::after,
+.search .field:focus-within::after {
+  opacity: 1;
+}
+</style>
+</head>
+<body>
+<main>
+<h1>FacetDB plugins</h1>
+<div class="lede">
+<p>To list a plugin, open a pull request that adds <code>registry/plugins/&lt;name&gt;.json</code>, as <a href="https://github.com/facet-db/facetdb/blob/main/registry/README.md">the registry's README</a> explains.</p>
+<p>A plugin runs inside your worker with its access. Verified ones were reviewed by the FacetDB team.</p>
+</div>
+<div class="search" id="search" hidden>
+<label for="search-field">Search</label>
+<span class="field"><input id="search-field" type="search" autocomplete="off" spellcheck="false" maxlength="100"></span>
+</div>
+<p class="count" id="count" role="status">5 plugins</p>
+<div class="gallery" id="gallery">
+<article aria-labelledby="plugin-email" data-search="email @facetdb/email send system alerts and record notifications by email. channel alert channel">
+<div class="head"><h2 id="plugin-email">email</h2><span class="tag">Verified</span></div>
+<p class="small">Alert channel</p>
+<p class="description">Send system alerts and record notifications by email.</p>
+<p class="small"><span class="figure">0</span> downloads last month</p>
+<div class="cmd"><code data-command>facetdb add email</code></div>
+</article>
+<article aria-labelledby="plugin-github" data-search="github @facetdb/github read github issues and pull requests as records, then label, comment or assign from the decisions. includes the issue triage pack. action pack source source, action, question pack">
+<div class="head"><h2 id="plugin-github">github</h2><span class="tag">Verified</span></div>
+<p class="small">Source, action, question pack</p>
+<p class="description">Read GitHub issues and pull requests as records, then label, comment or assign from the decisions. Includes the issue triage pack.</p>
+<p class="small"><span class="figure">0</span> downloads last month</p>
+<div class="cmd"><code data-command>facetdb add github</code></div>
+</article>
+<article aria-labelledby="plugin-packs" data-search="packs @facetdb/packs the marketplace trust and safety question pack: scams, banned items, payment outside the platform and counterfeits. pack question pack">
+<div class="head"><h2 id="plugin-packs">packs</h2><span class="tag">Verified</span></div>
+<p class="small">Question pack</p>
+<p class="description">The marketplace trust and safety question pack: scams, banned items, payment outside the platform and counterfeits.</p>
+<p class="small"><span class="figure">0</span> downloads last month</p>
+<div class="cmd"><code data-command>facetdb add packs</code></div>
+</article>
+<article aria-labelledby="plugin-slack" data-search="slack @facetdb/slack send system alerts and record notifications to a slack channel. channel alert channel">
+<div class="head"><h2 id="plugin-slack">slack</h2><span class="tag">Verified</span></div>
+<p class="small">Alert channel</p>
+<p class="description">Send system alerts and record notifications to a Slack channel.</p>
+<p class="small"><span class="figure">0</span> downloads last month</p>
+<div class="cmd"><code data-command>facetdb add slack</code></div>
+</article>
+<article aria-labelledby="plugin-telegram" data-search="telegram @facetdb/telegram send system alerts and record notifications to a telegram chat. channel alert channel">
+<div class="head"><h2 id="plugin-telegram">telegram</h2><span class="tag">Verified</span></div>
+<p class="small">Alert channel</p>
+<p class="description">Send system alerts and record notifications to a Telegram chat.</p>
+<p class="small"><span class="figure">0</span> downloads last month</p>
+<div class="cmd"><code data-command>facetdb add telegram</code></div>
+</article>
+</div>
+</main>
+<script>
+(() => {
+  const box = document.getElementById("search");
+  const field = document.getElementById("search-field");
+  const count = document.getElementById("count");
+  const gallery = document.getElementById("gallery");
+  if (box === null || field === null || count === null || gallery === null) return;
+  const cells = Array.from(gallery.querySelectorAll("[data-search]"));
+  const plugins = (n) => (n === 1 ? "1 plugin" : `${n} plugins`);
+  const show = () => {
+    const typed = field.value.trim();
+    const words = typed.toLowerCase().split(/\s+/).filter(Boolean);
+    let shown = 0;
+    for (const cell of cells) {
+      const text = cell.getAttribute("data-search") || "";
+      const hit = words.every((word) => text.includes(word));
+      cell.hidden = !hit;
+      if (hit) shown += 1;
+    }
+    gallery.hidden = shown === 0;
+    count.textContent =
+      words.length === 0
+        ? plugins(cells.length)
+        : shown === 0
+          ? `No plugin matches "${typed}".`
+          : `${shown} of ${plugins(cells.length)}`;
+  };
+  field.addEventListener("input", show);
+  box.hidden = false;
+  for (const cell of cells) {
+    const code = cell.querySelector("[data-command]");
+    if (code === null || code.parentElement === null) continue;
+    const command = code.textContent || "";
+    const button = document.createElement("button");
+    button.setAttribute("type", "button");
+    button.setAttribute("aria-label", `Copy ${command}`);
+    button.textContent = "Copy";
+    const said = document.createElement("p");
+    said.setAttribute("role", "status");
+    said.setAttribute("class", "sr-only");
+    const copied = () => {
+      button.textContent = "Copied";
+      button.setAttribute("aria-label", `Copied ${command}`);
+      said.setAttribute("class", "sr-only");
+      said.textContent = `Copied ${command}`;
+    };
+    const refused = () => {
+      const selection = window.getSelection();
+      if (selection !== null) selection.selectAllChildren(code);
+      said.setAttribute("class", "note");
+      said.textContent =
+        "This browser did not allow copying. The command is selected: press Ctrl+C or Cmd+C.";
+    };
+    button.addEventListener("click", () => {
+      try {
+        navigator.clipboard.writeText(command).then(copied, refused);
+      } catch {
+        refused();
+      }
+    });
+    code.parentElement.append(button);
+    code.parentElement.parentElement?.append(said);
+  }
+})();
+</script>
+</body>
+</html>
