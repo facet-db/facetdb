@@ -15,13 +15,16 @@ import {
   whenUtc,
 } from "@facetdb/core";
 import {
+  type Asker,
   type ConfigFileDoor,
+  capLoosenings,
   type FileApply,
   type FileDiff,
   hideSecrets,
   type PendingSource,
   type ReloadSummary,
   type SourceReload,
+  type SpendingSettings,
   secretParts,
   type TableFacts,
 } from "@facetdb/server";
@@ -1838,6 +1841,12 @@ export function configFileDoor(deps: {
   readonly load: () => Promise<ProjectConfig>;
   readonly env: Readonly<Record<string, string | undefined>>;
   /**
+   * The spending settings the worker enforces now: with the file's as it loads now, the baseline a
+   * draft from anyone but the operator may not loosen. Read in the queue, after any reload queued
+   * ahead of it.
+   */
+  readonly spending: () => SpendingSettings;
+  /**
    * The plugins the worker runs, which a project draft's `alerts` and `plugins` are judged with
    * (`draftPlugins`); absent, such a draft is refused.
    */
@@ -1855,9 +1864,10 @@ export function configFileDoor(deps: {
 
   async function plan(
     draft: ConfigDraft,
+    asker: Asker,
   ): Promise<
     | { readonly ok: true; readonly plan: ApplyPlan }
-    | Extract<FileDiff, { readonly kind: "invalid" | "unreadable" }>
+    | Extract<FileDiff, { readonly kind: "invalid" | "unreadable" | "operator_only" }>
   > {
     const read = await files.read(path);
     if (read.kind !== "file") {
@@ -1886,6 +1896,15 @@ export function configFileDoor(deps: {
       }
       throw error;
     }
+    // A draft that loosens the spending cap is the operator's alone, judged against the stricter of
+    // the cap in force and the file's as it loads now (a hand edit no reload has put in force),
+    // here in the queue, so no reload or write comes between this and the write.
+    if (!asker.operator) {
+      const changes = capLoosenings({ inForce: deps.spending(), file: config }, draft);
+      if (changes.length > 0) {
+        return { kind: "operator_only", changes };
+      }
+    }
     const planned = planApply(
       { path, text: read.text, config },
       draft,
@@ -1900,9 +1919,9 @@ export function configFileDoor(deps: {
     // Check again: the file as it is, read again in the same queue as the writes.
     reload: () => serial(() => deps.reload()),
 
-    diff: (draft) =>
+    diff: (draft, asker) =>
       serial(async (): Promise<FileDiff> => {
-        const planned = await plan(draft);
+        const planned = await plan(draft, asker);
         if (!("ok" in planned)) {
           return planned;
         }
@@ -1921,9 +1940,9 @@ export function configFileDoor(deps: {
         };
       }),
 
-    apply: (draft, options) =>
+    apply: (draft, options, asker) =>
       serial(async (): Promise<FileApply> => {
-        const planned = await plan(draft);
+        const planned = await plan(draft, asker);
         if (!("ok" in planned)) {
           return planned;
         }

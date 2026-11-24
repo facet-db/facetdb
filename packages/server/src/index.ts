@@ -38,6 +38,8 @@ export { onlyRecord } from "./check/target.ts";
 export { PREVIEW_MAX_LIMIT } from "./config/routes.ts";
 export type {
   ApplyOptions,
+  Asker,
+  CapLoosening,
   ConfigDraft,
   ConfigFileDoor,
   ConfigService,
@@ -53,10 +55,11 @@ export type {
   ReloadSummary,
   SourceDraft,
   SourceReload,
+  SpendingSettings,
   UncommittedWords,
   Words,
 } from "./config/service.ts";
-export { createConfigService } from "./config/service.ts";
+export { capLoosenings, createConfigService } from "./config/service.ts";
 export type {
   HistoryDoor,
   SourceHistory,

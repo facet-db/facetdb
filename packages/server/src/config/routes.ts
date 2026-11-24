@@ -1,10 +1,16 @@
-import { PREVIEW_DEFAULT_LIMIT, TEST_DEFAULT_SAMPLE, TEST_MAX_SAMPLE } from "@facetdb/core";
-import { Hono } from "hono";
+import {
+  groupedTokens,
+  PREVIEW_DEFAULT_LIMIT,
+  TEST_DEFAULT_SAMPLE,
+  TEST_MAX_SAMPLE,
+} from "@facetdb/core";
+import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../auth/middleware.ts";
+import { isOperator, operatorRefusal } from "../auth/operator.ts";
 import { ApiError } from "../errors.ts";
 import { bodyProblems, readJson } from "../request.ts";
-import type { ConfigDraft, ConfigService, DraftIssue } from "./service.ts";
+import type { CapLoosening, ConfigDraft, ConfigService, DraftIssue } from "./service.ts";
 
 /** The most rows one preview answers, as `facetdb preview --limit` allows. */
 export const PREVIEW_MAX_LIMIT = 100;
@@ -102,6 +108,39 @@ const unknownProject = () =>
     "This request belongs to a project this worker does not serve.",
     "Open the studio of the worker that serves this project.",
   );
+
+/** What a draft does to the cap in force, as the refusal says it. */
+function loosening(change: CapLoosening): string {
+  switch (change.kind) {
+    case "raises":
+      return `raises the spending cap from ${groupedTokens(change.from)} to ${groupedTokens(change.to)} input tokens a month`;
+    case "removes":
+      return `removes the spending cap of ${groupedTokens(change.from)} input tokens a month`;
+    case "continues":
+      return "keeps the project answering past the cap instead of pausing";
+  }
+}
+
+/**
+ * The refusal of a draft that loosens the cap: what it does, and what to do instead, where a
+ * request from this machine with no sign-in is the operator, and where none is (a `studioUrl` on
+ * another host), which leaves the file's hand edit alone.
+ */
+function operatorOnly(c: Context<AppEnv>, changes: readonly CapLoosening[]): ApiError {
+  const does = `This draft ${changes.map(loosening).join(" and ")}.`;
+  const open = "Lowering the cap, or pausing at 100%, can be applied here.";
+  const words = operatorRefusal(c, {
+    notOperator: {
+      message: `${does} Only the operator can do that.`,
+      fix: `Edit facetdb.config.ts on the machine that runs facetdb worker, or apply this in the studio opened there with no sign-in. ${open}`,
+    },
+    noOperator: {
+      message: `${does} A studio reached from other machines (studioUrl) never does that.`,
+      fix: `Edit facetdb.config.ts on the machine that runs facetdb worker, then press Check again or restart the worker. ${open}`,
+    },
+  });
+  return new ApiError(403, "operator_only", words.message, words.fix);
+}
 
 function issuesInWords(issues: readonly DraftIssue[]): string {
   return issues
@@ -255,7 +294,9 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
   // is written that was not shown. The draft is one source (the Questions page) or the project's
   // own settings (Settings' cap, the Alerts page's channels, the Plugins page's settings); any
   // reviewer who may Apply may send either, and the reload puts a written cap, channels and
-  // settings in force at once.
+  // settings in force at once. A project draft that raises the cap, removes it or sets `continue`,
+  // against the stricter of the cap in force and the file's, is the operator's alone: the door
+  // refuses it for anyone else, in its queue, at the diff and at the write.
   route.post("/apply", async (c) => {
     const body = await parsed(
       applyBody,
@@ -263,15 +304,19 @@ export function configRoutes(service: ConfigService): Hono<AppEnv> {
       `Send ${DRAFT_SHAPE}, or ${PROJECT_DRAFT_SHAPE} for the project's own settings, for the diff; to write it, send the same draft with "confirm": "<the plan the diff answered with>", and "force": true to replace a file git keeps no copy of.`,
     );
     const projectId = c.get("projectId");
+    const asker = { operator: isOperator(c) };
     const outcome =
       body.confirm === undefined
-        ? await service.diff(projectId, body.draft)
-        : await service.apply(projectId, body.draft, {
-            plan: body.confirm,
-            force: body.force,
-            by: c.get("reviewer"),
-          });
+        ? await service.diff(projectId, body.draft, asker)
+        : await service.apply(
+            projectId,
+            body.draft,
+            { plan: body.confirm, force: body.force, by: c.get("reviewer") },
+            asker,
+          );
     switch (outcome.kind) {
+      case "operator_only":
+        throw operatorOnly(c, outcome.changes);
       case "planned": {
         const { kind: _kind, ...result } = outcome;
         return c.json({ written: false, ...result });

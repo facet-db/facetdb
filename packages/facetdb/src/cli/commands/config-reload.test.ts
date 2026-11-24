@@ -88,6 +88,9 @@ const PROJECT = loaded(
   }),
 );
 
+/** The operator asks: the door judges no cap (apply-cap-operator.test.ts holds those tests). */
+const OPERATOR = { operator: true } as const;
+
 /** The project with one question's wording changed, nothing else. */
 function reworded(config: ProjectConfig, source: string, instructions: string): ProjectConfig {
   return {
@@ -773,6 +776,7 @@ describe("the config file door", () => {
     const told: unknown[] = [];
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load,
       env: ENV,
@@ -782,7 +786,7 @@ describe("the config file door", () => {
       },
     });
 
-    const shown = await door.diff({ source: draft });
+    const shown = await door.diff({ source: draft }, OPERATOR);
     expect(shown).toMatchObject({ kind: "planned", changed: true, uncommitted: null });
     if (shown.kind !== "planned") {
       throw new Error("planned");
@@ -809,6 +813,7 @@ describe("the config file door", () => {
     const applied = await door.apply(
       { source: draft },
       { plan: shown.plan, force: false, by: "maya" },
+      OPERATOR,
     );
     await t.fleet.settled();
 
@@ -846,6 +851,7 @@ describe("the config file door", () => {
     const told: unknown[] = [];
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load: loader(fake, [PROJECT, capped]),
       env: ENV,
@@ -856,7 +862,7 @@ describe("the config file door", () => {
     });
     const project = { spendingCap: 2_000_000, onCapReached: "continue" } as const;
 
-    const shown = await door.diff({ project });
+    const shown = await door.diff({ project }, OPERATOR);
     expect(shown).toMatchObject({
       kind: "planned",
       changed: true,
@@ -872,7 +878,11 @@ describe("the config file door", () => {
     ]);
     expect(fake.state.writes).toEqual([]);
 
-    const applied = await door.apply({ project }, { plan: shown.plan, force: false, by: "maya" });
+    const applied = await door.apply(
+      { project },
+      { plan: shown.plan, force: false, by: "maya" },
+      OPERATOR,
+    );
     await t.fleet.settled();
     // A project draft writes no source: no question set is the reviewer's.
     expect(told).toEqual([{ by: "maya", source: null }]);
@@ -895,7 +905,7 @@ describe("the config file door", () => {
     expect(toProjectJson(t.fleet.config())).toMatchObject({ spendingCap: 2_000_000 });
 
     // A cap the loader refuses is refused at its own path, before anything is shown.
-    expect(await door.diff({ project: { spendingCap: 0 } })).toEqual({
+    expect(await door.diff({ project: { spendingCap: 0 } }, OPERATOR)).toEqual({
       kind: "invalid",
       issues: [{ path: "spendingCap", message: "spendingCap must be more than 0" }],
     });
@@ -909,13 +919,18 @@ describe("the config file door", () => {
     const fake = fakeFiles(configFileSource(PROJECT));
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load: () => Promise.resolve(PROJECT),
       env: ENV,
       reload: () => Promise.reject(new Error("nothing is written, so nothing reloads")),
     });
     expect(
-      await door.apply({ source: draft }, { plan: "an-old-plan", force: true, by: "maya" }),
+      await door.apply(
+        { source: draft },
+        { plan: "an-old-plan", force: true, by: "maya" },
+        OPERATOR,
+      ),
     ).toEqual({
       kind: "stale",
     });
@@ -931,6 +946,7 @@ describe("the config file door", () => {
     const reloads: string[] = [];
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load: loader(fake, [PROJECT, judged.config]),
       env: ENV,
@@ -940,7 +956,7 @@ describe("the config file door", () => {
       },
     });
 
-    const shown = await door.diff({ source: draft });
+    const shown = await door.diff({ source: draft }, OPERATOR);
     if (shown.kind !== "planned") {
       throw new Error("planned");
     }
@@ -950,7 +966,7 @@ describe("the config file door", () => {
       fix: 'commit them (git add facetdb.config.ts && git commit), or apply again with force ("force": true) to replace them',
     });
     expect(
-      await door.apply({ source: draft }, { plan: shown.plan, force: false, by: "maya" }),
+      await door.apply({ source: draft }, { plan: shown.plan, force: false, by: "maya" }, OPERATOR),
     ).toEqual({
       kind: "uncommitted",
       ...shown.uncommitted,
@@ -959,7 +975,7 @@ describe("the config file door", () => {
     expect(reloads).toEqual([]);
 
     expect(
-      await door.apply({ source: draft }, { plan: shown.plan, force: true, by: "maya" }),
+      await door.apply({ source: draft }, { plan: shown.plan, force: true, by: "maya" }, OPERATOR),
     ).toMatchObject({
       kind: "applied",
     });
@@ -971,6 +987,7 @@ describe("the config file door", () => {
     const fake = fakeFiles("export default nothing;\n");
     const broken = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load: () =>
         Promise.reject(
@@ -982,20 +999,24 @@ describe("the config file door", () => {
       env: ENV,
       reload: () => Promise.reject(new Error("never")),
     });
-    expect(await broken.diff({ source: draft })).toMatchObject({
+    expect(await broken.diff({ source: draft }, OPERATOR)).toMatchObject({
       kind: "unreadable",
       fix: "fix each line named in facetdb.config.ts, then apply again",
     });
 
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fakeFiles(configFileSource(PROJECT)).files,
       load: () => Promise.resolve(PROJECT),
       env: ENV,
       reload: () => Promise.reject(new Error("never")),
     });
     expect(
-      await door.diff({ source: { name: "listings", thresholds: { is_scam: { yesAbove: 2 } } } }),
+      await door.diff(
+        { source: { name: "listings", thresholds: { is_scam: { yesAbove: 2 } } } },
+        OPERATOR,
+      ),
     ).toMatchObject({
       kind: "invalid",
       issues: [expect.objectContaining({ path: expect.stringContaining("thresholds") })],
@@ -1142,6 +1163,7 @@ describe("the config file door when the written file does not load", () => {
     };
     const door = configFileDoor({
       path: "facetdb.config.ts",
+      spending: () => PROJECT,
       files: fake.files,
       load: () => Promise.resolve(PROJECT),
       env: { DATABASE_URL: URL },
@@ -1152,7 +1174,7 @@ describe("the config file door when the written file does not load", () => {
           fix: "Fix each line named in facetdb.config.ts, then apply again or restart facetdb worker.",
         }),
     });
-    const shown = await door.diff({ source: draft });
+    const shown = await door.diff({ source: draft }, OPERATOR);
     if (shown.kind !== "planned") {
       throw new Error("planned");
     }
@@ -1160,6 +1182,7 @@ describe("the config file door when the written file does not load", () => {
     const result = await door.apply(
       { source: draft },
       { plan: shown.plan, force: false, by: "maya" },
+      OPERATOR,
     );
 
     expect(result).toEqual({

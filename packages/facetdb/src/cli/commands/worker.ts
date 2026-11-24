@@ -1224,6 +1224,9 @@ export async function runWorkers(
                   files: configFile.files,
                   load: () => configFile.load({ quiet: true }),
                   env: deps.env,
+                  // The cap the gate enforces now, which a draft from anyone but the operator may
+                  // not loosen, nor the file's own where that is stricter.
+                  spending: () => projectInForce,
                   // A draft's channels and plugin settings are judged against the plugins in force,
                   // as the reload after its write puts them in force.
                   plugins: draftPlugins({

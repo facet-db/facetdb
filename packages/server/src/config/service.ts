@@ -46,6 +46,79 @@ export type ProjectDraft = {
 /** What Apply places into facetdb.config.ts: one source, or the project's own settings. */
 export type ConfigDraft = { readonly source: SourceDraft } | { readonly project: ProjectDraft };
 
+/**
+ * A project's spending settings: the monthly cap (none when `spendingCap` is absent) and what
+ * happens at 100%. The worker enforces one set; the config file may hold another until a reload.
+ */
+export type SpendingSettings = {
+  readonly spendingCap?: number;
+  readonly onCapReached: "pause" | "continue";
+};
+
+/**
+ * A project draft's change that loosens the spending cap: a higher cap, no cap where one is set, or
+ * `continue` where the project pauses. Only the operator may apply one.
+ */
+export type CapLoosening =
+  | { readonly kind: "raises"; readonly from: number; readonly to: number }
+  | { readonly kind: "removes"; readonly from: number }
+  | { readonly kind: "continues" };
+
+/** Who asks for a diff or a write: the operator (auth/operator.ts's `isOperator`) or a reviewer. */
+export type Asker = { readonly operator: boolean };
+
+/** The refusal of a draft that loosens the cap, for anyone but the operator. */
+export type OperatorOnly = {
+  readonly kind: "operator_only";
+  readonly changes: readonly CapLoosening[];
+};
+
+/**
+ * The stricter of two sets of spending settings: the lower cap, a cap over none, `pause` over
+ * `continue`. What the operator wrote last, by hand or through a reload, is never loosened by
+ * being the one of the two that is not in force yet.
+ */
+function stricter(one: SpendingSettings, other: SpendingSettings): SpendingSettings {
+  const caps = [one.spendingCap, other.spendingCap].filter((cap) => cap !== undefined);
+  const onCapReached =
+    one.onCapReached === "pause" || other.onCapReached === "pause" ? "pause" : "continue";
+  return caps.length === 0 ? { onCapReached } : { spendingCap: Math.min(...caps), onCapReached };
+}
+
+/**
+ * What `draft` loosens of the spending settings, judged against the stricter of the two the
+ * operator has: the ones the worker enforces now, and the config file's as it loads now (a hand
+ * edit no reload has put in force yet). Empty for a source draft, and for a project draft that
+ * lowers the cap, sets one where none is, keeps it, or pauses. The CLI's file door calls it inside
+ * its queue, so nothing changes between this judgment and the write.
+ */
+export function capLoosenings(
+  baselines: { readonly inForce: SpendingSettings; readonly file: SpendingSettings },
+  // Only what it reads, so the CLI's own draft type (the door's) is one too.
+  draft:
+    | { readonly source: unknown }
+    | { readonly project: Pick<ProjectDraft, "spendingCap" | "onCapReached"> },
+): readonly CapLoosening[] {
+  if (!("project" in draft)) {
+    return [];
+  }
+  const { spendingCap, onCapReached } = draft.project;
+  const baseline = stricter(baselines.inForce, baselines.file);
+  const changes: CapLoosening[] = [];
+  const cap = baseline.spendingCap;
+  if (cap !== undefined) {
+    if (spendingCap === null) {
+      changes.push({ kind: "removes", from: cap });
+    } else if (spendingCap !== undefined && spendingCap > cap) {
+      changes.push({ kind: "raises", from: cap, to: spendingCap });
+    }
+  }
+  if (onCapReached === "continue" && baseline.onCapReached === "pause") {
+    changes.push({ kind: "continues" });
+  }
+  return changes;
+}
+
 /** A problem the loader found, with its field path as the config file writes it (`sources[0].questions.urgency.levels`). */
 export type DraftIssue = { readonly path: string; readonly message: string };
 
@@ -184,7 +257,8 @@ export type FileDiff =
     }
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
   /** The file is missing, is a link, or does not load as it is now. */
-  | ({ readonly kind: "unreadable" } & Words);
+  | ({ readonly kind: "unreadable" } & Words)
+  | OperatorOnly;
 
 /** How a confirmed apply went. */
 export type FileApply =
@@ -201,7 +275,8 @@ export type FileApply =
   | ({ readonly kind: "reverted" } & Words)
   | ({ readonly kind: "uncommitted" } & UncommittedWords)
   | { readonly kind: "invalid"; readonly issues: readonly DraftIssue[] }
-  | ({ readonly kind: "unreadable" } & Words);
+  | ({ readonly kind: "unreadable" } & Words)
+  | OperatorOnly;
 
 /**
  * A confirmed Apply: the plan the diff answered with, whether to replace a file git keeps no copy
@@ -218,8 +293,14 @@ export type ApplyOptions = {
 export type ConfigFileDoor = {
   /** Reads the file again and applies it to the running loops, as after a write. */
   reload(): Promise<ReloadSummary>;
-  diff(draft: ConfigDraft): Promise<FileDiff>;
-  apply(draft: ConfigDraft, options: ApplyOptions): Promise<FileApply>;
+  /**
+   * The diff a draft makes. For anyone but the operator, a project draft that loosens the spending
+   * cap (`capLoosenings`, judged in the same queue as the writes) is `operator_only`, before any
+   * diff.
+   */
+  diff(draft: ConfigDraft, asker: Asker): Promise<FileDiff>;
+  /** The write the confirmed plan names, judged again as the diff is, in the same queue step. */
+  apply(draft: ConfigDraft, options: ApplyOptions, asker: Asker): Promise<FileApply>;
 };
 
 /** A running source the preview can read: the fields its connector reads, and the preview over it. */
@@ -307,13 +388,20 @@ export type ConfigService = {
     draft: SourceDraft,
     options: { readonly sample: number; readonly estimateOnly: boolean },
   ): Promise<TestOutcome>;
-  /** The diff a source or project draft makes to the config file; nothing is written. */
-  diff(projectId: string, draft: ConfigDraft): Promise<FileOutcome<FileDiff>>;
-  /** Writes the file the confirmed plan names, and the worker reloads it. */
+  /**
+   * The diff a source or project draft makes to the config file; nothing is written. A draft that
+   * loosens the spending cap is refused for anyone but the operator, before any diff.
+   */
+  diff(projectId: string, draft: ConfigDraft, asker: Asker): Promise<FileOutcome<FileDiff>>;
+  /**
+   * Writes the file the confirmed plan names, and the worker reloads it; the draft is judged again
+   * at the write, so one edited, or a cap changed, since the diff is too.
+   */
   apply(
     projectId: string,
     draft: ConfigDraft,
     options: ApplyOptions,
+    asker: Asker,
   ): Promise<FileOutcome<FileApply>>;
   /** Check again: the worker reads the file and its databases again; nothing is written. */
   reload(projectId: string): Promise<FileOutcome<FileReload>>;
@@ -514,22 +602,24 @@ export function createConfigService(deps: ConfigServiceDeps): ConfigService {
       }
     },
 
-    diff(projectId, draft) {
+    async diff(projectId, draft, asker) {
       if (!ours(projectId)) {
-        return Promise.resolve({ kind: "unknown_project" });
+        return { kind: "unknown_project" };
       }
-      return config.file === undefined
-        ? Promise.resolve({ kind: "unavailable" })
-        : config.file.diff(draft);
+      if (config.file === undefined) {
+        return { kind: "unavailable" };
+      }
+      return config.file.diff(draft, asker);
     },
 
-    apply(projectId, draft, options) {
+    async apply(projectId, draft, options, asker) {
       if (!ours(projectId)) {
-        return Promise.resolve({ kind: "unknown_project" });
+        return { kind: "unknown_project" };
       }
-      return config.file === undefined
-        ? Promise.resolve({ kind: "unavailable" })
-        : config.file.apply(draft, options);
+      if (config.file === undefined) {
+        return { kind: "unavailable" };
+      }
+      return config.file.apply(draft, options, asker);
     },
 
     async reload(projectId) {
