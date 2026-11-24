@@ -65,6 +65,14 @@ export {
   INSPECT_MAX_VALUE,
   INSPECT_SAMPLE_ROWS,
 } from "./engine.ts";
+export type { DoctorCheckName, FixArea, FixCode, OtherDocsPage } from "./fix-pages.ts";
+export {
+  DOCTOR_CHECKS_BY_AREA,
+  FIX_AREAS,
+  FIX_CODES,
+  FIX_CODES_BY_AREA,
+  OTHER_DOCS_PAGES,
+} from "./fix-pages.ts";
 export type { PluginKind, PluginManifest } from "./plugin.ts";
 export { PLUGIN_ENTRY_NAME, PLUGIN_KINDS } from "./plugin.ts";
 export type { ModelProvider, ProviderRequest, ProviderResponse, Usage } from "./provider.ts";
