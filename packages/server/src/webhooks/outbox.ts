@@ -790,7 +790,8 @@ function minuteOf(at: number): TimeSpan {
  * with a batch key whose minute already holds `DIGEST_AFTER` rows of that key is due at the
  * minute's end, when its digest goes: a guess that saves the loop claiming it before then, as two
  * processes queueing at once may both count nine. The digest rule at delivery decides, by the rows'
- * order in the store, whatever the guess was.
+ * order in the store, whatever the guess was. A row with a batch key (a notification) is queued
+ * through `QUEUE_NOTIFICATION`: once per record state and status.
  */
 export async function queueAction(
   client: OutboxDatabase,
@@ -798,34 +799,120 @@ export async function queueAction(
   entry: NewAction,
 ): Promise<string> {
   const now = clock.now();
-  const minute = minuteOf(now);
-  const rows = await client.query(
-    `insert into facetdb.webhook_outbox
-       (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position, batch_key)
-     values ($1, $2, $3::bigint,
-             case when $9::text is not null and (
-               select count(*) from facetdb.webhook_outbox
-                where project_id = $1 and batch_key = $9 and created_at >= $10::bigint and created_at < $11::bigint
-             ) >= $12::integer then $11::bigint else $3::bigint end,
-             $4, $5, $6, $7, $8::integer, $9)
-     returning id::text as id`,
-    [
+  const payload = JSON.stringify(entry.payload);
+  if (entry.batchKey !== undefined) {
+    const minute = minuteOf(now);
+    const queued = await client.query(QUEUE_NOTIFICATION, [
       entry.projectId,
-      JSON.stringify(entry.payload),
+      payload,
       now,
       entry.sourceId,
       entry.recordKey,
       entry.plugin,
       entry.action,
       entry.position,
-      entry.batchKey ?? null,
+      entry.batchKey,
       minute.start,
       minute.end,
       DIGEST_AFTER,
+    ]);
+    return String(queued[0]?.["id"]);
+  }
+  const rows = await client.query(
+    `insert into facetdb.webhook_outbox
+       (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position)
+     values ($1, $2, $3::bigint, $3::bigint, $4, $5, $6, $7, $8::integer)
+     returning id::text as id`,
+    [
+      entry.projectId,
+      payload,
+      now,
+      entry.sourceId,
+      entry.recordKey,
+      entry.plugin,
+      entry.action,
+      entry.position,
     ],
   );
   return String(rows[0]?.["id"]);
 }
+
+/**
+ * A notification (an action row with a batch key) is queued once per record state and status: a
+ * person's partial decision, which runs the actions again and leaves the record in review, sends
+ * nothing more. One statement reads the latest action row queued for the same project, source,
+ * record, plugin, action and place through the record's index (`webhook_outbox_action`, partial on
+ * `plugin`, which such a row names), newest first, one row; it is that row's id, and nothing is
+ * written, when that row:
+ * - is not given up (nor closed untried, which sets `gave_up_at` too): a row closed or given up
+ *   says nothing reached the channel, so the notification is queued again;
+ * - carries the same `stateHash` and `status` in its payload (a payload without them, as a row of
+ *   another shape, never matches), and the same `settings`: a notify moved to another channel, or
+ *   two of one plugin whose places swapped, reach the channel the config names now;
+ * - delivered, already held as unsure every question this one holds as unsure. A partial decision
+ *   only takes questions out of that set, so it sends nothing more; a question newly unsure (one
+ *   added to the set, whose backfill answers at the same state, after a person closed the record:
+ *   a `done` in between queues no row when the notify's `when` names `needs_review`) is queued
+ *   again, as the record waits for a person on something the channel never heard of;
+ * - still waiting, carries the same decision on every question both payloads name. A waiting row
+ *   the runner would close at its delivery as superseded (a decision it carries is no longer the
+ *   record's, as a partial decision's question) never stands for this one: this one is queued, and
+ *   supersedes it there (`laterRow`), so one message goes out either way.
+ * Deliberately not notified again: an undo back to `needs_review` at the same state with the same
+ * questions open (the undoer is the reviewer, and the channel already heard of the record at this
+ * state). Only the latest row is compared: a status that changed and changed back, where the notify
+ * queued a row at each (a `when` that holds for both), is queued again. Queued,
+ * the row's `next_attempt_at` is `queueAction`'s minute guess. Two processes queueing at the same
+ * instant can still both write it (read committed, no unique index without a store migration), as
+ * for `QUEUE_DECISION`.
+ */
+const QUEUE_NOTIFICATION = `with latest as (
+  select id, payload, delivered_at, gave_up_at from facetdb.webhook_outbox
+   where project_id = $1 and source_id = $4 and record_key = $5 and plugin = $6 and action = $7
+     and position = $8::integer and endpoint is null
+   order by id desc
+   limit 1
+), earlier as (
+  select latest.id from latest
+   where latest.gave_up_at is null
+     and latest.payload::jsonb ->> 'stateHash' = $2::text::jsonb ->> 'stateHash'
+     and latest.payload::jsonb ->> 'status' = $2::text::jsonb ->> 'status'
+     and (latest.payload::jsonb -> 'settings') is not distinct from ($2::text::jsonb -> 'settings')
+     and case when latest.delivered_at is not null
+       then not exists (
+         select 1
+           from jsonb_each(case when jsonb_typeof($2::text::jsonb -> 'decisions') = 'object'
+                                then $2::text::jsonb -> 'decisions' else '{}'::jsonb end)
+                  as fresh (question, decision)
+          where fresh.decision ->> 'kind' = 'needs_review'
+            and (latest.payload::jsonb -> 'decisions' -> fresh.question ->> 'kind')
+                is distinct from 'needs_review')
+       else not exists (
+         select 1
+           from jsonb_each(case when jsonb_typeof(latest.payload::jsonb -> 'decisions') = 'object'
+                                then latest.payload::jsonb -> 'decisions' else '{}'::jsonb end)
+                  as was (question, decision)
+           join jsonb_each(case when jsonb_typeof($2::text::jsonb -> 'decisions') = 'object'
+                                then $2::text::jsonb -> 'decisions' else '{}'::jsonb end)
+                  as fresh (question, decision)
+             using (question)
+          where was.decision <> fresh.decision)
+     end
+), queued as (
+  insert into facetdb.webhook_outbox
+    (project_id, payload, created_at, next_attempt_at, source_id, record_key, plugin, action, position, batch_key)
+  select $1, $2, $3::bigint,
+         case when (
+           select count(*) from facetdb.webhook_outbox
+            where project_id = $1 and batch_key = $9 and created_at >= $10::bigint and created_at < $11::bigint
+         ) >= $12::integer then $11::bigint else $3::bigint end,
+         $4, $5, $6, $7, $8::integer, $9
+   where not exists (select 1 from earlier)
+  returning id
+)
+select id::text as id from queued
+union all
+select id::text as id from earlier`;
 
 /**
  * A webhook an action queued (`origin.record`), unless the latest row queued for the same record
