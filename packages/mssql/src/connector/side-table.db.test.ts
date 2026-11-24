@@ -295,6 +295,8 @@ describe.skipIf(skipUnless("MSSQL_URL"))("side-table mode on MSSQL_URL", () => {
         peer,
         fields: [...FIELDS],
         edit: (key, state) => made.edit(key, state),
+        // SQL Server does not write `_probabilities` yet.
+        probabilities: "not-yet",
         decisionOf: (key) => made.decisionOf(key),
         clock: made.clock,
       };

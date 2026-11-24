@@ -260,6 +260,8 @@ describe("polling connector contract", () => {
       peer: world.connector({ pageSize: 10 }),
       fields: world.questionSet.read,
       edit: (key, state) => world.edit(key, state),
+      // The polling connector does not write `_probabilities` yet.
+      probabilities: "not-yet",
       decisionOf: (key) => world.decisionOf(key),
       clock: world.clock,
       close: () => world.close(),

@@ -67,7 +67,7 @@ describe("fake provider", () => {
     const response = await fake.ask(ask("zzz"));
     expect(response.answers).toEqual({
       scam: { type: "noul", probability: 0.5 },
-      category: { type: "choice", top: "bike", probabilities: [0, 1] },
+      category: { type: "choice", top: "bike", probabilities: [0, 1], options: ["car", "bike"] },
       urgency: { type: "score", probabilities: [0, 0, 1], confidence: 1, expected: 2 },
     });
     expect(response.usage).toEqual({ inputTokens: 7, outputTokens: 1 });
@@ -78,6 +78,7 @@ describe("fake provider", () => {
       type: "choice",
       top: "bike",
       probabilities: [0, 1],
+      options: ["car", "bike"],
     });
   });
 

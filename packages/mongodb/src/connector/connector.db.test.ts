@@ -367,6 +367,8 @@ describe.skipIf(skipUnless("MONGODB_URL"))("the connector on MONGODB_URL", () =>
           await made.edit(key, state);
           await watcher.until([key], before);
         },
+        // MongoDB does not write `_probabilities` yet.
+        probabilities: "not-yet",
         decisionOf: (key) => made.decisionOf(key),
         clock: made.clock,
       };

@@ -222,6 +222,8 @@ describe("sqlite connector contract", () => {
       peer,
       fields: [...FIELDS],
       edit: (key, state) => Promise.resolve(made.edit(key, state)),
+      // SQLite does not write `_probabilities` yet.
+      probabilities: "not-yet",
       decisionOf: (key) => Promise.resolve(made.decisionOf(key)),
       clock: made.clock,
     };

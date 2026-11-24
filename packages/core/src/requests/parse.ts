@@ -101,7 +101,9 @@ function parseAnswer(question: Question, raw: unknown): Answer {
           `names "${top}", which does not hold the highest probability`,
         );
       }
-      return { type: "choice", top, probabilities };
+      // The option names go with the numbers into the log: the list stays readable by name after
+      // the question's options change.
+      return { type: "choice", top, probabilities, options };
     }
     case "score": {
       const parsed = scoreAnswerSchema.safeParse(raw);

@@ -1080,6 +1080,8 @@ describe("a backfill's own adapter passes the connector contract over a PGlite s
         tool.edit(key, written);
         await connector.intake([key]);
       },
+      // A plugin source keeps its decisions in the store, with no answer columns.
+      probabilities: "no-column",
       decisionOf: async (key) => (await records.getRecord(key))?.decision ?? null,
       clock,
     };

@@ -19,6 +19,7 @@ import {
   type LogEntry,
   standingHuman,
   WITHDRAWN,
+  withOptionNames,
 } from "../log/index.ts";
 import type { Question, QuestionSet } from "../questions/index.ts";
 import type { RecordStatus, StateValue } from "../records/index.ts";
@@ -291,18 +292,18 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
     if (current === undefined || !statuses.includes(current.status)) {
       return { stale: "the record is no longer waiting for review, so its card left the queue" };
     }
-    const answer = history.findLast(isAnswerEntry);
-    if (answer === undefined || answer.stateHash !== card.stateHash) {
+    const logged = history.findLast(isAnswerEntry);
+    if (logged === undefined || logged.stateHash !== card.stateHash) {
       return { stale: REASKED };
     }
-    const judged = judge(questionSet, answer);
+    const judged = judge(questionSet, named(source, logged));
     if (judged === undefined) {
       return { stale: REASKED };
     }
     const decisions = decideRecord(
       { ...questionSet, questions: judged.questions },
       questionSet.thresholds,
-      answer,
+      judged.answer,
       history,
     );
     if (decisions === undefined) {
@@ -328,6 +329,16 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
       throw new Error(`the answer for "${answer.key}" lacks a question it was narrowed to`);
     }
     return { answer, questions: answered.questions, byThresholds };
+  }
+
+  /**
+   * A logged answer as a card is judged on it: a choice answer logged by an earlier version without
+   * its option names gets the present ones only when it was asked under the version in force, so a
+   * card answered before its options changed writes `_probabilities` NULL, never numbers under the
+   * wrong names, and never fails the person's write over it (`withOptionNames`).
+   */
+  function named(source: Source, answer: AnswerEntry): AnswerEntry {
+    return withOptionNames(answer, source.questions.questionSet, source.questions.version);
   }
 
   /** The history's last model call: what `DecisionLog.latestAnswer` reads, without the read. */
@@ -455,7 +466,7 @@ export function createReviewService(deps: ReviewServiceDeps): ReviewService {
         // Judged with this service's own question set, as `load` judges the card: a review session
         // started before the version that added a question still leaves that question out, even
         // when the newer answer has it.
-        const next = judge(source.questions.questionSet, answer);
+        const next = judge(source.questions.questionSet, named(source, answer));
         if (next === undefined) {
           return undefined;
         }

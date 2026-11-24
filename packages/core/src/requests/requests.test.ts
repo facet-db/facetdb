@@ -153,7 +153,13 @@ describe("parseAnswers", () => {
           confidence: 0.61,
           expected: 1.8,
         },
-        team: { type: "choice", top: "shipping", probabilities: [0.2, 0.6, 0.2] },
+        // The option names go with the numbers into the log.
+        team: {
+          type: "choice",
+          top: "shipping",
+          probabilities: [0.2, 0.6, 0.2],
+          options: ["billing", "shipping", "returns"],
+        },
         wants_refund: { type: "noul", probability: 0.83 },
       },
       usage: { inputTokens: 412, outputTokens: 9 },
@@ -218,6 +224,7 @@ describe("parseAnswers", () => {
       type: "choice",
       top: "returns",
       probabilities: [0.4, 0.2, 0.4],
+      options: ["billing", "shipping", "returns"],
     });
   });
 

@@ -2,6 +2,7 @@ import type { DecisionLog, RecordKey } from "../contracts/index.ts";
 import type { QuestionSet, ThresholdOverride } from "../questions/index.ts";
 import type { Decision } from "../thresholds/index.ts";
 import type { DecisionWriter } from "./human.ts";
+import { withOptionNames } from "./logged-answers.ts";
 import { decideRecord, statusOf } from "./record-decisions.ts";
 
 /** What one re-apply did, so the caller can say it in plain words ("12 records changed, 0 model calls"). */
@@ -29,26 +30,31 @@ function sameDecision(a: Decision | undefined, b: Decision): boolean {
 }
 
 /**
- * Applies new thresholds to what the model already said. `questionSet.thresholds` are the
- * overrides in force until now and `thresholds` the new ones; each record is decided again from
- * its latest logged answer under both, and written only where the two differ: decided to review,
- * review to decided, or another value. The model is never called, and the row's single
- * probability is never read: the log holds every probability. A question a person decided
- * against the record's current state keeps that decision, whatever the thresholds say. The write
- * lands only while the record's state hash still equals the answer's.
+ * Applies new thresholds to what the model already said (how an answer becomes a decision).
+ * `questionSet.thresholds` are the overrides in force until now and `thresholds` the new ones; each
+ * record is decided again from its latest logged answer under both, and written only where the two
+ * differ: decided to review, review to decided, or another value. The model is never called, and
+ * the row's single probability is never read: the log holds every probability. A question a person
+ * decided against the record's current state keeps that decision, whatever the thresholds say. The
+ * write lands only while the record's state hash still equals the answer's. `version` is the
+ * question-set version in force: a choice answer logged by an earlier version without its option
+ * names writes its `_probabilities` only when it was asked under that version, and NULL otherwise
+ * (`withOptionNames`); an answer that cannot be tied to the present options never stops the run.
  */
 export async function reapplyThresholds(
   questionSet: QuestionSet,
   thresholds: Readonly<Record<string, ThresholdOverride>>,
   log: DecisionLog,
   write: DecisionWriter,
+  version: number,
 ): Promise<ReapplyReport> {
   const answers = await log.latestAnswersSince();
   const written: RecordKey[] = [];
   const stale: RecordKey[] = [];
   const unanswered: RecordKey[] = [];
   let unchanged = 0;
-  for (const entry of answers) {
+  for (const logged of answers) {
+    const entry = withOptionNames(logged, questionSet, version);
     const history = await log.history(entry.key);
     const before = decideRecord(questionSet, questionSet.thresholds, entry, history);
     const after = decideRecord(questionSet, thresholds, entry, history);

@@ -132,7 +132,7 @@ describe("typesafe client", () => {
     expect(response.usage).toEqual({ inputTokens: 321, outputTokens: 12 });
     expect(response.answers).toEqual({
       scam: { type: "noul", probability: 0.93 },
-      category: { type: "choice", top: "car", probabilities: [0.8, 0.2] },
+      category: { type: "choice", top: "car", probabilities: [0.8, 0.2], options: ["car", "bike"] },
       urgency: { type: "score", probabilities: [0.3, 0.7], confidence: 0.6, expected: 0.7 },
     });
   });

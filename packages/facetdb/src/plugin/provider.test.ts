@@ -135,6 +135,7 @@ describe("a plugin provider's response goes through core's validation", () => {
       type: "choice",
       top: "spam",
       probabilities: [0.99, 0.01],
+      options: ["spam", "ham"],
     });
     expect(response.answers["urgency"]).toMatchObject({ type: "score", expected: 1.6 });
     expect(response.usage).toEqual({ inputTokens: 40, outputTokens: 0 });

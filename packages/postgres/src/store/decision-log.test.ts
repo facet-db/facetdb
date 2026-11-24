@@ -163,6 +163,46 @@ const asked = (key: string, minute: number, probability: number): AnswerEntry =>
 
 const at = (minute: number) => new Date(Date.UTC(2026, 9, 31, 10, minute));
 
+describe("a choice answer's option names in the log", () => {
+  const insert = (answers: string) =>
+    pglite.exec(`insert into facetdb.decisions (source_id, record_key, kind, version, state_hash, model, answers, usage, at)
+      values ('src', 'k1', 'answer', 1, 'h', 'jev-1.14.0', '${answers}'::jsonb,
+              '{"inputTokens":1,"outputTokens":1}'::jsonb, now())`);
+
+  it("keeps the names an answer is logged with, and reads a row from before them without", async () => {
+    const store = await newStore();
+    const named: AnswerEntry = {
+      ...answer("k2", 1),
+      answers: {
+        team: {
+          type: "choice",
+          top: "bug",
+          probabilities: [0.3, 0.7],
+          options: ["billing", "bug"],
+        },
+      },
+    };
+    await store.log("src").appendAnswer(named);
+    await insert('{"team":{"type":"choice","top":"bug","probabilities":[0.3,0.7]}}');
+
+    expect((await store.log("src").latestAnswer("k2"))?.answers).toEqual(named.answers);
+    expect((await store.log("src").latestAnswer("k1"))?.answers).toEqual({
+      team: { type: "choice", top: "bug", probabilities: [0.3, 0.7] },
+    });
+  });
+
+  it("refuses a row whose names and numbers disagree, naming the column", async () => {
+    const store = await newStore();
+    await insert(
+      '{"team":{"type":"choice","top":"bug","probabilities":[0.3,0.7],"options":["bug"]}}',
+    );
+
+    await expect(store.log("src").latestAnswer("k1")).rejects.toThrow(
+      /facetdb.decisions.answers: the logged answers at team are not answers/,
+    );
+  });
+});
+
 describe("searching the log", () => {
   async function seeded() {
     const store = await newStore();

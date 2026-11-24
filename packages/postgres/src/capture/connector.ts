@@ -247,7 +247,16 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
             set(column.name, decided ? (answer.expected ?? null) : null);
             break;
           case "probabilities":
-            // The decision carries no probability list; the column keeps what it holds.
+            // An object keyed by option name (`facetdb types`), bound as text and cast to jsonb.
+            // NULL when `_confidence` is NULL, and when the answer the decision rests on cannot be
+            // tied to the present options (core leaves `probabilities` off): nothing a logged
+            // answer holds can fail this write.
+            params.push(
+              decided && answer.probabilities !== undefined
+                ? JSON.stringify(answer.probabilities)
+                : null,
+            );
+            out.push([column.name, `$${params.length}::jsonb`]);
             break;
         }
       }

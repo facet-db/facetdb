@@ -10,7 +10,7 @@ import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, expect } from "vitest";
 import { migrate, type TableSource, uninstall } from "../install/index.ts";
 import type { StorageMode } from "../scan/index.ts";
-import type { SqlClient } from "../sql/index.ts";
+import { quoteIdent, type SqlClient } from "../sql/index.ts";
 import { createPgliteWorld, type PgliteWorld, resetPgliteWorld } from "../testing/index.ts";
 import { createPostgresConnector, type Installer, type PostgresConnector } from "./connector.ts";
 
@@ -188,6 +188,26 @@ export class World {
       status: String(row["status"]) as RecordDecision["status"],
       ...(row["reviewed"] === true ? { reviewed: true as const } : {}),
     };
+  }
+
+  /**
+   * A choice's stored `<question>_probabilities`, where `decisionOf` reads: the jsonb object as the
+   * driver parses it, or null for SQL NULL and for a side row not written yet.
+   */
+  async probabilitiesOf(
+    key: RecordKey,
+    question: string,
+  ): Promise<Readonly<Record<string, number>> | null> {
+    const relation = this.storage === "side-table" ? `facetdb.listings_answers` : `public.listings`;
+    const rows = await this.pg.client.query(
+      `select ${quoteIdent(`${question}_probabilities`)} as probabilities from ${relation} where id = $1`,
+      [key],
+    );
+    const stored = rows[0]?.["probabilities"] ?? null;
+    if (stored !== null && (typeof stored !== "object" || Array.isArray(stored))) {
+      throw new Error(`${question}_probabilities holds ${JSON.stringify(stored)}, not an object`);
+    }
+    return stored as Readonly<Record<string, number>> | null;
   }
 
   async statusOf(key: RecordKey): Promise<string | null> {

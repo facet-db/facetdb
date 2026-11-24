@@ -26,6 +26,7 @@ export {
   humanDecisionStands,
   standingHuman,
 } from "./human.ts";
+export { parseLoggedAnswers, withOptionNames } from "./logged-answers.ts";
 export type {
   AnswerEntry,
   HumanDecisionEntry,

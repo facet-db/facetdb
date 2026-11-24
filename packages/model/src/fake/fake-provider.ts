@@ -155,6 +155,7 @@ function defaultAnswer(script: FakeScript, question: Question): Answer {
         type: "choice",
         top: top.name,
         probabilities: question.options.map((_, i) => (i === defaults.choice ? 1 : 0)),
+        options: question.options.map((option) => option.name),
       };
     }
     case "score":

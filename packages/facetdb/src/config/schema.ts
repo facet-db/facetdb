@@ -562,6 +562,33 @@ function captureIssue(source: {
 }
 
 /**
+ * A choice question's `storeProbabilities: true` on a source with no table: an API source answers
+ * /v1/check and a plugin source keeps its records in the FacetDB store, so no install gives either
+ * a `_probabilities` column and the option would do nothing. It is refused at the question, with
+ * where the probabilities are read instead: the decision log keeps every option's, and `GET
+ * /v1/decisions` returns them. A table source keeps the option on every engine and connector,
+ * side-table mode included; its connection string plays no part here, so the schema judges this
+ * once, with no second pass after the loader reads `env()`.
+ */
+function storeProbabilitiesIssues(
+  source: { readonly api: boolean; readonly source?: unknown },
+  questions: readonly Question[],
+  at: string,
+): ConfigIssue[] {
+  const kind =
+    source.source !== undefined ? "a plugin source" : source.api ? "an API source" : undefined;
+  if (kind === undefined) {
+    return [];
+  }
+  return questions
+    .filter((question) => question.type === "choice" && question.storeProbabilities)
+    .map((question) => ({
+      path: formatPath([at, "questions", question.name, "storeProbabilities"]),
+      message: `${kind} has no table, so no column to store the probabilities in; FacetDB's decision log keeps every option's probability, returned by GET /v1/decisions; remove storeProbabilities`,
+    }));
+}
+
+/**
  * The schemes whose engine polls the table itself (CockroachDB, Oracle: cli/engines.ts, `polls`),
  * the only ones besides `connector: "polling"` whose worker reads `lastChanged`.
  */
@@ -1144,6 +1171,7 @@ export function parseProjectConfig(input: unknown): ConfigParseResult {
     if (parsed.success) {
       sets.push(parsed.data);
       issues.push(...conditionIssues(source.actions, parsed.data.questions, at));
+      issues.push(...storeProbabilitiesIssues(source, parsed.data.questions, at));
     } else {
       sets.push(undefined);
       const declaredHere = source.model !== undefined;

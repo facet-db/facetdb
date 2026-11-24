@@ -422,6 +422,8 @@ describe.skipIf(skipUnless("MSSQL_URL"))("Change Tracking as the capture on MSSQ
         peer,
         fields: [...FIELDS],
         edit: (key, state) => made.edit(key, state),
+        // SQL Server does not write `_probabilities` yet.
+        probabilities: "not-yet",
         decisionOf: (key) => made.decisionOf(key),
         clock: made.clock,
       };

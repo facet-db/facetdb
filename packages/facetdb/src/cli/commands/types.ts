@@ -61,7 +61,18 @@ type StoredColumn = {
   readonly values: readonly string[];
   /** The status is always set once a record is queued, so its type has no null. */
   readonly required?: true;
+  /** One plain sentence the declaration writes above the field, where its value needs one. */
+  readonly description?: string;
 };
+
+/**
+ * What a choice's probabilities column holds, in the declaration: the model's numbers, kept under a
+ * person's decision, and NULL with the confidence or when the logged answer cannot be tied to the
+ * present options by name.
+ */
+function probabilitiesDescription(confidenceColumn: string): string {
+  return `The model's probability for each option, still the model's after a person decides; null when ${confidenceColumn} is null, or when the answer cannot be matched to today's options.`;
+}
 
 /**
  * What the ORM snippets write: every stored column, plus the two bookkeeping columns an application
@@ -156,15 +167,20 @@ function valuesOf(question: Question): readonly string[] {
  */
 export function storedColumns(source: SourceConfig): readonly StoredColumn[] {
   const columns: StoredColumn[] = [
-    ...source.questions.flatMap((question) =>
-      answerColumns(question).map(
+    ...source.questions.flatMap((question) => {
+      const columns = answerColumns(question);
+      const confidence = columns.find((column) => column.role === "confidence");
+      return columns.map(
         (column): StoredColumn => ({
           name: column.name,
           kind: column.kind,
           values: valuesOf(question),
+          ...(column.role === "probabilities" && confidence !== undefined
+            ? { description: probabilitiesDescription(confidence.name) }
+            : {}),
         }),
-      ),
-    ),
+      );
+    }),
     { name: STATUS_COLUMN, kind: "text", values: RECORD_STATUSES, required: true },
   ];
   const seen = new Set<string>();
@@ -366,7 +382,7 @@ export function renderDeclaration(config: ProjectConfig): string {
     const optional = engine.types.answersIn === "subdocument" ? "?" : "";
     const members = columns.map(
       (column) =>
-        `  ${propertyKey(storedName(column.name, engine.types))}${optional}: ${tsType(column, engine.types)};`,
+        `${column.description === undefined ? "" : `  /** ${column.description} */\n`}  ${propertyKey(storedName(column.name, engine.types))}${optional}: ${tsType(column, engine.types)};`,
     );
     return [
       ...declarationNotes(source, engine, columns),
@@ -389,8 +405,8 @@ type PrismaType = readonly [type: string, native?: string];
 
 /**
  * Each provider's types for FacetDB's columns, as its install writes them: MySQL's float and
- * varchar(255), SQL Server's nvarchar and its JSON in text (Prisma has no Json there), SQLite's
- * JSON and time as text (FacetDB writes ISO text, not Prisma's own date storage).
+ * varchar, SQL Server's nvarchar and its JSON in text (Prisma has no Json there), SQLite's JSON and
+ * time as text (FacetDB writes ISO text, not Prisma's own date storage).
  */
 const PRISMA_TYPES: Readonly<
   Record<PrismaProvider, Readonly<Record<OrmColumn["kind"], PrismaType>>>

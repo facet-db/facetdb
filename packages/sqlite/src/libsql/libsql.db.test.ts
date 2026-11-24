@@ -476,6 +476,8 @@ describe("the libSQL engine on sqld", () => {
             [key, state["subject"] ?? null, state["body"] ?? null],
           );
         },
+        // libSQL does not write `_probabilities` yet.
+        probabilities: "not-yet",
         decisionOf: async (key) => {
           const [row] = await app.all(
             `select facetdb_status as status, facetdb_updated_at as written, not_priority as value,

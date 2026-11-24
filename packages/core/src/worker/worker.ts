@@ -18,6 +18,7 @@ import {
   type LogEntry,
   recordAnswer,
   standingHuman,
+  withOptionNames,
   writeAnswer,
 } from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
@@ -514,7 +515,12 @@ export function createWorker(deps: WorkerDeps): Worker {
     ) {
       return undefined;
     }
-    return { answer: prior, history: await log.history(row.key) };
+    // Current means asked under this version, so an answer logged by an earlier version without its
+    // option names is given the present ones (`withOptionNames`), and its `_probabilities` written.
+    return {
+      answer: withOptionNames(prior, questionSet, version),
+      history: await log.history(row.key),
+    };
   }
 
   async function processRecord(

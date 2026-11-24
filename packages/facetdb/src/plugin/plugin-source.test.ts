@@ -288,6 +288,8 @@ describe("a plugin source passes the connector contract over a PGlite store (plu
         service.edit(key, written);
         await connector.intake([key]);
       },
+      // A plugin source keeps its decisions in the store, with no answer columns.
+      probabilities: "no-column",
       decisionOf: async (key) => (await made.records.getRecord(key))?.decision ?? null,
       clock,
     };

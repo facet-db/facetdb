@@ -10,10 +10,13 @@ export { type Delivery, FakeChannel } from "./channel.ts";
 export { FakeClock } from "./clock.ts";
 export { FakeConnector, FakeDatabase, type FakeDatabaseOptions } from "./connector.ts";
 export {
+  CONTRACT_PROBABILITIES_QUESTION,
   CONTRACT_QUESTIONS,
   type ContractFixture,
   type ContractOptions,
+  type ProbabilitiesSupport,
   runConnectorContract,
+  type StoredProbabilities,
 } from "./contract-suite.ts";
 export { FakeDecisionLog } from "./decision-log.ts";
 export {

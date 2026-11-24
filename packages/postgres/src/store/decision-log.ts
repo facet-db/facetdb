@@ -1,5 +1,4 @@
 import {
-  type Answer,
   type AnswerEntry,
   answerOutcomes,
   chosenWords,
@@ -10,6 +9,7 @@ import {
   type LogEntry,
   type LoggedUsage,
   namedValue,
+  parseLoggedAnswers,
   type QuestionSet,
   type RecordKey,
   type TaggedDecision,
@@ -391,7 +391,7 @@ function toEntry(row: SqlRow): LogEntry {
       kind,
       ...common,
       model: text(row, "model"),
-      answers: jsonObject(row, "answers") as Readonly<Record<string, Answer>>,
+      answers: parseLoggedAnswers(jsonObject(row, "answers"), "facetdb.decisions.answers"),
       usage: jsonObject(row, "usage") as LoggedUsage,
     };
   }

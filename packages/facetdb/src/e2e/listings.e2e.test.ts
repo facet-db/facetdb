@@ -387,6 +387,7 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
         listingsSource(tightened).thresholds,
         store.log(LOG_ID),
         (key, decision, hash) => connector.write(key, decision, hash),
+        1,
       ),
     );
     current = tightened;
@@ -500,6 +501,7 @@ describe("the local end-to-end: listings on PGlite with the fake provider", () =
         listingsSource(loosened).thresholds,
         log,
         (target, decision, hash) => connector.write(target, decision, hash),
+        2,
       ),
     );
     current = loosened;

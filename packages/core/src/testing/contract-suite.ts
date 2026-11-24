@@ -6,8 +6,8 @@ import type { Decision } from "../thresholds/index.ts";
 
 /**
  * The questions the suite's decisions name, one of each type: a fixture whose connector keeps
- * answers in columns asks these, so every question has its columns (a choice stores no
- * probability list here: a decision carries none).
+ * answers in columns asks these, so every question has its columns (this choice stores no
+ * probability list; `CONTRACT_PROBABILITIES_QUESTION` is the one that does).
  */
 export const CONTRACT_QUESTIONS: readonly Question[] = [
   { type: "noul", name: "not_priority", instructions: "Is this not a priority?", stakes: "low" },
@@ -32,10 +32,46 @@ export const CONTRACT_QUESTIONS: readonly Question[] = [
 ];
 
 /**
+ * The choice whose option probabilities the suite's `_probabilities` case writes: a fixture that
+ * says `probabilities: "written"` asks it beside `CONTRACT_QUESTIONS`, so its install has the
+ * column. Its option names are a dot, quotes and non-ASCII letters, keys the stored object must
+ * keep as they are.
+ */
+export const CONTRACT_PROBABILITIES_QUESTION: Question = {
+  type: "choice",
+  name: "team",
+  instructions: "Which team should handle this?",
+  options: [
+    { name: "sales.emea", description: "Sales in Europe, the Middle East and Africa" },
+    { name: `O'Brien "ops"`, description: "The operations team" },
+    { name: "équipe ñ ✓", description: "The international team" },
+  ],
+  stakes: "low",
+  storeProbabilities: true,
+};
+
+/** A `_probabilities` value read back: the object keyed by option name, or NULL. */
+export type StoredProbabilities = Readonly<Record<string, number>> | null;
+
+/**
+ * Whether the connector writes a choice's `_probabilities` column. `written`: it does, and the
+ * fixture's questions include `CONTRACT_PROBABILITIES_QUESTION`; `not-yet`: its engine has the
+ * column and does not write it yet; `no-column`: the connector keeps no answer columns at all (the
+ * store's queue, plugin sources, core's fake).
+ */
+export type ProbabilitiesSupport =
+  | {
+      readonly probabilities: "written";
+      /** The stored `team_probabilities` of a key, parsed: the object, or null. */
+      readonly probabilitiesOf: (key: RecordKey) => Promise<StoredProbabilities>;
+    }
+  | { readonly probabilities: "not-yet" | "no-column" };
+
+/**
  * What a connector under test is given. The suite never sees a database handle: the factory that
  * builds the fixture knows the database, and every write the application makes goes through `edit`.
  */
-export type ContractFixture = {
+export type ContractFixture = ProbabilitiesSupport & {
   /** A worker on a fresh database whose state fields are `fields`. The database may be empty. */
   readonly connector: Connector;
   /**
@@ -186,6 +222,63 @@ export function runConnectorContract(
 
       expect((await fx.decisionOf(k))?.reviewed).toBe(true);
       expect((await fx.decisionOf(k))?.status).toBe("needs_review");
+    });
+
+    it("writes a choice's _probabilities with its _confidence: set when decided, NULL in review, kept by a person and by a refused or status-only write, NULL when the decision carries none", async (ctx) => {
+      const fx = await open();
+      if (fx.probabilities !== "written") {
+        ctx.skip();
+        return;
+      }
+      await fx.connector.install();
+      await seed(fx, 1);
+      const [key = ""] = seedKeys(1);
+      const hash = (await fx.connector.read([key])).rows[0]?.hash ?? "";
+      const keyed = { "sales.emea": 0.8, [`O'Brien "ops"`]: 0.15, "équipe ñ ✓": 0.05 };
+      const team = (decision: Decision, status: RecordDecision["status"]): RecordDecision => ({
+        decisions: { team: decision },
+        status,
+      });
+      const byThresholds: Decision = {
+        kind: "decided",
+        value: "sales.emea",
+        probabilityOrConfidence: 0.7,
+        probabilities: keyed,
+      };
+
+      // Decided by the thresholds: every option, keyed by its name, as the model gave it.
+      await fx.connector.write(key, team(byThresholds, "done"), hash);
+      expect(await fx.probabilitiesOf(key)).toEqual(keyed);
+
+      // In review: NULL, as `_confidence` is.
+      await fx.connector.write(key, team({ kind: "needs_review" }, "needs_review"), hash);
+      expect(await fx.probabilitiesOf(key)).toBeNull();
+
+      // A person's decision keeps the model's list, as it keeps the model's confidence.
+      const byPerson: Decision = { ...byThresholds, value: "équipe ñ ✓" };
+      await fx.connector.write(key, { ...team(byPerson, "done"), reviewed: true }, hash);
+      expect(await fx.probabilitiesOf(key)).toEqual(keyed);
+
+      // A write the hash refuses changes nothing; nor does one that sets only the status.
+      const other: Decision = {
+        ...byThresholds,
+        probabilities: { "sales.emea": 0.1, [`O'Brien "ops"`]: 0.1, "équipe ñ ✓": 0.8 },
+      };
+      expect(await fx.connector.write(key, team(other, "done"), "stale-hash")).toEqual({
+        written: false,
+      });
+      await fx.connector.write(key, { decisions: {}, status: "error" }, hash);
+      expect(await fx.probabilitiesOf(key)).toEqual(keyed);
+
+      // Decided on an answer core could not tie to the present options (no `probabilities`): the
+      // write lands, the column NULL beside the confidence.
+      const untied: Decision = {
+        kind: "decided",
+        value: "sales.emea",
+        probabilityOrConfidence: 0.7,
+      };
+      expect(await fx.connector.write(key, team(untied, "done"), hash)).toEqual({ written: true });
+      expect(await fx.probabilitiesOf(key)).toBeNull();
     });
 
     it("current reports what write stored and nothing for a missing key", async () => {

@@ -1,6 +1,7 @@
 export { choiceConfidence } from "./confidence.ts";
 export { decide } from "./decide.ts";
 export { defaultThresholds, resolveThresholds } from "./defaults.ts";
+export { probabilitiesByName, storedProbabilities } from "./probabilities.ts";
 export type {
   Answer,
   ChoiceAnswer,

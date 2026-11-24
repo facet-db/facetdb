@@ -51,6 +51,8 @@ describe("the store connector passes the contract suite", () => {
       edit: async (key: RecordKey, state: Readonly<Record<string, StateValue>>) => {
         await connector.upsertRecord(key, state);
       },
+      // The store keeps a decision as JSON, not answer columns.
+      probabilities: "no-column",
       decisionOf: async (key: RecordKey) => (await connector.getRecord(key))?.decision ?? null,
       clock,
     };

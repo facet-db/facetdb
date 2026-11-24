@@ -638,6 +638,8 @@ describe.skipIf(skipUnless("ORACLE_URL"))("Oracle as a polling dialect", { timeo
               [key, state["subject"] ?? null, state["body"] ?? null],
             );
           },
+          // The polling connector does not write `_probabilities` yet.
+          probabilities: "not-yet",
           decisionOf: async (key) => {
             const found = (await connector.current([key])).get(key);
             return found === undefined

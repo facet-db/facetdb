@@ -8,6 +8,7 @@ export type SupportMessagesAnswers = {
   urgency_expected: number | null;
   team: "billing" | "shipping" | "returns" | null;
   team_confidence: number | null;
+  /** The model's probability for each option, still the model's after a person decides; null when team_confidence is null, or when the answer cannot be matched to today's options. */
   team_probabilities: { billing: number; shipping: number; returns: number } | null;
   wants_refund: boolean | null;
   wants_refund_probability: number | null;

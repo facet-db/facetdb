@@ -1,7 +1,12 @@
 import type { DecisionLog, RecordDecision, RecordKey, WriteResult } from "../contracts/index.ts";
 import type { Question } from "../questions/index.ts";
 import { type RecordStatus, transition } from "../records/index.ts";
-import { type Answer, choiceConfidence, type Decision } from "../thresholds/index.ts";
+import {
+  type Answer,
+  choiceConfidence,
+  type Decision,
+  storedProbabilities,
+} from "../thresholds/index.ts";
 import {
   type AnswerEntry,
   type HumanDecisionEntry,
@@ -22,31 +27,39 @@ export type DecisionWriter = (
 ) => Promise<WriteResult>;
 
 /**
- * The model's own number for a question: the yes probability of a noul, the confidence of a choice
- * or a score, and a score's expected level. A person's decision keeps it in the row, so the column
- * still says what the model thought while the value says what the person decided.
+ * The model's own numbers for a question: the yes probability of a noul, the confidence of a choice
+ * or a score, a score's expected level, and a choice's option probabilities when the question
+ * stores them. A person's decision keeps them in the row, so the columns still say what the model
+ * thought while the value says what the person decided.
  */
-function modelNumber(
+function modelNumbers(
+  question: Question,
   answer: Answer,
-): Pick<Extract<Decision, { kind: "decided" }>, "probabilityOrConfidence" | "expected"> {
+): Pick<
+  Extract<Decision, { kind: "decided" }>,
+  "probabilityOrConfidence" | "expected" | "probabilities"
+> {
   switch (answer.type) {
     case "noul":
       return { probabilityOrConfidence: answer.probability };
     case "choice":
-      return { probabilityOrConfidence: choiceConfidence(answer.probabilities) };
+      return {
+        probabilityOrConfidence: choiceConfidence(answer.probabilities),
+        ...storedProbabilities(question, answer),
+      };
     case "score":
       return { probabilityOrConfidence: answer.confidence, expected: answer.expected };
   }
 }
 
-/** The decision a person's value makes for a question, carrying the model's number from `answer`. */
+/** The decision a person's value makes for a question, carrying the model's numbers from `answer`. */
 export function humanDecision(question: Question, value: HumanValue, answer: Answer): Decision {
   if (answer.type !== question.type) {
     throw new Error(
       `question "${question.name}" is a ${question.type}; its logged answer is a ${answer.type}`,
     );
   }
-  return { kind: "decided", value, ...modelNumber(answer) };
+  return { kind: "decided", value, ...modelNumbers(question, answer) };
 }
 
 /**

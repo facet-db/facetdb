@@ -22,6 +22,8 @@ runConnectorContract(async () => {
       return Promise.resolve();
     },
     fields: database.fields,
+    // The fake keeps decisions, not answer columns.
+    probabilities: "no-column",
     decisionOf: (key) => Promise.resolve(database.decisionOf(key)),
     clock,
   };

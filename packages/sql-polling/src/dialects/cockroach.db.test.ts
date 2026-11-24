@@ -638,6 +638,8 @@ describe.skipIf(skipUnless("COCKROACH_URL"))("the CockroachDB dialect on COCKROA
             [key, state["subject"], state["body"], tick],
           );
         },
+        // The polling connector does not write `_probabilities` yet.
+        probabilities: "not-yet",
         decisionOf: async (key: RecordKey): Promise<RecordDecision | null> => {
           const [row] = await admin.query(
             `select facetdb_status as status, not_priority as value, not_priority_probability::text as probability,

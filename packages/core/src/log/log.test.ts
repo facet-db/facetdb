@@ -153,7 +153,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
     );
     expect(writes[0]?.decision.status).toBe("needs_review");
 
-    const report = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write);
+    const report = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write, 1);
 
     expect(report.written).toEqual(["r1"]);
     expect(writes[1]?.decision).toEqual({
@@ -181,6 +181,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
       { scam: { yesAbove: 0.9, noBelow: 0.1 } },
       log,
       write,
+      1,
     );
 
     expect(report.written).toEqual(["r1"]);
@@ -204,7 +205,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
       write,
     );
 
-    await reapplyThresholds(current, { team: { confidenceAtLeast: 0.19 } }, log, write);
+    await reapplyThresholds(current, { team: { confidenceAtLeast: 0.19 } }, log, write, 1);
 
     expect(writes[1]?.decision.decisions["team"]).toMatchObject({
       kind: "decided",
@@ -236,7 +237,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
     );
     writes.length = 0;
 
-    const report = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write);
+    const report = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write, 1);
 
     expect(report).toMatchObject({
       examined: 3,
@@ -260,7 +261,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
     );
     expect(writes[0]?.decision.decisions["scam"]).toMatchObject({ value: true });
 
-    await reapplyThresholds(current, { scam: { yesAbove: 0.9, noBelow: 0.6 } }, log, write);
+    await reapplyThresholds(current, { scam: { yesAbove: 0.9, noBelow: 0.6 } }, log, write, 1);
 
     expect(writes[1]?.decision.decisions["scam"]).toMatchObject({ kind: "decided", value: false });
   });
@@ -271,7 +272,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
     await log.appendAnswer(answerEntry("r1", "h1", { scam: { type: "noul", probability: 0.55 } }));
     await log.appendAnswer(answerEntry("r2", "h2", { scam: { type: "noul", probability: 0.55 } }));
 
-    const report = await reapplyThresholds(questionSet([scam, team]), {}, log, write);
+    const report = await reapplyThresholds(questionSet([scam, team]), {}, log, write, 1);
 
     expect(report.stale).toEqual([]);
     expect(report.unanswered).toEqual(["r1", "r2"]);
@@ -281,6 +282,7 @@ describe("re-applying thresholds reads the log, never the model", () => {
       { scam: { yesAbove: 0.5 } },
       log,
       write,
+      1,
     );
     expect(staleReport.stale).toEqual(["r1"]);
     expect(staleReport.written).toEqual(["r2"]);
@@ -405,12 +407,13 @@ describe("a human decision stands until the record's state changes", () => {
     writes.length = 0;
 
     // Loosening would decide yes (0.55 >= 0.5); tightening would send it back to review.
-    const loosened = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write);
+    const loosened = await reapplyThresholds(current, { scam: { yesAbove: 0.5 } }, log, write, 1);
     const tightened = await reapplyThresholds(
       current,
       { scam: { yesAbove: 0.99, noBelow: 0.01 } },
       log,
       write,
+      1,
     );
     // A model upgrade answers the same state again, now at 0.99.
     await recordAnswer(

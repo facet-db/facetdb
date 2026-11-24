@@ -130,6 +130,8 @@ describe("mysql connector contract", () => {
       peer,
       fields: [...FIELDS],
       edit: (key, state) => Promise.resolve(made.server.edit(key, state)),
+      // MySQL and MariaDB do not write `_probabilities` yet.
+      probabilities: "not-yet",
       decisionOf: (key) => Promise.resolve(made.decisionOf(key)),
       clock: made.clock,
       close: async () => {

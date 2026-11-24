@@ -303,6 +303,8 @@ for (const variable of URL_VARIABLES) {
           peer,
           fields: [...FIELDS],
           edit: (key, state) => made.edit(key, state),
+          // MySQL and MariaDB do not write `_probabilities` yet.
+          probabilities: "not-yet",
           decisionOf: (key) => made.decisionOf(key),
           clock: made.clock,
         };

@@ -10,7 +10,12 @@ import type {
   RecordKey,
   ScanCursor,
 } from "../contracts/index.ts";
-import { type AnswerEntry, answersCurrentFor, recordAnswer } from "../log/index.ts";
+import {
+  type AnswerEntry,
+  answersCurrentFor,
+  recordAnswer,
+  withOptionNames,
+} from "../log/index.ts";
 import type { QuestionSet } from "../questions/index.ts";
 import { type StateValue, shouldSkip } from "../records/index.ts";
 import {
@@ -649,7 +654,11 @@ export function createBackfill(deps: BackfillDeps): Backfill {
           return;
         }
         // Every other question keeps the answer it already has, so its decision is the one it had.
-        const kept = prior === undefined ? {} : prior.answers;
+        // A kept choice answer logged without its option names is named here, while its own entry's
+        // version still says which options it was given; once merged under this version, it no
+        // longer could be (`withOptionNames`).
+        const kept =
+          prior === undefined ? {} : withOptionNames(prior, questionSet, version).answers;
         const entry: AnswerEntry = {
           kind: "answer",
           key: row.key,

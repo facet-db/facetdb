@@ -45,6 +45,15 @@ export type ChoiceAnswer = {
   readonly type: "choice";
   readonly top: string;
   readonly probabilities: readonly number[];
+  /**
+   * The option each probability belongs to, position for position: the question's option names when
+   * the model answered. It travels with the answer into the decision log, because the log outlives
+   * the option list: an option added, removed or reordered later would otherwise put a logged
+   * number under another option's name. Absent on an answer logged by an earlier version; such an
+   * answer is tied to the options only at the question-set version it was asked under
+   * (`withOptionNames`).
+   */
+  readonly options?: readonly string[];
 };
 
 /**
@@ -69,5 +78,13 @@ export type Decision =
       readonly probabilityOrConfidence: number;
       /** A score's expected level, as the model returned it. */
       readonly expected?: number;
+      /**
+       * A choice's `<name>_probabilities` value: each present option's probability as the model
+       * gave it, keyed by option name in the question's present option order. Present when the
+       * question sets `storeProbabilities` and the answer the decision rests on can be tied to the
+       * present options by name (`probabilitiesByName`); a connector writes NULL without it. A
+       * person's decision keeps the model's numbers, as it keeps the model's confidence.
+       */
+      readonly probabilities?: Readonly<Record<string, number>>;
     }
   | { readonly kind: "needs_review" };

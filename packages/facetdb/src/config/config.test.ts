@@ -98,7 +98,7 @@ describe("the DSL", () => {
           read: ["note"],
           questions: {
             rush: noul("Is it a rush order?", { thresholds: { yesAbove: 0.9, noBelow: 0.1 } }),
-            kind: choice("What kind?", { a: "Alpha", b: "Beta" }, { storeProbabilities: true }),
+            kind: choice("What kind?", { a: "Alpha", b: "Beta" }),
           },
         },
       ],

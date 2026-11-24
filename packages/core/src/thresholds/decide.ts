@@ -1,5 +1,6 @@
-import type { Question, ScoreQuestion } from "../questions/index.ts";
+import type { ChoiceQuestion, Question, ScoreQuestion } from "../questions/index.ts";
 import { choiceConfidence } from "./confidence.ts";
+import { storedProbabilities } from "./probabilities.ts";
 import type {
   Answer,
   ChoiceAnswer,
@@ -28,7 +29,7 @@ export function decide(question: Question, thresholds: Thresholds, answer: Answe
       if (answer.type !== "choice" || thresholds.kind !== "confidence") {
         throw mismatch(question.type, thresholds, answer);
       }
-      return decideChoice(thresholds, answer);
+      return decideChoice(question, thresholds, answer);
     case "score":
       if (answer.type !== "score" || thresholds.kind !== "confidence") {
         throw mismatch(question.type, thresholds, answer);
@@ -47,10 +48,24 @@ function decideNoul(thresholds: YesNoThresholds, answer: NoulAnswer): Decision {
   return { kind: "needs_review" };
 }
 
-function decideChoice(thresholds: ConfidenceThresholds, answer: ChoiceAnswer): Decision {
+/**
+ * A decided choice carries its option probabilities when the question stores them and the answer
+ * can be tied to the present options by name, so the `_probabilities` column is written with the
+ * confidence; one in review carries none.
+ */
+function decideChoice(
+  question: ChoiceQuestion,
+  thresholds: ConfidenceThresholds,
+  answer: ChoiceAnswer,
+): Decision {
   const confidence = choiceConfidence(answer.probabilities);
   if (confidence >= thresholds.confidenceAtLeast) {
-    return { kind: "decided", value: answer.top, probabilityOrConfidence: confidence };
+    return {
+      kind: "decided",
+      value: answer.top,
+      probabilityOrConfidence: confidence,
+      ...storedProbabilities(question, answer),
+    };
   }
   return { kind: "needs_review" };
 }
