@@ -367,11 +367,11 @@ describe("adding a source on a running facetdb worker", () => {
     // (current, so nothing to run) and the line naming the source's database by its host, which
     // the page leaves out and says so (storeElsewhere).
     expect(answers["plan"]?.body["storeElsewhere"]).toBe(true);
-    expect(dry.stdout.endsWith(`${sql}Dry run: nothing was changed.\n`)).toBe(true);
-    const above = dry.stdout.slice(
-      0,
-      dry.stdout.length - sql.length - "Dry run: nothing was changed.\n".length,
-    );
+    // Below it, the lock list, which the page does not show: the store is current, so only the
+    // install's lock on the table.
+    const tail = `Locks (each waits at most 10 s for the table; new queries queue behind it meanwhile; then migrate stops and changes nothing):\n  install of sellers, public.sellers: blocks reads and writes until the install ends; no rows\nDry run: nothing was changed.\n`;
+    expect(dry.stdout.endsWith(`${sql}${tail}`)).toBe(true);
+    const above = dry.stdout.slice(0, dry.stdout.length - sql.length - tail.length);
     expect(above.split("\n")).toEqual([
       expect.stringMatching(/^-- store: /),
       STORE_CURRENT,

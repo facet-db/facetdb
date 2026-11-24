@@ -109,6 +109,11 @@ function run(
   );
 }
 
+/** Text as a regular expression that matches it literally. */
+function escapeRegExp(text: string): string {
+  return text.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function expectNoSecret(text: string): void {
   for (const secret of SECRETS) {
     expect(text).not.toContain(secret);
@@ -200,8 +205,11 @@ describe("a project whose sources read no table migrates the store alone (supaba
   it("shows the store's step, runs it once confirmed, and a second run finds the store current", async () => {
     const dry = await run(["migrate", "--dry-run"], { config: triage, env: storeEnv });
     expect(dry.code, dry.stderr).toBe(0);
-    expect(dry.stdout).toBe(
-      `-- store: localhost:5432/facetdb\n${storeScript(storeStepStatements())}Dry run: nothing was changed.\n`,
+    // The store's step, then what it locks: a fresh store's tables, all new.
+    expect(dry.stdout).toMatch(
+      new RegExp(
+        `^${escapeRegExp(`-- store: localhost:5432/facetdb\n${storeScript(storeStepStatements())}`)}Locks \\(.+\\):\n {2}store step: creates \\d+ tables in facetdb\nDry run: nothing was changed\\.\n$`,
+      ),
     );
     expect(dry.prompts).toEqual([]);
     expect(
@@ -233,7 +241,13 @@ describe("a project whose sources read no table migrates the store alone (supaba
     expect(JSON.parse(json.stdout)).toEqual({
       ok: true,
       dryRun: false,
-      store: { database: "localhost:5432/facetdb", current: true, sql: "", applied: false },
+      store: {
+        database: "localhost:5432/facetdb",
+        current: true,
+        sql: "",
+        applied: false,
+        locks: { listed: [] },
+      },
       sources: [],
     });
     for (const result of [dry, first, second, json]) {

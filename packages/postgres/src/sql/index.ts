@@ -25,4 +25,13 @@ export {
   jobsQueries,
   jobsTableSql,
 } from "./jobs.ts";
+export {
+  holdsOff,
+  type LockMode,
+  type ScriptLocksOptions,
+  type StatementLock,
+  scriptLocks,
+  statementLocks,
+  UnreadStatementError,
+} from "./locks.ts";
 export { pgliteClient, unlistenAll } from "./pglite-client.ts";

@@ -819,7 +819,8 @@ describe("a worker login created between an install's plan and its run", () => {
     const login = workerRole(suffix);
     roles.push(login, enqueueRole(suffix));
     // The first run's transaction stays open after its last statement, the lock held, until the
-    // test lets it commit; `reached` says it got there.
+    // test lets it commit; `reached` says it got there. Only the run's: the read-only transaction
+    // the planning reads its lock list in holds nothing and goes through.
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -834,9 +835,15 @@ describe("a worker login created between an install's plan and its run", () => {
         ...inner,
         transaction: (work) =>
           inner.transaction(async (query) => {
-            const done = await work(query);
-            reached();
-            await gate;
+            const sent: string[] = [];
+            const done = await work((text, params) => {
+              sent.push(text);
+              return query(text, params);
+            });
+            if (sent[0] !== "set transaction read only") {
+              reached();
+              await gate;
+            }
             return done;
           }),
       };

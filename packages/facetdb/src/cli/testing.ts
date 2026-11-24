@@ -171,12 +171,29 @@ export function storeAtVersions(
     if (text.includes("to_regclass('facetdb.sources')")) {
       return Promise.resolve([{ present: false }]);
     }
+    // The lock list's reads of a store behind: it holds every table already, and none of the step's
+    // conditions (an index, a column missing) holds, so its step locks nothing.
+    if (text.startsWith("do $fdb_lock_condition$")) {
+      return Promise.resolve([]);
+    }
+    if (text === "select pg_catalog.current_setting('facetdb.lock_condition') as runs") {
+      return Promise.resolve([{ runs: "false" }]);
+    }
+    if (text.startsWith("select c.oid is not null as present")) {
+      return Promise.resolve([{ present: true, rows: 0, never: false }]);
+    }
     return Promise.reject(new Error(`the fake store only reads its version, not: ${text}`));
   };
+  // The lock list reads in a read-only transaction, its literal rules and a short lock timeout
+  // pinned: those statements pass, and every other one meets `query`'s refusal.
+  const READ_ONLY_FRAME =
+    /^(set transaction read only|set local standard_conforming_strings = on|set local lock_timeout = '\d+m?s')$/;
+  const reading: SqlQuery = (text, params) =>
+    READ_ONLY_FRAME.test(text) ? Promise.resolve([]) : query(text, params);
   const refused = () => Promise.reject(new Error("the fake store runs nothing"));
   return () => ({
     query,
-    transaction: refused,
+    transaction: (work) => work(reading),
     pipeline: refused,
     close: () => Promise.resolve(),
   });

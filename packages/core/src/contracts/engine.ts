@@ -225,6 +225,43 @@ export type KeptObject = EngineObject & {
 };
 
 /**
+ * The part of `facetdb migrate` that takes a lock, each in a transaction of its own: the FacetDB
+ * store's own step, then for each source its prune (`--prune`) and its install.
+ */
+export type PlanStep = "store" | "install" | "prune";
+
+/**
+ * One table a step locks against the application, as `facetdb migrate` lists it before it runs. A
+ * lock that holds off neither reads nor writes (a plain read's, a row write's, a comment's) is not
+ * one of these. The lock lasts until its step ends; the rows the step goes through in the table
+ * stand in for how long, since no build time can be promised.
+ */
+export type PlanLock = {
+  readonly step: PlanStep;
+  /** The table as the engine labels it (`DatabaseEngine.label`): `public.listings`, `facetdb.decisions`. */
+  readonly table: string;
+  /**
+   * What the application cannot do to the table while the step runs: `no reads or writes` (what
+   * Postgres calls access exclusive), or `no writes` (share and the modes between).
+   */
+  readonly mode: "no reads or writes" | "no writes";
+  /**
+   * The rows the step reads or writes in the table: the database's own estimate (a number, said
+   * as "about", never a count that would read the table), `none` when the step touches no row,
+   * `empty` for a table the step creates, `unknown` when it goes through every row and the
+   * database has no estimate yet (a table never analysed).
+   */
+  readonly rows: number | "none" | "empty" | "unknown";
+};
+
+/**
+ * A step's lock list, or why it could not be made (a statement the reader does not know, the
+ * catalog unreadable): a listing that cannot be made never stops a migration, and is never read as
+ * "no lock". The reason is the reader's own words; the CLI hides any secret before printing it.
+ */
+export type PlanLocks = { readonly listed: readonly PlanLock[] } | { readonly unlisted: string };
+
+/**
  * What an engine would do for one source, shown before anything runs: the statements in order, what
  * they remove, what stays and why, and what to tell and ask the operator. Plain data, so it prints
  * as `--json` and two plans compare as values.
@@ -243,6 +280,15 @@ export type EnginePlan = {
   readonly keeps: readonly KeptObject[];
   /** What the operator must be told besides the script, one sentence each. */
   readonly notes: readonly string[];
+  /**
+   * Every table the plan's statements lock against the application, one entry per table, in the
+   * order the run first locks it, with the step the plan is (`install`, `prune`); an empty list
+   * when the plan locks nothing, `unlisted` with the reason when the list could not be made. Read
+   * from the statements the plan holds, never written beside them. Absent for an engine that does
+   * not list its locks yet: the CLI then prints no list for the plan (MySQL and MariaDB, SQL
+   * Server, SQLite and libSQL, MongoDB, the polling engines).
+   */
+  readonly locks?: PlanLocks;
   /**
    * The name typed back before the plan runs: the project's for an uninstall, the source's for a
    * purge of a log its earlier uninstall left. Absent when a yes is enough (install, prune).

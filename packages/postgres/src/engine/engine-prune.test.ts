@@ -39,6 +39,8 @@ const NOTHING: EnginePlan = {
   removes: [],
   keeps: [],
   notes: [],
+  // Nothing to prune locks nothing.
+  locks: { listed: [] },
 };
 
 function target(questionSet: QuestionSet, overrides: Partial<EngineTarget> = {}): EngineTarget {

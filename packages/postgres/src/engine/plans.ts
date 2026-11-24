@@ -5,6 +5,7 @@ import type {
   ObjectKind,
   PlanResult,
   PlanStatement,
+  PlanStep,
 } from "@facetdb/core";
 import {
   ENQUEUE_ROLE,
@@ -18,7 +19,8 @@ import {
   type UninstallPlan,
   WORKER_ROLE,
 } from "../install/index.ts";
-import { STORE_TABLES, STORE_VERSION_TABLE } from "../store/index.ts";
+import { type SqlClient, scriptLocks } from "../sql/index.ts";
+import { STORE_TABLES, STORE_VERSION_TABLE, storeStepStatements } from "../store/index.ts";
 
 /**
  * Today's install, uninstall and prune, as the engine contract's plans: every statement as printed,
@@ -70,6 +72,32 @@ export function installPlan(
     // The store's migration notes (`rekeyNotes`) are about the store: its door says them otherwise.
     notes: storeShared ? draft.notes : [],
   };
+}
+
+/**
+ * The plan with the tables its statements lock, read from the statements as printed and the
+ * database as `client` shows it now. With `storeShared` an install's plan holds the store's own
+ * statements, which `facetdb migrate` runs first as the store's step, in a transaction of its own:
+ * what that step makes is there by then, and its statements here find their work done. A list that
+ * cannot be made never stops the plan: whatever failed (a statement the reader does not know, the
+ * catalog unreadable) is the plan's `unlisted` reason, and the migration goes on.
+ */
+export async function withLocks(
+  plan: EnginePlan,
+  client: Pick<SqlClient, "transaction">,
+  step: Extract<PlanStep, "install" | "prune">,
+  storeShared: boolean,
+): Promise<EnginePlan> {
+  const texts = plan.statements.map((statement) => statement.text);
+  try {
+    const listed = await scriptLocks(client, texts, {
+      step,
+      ...(step === "install" && storeShared ? { after: storeStepStatements() } : {}),
+    });
+    return { ...plan, locks: { listed } };
+  } catch (error) {
+    return { ...plan, locks: { unlisted: error instanceof Error ? error.message : String(error) } };
+  }
 }
 
 /**

@@ -34,6 +34,9 @@ const ADMIN_URL = "postgres://admin:s3cret-admin-password@localhost:5432/app";
 const WORKER_URL = "postgres://facetdb_worker:worker-password@localhost:5432/app";
 /** The project directory's name is the project's name: what uninstall asks to have typed back. */
 const PROJECT_DIR = "/work/listings-app";
+/** The lock list's header, with the scripts' lock timeout. */
+const LOCKS_HEADER =
+  "Locks (each waits at most 10 s for the table; new queries queue behind it meanwhile; then migrate stops and changes nothing):\n";
 /** The store's secret, set as on a machine that runs the worker. */
 const SECRET_ENV = { FACETDB_SECRET: TEST_SECRET };
 
@@ -144,9 +147,15 @@ function recordingConnect(onConnect?: (index: number) => Promise<void>): {
       transaction: async (work) => {
         await ready;
         const ran: string[] = [];
-        transactions.push(ran);
+        // The lock list reads the catalog in a read-only transaction: it runs nothing, so it is not
+        // one of the transactions a test counts.
+        let counted = false;
         return world.client.transaction((query) =>
           work((text, params) => {
+            if (!counted && text !== "set transaction read only") {
+              transactions.push(ran);
+            }
+            counted = true;
             ran.push(text);
             return query(text, params);
           }),
@@ -763,8 +772,15 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     if (!today.ok) {
       throw new Error(today.reason);
     }
-    expect(result.stdout).toBe(
-      `-- store: localhost:5432/app\n${storeScript(storeStepStatements())}-- source listings: localhost:5432/app\n-- facetdb migrate: listings (public.listings)\n${today.sql}Dry run: nothing was changed.\n`,
+    // Then the lock list, last before the dry run's words: the store's step makes its tables; the
+    // install, which finds them made, locks the customer's table and the projects, and makes the
+    // marks' table.
+    const locks = result.stdout.indexOf(LOCKS_HEADER);
+    expect(result.stdout.slice(0, locks)).toBe(
+      `-- store: localhost:5432/app\n${storeScript(storeStepStatements())}-- source listings: localhost:5432/app\n-- facetdb migrate: listings (public.listings)\n${today.sql}`,
+    );
+    expect(result.stdout.slice(locks)).toMatch(
+      /^Locks \(.+\):\n {2}store step: creates \d+ tables in facetdb\n {2}install of listings: creates 1 table in facetdb\n {2}install of listings, public\.listings: blocks reads and writes until the install ends; no rows\n {2}install of listings, facetdb\.projects: blocks writes until the install ends; no rows\nDry run: nothing was changed\.\n$/,
     );
   });
 
@@ -781,8 +797,12 @@ describe("the store is the Postgres DATABASE_URL names", () => {
     );
     expect(source).toBeGreaterThan(0);
     // The store's tables are in the store's part alone; the source's part holds its own objects.
+    // The lock list after both names each step's tables under its step.
+    const locks = dry.stdout.indexOf(LOCKS_HEADER);
+    expect(locks).toBeGreaterThan(source);
+    expect(dry.stdout.slice(locks)).toMatch(/\n {2}store step: creates \d+ tables in facetdb\n/);
     const storePart = dry.stdout.slice(0, source);
-    const sourcePart = dry.stdout.slice(source);
+    const sourcePart = dry.stdout.slice(source, locks);
     expect(storePart).toContain("facetdb.decisions");
     expect(sourcePart).not.toContain("facetdb.decisions");
     expect(sourcePart).toContain('"is_scam"');
@@ -843,11 +863,13 @@ describe("the store is the Postgres DATABASE_URL names", () => {
       store: { current: boolean; sql: string; applied: boolean };
       sources: { applied: boolean }[];
     };
+    // A current store's step locks nothing.
     expect(parsed.store).toEqual({
       database: "localhost:5432/facetdb",
       current: true,
       sql: "",
       applied: false,
+      locks: { listed: [] },
     });
     expect(parsed.sources[0]?.applied).toBe(true);
   });

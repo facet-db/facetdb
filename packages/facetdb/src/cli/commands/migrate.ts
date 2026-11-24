@@ -4,7 +4,10 @@ import type {
   EngineObject,
   EnginePlan,
   EngineTarget,
+  PlanLock,
+  PlanLocks,
   PlanResult,
+  PlanStep,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { databaseChanged, refusalError, stoppedError } from "../engines.ts";
@@ -14,8 +17,10 @@ import {
   type CommandContext,
   databaseLabel,
   defineCommand,
+  plainMessage,
 } from "../program.ts";
 import {
+  LOCK_WAIT,
   rebuildReviewCards,
   requireStoreRunnable,
   requireStoreUrl,
@@ -27,6 +32,7 @@ import {
   storeSecretWarning,
   storeSharedFor,
   storeSourceId,
+  storeStepLocks,
 } from "../store-door.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -60,7 +66,10 @@ import {
  * store moved. Every line names the table as its engine does (`DatabaseEngine.label`):
  * `public.listings` on Postgres, `dbo.listings` on SQL Server, `listings` on MySQL. Sources that
  * read no table (a plugin or API source) have the store's step alone, and a Postgres install says
- * whether it created the worker login or found it and kept its password.
+ * whether it created the worker login or found it and kept its password. Last before the
+ * confirmation, and in `--dry-run` and `--json`, it lists every table each step locks, what the
+ * application cannot do to it meanwhile and how many rows the step goes through, read from the
+ * scripts shown.
  */
 
 type MigrateOptions = {
@@ -145,6 +154,160 @@ export function installHeader(source: string, label: string): string {
 /** A note as migrate prints it, after the scripts. */
 export function noteLine(note: string): string {
   return `note: ${note}`;
+}
+
+/** `240`, `12,400`, `1.2M`, `3B`: an estimate, written short. */
+function short(rows: number): string {
+  const scaled = (by: number, unit: string) =>
+    `${(rows / by).toFixed(1).replace(/\.0$/, "")}${unit}`;
+  return rows >= 1e9
+    ? scaled(1e9, "B")
+    : rows >= 1e6
+      ? scaled(1e6, "M")
+      : rows.toLocaleString("en-US");
+}
+
+/**
+ * The rows a step goes through in a table, in words: the estimate named as the database's own
+ * (`Postgres's` for the store and a Postgres source), never a count.
+ */
+function rowsWords(rows: Exclude<PlanLock["rows"], "empty">, database: string): string {
+  if (rows === "none") {
+    return "no rows";
+  }
+  if (rows === "unknown") {
+    return `every row (${database} has no estimate yet)`;
+  }
+  return `about ${short(rows)} ${rows === 1 ? "row" : "rows"} (${database}'s estimate)`;
+}
+
+/** The step a lock is taken in, as its line names it: `store step`, `install of listings`. */
+function stepOf(step: PlanStep, source: string | undefined): string {
+  return step === "store" ? "store step" : `${step} of ${source ?? "the source"}`;
+}
+
+/** When a step's locks end: with its transaction. */
+function stepEnd(step: PlanStep): string {
+  return step === "store" ? "the store step ends" : `the ${step} ends`;
+}
+
+/**
+ * One lock on a table that exists, as migrate prints it before it runs: the step, the table as its
+ * engine names it, what the application cannot do to it until the step ends, and how many rows the
+ * step goes through. No row's content and no connection string is in it.
+ */
+export function lockLine(lock: PlanLock, source?: string, database = "Postgres"): string {
+  const blocks = lock.mode === "no reads or writes" ? "blocks reads and writes" : "blocks writes";
+  const rows = lock.rows === "empty" ? "no rows" : rowsWords(lock.rows, database);
+  return `  ${stepOf(lock.step, source)}, ${lock.table}: ${blocks} until ${stepEnd(lock.step)}; ${rows}`;
+}
+
+/**
+ * A step's tables new to it, in one line: `creates 23 tables in facetdb`. Nothing can wait on a
+ * table no one else can see yet, so each is not a line of its own.
+ */
+function createdLine(step: PlanStep, source: string | undefined, created: readonly PlanLock[]) {
+  const bySchema = new Map<string, number>();
+  for (const lock of created) {
+    const schema = lock.table.includes(".") ? lock.table.slice(0, lock.table.indexOf(".")) : "";
+    bySchema.set(schema, (bySchema.get(schema) ?? 0) + 1);
+  }
+  const parts = [...bySchema].map(([schema, count], index) => {
+    const noun = index > 0 ? "" : count === 1 ? " table" : " tables";
+    return `${count}${noun}${schema === "" ? "" : ` in ${schema}`}`;
+  });
+  const words =
+    parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+  return `  ${stepOf(step, source)}: creates ${words}`;
+}
+
+/**
+ * One step's lines: its new tables folded into one line, then each table it locks; or, when its
+ * list could not be made, why, in one line (its secrets hidden by `hide`).
+ */
+function stepLines(
+  step: PlanStep,
+  source: string | undefined,
+  locks: PlanLocks,
+  database: string,
+  hide: (text: string) => string,
+): readonly string[] {
+  if ("unlisted" in locks) {
+    return [`  ${stepOf(step, source)}: could not list this step's locks: ${hide(locks.unlisted)}`];
+  }
+  const created = locks.listed.filter((lock) => lock.rows === "empty");
+  return [
+    ...(created.length === 0 ? [] : [createdLine(step, source, created)]),
+    ...locks.listed
+      .filter((lock) => lock.rows !== "empty")
+      .map((lock) => lockLine(lock, source, database)),
+  ];
+}
+
+/** A step's list with its `unlisted` reason's secrets hidden, as the lines and `--json` carry it. */
+function hidden(locks: PlanLocks, hide: (text: string) => string): PlanLocks {
+  return "unlisted" in locks ? { unlisted: hide(locks.unlisted) } : locks;
+}
+
+/** Prints the lock list, both paths' one way: last before the confirmation and in `--dry-run`. */
+function printLocks(print: (text: string) => void, section: readonly string[]): void {
+  if (section.length > 0) {
+    print(section.join("\n"));
+  }
+}
+
+/** One source's plans as the lock list reads them: the prune's (with `--prune`), then the install's. */
+type SourceLocks = {
+  readonly source: string;
+  readonly prune: EnginePlan | undefined;
+  readonly install: EnginePlan;
+};
+
+/** A database engine's name as the lock list says whose estimate a row figure is. */
+function databaseOf(engine: string): string {
+  return engine === "postgres" ? "Postgres" : "the database";
+}
+
+/**
+ * The lock list migrate prints before the confirmation and in `--dry-run`, on both of its paths:
+ * the store's step first, then each source's prune and install, in the order they run. Its header
+ * says what any lock does while it waits, with the scripts' own lock timeout. A plan whose engine
+ * lists no locks yet prints no list: the whole section is left out when no step has one, and
+ * otherwise the plan says so in one line, so its silence never reads as "no lock"; a list that
+ * could not be made says why. Nothing listed at all: it says none.
+ */
+export function lockSection(
+  store: PlanLocks,
+  sources: readonly SourceLocks[],
+  engine: string,
+  hide: (text: string) => string = (text) => text,
+): readonly string[] {
+  const plans = sources.flatMap((item) => [
+    ...(item.prune === undefined || item.prune.statements.length === 0
+      ? []
+      : [{ source: item.source, step: "prune" as const, plan: item.prune }]),
+    { source: item.source, step: "install" as const, plan: item.install },
+  ]);
+  const storeSilent = "listed" in store && store.listed.length === 0;
+  if (storeSilent && plans.every(({ plan }) => plan.locks === undefined)) {
+    return [];
+  }
+  const lines = [
+    ...stepLines("store", undefined, store, "Postgres", hide),
+    ...plans.flatMap(({ source, step, plan }) =>
+      plan.locks === undefined
+        ? [
+            `  ${stepOf(step, source)}: not listed (the ${engine} engine does not list its locks yet)`,
+          ]
+        : stepLines(step, source, plan.locks, databaseOf(engine), hide),
+    ),
+  ];
+  return lines.length === 0
+    ? ["Locks: none."]
+    : [
+        `Locks (each waits at most ${LOCK_WAIT} for the table; new queries queue behind it meanwhile; then migrate stops and changes nothing):`,
+        ...lines,
+      ];
 }
 
 /**
@@ -397,6 +560,11 @@ async function migrateStoreAlone(
   for (const note of store.notes) {
     print(noteLine(note));
   }
+  // What the store's step locks, as the full run says it: an index built on the decision log holds
+  // off the workers' writes to it.
+  const hide = (text: string) => plainMessage(text, [storeUrl]);
+  const storeLocks = hidden(await storeStepLocks(deps.connect, storeUrl, store), hide);
+  printLocks(print, lockSection(storeLocks, [], "postgres", hide));
   const secretWarning = storeSecretWarning(deps.env);
   if (secretWarning !== undefined) {
     deps.io.stderr(`${secretWarning}\n`);
@@ -409,6 +577,7 @@ async function migrateStoreAlone(
       current: store.current,
       sql: store.script,
       applied: applied && !store.current,
+      locks: storeLocks,
     },
     sources: [],
   });
@@ -519,6 +688,41 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
     for (const note of notes) {
       print(noteLine(note));
     }
+    // What each step locks, last before the confirmation: read from the scripts above and the
+    // databases as they stand, nothing changed. A list that could not be made says why, with no
+    // connection string in the words.
+    const hide = (text: string) =>
+      plainMessage(text, [url, storeUrl, ...targets.map((target) => target.source.database)]);
+    const storeLocks = hidden(await storeStepLocks(deps.connect, storeUrl, store), hide);
+    // A source's locks under `--json`: the prune's and the install's, as the lines say them; no
+    // field where the engine lists none.
+    const lockedBy = (
+      item: Shown,
+    ): { readonly locks?: { readonly prune?: PlanLocks; readonly install?: PlanLocks } } => {
+      const prune = item.prune?.locks;
+      const install = item.install.locks;
+      return prune === undefined && install === undefined
+        ? {}
+        : {
+            locks: {
+              ...(prune === undefined ? {} : { prune: hidden(prune, hide) }),
+              ...(install === undefined ? {} : { install: hidden(install, hide) }),
+            },
+          };
+    };
+    printLocks(
+      print,
+      lockSection(
+        storeLocks,
+        shown.map((item) => ({
+          source: item.target.source.name,
+          prune: item.prune,
+          install: item.install,
+        })),
+        engine.name,
+        hide,
+      ),
+    );
     // migrate never opens the store's encrypted part, so an unset secret stops nothing here; the
     // worker it installs for refuses to start without it. Said before the run, on stderr, the dry
     // run included.
@@ -535,10 +739,12 @@ export const migrateCommand = defineCommand<MigrateOptions>("migrate", {
         current: store.current,
         sql: store.script,
         applied: applied && !store.current,
+        locks: storeLocks,
       },
       sources: shown.map((item) => ({
         source: item.target.source.name,
         table: item.label,
+        ...lockedBy(item),
         ...(item.pruneScript === "" ? {} : { pruneSql: item.pruneScript }),
         ...(item.prune === undefined
           ? {}

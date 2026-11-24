@@ -25,6 +25,8 @@ export {
   type SqlConnectOptions,
   type SqlQuery,
   type SqlRow,
+  // What a script locks, read from its statements: the store door lists its step's.
+  scriptLocks,
   unlistenAll,
 } from "./sql/index.ts";
 export * from "./store/index.ts";

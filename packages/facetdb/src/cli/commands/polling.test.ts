@@ -132,7 +132,14 @@ describe('facetdb migrate with connector: "polling"', () => {
     expect(dry.stdout).toContain(
       "note: FacetDB polls public.listings every 10 seconds by updated_at: the application must set updated_at on every insert and every update, or a change it makes is never noticed\n",
     );
-    const source = dry.stdout.slice(at);
+    // The source's part ends where the lock list begins: the store's step lists its tables there,
+    // and the polling plan, which lists no locks yet, says so beside them.
+    const locks = dry.stdout.indexOf("Locks (each waits at most 10 s for the table;");
+    expect(locks).toBeGreaterThan(at);
+    expect(dry.stdout.slice(locks)).toContain(
+      "  install of listings: not listed (the polling engine does not list its locks yet)\nDry run: nothing was changed.\n",
+    );
+    const source = dry.stdout.slice(at, locks);
     expect(source).toContain(
       `comment on column "public"."listings"."facetdb_state_hash" is 'facetdb:${PROJECT_ID}'`,
     );

@@ -1,4 +1,10 @@
-import { type Clock, type DoctorCheck, HEARTBEAT_LOSS_MS, type QuestionSet } from "@facetdb/core";
+import {
+  type Clock,
+  type DoctorCheck,
+  HEARTBEAT_LOSS_MS,
+  type PlanLocks,
+  type QuestionSet,
+} from "@facetdb/core";
 import {
   AmbiguousHostError,
   connectTimedOut,
@@ -20,6 +26,7 @@ import {
   STORE_NEWER_STATE,
   StoreBusyError,
   type StoreLog,
+  scriptLocks,
   serverDidNotAnswer,
   sourceIdOf,
   storePurgeRefusal,
@@ -393,6 +400,8 @@ export type StoreMigration = {
    * what migrate brings it to and runs statement for statement; empty when it is current.
    */
   readonly script: string;
+  /** The step's statements, as `script` prints them; none when it is current. */
+  readonly statements: readonly string[];
   /** What its migrations cannot settle (store version 4's shared logs), said before it runs. */
   readonly notes: readonly string[];
   /** Whether the login may create the store's tables; true when it is current (nothing to create). */
@@ -430,11 +439,12 @@ export async function showStoreMigration(
       throw storeNewer(label, step.newest);
     }
     return step.kind === "current"
-      ? { label, current: true, script: "", notes: [], mayCreate: true }
+      ? { label, current: true, script: "", statements: [], notes: [], mayCreate: true }
       : {
           label,
           current: false,
           script: storeScript(step.statements),
+          statements: step.statements,
           notes: step.notes,
           mayCreate: step.mayCreate,
         };
@@ -442,6 +452,35 @@ export async function showStoreMigration(
     await client.close();
   }
 }
+
+/**
+ * The store's tables its step locks against the workers and the studio, read from the step's
+ * statements and the store as it stands (nothing is changed): none when it is current. A list that
+ * cannot be made never stops the migration: why is `unlisted`, said in its place.
+ */
+export async function storeStepLocks(
+  connect: SqlConnect,
+  url: string,
+  store: StoreMigration,
+): Promise<PlanLocks> {
+  if (store.current) {
+    return { listed: [] };
+  }
+  const client = connect(url);
+  try {
+    return { listed: await scriptLocks(client, store.statements, { step: "store" }) };
+  } catch (error) {
+    return { unlisted: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * How long each of FacetDB's scripts waits for a lock before it stops, in words (`10 s`), read from
+ * the timeout the scripts pin (`LOCK_TIMEOUT`), never written twice.
+ */
+export const LOCK_WAIT = LOCK_TIMEOUT.replace(/^(\d+)s$/, "$1 s");
 
 /**
  * The refusal of a store step whose login may not create the store's tables, before the

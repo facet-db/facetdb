@@ -20,7 +20,7 @@ import { connectPostgres, quoteIdent, type SqlClient, type SqlConnect } from "..
 import { STORE_VERSION_TABLE } from "../store/index.ts";
 import { DOCTOR_CHECKS, doctorChecks } from "./doctor.ts";
 import { estimateTableRows, inspectDatabase, readTableRows } from "./inspect.ts";
-import { installPlan, prunePlan, refusedPlan, uninstallPlan } from "./plans.ts";
+import { installPlan, prunePlan, refusedPlan, uninstallPlan, withLocks } from "./plans.ts";
 import { runPlan } from "./run.ts";
 import { adminUrlRefusal, subjectOf, workerUrlRefusal } from "./urls.ts";
 
@@ -115,13 +115,14 @@ const CAPABILITIES: Capabilities = {
   multipleWorkers: true,
 };
 
-/** A plan with nothing to do: a prune of a source not installed yet. */
+/** A plan with nothing to do: a prune of a source not installed yet. It locks nothing. */
 const NOTHING: EnginePlan = {
   statements: [],
   transactional: true,
   removes: [],
   keeps: [],
   notes: [],
+  locks: { listed: [] },
 };
 
 const ROLE_EXISTS = "select 1 from pg_catalog.pg_roles where rolname = $1";
@@ -215,7 +216,8 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
       if (insecure !== undefined) {
         return { ok: false, refusal: insecure };
       }
-      return withAdmin(url, async ({ query }) => {
+      return withAdmin(url, async (client) => {
+        const { query } = client;
         // An existing login keeps its password: other projects on the server may share it.
         const exists = (await query(ROLE_EXISTS, [login])).length > 0;
         if (!exists && installOptions.workerPassword === undefined) {
@@ -245,9 +247,12 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
             ? {}
             : { workerPassword: installOptions.workerPassword }),
         });
-        return draft.ok
-          ? { ok: true, plan: installPlan(draft, installOptions.storeShared) }
-          : refusedPlan("migrate-refused", draft.reason);
+        if (!draft.ok) {
+          return refusedPlan("migrate-refused", draft.reason);
+        }
+        const { storeShared } = installOptions;
+        const plan = installPlan(draft, storeShared);
+        return { ok: true, plan: await withLocks(plan, client, "install", storeShared) };
       });
     },
 
@@ -288,15 +293,15 @@ export function createPostgresEngine(options: PostgresEngineOptions): DatabaseEn
       if (insecure !== undefined) {
         return { ok: false, refusal: insecure };
       }
-      return withAdmin(url, async ({ query }) => {
-        const draft = await draftPrune(query, {
+      return withAdmin(url, async (client) => {
+        const draft = await draftPrune(client.query, {
           source: tableOf(target),
           questionSet: target.questionSet,
           project: target.project,
           ...suffixed,
         });
         if (draft.ok) {
-          return { ok: true, plan: prunePlan(draft) };
+          return { ok: true, plan: await withLocks(prunePlan(draft), client, "prune", false) };
         }
         // A source not installed yet has nothing to prune: an empty plan, not a refusal.
         return draft.absent

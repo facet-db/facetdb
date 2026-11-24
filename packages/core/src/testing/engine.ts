@@ -158,13 +158,14 @@ export class FakeOpenConnector extends FakeConnector implements OpenConnector {
 }
 
 /**
- * A database engine for the CLI's tests: its plans come from the test's fixtures, its runs are
- * recorded, and `open` hands out fake connectors over one `FakeDatabase`. A plan the test gave no
- * fixture for rejects, so a command that plans what the test did not expect fails loudly; so does a
- * fixture that plans the store while the store is not shared, which no engine may do. Like a real
- * engine, it refuses a plaintext URL to another host unless `allowInsecure` (`checkUrl` says so
- * without connecting, `open` throws it as an `EngineRefusal`), a run never keeps the worker
- * password, and a run stops at a `secret` statement when given none.
+ * A database engine for the CLI's tests: its plans come from the test's fixtures (their `locks`
+ * carried as given), its runs are recorded, and `open` hands out fake connectors over one
+ * `FakeDatabase`. A plan the test gave no fixture for rejects, so a command that plans what the
+ * test did not expect fails loudly; so does a fixture that plans the store while the store is not
+ * shared, which no engine may do. Like a real engine, it refuses a plaintext URL to another host
+ * unless `allowInsecure` (`checkUrl` says so without connecting, `open` throws it as an
+ * `EngineRefusal`), a run never keeps the worker password, and a run stops at a `secret` statement
+ * when given none.
  */
 export class FakeEngine implements DatabaseEngine {
   readonly name: string;
@@ -397,6 +398,18 @@ export class FakeEngine implements DatabaseEngine {
       return { ok: false, refusal: insecure };
     }
     const result = make();
+    // A plan's locks are its own step's: the store's step is the CLI's store door's, so no engine
+    // plan lists a lock under it, whatever the store.
+    const locks = result.ok ? result.plan.locks : undefined;
+    if (
+      locks !== undefined &&
+      "listed" in locks &&
+      locks.listed.some((one) => one.step === "store")
+    ) {
+      throw new Error(
+        `the fake engine's ${operation} fixture lists a lock of the store's step, which only the store door takes`,
+      );
+    }
     if (result.ok && !deps.storeShared) {
       const { statements, removes, keeps } = result.plan;
       const store = (kind: string) => kind === "log" || kind === "store-table";
