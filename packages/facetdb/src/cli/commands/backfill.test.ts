@@ -226,8 +226,10 @@ describe("facetdb backfill", () => {
     const result = await run(["backfill", "--dry-run"], provider);
 
     expect(result.code).toBe(0);
-    expect(result.stdout).toContain("6 records to answer");
-    expect(result.stdout).toMatch(/input tokens, (about \$|less than \$)/);
+    // A dry run opens no store, so no billed answer scales the estimate: it is a floor.
+    expect(result.stdout).toMatch(
+      /\n6 records to answer, at least [\d,.]+k? input tokens, at least \$0\.0*[1-9]\d?\.\n/,
+    );
     expect(result.stdout).toContain("Dry run: nothing was asked and nothing was changed.");
     expect(result.prompts).toEqual([]);
     expect(provider.callCount).toBe(0);
@@ -376,6 +378,53 @@ describe("facetdb backfill", () => {
     expect(result.stdout).toContain("6 records done. That was the last page.");
     expect(result.stdout).toContain("6 records queued for the worker");
     expect(world.cursors.saved.get(ALL_V1)?.done).toBe(true);
+  });
+
+  it("says the estimate is at least its figures when no record has a billed answer", async () => {
+    const result = await run(["backfill", "--yes", "--json"], createFakeProvider(SCRIPT));
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      estimate: { records: 6, calibration: null },
+    });
+    // The estimator counts 67 tokens a record: 402 for six, $0.0000169 at $0.042 per million,
+    // said rounded down so the floor stays one.
+    const words = await run(["backfill", "--dry-run"], createFakeProvider(SCRIPT));
+    expect(words.stdout).toContain(
+      "\n6 records to answer, at least 402 input tokens, at least $0.00001.\n",
+    );
+  });
+
+  it("scales the estimate by what the answered records were billed, and says about", async () => {
+    // Every record answered at its present state, each billed a million input tokens: far above
+    // the estimator's count of characters, so the estimate is a million a record.
+    for (const key of KEYS) {
+      await world.log.appendAnswer({
+        kind: "answer",
+        key,
+        version: 1,
+        model: questionSet.model,
+        stateHash: stateHash(questionSet.read, { id: key, title: `Listing ${key}` }),
+        answers: {
+          is_scam: { type: "noul", probability: 0.02 },
+          category: { type: "choice", top: "car", probabilities: [0.9, 0.1] },
+        },
+        usage: { inputTokens: 1_000_000, outputTokens: 0, asked: ["is_scam", "category"] },
+        at: new Date(0),
+      });
+    }
+
+    const result = await run(["backfill"], createFakeProvider(SCRIPT), ["no"]);
+
+    expect(result.code, result.stderr).toBe(0);
+    // 6 records at a million each, at $0.042 per million.
+    expect(result.stdout).toContain("6 records to answer, about 6M input tokens, about $0.25.\n");
+
+    const json = await run(["backfill", "--json"], createFakeProvider(SCRIPT), ["no"]);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      estimate: { records: 6, tokens: expect.closeTo(6_000_000, 6), calibration: { records: 6 } },
+    });
   });
 
   it("--yes starts without a prompt", async () => {

@@ -5,7 +5,6 @@ import {
   type Clock,
   type Connector,
   type CursorStore,
-  compactTokens,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
   type DecisionLog,
@@ -21,6 +20,7 @@ import type {
   BackfillJobStatus,
   BackfillJobsDoor,
 } from "@facetdb/server";
+import { costWords } from "./backfill-cost.ts";
 import { addedQuestionsEnd, type LeftOver, leftOver, NOTHING_LEFT } from "./backfill-left.ts";
 import type { SourceLoop } from "./config-reload.ts";
 
@@ -166,10 +166,6 @@ const LIVING: ReadonlySet<BackfillJobState> = new Set([
 
 const grouped = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
-function money(dollars: number): string {
-  return dollars > 0 && dollars < 0.01 ? "less than $0.01" : `about $${dollars.toFixed(2)}`;
-}
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -311,7 +307,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       case "waiting":
         return estimate === null
           ? "Waiting to be started."
-          : `Estimated${asked(job)}: ${grouped.format(estimate.records)} records, about ${compactTokens(estimate.tokens)} input tokens, ${money(estimate.dollars)}. Nothing is asked until it is started; an estimate not started within ${ESTIMATE_KEPT_MS / 60_000} minutes is dropped.`;
+          : `Estimated${asked(job)}: ${grouped.format(estimate.records)} records, ${costWords(estimate)}. Nothing is asked until it is started; an estimate not started within ${ESTIMATE_KEPT_MS / 60_000} minutes is dropped.`;
       case "running":
         return `Running${asked(job)} under version ${job.loop.version}, ${order(job)}, at most ${DEFAULT_BACKFILL_PACE} records a second: ${grouped.format(counts.records)}${estimate === null ? "" : ` of ${grouped.format(estimate.records)}`} records done.`;
       case "stopping":

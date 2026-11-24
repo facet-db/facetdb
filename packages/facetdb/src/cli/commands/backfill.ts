@@ -1,7 +1,6 @@
 import {
   type BackfillEstimate,
   type BackfillReport,
-  compactTokens,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
 } from "@facetdb/core";
@@ -15,6 +14,7 @@ import {
 import { requireUsableUrl } from "../engines.ts";
 import { type CliDeps, CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
+import { costWords } from "./backfill-cost.ts";
 import { addedQuestionsEnd, leftOver } from "./backfill-left.ts";
 import {
   ALLOW_INSECURE_OPTION,
@@ -157,13 +157,9 @@ function parseQuestions(
 
 const whole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
-function money(dollars: number): string {
-  return dollars > 0 && dollars < 0.01 ? "less than $0.01" : `about $${dollars.toFixed(2)}`;
-}
-
-/** The estimate in words: records, tokens, dollars. */
+/** The estimate in words: records, tokens, dollars ("at least" when nothing billed scaled it). */
 function describeEstimate(estimate: BackfillEstimate): string {
-  return `${whole.format(estimate.records)} records to answer, about ${compactTokens(estimate.tokens)} input tokens, ${money(estimate.dollars)}.`;
+  return `${whole.format(estimate.records)} records to answer, ${costWords(estimate)}.`;
 }
 
 function summary(report: BackfillReport) {

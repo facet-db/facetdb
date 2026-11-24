@@ -75,6 +75,7 @@ function waiting(records: number): BackfillStatus {
       tokensPerRecord: 85,
       tokens: records * 85,
       dollars: records * 0.0000036,
+      calibration: { records: 100, scale: 2.7 },
     },
     token: "token-1",
     expiresAt: "2026-11-06T12:10:00.000Z",

@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { DEFAULT_WORKER_LIMITS, type QuestionSet } from "@facetdb/core";
+import {
+  calibrateEstimate,
+  DEFAULT_WORKER_LIMITS,
+  estimateBackfill,
+  type QuestionSet,
+} from "@facetdb/core";
 import { FakeClock } from "@facetdb/core/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { connectPostgres, type SqlClient } from "../sql/index.ts";
@@ -234,6 +239,41 @@ describe("the decision log on a real Postgres", () => {
     expect(latest.get("p0")?.version).toBe(2);
     expect(latest.get("p2")?.version).toBe(1);
     expect(latest.has("p1")).toBe(false);
+  });
+
+  it("gives a backfill's estimate the billed tokens of its sample, summed as numbers", async () => {
+    // The estimate reads `usage` back through postgres.js's jsonb: a figure read as text would
+    // concatenate in the sum, or leave the estimate uncalibrated.
+    const store = await newStore();
+    const log = store.log("calibrated");
+    const set: QuestionSet = {
+      questions: [{ type: "noul", name: "is_scam", instructions: "A scam?", stakes: "low" }],
+      read: ["title"],
+      model: "jev-1.14.0",
+      thresholds: {},
+    };
+    const state = { title: "A listing" };
+    const counted = estimateBackfill(set, { records: 1, states: [state] }).tokens;
+    const sampled = ["c1", "c2", "c3"].map((key) => ({ key, hash: `hash-${key}`, state }));
+    for (const { key, hash } of sampled) {
+      await log.appendAnswer({
+        kind: "answer",
+        key,
+        version: 1,
+        model: "jev-1.14.0",
+        stateHash: hash,
+        answers: { is_scam: { type: "noul", probability: 0.1 } },
+        usage: { inputTokens: counted * 3, outputTokens: 5, asked: ["is_scam"] },
+        at: new Date("2026-11-02T08:00:00.000Z"),
+      });
+    }
+    // What the call asked rides in the usage's jsonb, and comes back as a list (no migration).
+    expect((await log.latestAnswer("c1"))?.usage.asked).toEqual(["is_scam"]);
+
+    const calibration = await calibrateEstimate(set, sampled, log);
+
+    expect(calibration?.records).toBe(3);
+    expect(calibration?.scale).toBe(3);
   });
 });
 

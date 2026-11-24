@@ -453,7 +453,7 @@ function rig(
         model: "jev-1.14.0",
         stateHash: row.hash,
         answers: { [question]: { type: "noul", probability: 0.05 } },
-        usage: { inputTokens: 100, outputTokens: 5 },
+        usage: { inputTokens: 100, outputTokens: 5, asked: [question] },
         at: new Date(START_MS),
       });
     }
@@ -517,7 +517,11 @@ describe("a backfill job: the estimate first", () => {
     });
     expect(waiting.estimate).toMatchObject({ records: 30, sampled: 30 });
     expect(waiting.estimate?.dollars).toBeGreaterThan(0);
-    expect(waiting.words).toMatch(/^Estimated: 30 records, about [\d,.]+[kMB]? input tokens, /);
+    // No record has a billed answer yet, so the estimate is a floor, said so.
+    expect(waiting.estimate?.calibration).toBeNull();
+    expect(waiting.words).toMatch(
+      /^Estimated: 30 records, at least [\d,.]+[kMB]? input tokens, at least \$0\.0*[1-9]\. /,
+    );
     expect(waiting.words).toMatch(
       /Nothing is asked until it is started; an estimate not started within 10 minutes is dropped\.$/,
     );
@@ -604,6 +608,19 @@ describe("a backfill job: the estimate first", () => {
     await open.jobs.start("listings", "token-1");
     await open.reaches("finished");
     expect(open.provider.peak).toBeGreaterThan(2);
+  });
+
+  it("scales the estimate by what the records' answers were billed, and says about", async () => {
+    const t = rig();
+    await t.answered("scam");
+
+    await t.jobs.estimate("listings", ["spam"]);
+    const waiting = await t.reaches("waiting");
+
+    expect(waiting.estimate?.calibration).toMatchObject({ records: 30 });
+    expect(waiting.words).toMatch(
+      /^Estimated of "spam": 30 records, about [\d,.]+[kMB]? input tokens, less than \$0\.01\. Nothing is asked until it is started/,
+    );
   });
 
   it("asks named questions alone through the workers' provider and spending gate, and merges with the answers each record has", async () => {

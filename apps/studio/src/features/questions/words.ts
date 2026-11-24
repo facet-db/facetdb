@@ -29,6 +29,19 @@ export function dollarWords(dollars: number): string {
   return `$${dollars.toFixed(2)}`;
 }
 
+/**
+ * A floor in dollars, as `dollarWords` writes it but rounded down so it stays a floor: "$0.0001"
+ * for 0.00017, "$0.67" for 0.6789. The small epsilon keeps 0.29 from reading as 0.28.
+ */
+export function floorDollarWords(dollars: number): string {
+  if (dollars <= 0) {
+    return "$0";
+  }
+  const digits = dollars >= 0.01 ? 2 : -Math.floor(Math.log10(dollars));
+  const scale = 10 ** digits;
+  return `$${(Math.floor(dollars * scale + 1e-9) / scale).toFixed(digits)}`;
+}
+
 export function countWords(count: number): string {
   return count.toLocaleString("en-US");
 }

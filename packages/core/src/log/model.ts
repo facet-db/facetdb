@@ -6,10 +6,20 @@ import type { Answer } from "../thresholds/index.ts";
  * which stands for the wording, criteria, state fields and model version of that moment.
  */
 
-/** Tokens one call consumed, as the provider counted them (the same two numbers the provider returns). */
+/**
+ * Tokens one call consumed, as the provider counted them (the same two numbers the provider returns),
+ * and the questions that call asked.
+ */
 export type LoggedUsage = {
   readonly inputTokens: number;
   readonly outputTokens: number;
+  /**
+   * The names of the questions the call asked, which its tokens paid for. An added-question run
+   * asks the added questions alone and logs every question's answer, so the answers do not say what
+   * was billed; this does. Absent on an answer logged by an earlier version, and read as not known:
+   * such an answer never scales a backfill's estimate.
+   */
+  readonly asked?: readonly string[];
 };
 
 /**

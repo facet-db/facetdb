@@ -286,6 +286,9 @@ describe("the worker loop", () => {
       stateHash: stateHash(["body"], { body: "hello" }),
       usage: { inputTokens: 120, outputTokens: 8 },
     });
+    // What the call asked beside what it cost: the whole set, which a backfill's estimate reads to
+    // set the bill against the right questions.
+    expect(entry?.usage).toEqual({ inputTokens: 120, outputTokens: 8, asked: ["scam"] });
   });
 
   it("logs the model the response names, not the one the set asked for", async () => {

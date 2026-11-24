@@ -19,6 +19,7 @@ import {
   countWords,
   dollarWords,
   figuresFor,
+  floorDollarWords,
   formHolds,
   nameProblem,
   newQuestion,
@@ -1129,7 +1130,13 @@ function backfillWords(plan: SetupPlan): string {
     backfill.counted === "statistics"
       ? `about ${countWords(backfill.records)} records (the database's own estimate of the table's size; nothing was counted)`
       : `at least ${countWords(backfill.records)} records (the rows read here: the database has no estimate of the table's size yet)`;
-  return `The backfill of the rows already there: ${records}, newest first, at most ${countWords(backfill.pace)} a second, ${durationWords(backfill.seconds)} and ${dollarWords(backfill.dollars)} (${countWords(backfill.inputTokens)} input tokens). Start it with ${backfill.command} once the worker runs the source: it counts exactly and shows its estimate first.`;
+  // A source not yet installed has no answer billed to scale the estimate by, so its figures are
+  // the characters' count alone, a floor, and said so.
+  const cost =
+    backfill.inputTokens > 0
+      ? `at least ${floorDollarWords(backfill.dollars)} (at least ${countWords(backfill.inputTokens)} input tokens)`
+      : `${dollarWords(backfill.dollars)} (${countWords(backfill.inputTokens)} input tokens)`;
+  return `The backfill of the rows already there: ${records}, newest first, at most ${countWords(backfill.pace)} a second, ${durationWords(backfill.seconds)} and ${cost}. Start it with ${backfill.command} once the worker runs the source: it counts exactly and shows its estimate first.`;
 }
 
 /** Step two once connected: the table, its columns and rows, the source's name and its filter. */

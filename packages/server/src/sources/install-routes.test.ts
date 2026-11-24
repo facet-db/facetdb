@@ -188,6 +188,7 @@ function doorOf(engine: FakeEngine, behaviour: Behaviour) {
           tokensPerRecord: 40,
           tokens: 2e6,
           dollars: 0.084,
+          calibration: null,
         },
         pace: 50,
         counted: "statistics",

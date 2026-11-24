@@ -307,8 +307,12 @@ describe("Add a source", () => {
     const sql = await within(turnOn()).findByText(/alter table "public"."sellers"/);
     expect(sql.tagName).toBe("PRE");
     expect(sql.textContent).toBe(SAMPLE_SETUP_PLAN.sql);
+    // A source not yet installed has no billed answer to scale its estimate by: the cost is a
+    // floor, said so before the tokens and the dollars.
     expect(
-      within(turnOn()).getByText(/about 50,000 records \(the database's own estimate/),
+      within(turnOn()).getByText(
+        "The backfill of the rows already there: about 50,000 records (the database's own estimate of the table's size; nothing was counted), newest first, at most 50 a second, about 17 minutes and at least $0.08 (at least 2,000,000 input tokens). Start it with facetdb backfill --source sellers once the worker runs the source: it counts exactly and shows its estimate first.",
+      ),
     ).toBeVisible();
     const run = within(turnOn()).getByRole("button", { name: "Run the install" });
     expect(run).toBeEnabled();

@@ -118,6 +118,32 @@ export type BackfillSample = {
   readonly states: readonly State[];
 };
 
+/** One record the survey sampled: its key and the hash of its present state, with that state. */
+export type SampledRecord = {
+  readonly key: RecordKey;
+  readonly hash: string;
+  readonly state: State;
+};
+
+/** What the survey read: every record the run will visit, and up to 100 of them sampled. */
+export type BackfillSurvey = {
+  readonly records: number;
+  readonly sampled: readonly SampledRecord[];
+};
+
+/**
+ * What the source has already paid, set against the estimator: the input tokens billed for the
+ * sampled records' latest answers at their present state, over what the estimator counts for those
+ * answers' questions at that state. The estimator counts characters at four a token, which the
+ * model's own count can pass many times over (2.7 times on a first real run).
+ */
+export type EstimateCalibration = {
+  /** How many sampled records had a billed answer at their present state. */
+  readonly records: number;
+  /** Billed over estimated, never below 1: an estimator that counts high is left as it is. */
+  readonly scale: number;
+};
+
 export type BackfillEstimate = {
   readonly records: number;
   /** How many states the average was taken over. */
@@ -126,6 +152,11 @@ export type BackfillEstimate = {
   readonly tokensPerRecord: number;
   readonly tokens: number;
   readonly dollars: number;
+  /**
+   * The scale taken from billed answers, or null when no sampled record had one: the figures are
+   * then the estimator's alone, a floor, and every place that prints them says "at least".
+   */
+  readonly calibration: EstimateCalibration | null;
 };
 
 export type BackfillOptions = {
@@ -205,13 +236,15 @@ export type BackfillReport = {
 export type Backfill = {
   /**
    * What a run over `sample.records` records would cost: the average estimated input tokens of the
-   * sampled states, times the records, at $0.042 per million. `onlyQuestions` prices an added
-   * question alone, which is the state plus those questions' words.
+   * sampled states, times the records, scaled by `calibration` when there is one, at $0.042 per
+   * million. `onlyQuestions` prices an added question alone, which is the state plus those
+   * questions' words.
    */
   estimate(
     questionSet: QuestionSet,
     sample: BackfillSample,
     onlyQuestions?: readonly string[],
+    calibration?: EstimateCalibration | null,
   ): BackfillEstimate;
   run(options: BackfillOptions): Promise<BackfillReport>;
 };
@@ -223,13 +256,15 @@ export type Backfill = {
  */
 /**
  * What a run over `sample.records` records would cost: the average estimated input tokens of the
- * sampled states, times the records, at $0.042 per million (`Backfill.estimate`; the studio's setup
- * flow prices a source's first backfill with it before the install).
+ * sampled states, times the scale `calibration` carries (1 without one), times the records, at
+ * $0.042 per million (`Backfill.estimate`). The studio's setup flow prices a source's first
+ * backfill with it before the install, with no calibration: a source not installed has no answer.
  */
 export function estimateBackfill(
   set: QuestionSet,
   sample: BackfillSample,
   onlyQuestions?: readonly string[],
+  calibration: EstimateCalibration | null = null,
 ): BackfillEstimate {
   const questions = pickQuestions(set, onlyQuestions);
   const priced: QuestionSet = { ...set, questions };
@@ -237,7 +272,8 @@ export function estimateBackfill(
   for (const state of sample.states) {
     tokens += recordTokens(priced, state);
   }
-  const tokensPerRecord = sample.states.length === 0 ? 0 : tokens / sample.states.length;
+  const scale = calibration === null ? 1 : calibration.scale;
+  const tokensPerRecord = sample.states.length === 0 ? 0 : (tokens / sample.states.length) * scale;
   const total = tokensPerRecord * sample.records;
   return {
     records: sample.records,
@@ -245,20 +281,77 @@ export function estimateBackfill(
     tokensPerRecord,
     tokens: total,
     dollars: (total * PRICE_PER_MILLION_INPUT_TOKENS) / 1_000_000,
+    calibration,
   };
 }
 
 /**
- * Walks the pages of `scan` from `from` to the end, counting records and keeping the first 100
- * states. No model call, and nothing is written. An aborted `signal` stops it between pages, with
- * what it counted so far.
+ * What the sampled records' latest answers were billed, set against the estimator, in one read of
+ * the log. An answer counts when:
+ *  - it was given at the record's present state (the text the estimator reads now);
+ *  - the model that answered is the set's present one (another version, a gateway or a compatible
+ *    provider has its own prompt and its own count of tokens);
+ *  - it was billed some input tokens (a provider that reports none says nothing of the cost);
+ *  - it says which questions its call asked (`usage.asked`), each one still in the set. An answer
+ *    logged by an earlier version does not say: an added-question run logs every question's answer for a
+ *    call that paid for the added ones alone, and nothing in that one read tells such a merge from
+ *    a whole call, so it is left out rather than read as a ratio far too low.
+ * Its estimator count is that of the questions its call asked, at the record's state. The scale is
+ * the billed tokens over the estimator's, each summed over the answers counted, never below 1. Null
+ * when no sampled record has such an answer: the estimate is then a floor.
+ */
+export async function calibrateEstimate(
+  set: QuestionSet,
+  sampled: readonly SampledRecord[],
+  log: Pick<DecisionLog, "latestAnswers">,
+): Promise<EstimateCalibration | null> {
+  if (sampled.length === 0) {
+    return null;
+  }
+  const latest = await log.latestAnswers(sampled.map((record) => record.key));
+  let billed = 0;
+  let estimated = 0;
+  let records = 0;
+  for (const record of sampled) {
+    const answer = latest.get(record.key);
+    if (
+      answer === undefined ||
+      answer.stateHash !== record.hash ||
+      answer.model !== set.model ||
+      answer.usage.inputTokens <= 0
+    ) {
+      continue;
+    }
+    const asked = answer.usage.asked;
+    if (asked === undefined) {
+      continue;
+    }
+    const questions = set.questions.filter((question) => asked.includes(question.name));
+    if (questions.length === 0 || questions.length !== asked.length) {
+      continue;
+    }
+    const counted = recordTokens({ ...set, questions }, record.state);
+    if (counted === 0) {
+      continue;
+    }
+    billed += answer.usage.inputTokens;
+    estimated += counted;
+    records += 1;
+  }
+  return records === 0 ? null : { records, scale: Math.max(1, billed / estimated) };
+}
+
+/**
+ * Walks the pages of `scan` from `from` to the end, counting records and keeping the first 100 with
+ * their keys and the hashes of their states. No model call, and nothing is written. An aborted
+ * `signal` stops it between pages, with what it counted so far.
  */
 export async function surveyBackfill(
   connector: Pick<Connector, "scan">,
   from: ScanCursor | null,
   signal?: AbortSignal,
-): Promise<BackfillSample> {
-  const states: State[] = [];
+): Promise<BackfillSurvey> {
+  const sampled: SampledRecord[] = [];
   let records = 0;
   let cursor = from;
   do {
@@ -270,13 +363,13 @@ export async function surveyBackfill(
     const included = page.rows.filter((row) => !row.excluded);
     records += included.length;
     for (const row of included) {
-      if (states.length < ESTIMATE_SAMPLE_SIZE) {
-        states.push(row.state);
+      if (sampled.length < ESTIMATE_SAMPLE_SIZE) {
+        sampled.push({ key: row.key, hash: row.hash, state: row.state });
       }
     }
     cursor = page.next;
   } while (cursor !== null);
-  return { records, states };
+  return { records, sampled };
 }
 
 export function createBackfill(deps: BackfillDeps): Backfill {
@@ -305,14 +398,22 @@ export function createBackfill(deps: BackfillDeps): Backfill {
     const saved = await cursorStore.load(runKey);
     const start = saved === undefined || saved.done ? null : saved.cursor;
 
-    const report = newReport(
-      estimate(questionSet, await survey(start, options.signal), options.onlyQuestions),
-    );
-    // Stopped while counting: the estimate covers only what was read, so it is never shown.
+    const surveyed = await survey(start, options.signal);
+    const sample: BackfillSample = {
+      records: surveyed.records,
+      states: surveyed.sampled.map((record) => record.state),
+    };
+    // Stopped while counting: the estimate covers only what was read, so it is never shown, and
+    // the log is not read for it.
     if (aborted()) {
+      const report = newReport(estimate(questionSet, sample, options.onlyQuestions));
       report.status = "aborted";
       return report;
     }
+    // Scaled by what the sampled records' answers were billed: the cost shown first is the model's
+    // count, not the characters' alone.
+    const calibration = await calibrateEstimate(questionSet, surveyed.sampled, log);
+    const report = newReport(estimate(questionSet, sample, options.onlyQuestions, calibration));
     // The cost is shown before a single record is asked; a refusal leaves everything as it was.
     if (!(await options.onEstimate(report.estimate))) {
       report.status = "declined";
@@ -551,7 +652,8 @@ export function createBackfill(deps: BackfillDeps): Backfill {
               asked.map((q) => q.name),
             ),
           },
-          usage: response.usage,
+          // The answers hold every question; the tokens paid for the added ones alone.
+          usage: { ...response.usage, asked: asked.map((question) => question.name) },
           at: new Date(clock.now()),
         };
         // Each write that lands is followed by the queue as the loop's write is, a card at the

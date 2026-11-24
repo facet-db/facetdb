@@ -12,7 +12,7 @@ import {
 import { useApi, useSchedule } from "../../deps.tsx";
 import { compactTokens } from "../../shell/index.ts";
 import { Problem, whenWords } from "../decisions/index.ts";
-import { countWords, dollarWords, plural } from "../questions/index.ts";
+import { countWords, dollarWords, floorDollarWords, plural } from "../questions/index.ts";
 import { BACKFILL_REFRESH_MS, type BackfillRead, backfillKey, backfillQuery } from "./queries.ts";
 
 /**
@@ -157,7 +157,13 @@ function estimateWords(
       : "";
   // After the cap's sentence, whose "That" is the estimate's figures.
   const plugin = pages === "plugin" ? ` ${PLUGIN_PAGED}` : "";
-  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, about ${dollarWords(estimate.dollars)} (${compactTokens(estimate.tokens)} input tokens)${time}.${beyond}${plugin}`;
+  // Scaled by what answered records were billed, the figures are about the cost; with nothing
+  // billed yet they are the characters' count alone, a floor, and said so.
+  const cost =
+    estimate.calibration === null && estimate.tokens > 0
+      ? `at least ${floorDollarWords(estimate.dollars)} (at least ${compactTokens(estimate.tokens)} input tokens)`
+      : `about ${dollarWords(estimate.dollars)} (${compactTokens(estimate.tokens)} input tokens)`;
+  return `Estimated${what}: ${plural(estimate.records, "record", "records")}, ${cost}${time}.${beyond}${plugin}`;
 }
 
 /** How far the job got, for the strip: the pages settled over the records estimated. */

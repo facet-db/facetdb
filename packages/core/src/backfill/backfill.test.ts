@@ -435,9 +435,10 @@ describe("backfill pacing", () => {
 
     expect(report.status).toBe("completed");
     expect(report.enqueued).toHaveLength(2_000);
-    // ceil(2,000 / 500) lookups, one per page and before any record of it is queued; no record
-    // costs a lookup of its own (a far database paid two round trips per record).
-    expect(r.log.lookups.map((keys) => keys.length)).toEqual([500, 500, 500, 500]);
+    // The estimate's one lookup of its 100 sampled records, then ceil(2,000 / 500) lookups, one per
+    // page and before any record of it is queued; no record costs a lookup of its own (a far
+    // database paid two round trips per record).
+    expect(r.log.lookups.map((keys) => keys.length)).toEqual([100, 500, 500, 500, 500]);
     expect(r.log.singleLookups).toEqual([]);
     // ceil(2,000 / 50) calls of 50 records, one per second of the pace.
     expect(r.connector.enqueueCalls).toHaveLength(40);
@@ -754,8 +755,9 @@ describe("backfill of an added question", () => {
     });
 
     expect(report.answered).toHaveLength(12);
-    // Pages of 10: one lookup for each page, before any record of it is held.
-    expect(r.log.lookups.map((keys) => keys.length)).toEqual([10, 2]);
+    // The estimate's one lookup of its sampled records, then pages of 10: one lookup for each page,
+    // before any record of it is held.
+    expect(r.log.lookups.map((keys) => keys.length)).toEqual([12, 10, 2]);
     // Under the claim each asked record is read again, since the worker may have answered it since
     // the page was read; that read rides on a model call, so it never sets the run's time.
     expect([...r.log.singleLookups].sort()).toEqual([...report.answered].sort());

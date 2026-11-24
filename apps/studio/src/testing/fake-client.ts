@@ -1186,7 +1186,8 @@ export const SAMPLE_MIGRATED: Migrated = {
 
 /**
  * A backfill job of `source` in `state`, shaped as the worker's door reports one: the sample
- * estimate is 1,200 records at about $0.0043, paced at 50 a second; a test overrides what differs.
+ * estimate is 1,200 records at about $0.0043, scaled by what 100 answered records were billed,
+ * paced at 50 a second; a test overrides what differs.
  */
 export function sampleBackfill(
   state: BackfillStatus["state"],
@@ -1204,6 +1205,7 @@ export function sampleBackfill(
       tokensPerRecord: 85,
       tokens: 102_000,
       dollars: 0.0043,
+      calibration: { records: 100, scale: 2.7 },
     },
     pace: 50,
     token: null,

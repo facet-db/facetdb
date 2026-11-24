@@ -1033,6 +1033,16 @@ const backfillEstimateSchema = z.object({
   tokensPerRecord: z.number().min(0),
   tokens: z.number().min(0),
   dollars: z.number().min(0),
+  /**
+   * The scale taken from what answered records were billed, from how many; null when none was: the
+   * figures are then a floor, said "at least". Absent from a worker of an earlier version, and read
+   * as null there, so the page still parses its estimate and words it as the floor it is.
+   */
+  calibration: z
+    .object({ records: z.number().int().positive(), scale: z.number().min(1) })
+    .nullable()
+    .optional()
+    .transform((calibration) => calibration ?? null),
 });
 const backfillStatusSchema = z.object({
   source: z.string().min(1),

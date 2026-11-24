@@ -674,7 +674,11 @@ export function createWorker(deps: WorkerDeps): Worker {
         model: response.model,
         stateHash: row.hash,
         answers: response.answers,
-        usage: response.usage,
+        // What the call asked, beside what it cost: every question of the set.
+        usage: {
+          ...response.usage,
+          asked: questionSet.questions.map((question) => question.name),
+        },
         at: new Date(clock.now()),
       };
       // The only door to the database: `recordAnswer` logs, decides and writes with this hash, then

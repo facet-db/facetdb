@@ -48,7 +48,7 @@ const WAITING = sampleBackfill("waiting", {
   token: "token-1",
   expiresAt: "2026-11-06T12:10:00.000Z",
   words:
-    "Estimated: 1,200 records, about 102k input tokens, $0.0043. Nothing is asked until it is started; an estimate not started within 10 minutes is dropped.",
+    "Estimated: 1,200 records, about 102k input tokens, less than $0.01. Nothing is asked until it is started; an estimate not started within 10 minutes is dropped.",
 });
 
 function running(records: number): BackfillStatus {
@@ -324,6 +324,25 @@ describe("a source's backfill from the Sources page", () => {
     ).toBeVisible();
     // Start stays the person's call: the worker's state enforces the cap, not the page.
     expect(button(group, "Start")).toBeEnabled();
+  });
+
+  it("says at least before the figures when no billed answer scaled the estimate", async () => {
+    const { api, job } = worker(SAMPLE_BACKFILL_IDLE);
+    const { studio, group } = await sourcesPage(api);
+    await studio.user.click(button(group, "Answer existing records"));
+    const estimate = WAITING.estimate;
+    if (estimate === null) {
+      throw new Error("the waiting job has its estimate");
+    }
+    job.status = { ...WAITING, estimate: { ...estimate, dollars: 0.0047, calibration: null } };
+    // $0.0047 rounded down, never up to $0.005, so the floor stays one.
+    expect(
+      await refreshed(
+        studio,
+        "Estimated: 1,200 records, at least $0.004 (at least 102k input tokens), at 50 records a second: about 24 seconds.",
+      ),
+    ).toBeVisible();
+    expect(within(group).queryByText(/about \$/)).toBeNull();
   });
 
   it("says a cap set to keep answering is crossed, not paused at", async () => {

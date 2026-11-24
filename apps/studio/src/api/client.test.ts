@@ -251,6 +251,19 @@ describe("the backfill calls", () => {
     });
   });
 
+  it("reads an estimate from a worker of an earlier version, which names no calibration, as a floor", async () => {
+    const waiting = sampleBackfill("waiting", { token: "token-1" });
+    if (waiting.estimate === null) {
+      throw new Error("the sample's waiting job has its estimate");
+    }
+    const { calibration: _calibration, ...older } = waiting.estimate;
+    const t = recording(() => json({ ...waiting, estimate: older }));
+
+    const read = await createApiClient(t.fetch).backfillStatus("listings");
+
+    expect(read.estimate).toEqual({ ...older, calibration: null });
+  });
+
   it("turns the worker's refusals into the error with its code and fix", async () => {
     const t = recording(() =>
       json(

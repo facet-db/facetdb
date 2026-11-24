@@ -19,4 +19,4 @@ export { CONFIG_KEY, projectConfigQuery } from "./queries.ts";
 export { ReplaceAnyway } from "./ReplaceAnyway.tsx";
 export type { QuestionsSearch } from "./search.ts";
 export { questionsSearch } from "./search.ts";
-export { countWords, dollarWords, issueWords, plural } from "./words.ts";
+export { countWords, dollarWords, floorDollarWords, issueWords, plural } from "./words.ts";
