@@ -8,10 +8,11 @@ import {
 import {
   createWebhookAction,
   isLoopbackHost,
+  isPrivateHost,
   type Outbox,
   type WebhookConfig,
 } from "@facetdb/server";
-import type { ActionCall, ProjectConfig, SourceConfig } from "../../config/index.ts";
+import type { ActionCall, JsonValue, ProjectConfig, SourceConfig } from "../../config/index.ts";
 import { VERSION } from "../../index.ts";
 import { definePlugin, type Plugin } from "../define.ts";
 import type { HostedPlugin, PluginHost } from "../host.ts";
@@ -71,9 +72,19 @@ const ENDPOINT_NAME_RULE =
 /**
  * Why `text` cannot be an endpoint, or undefined when it can: an address with no username or
  * password and no `#` part, over https, or http to this machine alone (the receiver's own words
- * name what to write). The words never quote the address: one may carry a token in its query.
+ * name what to write), and, unless `allowPrivate`, not on this machine or a private network. The
+ * words never quote the address, one may carry a token in its query: only its host.
+ *
+ * What this sees is the host as written. A public name that resolves to a private address, or a
+ * receiver that redirects to one, is judged when the delivery is sent, never here. `written` is
+ * where the address sits, so the fix reads as the user writes it there: an endpoint of
+ * `plugins.webhook.endpoints`, or a `webhook({ url })` action.
  */
-export function endpointProblem(text: string): string | undefined {
+export function endpointProblem(
+  text: string,
+  allowPrivate = false,
+  written: "endpoint" | "action" = "endpoint",
+): string | undefined {
   const example = '"https://hooks.example.com/facetdb"';
   // A backslash, a space, a control character and an invisible one are read differently by
   // different URL parsers, as studioUrl's rule says: the address must mean one thing.
@@ -90,15 +101,55 @@ export function endpointProblem(text: string): string | undefined {
   if (text.includes("#")) {
     return 'an endpoint has no "#" part, which is never sent to the receiver: remove everything from the "#" on';
   }
+  // The parser has already read every spelling of an address (127.1, 2130706433, 0x7f.1, a
+  // trailing dot, upper case, percent-encoding) into the one `hostname` judged here.
+  if (!allowPrivate && isPrivateHost(url.hostname)) {
+    const fix =
+      written === "action"
+        ? 'webhook({ url: "…", allowPrivate: true })'
+        : '{ url: "…", allowPrivate: true }';
+    return `${url.hostname} is on this machine or a private network: if the receiver is yours, write ${fix}`;
+  }
   return undefined;
 }
 
-/** An endpoint's address, judged at load by `endpointProblem`. */
-function endpointUrl(missing: string) {
-  return z.string({ error: missing }).superRefine((text, context) => {
-    const problem = endpointProblem(text);
+/** `allowPrivate` beside an endpoint's url and a webhook action's: one field, one description. */
+function allowPrivateField() {
+  return z
+    .boolean({ error: "allowPrivate is true or false" })
+    .optional()
+    .describe(
+      "Send to this url even though it is on this machine or a private network, such as a receiver you run beside the worker. Off by default: a webhook goes to a public address only.",
+    );
+}
+
+/** An endpoint as `endpoints` writes it: its address, or `{ url, allowPrivate }`. */
+export type WebhookEndpoint =
+  | string
+  | { readonly url: string; readonly allowPrivate?: boolean | undefined };
+
+/** The address an endpoint sends to, in either form. */
+export function endpointAddress(endpoint: WebhookEndpoint): string {
+  return typeof endpoint === "string" ? endpoint : endpoint.url;
+}
+
+/** One endpoint of `endpoints`, in either form, its address judged at load by `endpointProblem`. */
+function endpointSchema(missing: string) {
+  const written = z.strictObject({
+    url: z.string({ error: missing }),
+    allowPrivate: allowPrivateField(),
+  });
+  return z.union([z.string(), written], { error: missing }).superRefine((value, context) => {
+    const problem =
+      typeof value === "string"
+        ? endpointProblem(value)
+        : endpointProblem(value.url, value.allowPrivate === true);
     if (problem !== undefined) {
-      context.addIssue({ code: "custom", message: problem });
+      context.addIssue({
+        code: "custom",
+        message: problem,
+        ...(typeof value === "string" ? {} : { path: ["url"] }),
+      });
     }
   });
 }
@@ -109,8 +160,8 @@ const settings = z.strictObject({
   endpoints: z
     .record(
       z.string().regex(ENDPOINT_NAME, ENDPOINT_NAME_RULE),
-      endpointUrl(
-        'an endpoint is an address in quotes, such as "https://hooks.example.com/facetdb"',
+      endpointSchema(
+        'an endpoint is an address in quotes, such as "https://hooks.example.com/facetdb", or { url: "https://hooks.example.com/facetdb", allowPrivate: true } for a receiver on a private network',
       ),
       { error: (issue) => (issue.code === "invalid_key" ? ENDPOINT_NAME_RULE : undefined) },
     )
@@ -119,12 +170,41 @@ const settings = z.strictObject({
 
 type Settings = Infer<typeof settings>;
 
-/** The settings of one `webhook({ url })`: where its decisions go. */
-const sendSettings = z.strictObject({
-  url: endpointUrl(
-    'url is where each decision is sent, written as the address itself: webhook({ url: "https://hooks.example.com/facetdb" })',
-  ),
-});
+/** The settings of one `webhook({ url, allowPrivate })`: where its decisions go. */
+const sendSettings = z
+  .strictObject({
+    url: z.string({
+      error:
+        'url is where each decision is sent, written as the address itself: webhook({ url: "https://hooks.example.com/facetdb" })',
+    }),
+    allowPrivate: allowPrivateField(),
+  })
+  .superRefine((value, context) => {
+    const problem = endpointProblem(value.url, value.allowPrivate === true, "action");
+    if (problem !== undefined) {
+      context.addIssue({ code: "custom", message: problem, path: ["url"] });
+    }
+  });
+
+/**
+ * A webhook action's settings as they run: `allowPrivate` belongs to the url beside it, so an
+ * `else` with a url of its own carries its own flag, never the action's (core's pipeline lays
+ * `else` over the action's settings, which would hand it the action's). An `else` with no url sends
+ * to the action's url, under the action's flag. The action host judges these at load and
+ * `webhookStep` runs them, so both read one rule.
+ */
+export function sendInvocation(config: ActionCall["config"]): ActionCall["config"] {
+  const otherwise = config["else"];
+  if (!isSettings(otherwise)) {
+    return config;
+  }
+  const flag = Object.hasOwn(otherwise, "url") ? otherwise["allowPrivate"] : config["allowPrivate"];
+  return { ...config, else: { ...otherwise, allowPrivate: flag === true } };
+}
+
+function isSettings(value: JsonValue | undefined): value is { readonly [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 /** The settings of one `webhook:<name>` address: the endpoint it names. */
 const channelSettings = z.object({ where: z.string().regex(ENDPOINT_NAME, ENDPOINT_NAME_RULE) });
@@ -203,7 +283,7 @@ function webhookPlugin(outbox: WebhookOutbox | undefined): Plugin<Settings> {
           }
           await outbox.outbox.enqueue({
             projectId: outbox.projectId,
-            endpoint,
+            endpoint: endpointAddress(endpoint),
             origin: { plugin: WEBHOOK_PLUGIN, entry: WEBHOOK_CHANNEL },
             payloadOf: (delivery): WebhookAlertPayload => ({
               event: message.kind === "system-alert" ? "alert" : "notification",
@@ -295,8 +375,8 @@ export function webhookRefusal(
   }
   if (host.plugin(WEBHOOK_PLUGIN)?.plugin === BUILTIN_WEBHOOK) {
     const settings = host.contextFor(WEBHOOK_PLUGIN, NEVER).config as Settings;
-    for (const address of Object.values(settings.endpoints)) {
-      named.add(address);
+    for (const endpoint of Object.values(settings.endpoints)) {
+      named.add(endpointAddress(endpoint));
     }
   }
   return named.has(row.endpoint) ? undefined : WEBHOOK_ENDPOINT_GONE;
@@ -333,16 +413,17 @@ export function webhookStep(
       position,
     },
   });
-  return configureAction<WebhookConfig>(
+  return configureAction<SendConfig>(
     `${WEBHOOK_CHANNEL}.${WEBHOOK_ACTION}`,
     {
       async run(record, decisions, config) {
         // The file's JSON, as `facetdb review` reads it unchecked: an address is text that the
-        // load-time rule takes, or nothing is queued.
+        // load-time rule takes, under the flag written beside it, or nothing is queued.
         const address: unknown = config.url;
+        const allowPrivate: unknown = config.allowPrivate;
         const problem =
           typeof address === "string"
-            ? endpointProblem(address)
+            ? endpointProblem(address, allowPrivate === true, "action")
             : "url is not written as an address in the config file";
         if (problem !== undefined) {
           throw new Error(`the webhook was not queued, as its url is refused: ${problem}`);
@@ -358,7 +439,11 @@ export function webhookStep(
       },
     },
     // The action host checked `url` and `else` against the action's schema at load, the url
-    // written as text (never a variable): this is the invocation core's pipeline reads.
-    call.config as ActionInvocation<WebhookConfig>,
+    // written as text (never a variable), each `else` under its own flag (`sendInvocation`): this
+    // is the invocation core's pipeline reads.
+    sendInvocation(call.config) as ActionInvocation<SendConfig>,
   );
 }
+
+/** What one webhook step runs with: where to send, and whether that address may be private. */
+type SendConfig = WebhookConfig & { readonly allowPrivate?: boolean };

@@ -12,6 +12,7 @@ import {
   pathText,
   type Setting,
   settingsOf,
+  urlEntry,
   variableOf,
 } from "./settings.ts";
 import { changesWords, lineWords } from "./words.ts";
@@ -80,6 +81,18 @@ function Item({
     return (
       <span className="inline-flex flex-wrap items-baseline gap-x-2">
         <span className="text-text-2">at</span> <code>{value}</code>
+      </span>
+    );
+  }
+  // An endpoint written `{ url, allowPrivate }`: its host, and the flag in words.
+  const endpoint = urlEntry(value);
+  if (endpoint !== undefined && places.hostOnly.has(pathText([...at, "url"]))) {
+    return (
+      <span className="inline-flex flex-wrap items-baseline gap-x-2">
+        <span className="text-text-2">at</span> <code>{endpoint.url}</code>{" "}
+        {endpoint.allowPrivate ? (
+          <span className="text-text-2">private network allowed</span>
+        ) : null}
       </span>
     );
   }

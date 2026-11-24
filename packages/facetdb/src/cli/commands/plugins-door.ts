@@ -8,7 +8,12 @@ import type {
   PluginsDoor,
 } from "@facetdb/server";
 import { toJSONSchema } from "zod";
-import { formatPath, type PluginSettings, type ProjectConfig } from "../../config/index.ts";
+import {
+  formatPath,
+  type JsonValue,
+  type PluginSettings,
+  type ProjectConfig,
+} from "../../config/index.ts";
 import {
   BUILTIN_PLUGINS,
   type HostedPlugin,
@@ -102,6 +107,11 @@ function hostOf(address: string): string {
   return URL.canParse(address) ? new URL(address).host : "an address that is not a URL";
 }
 
+/** Whether a setting is an object of settings, not a list or a single value. */
+function isEntries(value: JsonValue): value is { readonly [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * The settings as the page sees them: as the file writes them, but each of the built-in webhook's
  * endpoint addresses cut to its host, since the rest of an address can hold a token; an endpoint
@@ -123,12 +133,18 @@ function shownSettings(hosted: HostedPlugin): {
   }
   const hostOnly: string[] = [];
   const cut = Object.fromEntries(
-    Object.entries(endpoints).map(([name, address]) => {
-      if (typeof address !== "string") {
-        return [name, address];
+    Object.entries(endpoints).map(([name, endpoint]) => {
+      if (typeof endpoint === "string") {
+        hostOnly.push(formatPath(["endpoints", name]));
+        return [name, hostOf(endpoint)];
       }
-      hostOnly.push(formatPath(["endpoints", name]));
-      return [name, hostOf(address)];
+      // `{ url, allowPrivate }`: its url cut as a written address is.
+      const url = isEntries(endpoint) ? endpoint["url"] : undefined;
+      if (isEntries(endpoint) && typeof url === "string") {
+        hostOnly.push(formatPath(["endpoints", name, "url"]));
+        return [name, { ...endpoint, url: hostOf(url) }];
+      }
+      return [name, endpoint];
     }),
   );
   return { values: { ...settings, endpoints: cut }, hostOnly };

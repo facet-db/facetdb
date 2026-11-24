@@ -110,6 +110,16 @@ export function withValue(entries: Entries, path: Path, value: Json | undefined)
     : { ...entries, [step]: next };
 }
 
+/** A value written `{ url, allowPrivate }` (the built-in webhook's endpoint), or undefined. */
+export function urlEntry(
+  value: Json,
+): { readonly url: string; readonly allowPrivate: boolean } | undefined {
+  const url = isEntries(value) ? value["url"] : undefined;
+  return isEntries(value) && typeof url === "string"
+    ? { url, allowPrivate: value["allowPrivate"] === true }
+    : undefined;
+}
+
 /** Whether two values are the same JSON. */
 export function same(a: Json | undefined, b: Json | undefined): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -150,6 +160,22 @@ function fieldsOf(node: Entries): Entries | undefined {
   return isEntries(properties) && Object.keys(properties).length > 0 ? properties : undefined;
 }
 
+/**
+ * A map's value written as text or as an object holding its text `url`: the built-in webhook's
+ * endpoint, `ops: "https://…"` or `ops: { url, allowPrivate }`, drawn as a map still.
+ */
+function isTextOrUrl(node: Json): boolean {
+  const options = isEntries(node) ? node["anyOf"] : undefined;
+  return (
+    Array.isArray(options) &&
+    options.length > 0 &&
+    options.every((option) => {
+      const url = isEntries(option) ? fieldsOf(option)?.["url"] : undefined;
+      return isText(option) || (url !== undefined && isText(url));
+    })
+  );
+}
+
 function shapeOf(node: Entries): Shape {
   const choices = node["enum"];
   const type = node["type"];
@@ -179,7 +205,9 @@ function shapeOf(node: Entries): Shape {
     }
     case "object": {
       const values = node["additionalProperties"];
-      return values !== undefined && isText(values) ? { kind: "map" } : OTHER;
+      return values !== undefined && (isText(values) || isTextOrUrl(values))
+        ? { kind: "map" }
+        : OTHER;
     }
     default:
       return OTHER;

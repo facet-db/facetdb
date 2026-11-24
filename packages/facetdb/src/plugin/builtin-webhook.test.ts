@@ -961,16 +961,16 @@ describe("the built-in webhook (builtin-webhook)", () => {
         expect(channel.message).toContain(`  - plugins.webhook.endpoints.ops: ${words}`);
         expect(channel.message).not.toContain(url);
       }
-      // A receiver on this machine may be reached over plain HTTP.
+      // A receiver on this machine may be reached over plain HTTP, the config allowing a private
+      // address.
       for (const url of [
         "http://localhost:8080/hook",
         "http://127.0.0.1/hook",
         "http://[::1]/hook",
       ]) {
-        const host = await hostFor(project({ actions: [webhook({ url })] }));
-        expect(() =>
-          checkActions(project({ actions: [webhook({ url })] }), host, ENV),
-        ).not.toThrow();
+        const config = project({ actions: [webhook({ url, allowPrivate: true })] });
+        const host = await hostFor(config);
+        expect(() => checkActions(config, host, ENV)).not.toThrow();
       }
     });
 

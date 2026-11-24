@@ -38,6 +38,7 @@ import {
 import {
   isWebhookSend,
   type SourceWebhooks,
+  sendInvocation,
   WEBHOOK_ACTION,
   WEBHOOK_CHANNEL,
   WEBHOOK_PLUGIN,
@@ -265,7 +266,10 @@ function checkAction(host: PluginHost, call: ActionCall, where: string, env: Env
     return;
   }
   const entry = entryOf(host, call, where);
-  const { own, otherwise } = splitSettings(call);
+  // The built-in webhook's `else` is judged under its own allowPrivate, as its step runs it.
+  const { own, otherwise } = splitSettings(
+    isWebhookSend(call) ? { ...call, config: sendInvocation(call.config) } : call,
+  );
   // The built-in webhook's step queues its endpoint row at the decision, its address in the row
   // (`actionSteps`), so the address is written in the file: a variable would be queued unread.
   const fed = isWebhookSend(call) ? [...variablesIn(own), ...variablesIn(otherwise ?? {})] : [];
@@ -374,11 +378,13 @@ function checkWebhookEndpoints(config: ProjectConfig, host: PluginHost): void {
       (name) => host.plugin(name)?.packageName === WEBHOOK_PLUGIN,
     ) ?? "webhook";
   const where = `${formatPath(["plugins", key])}.${fed.path}`;
-  const name = fed.path.startsWith("endpoints.") ? fed.path.slice("endpoints.".length) : "ops";
+  // An endpoint is `ops: "…"` or `ops: { url: "…", allowPrivate }`: the fix writes the address
+  // where the variable was named.
+  const [, name = "ops", field] = fed.path.split(".");
   throw new PluginHostError(
     "plugin-settings",
     `${where} reads ${fed.variable} from the environment, but ${ADDRESS_WORDS}`,
-    `write the address in ${where}: ${name}: "https://hooks.example.com/facetdb"`,
+    `write the address in ${where}: ${field ?? name}: "https://hooks.example.com/facetdb"`,
   );
 }
 

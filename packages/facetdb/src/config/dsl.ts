@@ -54,10 +54,20 @@ export type WebhookOptions = {
    * the address itself, which is no secret (the signing secret is `plugins.webhook.secret`).
    */
   readonly url: string;
+  /**
+   * Send to `url` even though it is on this machine or a private network (localhost, 10.x,
+   * 192.168.x, 169.254.x, an IPv6 unique-local or link-local address, a name under `.internal`),
+   * such as a receiver you run beside the worker. Off by default: a webhook goes to a public
+   * address only, and one written as a private address is refused when the config loads.
+   */
+  readonly allowPrivate?: boolean;
   /** Send only when this holds: a decision value, the status, or `{ atLeast }` on a number. */
   readonly when?: ActionCondition;
-  /** Where to send instead when `when` does not hold; without it nothing is sent then. */
-  readonly else?: { readonly url: string };
+  /**
+   * Where to send instead when `when` does not hold; without it nothing is sent then. Its
+   * `allowPrivate` is its own: the action's does not carry over to another url.
+   */
+  readonly else?: { readonly url: string; readonly allowPrivate?: boolean };
 };
 
 /**
@@ -73,11 +83,21 @@ export type WebhookOptions = {
  * number, the outbox's sequence number taken when queued.
  */
 export function webhook(options: WebhookOptions): ActionCall {
-  const { url, when, else: otherwise } = options;
+  const { url, allowPrivate, when, else: otherwise } = options;
   return actionCall("@facetdb/webhook", "send", {
     url,
+    ...(allowPrivate === undefined ? {} : { allowPrivate }),
     ...(when === undefined ? {} : { when }),
-    ...(otherwise === undefined ? {} : { else: { url: otherwise.url } }),
+    ...(otherwise === undefined
+      ? {}
+      : {
+          else: {
+            url: otherwise.url,
+            ...(otherwise.allowPrivate === undefined
+              ? {}
+              : { allowPrivate: otherwise.allowPrivate }),
+          },
+        }),
   });
 }
 

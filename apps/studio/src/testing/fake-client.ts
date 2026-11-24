@@ -1426,7 +1426,18 @@ export const SAMPLE_PLUGINS: InstalledPlugins = {
               default: {},
               type: "object",
               propertyNames: { type: "string" },
-              additionalProperties: { type: "string" },
+              // An endpoint is its address or `{ url, allowPrivate }`.
+              additionalProperties: {
+                anyOf: [
+                  { type: "string" },
+                  {
+                    type: "object",
+                    properties: { url: { type: "string" }, allowPrivate: { type: "boolean" } },
+                    required: ["url"],
+                    additionalProperties: false,
+                  },
+                ],
+              },
             },
           },
           required: ["secret"],
@@ -1434,12 +1445,15 @@ export const SAMPLE_PLUGINS: InstalledPlugins = {
         },
         values: {
           secret: { env: "FACETDB_WEBHOOK_SECRET" },
-          endpoints: { ops: "hooks.example.com" },
+          endpoints: {
+            ops: "hooks.example.com",
+            lan: { url: "10.0.0.9:8443", allowPrivate: true },
+          },
         },
         variables: [
           { path: "secret", variable: "FACETDB_WEBHOOK_SECRET", secret: true, set: true },
         ],
-        hostOnly: ["endpoints.ops"],
+        hostOnly: ["endpoints.ops", "endpoints.lan.url"],
       },
     },
   ],

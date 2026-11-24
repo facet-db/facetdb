@@ -249,5 +249,6 @@ export {
   retryAfterDelayMs,
   retryDelayMs,
 } from "./webhooks/outbox.ts";
+export { isPrivateAddress, isPrivateHost } from "./webhooks/private-address.ts";
 export type { Verification } from "./webhooks/sign.ts";
 export { SIGNATURE_TOLERANCE_MS, sign, verify, WEBHOOK_SIGNATURE_HEADER } from "./webhooks/sign.ts";

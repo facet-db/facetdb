@@ -353,7 +353,27 @@
                 "pattern": "^[a-z][a-z0-9_-]{0,62}$"
               },
               "additionalProperties": {
-                "type": "string"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      },
+                      "allowPrivate": {
+                        "description": "Send to this url even though it is on this machine or a private network, such as a receiver you run beside the worker. Off by default: a webhook goes to a public address only.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "url"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
               }
             }
           },

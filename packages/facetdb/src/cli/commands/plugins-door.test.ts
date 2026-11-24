@@ -321,7 +321,7 @@ describe("the installed plugins", () => {
           secret: env("FACETDB_WEBHOOK_SECRET"),
           endpoints: {
             ops: "https://hooks.example.com/facetdb?token=s3cret-endpoint-token",
-            local: "http://localhost:8080/s3cret-path/hook",
+            local: { url: "http://localhost:8080/s3cret-path/hook", allowPrivate: true },
             pager: env("PAGER_URL"),
           },
         },
@@ -348,11 +348,11 @@ describe("the installed plugins", () => {
         secret: { env: "FACETDB_WEBHOOK_SECRET" },
         endpoints: {
           ops: "hooks.example.com",
-          local: "localhost:8080",
+          local: { url: "localhost:8080", allowPrivate: true },
           pager: { env: "PAGER_URL" },
         },
       },
-      hostOnly: ["endpoints.ops", "endpoints.local"],
+      hostOnly: ["endpoints.ops", "endpoints.local.url"],
       variables: [
         { path: "secret", variable: "FACETDB_WEBHOOK_SECRET", secret: true, set: true },
         { path: "endpoints.pager", variable: "PAGER_URL", secret: false, set: true },

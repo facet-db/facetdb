@@ -128,6 +128,10 @@ describe("the installed plugins", () => {
 
     const webhook = within(settingsOf("webhook"));
     expect(webhook.getByText("ops").parentElement).toHaveTextContent("ops at hooks.example.com");
+    // One written `{ url, allowPrivate: true }`: its host, and the flag in words.
+    expect(webhook.getByText("lan").parentElement).toHaveTextContent(
+      "lan at 10.0.0.9:8443 private network allowed",
+    );
     expect(document.body.textContent).not.toContain("https://hooks");
     const email = within(settingsOf("email"));
     expect(email.getByText("secure").closest("dt")?.nextElementSibling).toHaveTextContent("off");
