@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import {
   type BackfillEstimate,
   type BackfillReport,
   createBackfill,
   DEFAULT_BACKFILL_PACE,
+  followReview,
+  type OpenConnector,
+  restoreFromLog,
+  reviewsOf,
 } from "@facetdb/core";
 import type { ProjectConfig, SourceCall, SourceConfig } from "../../config/index.ts";
 import {
@@ -11,20 +16,23 @@ import {
   PluginHostError,
   PluginSourceFailed,
 } from "../../plugin/index.ts";
-import { requireUsableUrl } from "../engines.ts";
+import { openConnector, requireUsableUrl } from "../engines.ts";
 import { type CliDeps, CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
-import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
+import { requireUsableStoreUrl, storeSharedFor, storeSourceId, storeUrlOf } from "../store-door.ts";
 import { costWords } from "./backfill-cost.ts";
-import { addedQuestionsEnd, leftOver, wholeSetEnd } from "./backfill-left.ts";
+import { addedQuestionsEnd, fromLogEnd, leftOver, wholeSetEnd } from "./backfill-left.ts";
 import {
   ALLOW_INSECURE_OPTION,
   loadPluginHost,
   loadProjectConfig,
   pluginHostForAlerts,
+  projectRef,
+  questionSetOf,
   singleTarget,
   sourceTable,
   type TableTarget,
 } from "./database.ts";
+import { tableRead } from "./explain.ts";
 import { pluginHostForProvider } from "./model-provider.ts";
 
 /**
@@ -113,6 +121,7 @@ type BackfillOptions = {
   readonly source?: string;
   readonly pace: string;
   readonly question?: string;
+  readonly fromLog?: boolean;
   readonly yes: boolean;
   readonly allowInsecure?: boolean;
 };
@@ -157,6 +166,116 @@ function parseQuestions(
 
 const whole = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
+/**
+ * `facetdb backfill --from-log`: each record the decision log answered gets its latest logged
+ * decision written back (core's `restoreFromLog`), with no model call and no action: no provider,
+ * spending gate or action is built, so nothing is asked, reserved or sent. The count comes first
+ * and nothing is written without a yes (or `--yes`); `--dry-run` reads the log and the source and
+ * writes nothing. The log lives in the store, so a dry run opens it too, as `export --dry-run`
+ * does. A table's records are read and written through its engine, a plugin source's in the store.
+ */
+async function writeBackFromLog(
+  deps: CliDeps,
+  print: (text: string) => void,
+  config: ProjectConfig,
+  picked: BackfillTarget,
+  run: {
+    readonly pace: number;
+    readonly dryRun: boolean;
+    readonly yes: boolean;
+    readonly allowInsecure: boolean;
+  },
+) {
+  const source = picked.kind === "table" ? picked.target.source : picked.source;
+  const { allowInsecure } = run;
+  const storeUrl = storeUrlOf(deps.env);
+  if (storeUrl === undefined) {
+    throw new CliError(
+      "database-url",
+      "DATABASE_URL is not set, so FacetDB has no decision log to write back from",
+      "set DATABASE_URL to the connection string of the database FacetDB keeps its store in",
+    );
+  }
+  // Before any connection: the store's URL, then the source's own.
+  requireUsableStoreUrl(storeUrl, allowInsecure, deps.env["PGHOST"]);
+  const table =
+    picked.kind === "table" ? await tableRead(deps, config, source, allowInsecure) : undefined;
+  const name =
+    table?.label ??
+    (picked.kind === "plugin" ? `${picked.call.plugin} ${picked.call.source}` : source.name);
+  const store = await deps.store({ allowInsecure });
+  const workerId = `restore-${randomUUID()}`;
+  const sourceId = storeSourceId(projectRef(deps.projectDir).id, source.name);
+  let connector: OpenConnector | undefined;
+  try {
+    connector =
+      table === undefined
+        ? undefined
+        : await openConnector(table.engine, table.target, table.url, {
+            clock: deps.clock,
+            allowInsecure,
+            storeShared: storeSharedFor(deps.env, source),
+            workerId,
+          });
+    const reviews = reviewsOf(store.reviews, sourceId);
+    const report = await restoreFromLog(
+      {
+        questionSet: questionSetOf(config, source),
+        log: store.log(sourceId),
+        connector: connector ?? store.connector({ sourceId, fields: source.read, workerId }),
+        follow: (record, decision, answer) => followReview(reviews, record, decision, answer),
+        clock: deps.clock,
+      },
+      {
+        pace: run.pace,
+        dryRun: run.dryRun,
+        confirm: async (records) => {
+          print(
+            `Write back from the decision log, ${name} (source ${source.name}): ${records === 0 ? "no record has" : `${whole.format(records)} ${records === 1 ? "record has" : "records have"}`} a logged answer.`,
+          );
+          if (records === 0) {
+            return true;
+          }
+          print(
+            "Each gets its latest logged decision, a person's included, unless it changed since. No model call and no action, so no cost.",
+          );
+          if (run.dryRun) {
+            return true;
+          }
+          print(`Pace: at most ${run.pace} records written per second.`);
+          if (run.yes) {
+            return true;
+          }
+          const answer = await deps.io.prompt("Write them back? Type yes to continue: ");
+          return answer.trim().toLowerCase() === "yes";
+        },
+        onProgress: (looked, records) => {
+          if (looked < records) {
+            print(`${whole.format(looked)} of ${whole.format(records)} records looked at.`);
+          }
+        },
+      },
+    );
+    const counts = {
+      written: report.written.length,
+      alreadyCurrent: report.current.length,
+      changed: report.changed.length,
+      missingQuestion: report.incomplete.length,
+      kept: report.kept.length,
+      gone: report.gone.length,
+    };
+    if (report.status === "declined") {
+      print("Nothing was written. Run the command again and type yes (or pass --yes) to start.");
+      return { ok: true, fromLog: true, dryRun: run.dryRun, status: report.status, ...counts };
+    }
+    print(fromLogEnd(report, source.name, run.dryRun));
+    return { ok: true, fromLog: true, dryRun: run.dryRun, status: report.status, ...counts };
+  } finally {
+    await connector?.close();
+    await store.close();
+  }
+}
+
 /** The estimate in words: records, tokens, dollars ("at least" when nothing billed scaled it). */
 function describeEstimate(estimate: BackfillEstimate): string {
   return `${whole.format(estimate.records)} records to answer, ${costWords(estimate)}.`;
@@ -197,13 +316,34 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       flags: "--question <names>",
       description: "ask only these questions (comma-separated), for questions you just added",
     },
+    {
+      flags: "--from-log",
+      description:
+        "write each answered record's latest logged decision back, with no model call and no action (after a table rebuild)",
+    },
     { flags: "--yes", description: "start without asking, after showing the estimate" },
     ALLOW_INSECURE_OPTION,
   ],
   run: async ({ options, deps, print }) => {
+    if (options.fromLog === true && options.question !== undefined) {
+      throw new CliError(
+        "from-log-question",
+        "--from-log writes back every question the log answered, so it does not take --question",
+        "run facetdb backfill --from-log without --question; for a question you just added, run facetdb backfill --question <names> after it",
+        EXIT_USAGE,
+      );
+    }
     const pace = parsePace(options.pace);
     const config = await loadProjectConfig(deps, options.config);
     const picked = backfillTarget(config, options.source);
+    if (options.fromLog === true) {
+      return writeBackFromLog(deps, print, config, picked, {
+        pace,
+        dryRun: options.dryRun,
+        yes: options.yes,
+        allowInsecure: options.allowInsecure === true,
+      });
+    }
     const source = picked.kind === "table" ? picked.target.source : picked.source;
     const onlyQuestions = parseQuestions(
       options.question,

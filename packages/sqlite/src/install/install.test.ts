@@ -308,8 +308,9 @@ describe("run", () => {
 
   /*
    * An ORM's table rebuild copies FacetDB's columns without their marks. migrate names the case and
-   * the recovery, and the recovery, run as printed, brings the columns back marked with the
-   * answered records queued for the worker to write back from the decision log.
+   * the recovery, and the recovery, run as printed, brings the columns back marked and queues
+   * nothing: `facetdb backfill --from-log` writes the answered records back from the decision log
+   * with no action, where the worker's write-back of a queued record runs its actions again.
    */
   describe("a table rebuilt since the install (lost marks)", () => {
     /** Prisma's and Drizzle's form: the table made again with every column, the rows copied. */
@@ -333,12 +334,11 @@ describe("run", () => {
       "listings has columns named is_scam, is_scam_probability, facetdb_status, facetdb_updated_at and facetdb_reviewed with FacetDB's names and types but without FacetDB's mark (/* facetdb */ in the table's definition), on a table FacetDB installed for this project where no column carries the mark any more and FacetDB's two triggers are gone: the table was rebuilt since (a new table, the rows copied, the old one dropped and the new one renamed, as an ORM migration that copies every column does, or a hand-written create table … as select), which copies columns and their values but not their marks and drops the triggers, so changes made since were not queued. SQLite cannot mark a column without rebuilding the table again, and FacetDB never adopts an unmarked column: it may be the application's own.";
 
     const RECOVERY = [
-      "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it queues every record FacetDB has written to and drops the copies:",
+      "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the copies:",
       "  begin immediate;",
-      `  insert or ignore into "facetdb_jobs" ("table_name", "record_key") select 'listings', "id" from "listings" where "facetdb_updated_at" is not null;`,
       ...COPIES.map((column) => `  alter table "listings" drop column "${column}";`),
       "  commit;",
-      "Then run facetdb migrate, which adds the columns back, marked, with the triggers, and start facetdb worker: it writes each queued record's decision back from the decision log without asking the model, and runs the record's actions again as every write does (webhooks, plugins). It asks the model for a queued record whose state changed since its last answer, whose question set or model version changed since, or whose last outcome was an error or held, and those asks skip backfill's estimate. facetdb backfill asks the records never answered, after its estimate. If the application made these columns itself, rename the question or the column instead.",
+      "Then run facetdb migrate, which adds the columns back, marked, with the triggers, and then facetdb backfill --from-log, which writes each answered record's latest logged decision back, a person's included, without asking the model or running any action, and names what is left for facetdb backfill. Then start facetdb worker again. If the application made these columns itself, rename the question or the column instead.",
     ].join("\n");
 
     /** The listings installed, one record decided by the worker and one never asked, the queue empty. */
@@ -363,7 +363,7 @@ describe("run", () => {
       });
     });
 
-    it("the recovery run as printed brings the columns back marked, the answered record queued and the values gone only from the table", async () => {
+    it("the recovery run as printed brings the columns back marked, queues nothing, and the values are gone only from the table", async () => {
       await decided();
       execute(file, ORM_REBUILD);
       const refused = await plan();
@@ -376,10 +376,8 @@ describe("run", () => {
         .join("\n");
       execute(file, script);
       expect(columns(file)).toEqual(["id", "title", "description", "price"]);
-      // Only the record FacetDB had written to is queued: the one never asked waits for a backfill.
-      expect(jobs(file.open())).toEqual([
-        { table_name: "listings", record_key: "1", claimed_by: null, claimed_at: null },
-      ]);
+      // Nothing queued: a queued record's write-back would run its actions again.
+      expect(jobs(file.open())).toEqual([]);
 
       const again = planned(await plan());
       expect(again.statements.filter((one) => one.purpose === "columns")).toHaveLength(5);
@@ -395,13 +393,13 @@ describe("run", () => {
         { id: 1, is_scam: null, facetdb_status: "pending" },
         { id: 2, is_scam: null, facetdb_status: "pending" },
       ]);
-      expect(jobs(db)).toHaveLength(1);
+      expect(jobs(db)).toEqual([]);
       // The triggers are back: the application's next change is queued again.
       db.exec("update listings set title = 'red bike' where id = 2");
-      expect(jobs(db)).toHaveLength(2);
+      expect(jobs(db)).toHaveLength(1);
     });
 
-    it("names a rebuild that copied one column, and queues nothing when no facetdb_updated_at survived", async () => {
+    it("names a rebuild that copied one column, with the same recovery when no facetdb_updated_at survived", async () => {
       await decided();
       execute(
         file,
@@ -418,14 +416,15 @@ describe("run", () => {
       expect(result.refusal.message).toMatch(
         /^listings has a column named is_scam with FacetDB's name and type but without FacetDB's mark/,
       );
-      // Queuing every record would ask the model for each one never answered, unpaced, unestimated.
+      // The answered records are found from the log, not from the copy: the step after migrate is
+      // the same write-back, and nothing is queued.
       expect(result.refusal.fix).toBe(
         [
-          "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the copy, and queues nothing, since the table kept no facetdb_updated_at to tell the answered records from the others:",
+          "Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the copy:",
           "  begin immediate;",
           `  alter table "listings" drop column "is_scam";`,
           "  commit;",
-          "Then run facetdb migrate, which adds the column back, marked, with the triggers. facetdb backfill asks the records never answered, after its estimate; an answered record's columns fill again when its state next changes, and facetdb explain shows its answers meanwhile. If the application made this column itself, rename the question or the column instead.",
+          "Then run facetdb migrate, which adds the column back, marked, with the triggers, and then facetdb backfill --from-log, which writes each answered record's latest logged decision back, a person's included, without asking the model or running any action, and names what is left for facetdb backfill. Then start facetdb worker again. If the application made this column itself, rename the question or the column instead.",
         ].join("\n"),
       );
     });

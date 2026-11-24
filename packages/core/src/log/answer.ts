@@ -61,7 +61,7 @@ export async function writeAnswer(
 ): Promise<WrittenAnswer> {
   let decidedFrom = history;
   for (;;) {
-    const decision = decisionOf(entry, questionSet, decidedFrom);
+    const decision = answerDecision(entry, questionSet, decidedFrom);
     const result = await write(entry.key, decision, entry.stateHash);
     if (!result.written) {
       return { ...result, decision, history: decidedFrom };
@@ -79,9 +79,9 @@ export async function writeAnswer(
  * The row's decision for `entry` over `history`: every question decided by the thresholds, a
  * standing person's value laid over its question, and `reviewed` set when a person's value is in
  * it, so a row that carries a person's decision says a person decided even when the person's own
- * write never landed.
+ * write never landed. `restoreFromLog` compares a row with it before writing.
  */
-function decisionOf(
+export function answerDecision(
   entry: AnswerEntry,
   questionSet: QuestionSet,
   history: readonly LogEntry[],

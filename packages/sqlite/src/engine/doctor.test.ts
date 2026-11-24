@@ -150,6 +150,10 @@ describe("doctor's marks check", () => {
       /^listings has columns named is_scam, is_scam_probability, facetdb_status, facetdb_updated_at and facetdb_reviewed with FacetDB's names and types but without FacetDB's mark/,
     );
     expect(marks.fix).toContain('  alter table "listings" drop column "is_scam";');
+    // The step after migrate is the write-back from the log, which runs no action.
+    expect(marks.fix).toContain(
+      "Then run facetdb migrate, which adds the columns back, marked, with the triggers, and then facetdb backfill --from-log,",
+    );
   });
 
   it("fails after a create table as select rebuild too, which also drops the key", async () => {

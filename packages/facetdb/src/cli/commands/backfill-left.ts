@@ -1,4 +1,4 @@
-import type { BackfillReport } from "@facetdb/core";
+import type { BackfillReport, RestoreReport } from "@facetdb/core";
 
 /**
  * The closing line of an added-question backfill, said alike by `facetdb backfill
@@ -120,4 +120,52 @@ export function wholeSetEnd(opening: string, counts: WholeSetCounts, door: Whole
     ...(door === "cli" && counts.queued > 0 ? ["Run facetdb worker to answer the queue."] : []),
   ];
   return sentences.join(" ");
+}
+
+/**
+ * The closing line of `facetdb backfill --from-log`: what was written back from the decision log,
+ * and what is left for a plain `facetdb backfill`, which queues a record changed since its answer,
+ * one answered before a question was added, and one never answered (the log holds no answer for
+ * those, so they are named, never counted). The run queued nothing: "queued" belongs to a key
+ * `enqueue` returned. A part that counts zero is left out.
+ *
+ * "Done: 3 written, 1 already current. 2 changed since their answer: run facetdb backfill --source
+ * listings to queue them, and any record never answered."
+ */
+export function fromLogEnd(
+  report: Pick<RestoreReport, "written" | "current" | "changed" | "incomplete" | "kept" | "gone">,
+  source: string,
+  dryRun: boolean,
+): string {
+  const count = (keys: readonly unknown[]): string => whole.format(keys.length);
+  const written =
+    report.written.length > 0
+      ? `${count(report.written)} ${dryRun ? "to write" : "written"}`
+      : dryRun
+        ? "nothing to write"
+        : "nothing written";
+  const parts = [
+    written,
+    ...(report.current.length > 0 ? [`${count(report.current)} already current`] : []),
+    ...(report.kept.length > 0
+      ? [`${count(report.kept)} left with the worker's later status (error, unchecked or skipped)`]
+      : []),
+    ...(report.gone.length > 0 ? [`${count(report.gone)} no longer in the source`] : []),
+  ];
+  const opening = `${dryRun ? "Dry run, nothing written" : "Done"}: ${parts.join(", ")}.`;
+  const why = [
+    ...(report.changed.length > 0
+      ? [
+          `${count(report.changed)} changed since ${report.changed.length === 1 ? "its" : "their"} answer`,
+        ]
+      : []),
+    ...(report.incomplete.length > 0
+      ? [`${count(report.incomplete)} answered before a question was added`]
+      : []),
+  ];
+  const how = `facetdb backfill --source ${source}`;
+  const left = report.changed.length + report.incomplete.length;
+  return left === 0
+    ? `${opening} Run ${how} to queue any record never answered.`
+    : `${opening} ${why.join(" and ")}: run ${how} to queue ${left === 1 ? "it" : "them"}, and any record never answered.`;
 }

@@ -1,5 +1,5 @@
 import type { QuestionSet } from "@facetdb/core";
-import { quoteIdent, quoteLiteral } from "../sql/index.ts";
+import { quoteIdent } from "../sql/index.ts";
 import {
   dropBlockers,
   inWords,
@@ -8,14 +8,7 @@ import {
   sameName,
   type TableFacts,
 } from "./catalog.ts";
-import {
-  type CaptureTable,
-  COLUMN_MARK,
-  declaredType,
-  JOBS_TABLE,
-  ownedColumns,
-  triggerNames,
-} from "./sql.ts";
+import { type CaptureTable, COLUMN_MARK, declaredType, ownedColumns, triggerNames } from "./sql.ts";
 
 /**
  * FacetDB's columns that lost their marks. SQLite keeps each column's mark in the table's stored
@@ -28,13 +21,12 @@ import {
  * cannot mark one without rebuilding the table again, so `migrate` refuses, `doctor` fails its
  * `marks` check, and `uninstall` keeps them, all in the words below.
  *
- * The recovery loses nothing and asks the model for nothing answered at the record's current state
- * and question set: with the worker stopped, the records FacetDB has written to (the copy's
- * `facetdb_updated_at`) are queued, the copies are dropped, `facetdb migrate` adds the columns back
- * marked with the triggers, and the worker writes each queued record's decision back from the
- * decision log, which keeps every answer and every human decision, running its actions again as any
- * write does. `facetdb backfill` alone would not do it: it skips a record the log has answered at
- * its current state, and the record's columns would stay empty.
+ * The recovery loses nothing and asks the model for nothing answered at the record's current state:
+ * with the worker stopped, the copies are dropped, `facetdb migrate` adds the columns back marked
+ * with the triggers, and `facetdb backfill --from-log` writes each answered record's latest
+ * decision back from the decision log, which keeps every answer and every human decision, with no
+ * model call and no action. A plain `facetdb backfill` alone would not do it: it skips a record the
+ * log has answered at its current state, and the record's columns would stay empty.
  */
 
 /** SQLite's affinity of a declared type (§3.1 of its datatype rules), as a rebuild may respell it. */
@@ -164,35 +156,21 @@ export async function lostMarks(
       ? ""
       : `First, ${inWords(blockers.map(({ by, columns: used }) => `${by} uses ${inWords(used)}`))}, and SQLite cannot drop a column in use: drop or change ${blockers.length === 1 ? "it" : "them"}. `;
   const quoted = quoteIdent(table.name);
-  const keyColumn = key.kind === "rowid" ? "rowid" : quoteIdent(key.name);
-  // The copy's last write time tells the records FacetDB has decided from the ones it never asked.
-  // Without it nothing is queued: every record queued would ask the model for each one never
-  // answered, without backfill's pacing or estimate.
-  const written = table.columns.find((column) => sameName(column.name, "facetdb_updated_at"));
+  // Nothing is queued, with or without a facetdb_updated_at copy. The worker writing a queued
+  // record back from the log would run its actions again (webhooks, plugins); `facetdb backfill
+  // --from-log` writes every answered record back with none, and names the rest.
   const script = [
     "begin immediate;",
-    ...(written === undefined
-      ? []
-      : [
-          `insert or ignore into ${quoteIdent(JOBS_TABLE)} (${quoteIdent("table_name")}, ${quoteIdent("record_key")}) select ${quoteLiteral(table.name)}, ${keyColumn} from ${quoted} where ${quoteIdent(written.name)} is not null;`,
-        ]),
     ...columns.map((column) => `alter table ${quoted} drop column ${quoteIdent(column)};`),
     "commit;",
   ];
-  const copies = one ? "copy" : "copies";
-  const replay =
-    "it writes each queued record's decision back from the decision log without asking the model, and runs the record's actions again as every write does (webhooks, plugins). It asks the model for a queued record whose state changed since its last answer, whose question set or model version changed since, or whose last outcome was an error or held, and those asks skip backfill's estimate.";
   return {
     columns,
     message,
     fix: [
-      written === undefined
-        ? `${first}Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the ${copies}, and queues nothing, since the table kept no facetdb_updated_at to tell the answered records from the others:`
-        : `${first}Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it queues every record FacetDB has written to and drops the ${copies}:`,
+      `${first}Nothing is lost: the decision log keeps every answer and every human decision (facetdb explain shows a record's). Stop facetdb worker, then run this on the database; it drops the ${one ? "copy" : "copies"}:`,
       ...script.map((line) => `  ${line}`),
-      written === undefined
-        ? `Then run facetdb migrate, which adds the ${one ? "column" : "columns"} back, marked, with the triggers. facetdb backfill asks the records never answered, after its estimate; an answered record's columns fill again when its state next changes, and facetdb explain shows its answers meanwhile. ${unlessOwn}`
-        : `Then run facetdb migrate, which adds the ${one ? "column" : "columns"} back, marked, with the triggers, and start facetdb worker: ${replay} facetdb backfill asks the records never answered, after its estimate. ${unlessOwn}`,
+      `Then run facetdb migrate, which adds the ${one ? "column" : "columns"} back, marked, with the triggers, and then facetdb backfill --from-log, which writes each answered record's latest logged decision back, a person's included, without asking the model or running any action, and names what is left for facetdb backfill. Then start facetdb worker again. ${unlessOwn}`,
     ].join("\n"),
   };
 }
