@@ -366,8 +366,7 @@ async function enqueueAll(connector: OpenConnector): Promise<number> {
     const page = await connector.scan(cursor);
     const keys = page.rows.map((row) => row.key);
     if (keys.length > 0) {
-      await connector.enqueue(keys);
-      queued += keys.length;
+      queued += (await connector.enqueue(keys)).length;
     }
     cursor = page.next;
   } while (cursor !== null);

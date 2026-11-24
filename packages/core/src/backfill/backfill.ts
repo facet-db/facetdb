@@ -217,8 +217,16 @@ export type BackfillReport = {
    */
   readonly status: "completed" | "declined" | "stopped" | "paused" | "aborted";
   readonly estimate: BackfillEstimate;
-  /** A whole-set run: records put in the worker's queue, which asks, skips or refuses each one. */
+  /**
+   * A whole-set run: records the queue holds, by the connector's own answer (`enqueue`'s return),
+   * which the worker asks, skips or refuses each one of.
+   */
   readonly enqueued: readonly RecordKey[];
+  /**
+   * A whole-set run: records handed to the queue that the connector did not queue: a plugin source
+   * whose plugin no longer returns them on the read again. No worker asks them.
+   */
+  readonly notQueued: readonly RecordKey[];
   /** An added-question run: model calls made whose answers were logged and written. */
   readonly answered: readonly RecordKey[];
   /** Already answered at the same state (and version): not asked again. */
@@ -463,7 +471,8 @@ export function createBackfill(deps: BackfillDeps): Backfill {
      * and the worker asks, skips or refuses each one exactly as it does any change. The queue holds
      * one entry per record, so a record the worker is already asking is never answered twice. A
      * chunk the queue refuses fails every record in it: the page is not saved, and the next run
-     * starts it again and queues what is still unanswered.
+     * starts it again and queues what is still unanswered. Only the keys `enqueue` returns are
+     * counted as queued; a key of the chunk it leaves out is reported apart.
      */
     async function enqueuePage(
       rows: readonly ReadRow[],
@@ -487,8 +496,10 @@ export function createBackfill(deps: BackfillDeps): Backfill {
         const chunk = due.slice(from, from + chunkSize);
         try {
           await waitForTurn(chunk.length);
-          await connector.enqueue(chunk);
-          report.enqueued.push(...chunk);
+          const queued = new Set(await connector.enqueue(chunk));
+          for (const key of chunk) {
+            (queued.has(key) ? report.enqueued : report.notQueued).push(key);
+          }
         } catch (error) {
           for (const key of chunk) {
             report.failures.push({ key, error });
@@ -881,6 +892,7 @@ function newReport(estimated: BackfillEstimate): MutableReport {
     status: "completed",
     estimate: estimated,
     enqueued: [],
+    notQueued: [],
     answered: [],
     alreadyAnswered: [],
     discarded: [],

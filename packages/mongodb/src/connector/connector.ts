@@ -1017,6 +1017,7 @@ export async function createMongoConnector(
     /** A backfill's keys, each its own upsert in one round trip: a queued key keeps its job and claim. */
     async enqueue(keys) {
       await client.bulkUpdate(JOBS_COLLECTION, [...new Set(keys)].map(queued));
+      return keys;
     },
     /**
      * One atomic find-and-update per job, a free one or one whose lease ended, stamped with this

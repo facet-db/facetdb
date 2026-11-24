@@ -706,7 +706,7 @@ export async function createSqliteConnector(
     async enqueue(keys) {
       const unique = [...new Set(keys)];
       if (unique.length === 0) {
-        return;
+        return unique;
       }
       await client.transaction(async (tx) => {
         for (const one of unique) {
@@ -716,6 +716,7 @@ export async function createSqliteConnector(
           ]);
         }
       });
+      return unique;
     },
     async claim(limit) {
       if (limit < 1) {

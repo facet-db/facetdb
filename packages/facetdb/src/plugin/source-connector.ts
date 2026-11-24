@@ -925,14 +925,21 @@ function adapterOf(
    *   taken in by `intake`, which stores and queues a state that changed; a key it finds unchanged
    *   is queued as it is, one it leaves out or refuses is not queued.
    * A key of no page is queued as it is. Each key leaves the kept page as it is taken in.
+   * Returns the keys queued: every key but those the read again left out or refused,
+   * which the backfill reports apart instead of counting as queued.
    */
-  async function takeIn(into: BackfillStore, keys: readonly RecordKey[]): Promise<void> {
+  async function takeIn(
+    into: BackfillStore,
+    keys: readonly RecordKey[],
+  ): Promise<readonly RecordKey[]> {
     const unique = [...new Set(keys)];
     const kept = unique.flatMap((key) => {
       const row = scanned.get(key);
       return row === undefined ? [] : [row];
     });
     const waiting = unique.filter((key) => !scanned.has(key));
+    /** Stored and queued in the store's own transaction: by `insertRecord`, or by `intake`. */
+    const queued: RecordKey[] = [];
     if (kept.length > 0) {
       const { rows } = await into.read(kept.map((row) => row.key));
       const held = new Map(rows.map((row) => [row.key, row.hash]));
@@ -941,18 +948,23 @@ function adapterOf(
         const hash = held.get(row.key);
         if (hash === row.hash) {
           waiting.push(row.key);
-        } else if (hash !== undefined || !(await into.insertRecord(row.key, row.state))) {
+        } else if (hash === undefined && (await into.insertRecord(row.key, row.state))) {
+          queued.push(row.key);
+        } else {
           readAgain.push(row.key);
         }
         scanned.delete(row.key);
       }
       if (readAgain.length > 0) {
-        waiting.push(...(await intake(readAgain)).unchanged);
+        const taken = await intake(readAgain);
+        queued.push(...taken.queued);
+        waiting.push(...taken.unchanged);
       }
     }
     if (waiting.length > 0) {
-      await into.enqueue(waiting);
+      queued.push(...(await into.enqueue(waiting)));
     }
+    return queued;
   }
 
   return {

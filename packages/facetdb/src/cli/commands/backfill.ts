@@ -15,7 +15,7 @@ import { requireUsableUrl } from "../engines.ts";
 import { type CliDeps, CliError, defineCommand, EXIT_SETUP, EXIT_USAGE } from "../program.ts";
 import { requireUsableStoreUrl, storeUrlOf } from "../store-door.ts";
 import { costWords } from "./backfill-cost.ts";
-import { addedQuestionsEnd, leftOver } from "./backfill-left.ts";
+import { addedQuestionsEnd, leftOver, wholeSetEnd } from "./backfill-left.ts";
 import {
   ALLOW_INSECURE_OPTION,
   loadPluginHost,
@@ -167,6 +167,7 @@ function summary(report: BackfillReport) {
     status: report.status,
     estimate: report.estimate,
     queued: report.enqueued.length,
+    notQueued: report.notQueued.length,
     answered: report.answered.length,
     alreadyAnswered: report.alreadyAnswered.length,
     discarded: report.discarded.length,
@@ -326,7 +327,15 @@ export const backfillCommand = defineCommand<BackfillOptions>("backfill", {
       }
       print(
         onlyQuestions === undefined
-          ? `Done: ${whole.format(report.enqueued.length)} records queued for the worker, ${whole.format(report.alreadyAnswered.length)} already answered. Run facetdb worker to answer the queue.`
+          ? wholeSetEnd(
+              "Done",
+              {
+                queued: report.enqueued.length,
+                alreadyAnswered: report.alreadyAnswered.length,
+                notQueued: report.notQueued.length,
+              },
+              "cli",
+            )
           : addedQuestionsEnd(
               "Done",
               {

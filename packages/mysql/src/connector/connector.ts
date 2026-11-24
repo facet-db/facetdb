@@ -941,6 +941,7 @@ export async function createMysqlConnector(
           [name, one],
         );
       }
+      return keys;
     },
     /**
      * One atomic update stamps this claim's token, this worker and the lease's start on the oldest

@@ -326,7 +326,7 @@ describe("the worker's backfill job", () => {
         await checkpoint({ scan: this.scans });
         return super.scan(cursor);
       }
-      override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+      override async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
         await checkpoint({ keys });
         return super.enqueue(keys);
       }

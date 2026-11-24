@@ -404,8 +404,11 @@ export function createStoreConnector(
     insertRecord,
     getRecord,
     // One key per statement, pipelined, as on the customer's database: `upsertRecord` holds a job
-    // row in its transaction while it writes that record.
-    enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
+    // row in its transaction while it writes that record. Every key is then in the queue.
+    enqueue: async (keys) => {
+      await enqueueJobs(client, keys.map(queued));
+      return keys;
+    },
     async claim(limit) {
       if (limit < 1) {
         return [];

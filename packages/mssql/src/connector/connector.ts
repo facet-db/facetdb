@@ -47,7 +47,7 @@ import { connectMssqlPool, DEFAULT_MAX_CONNECTIONS, type MssqlPoolConnect } from
  * record's key in the database's one `dbo.facetdb_jobs`, shared by every installed table and keyed
  * by `(table_name, record_key)` under `ignore_dup_key`: `table_name` is the table as the trigger
  * spells it, `[dbo].[listings]`, and `record_key` the key as `keyText` writes it
- * (`convert(nvarchar(322), …)`, so a `decimal(10,2)` key is '5.00' and a uniqueidentifier is upper
+ * (`convert(nvarchar, …)`, so a `decimal(10,2)` key is '5.00' and a uniqueidentifier is upper
  * case). This connector reads every key of the table through the same expression, so a key it hands
  * out is always the queue's text, and finds a row by a key's text converted back to the key's own
  * type (`try_convert`), which keeps the primary key's seek and turns a text of another type into no
@@ -990,6 +990,7 @@ select count(*) as written from @written;`,
           one,
         ]);
       }
+      return keys;
     },
     /**
      * One statement stamps this claim's token, this worker and the lease's start on up to `limit`

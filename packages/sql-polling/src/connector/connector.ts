@@ -664,6 +664,8 @@ export function createPollingConnector(
           }
         }
       }
+      // Every key: marked and waiting, or held by this worker, which is asking it.
+      return keys;
     },
     claim(limit) {
       const taken = [...waiting].slice(0, limit);

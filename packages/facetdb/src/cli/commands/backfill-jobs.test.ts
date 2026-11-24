@@ -119,7 +119,7 @@ class JobConnector extends FakeOpenConnector {
     return super.scan(cursor);
   }
 
-  override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  override async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     this.enqueued.push(...keys);
     return super.enqueue(keys);
   }
@@ -136,7 +136,7 @@ class LoopQueue {
     this.#hooks = hooks;
   }
 
-  async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     await this.#hooks.beforeEnqueue(keys);
     this.enqueued.push(...keys);
     return this.#connector.enqueue(keys);
@@ -560,7 +560,7 @@ describe("a backfill job: the estimate first", () => {
       counts: { records: 30, queued: 30, answered: 0, alreadyAnswered: 0, deferred: 0 },
       // Two pages waited their turn: ten records take 200 ms at 50 a second.
       endedAt: new Date(START_MS + 400).toISOString(),
-      words: "Finished: 30 records queued for the worker, 0 already answered.",
+      words: "Finished: 30 records queued for the worker.",
     });
     expect(t.clock.sleeps).toEqual([200, 200]);
     // Handed to the loop in force, which asks them. None went through the job's own connector: a
@@ -583,7 +583,7 @@ describe("a backfill job: the estimate first", () => {
     ]);
     expect(t.lines).toEqual([
       "listings: backfill started under version 1.",
-      "listings: backfill finished. Finished: 30 records queued for the worker, 0 already answered.",
+      "listings: backfill finished. Finished: 30 records queued for the worker.",
     ]);
   });
 

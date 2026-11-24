@@ -79,9 +79,9 @@ const ONLY_CATEGORY = "backfill:listings-app:listings:only@v1:category";
 /** Counts enqueues in order, so a test can assert newest first and that a decline queued nothing. */
 class RecordingConnector extends FakeConnector {
   readonly queued: RecordKey[] = [];
-  override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  override async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     this.queued.push(...keys);
-    await super.enqueue(keys);
+    return super.enqueue(keys);
   }
 }
 

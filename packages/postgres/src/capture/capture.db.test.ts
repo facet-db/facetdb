@@ -557,7 +557,7 @@ describe("two workers on one queue", () => {
       const held = (state === "cold" ? keys[0] : keys[120]) ?? "";
       const app = connectPostgres(scratch.url);
       const mayCommit = gate();
-      let enqueued: Promise<void> = Promise.resolve();
+      let enqueued: Promise<readonly string[]> = Promise.resolve([]);
       try {
         const holds = gate();
         const appDone = app.transaction(async (query) => {

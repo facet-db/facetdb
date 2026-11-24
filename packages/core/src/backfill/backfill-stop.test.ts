@@ -78,7 +78,7 @@ class SpyConnector extends FakeConnector {
     return super.scan(cursor);
   }
 
-  override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  override async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     this.onEnqueue(keys);
     this.enqueued.push(...keys);
     return super.enqueue(keys);

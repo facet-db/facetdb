@@ -21,7 +21,13 @@ import type {
   BackfillJobsDoor,
 } from "@facetdb/server";
 import { costWords } from "./backfill-cost.ts";
-import { addedQuestionsEnd, type LeftOver, leftOver, NOTHING_LEFT } from "./backfill-left.ts";
+import {
+  addedQuestionsEnd,
+  type LeftOver,
+  leftOver,
+  NOTHING_LEFT,
+  wholeSetEnd,
+} from "./backfill-left.ts";
 import type { SourceLoop } from "./config-reload.ts";
 
 /**
@@ -151,6 +157,8 @@ type Job = {
   counts: Counts;
   /** An added-question job's deferred records by what becomes of each, from its report. */
   left: LeftOver;
+  /** A whole-set job's records a plugin source did not queue, from its report. */
+  notQueued: number;
   cause: StopCause | undefined;
   why: string | null;
   /** Ends the estimate's wait (true lets the job run); set only while it waits. */
@@ -314,7 +322,15 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
         return "Stopping after the page in hand: that page is settled and its place saved first.";
       case "finished":
         return job.questions === null
-          ? `Finished: ${grouped.format(counts.queued)} records queued for the worker, ${grouped.format(counts.alreadyAnswered)} already answered.`
+          ? wholeSetEnd(
+              "Finished",
+              {
+                queued: counts.queued,
+                alreadyAnswered: counts.alreadyAnswered,
+                notQueued: job.notQueued,
+              },
+              "studio",
+            )
           : addedQuestionsEnd("Finished", counts, job.left, job.source, "studio");
       case "stopped":
       case "failed":
@@ -405,6 +421,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
       deferred: report.deferred.length,
     };
     job.left = leftOver(report.deferred);
+    job.notQueued = report.notQueued.length;
     switch (report.status) {
       case "completed":
         job.state = "finished";
@@ -600,6 +617,7 @@ export function createBackfillJobs(deps: BackfillJobsDeps): BackfillJobs {
         endedAt: null,
         counts: noCounts(),
         left: NOTHING_LEFT,
+        notQueued: 0,
         cause: undefined,
         why: null,
         answer: undefined,

@@ -284,7 +284,7 @@ describe("the worker backfills a plugin source (worker-plugin-backfill)", () => 
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain("issues: backfill started under version 1.");
     expect(result.stdout).toContain(
-      "issues: backfill finished. Finished: 25 records queued for the worker, 0 already answered.",
+      "issues: backfill finished. Finished: 25 records queued for the worker.\n",
     );
     // The job's connector never ran the plugin's watch: the loop's alone did.
     expect(watchCalls).toBe(1);

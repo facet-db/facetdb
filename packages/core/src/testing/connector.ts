@@ -263,11 +263,12 @@ export class FakeConnector implements Connector {
     return Promise.resolve(found);
   }
 
-  async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     this.#db.assertInstalled();
     for (const key of keys) {
       this.#db.queue(key);
     }
+    return keys;
   }
 
   async claimKey(key: RecordKey): Promise<boolean> {

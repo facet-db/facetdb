@@ -193,7 +193,7 @@ class SpyConnector extends FakeConnector {
     this.#clock = clock;
   }
 
-  override async enqueue(keys: readonly RecordKey[]): Promise<void> {
+  override async enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
     this.enqueueCalls.push([...keys]);
     const refused = keys.find((key) => this.failEnqueue(key));
     if (refused !== undefined) {

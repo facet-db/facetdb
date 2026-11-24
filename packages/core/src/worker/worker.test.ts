@@ -1506,7 +1506,7 @@ describe("the outage policy in the worker", () => {
   it("hands a record back to the policy when the queue refuses it, so a retry stays scheduled", async () => {
     class RefusingConnector extends FakeConnector {
       refuse = false;
-      override enqueue(keys: readonly RecordKey[]): Promise<void> {
+      override enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
         return this.refuse ? Promise.reject(new Error("the queue is down")) : super.enqueue(keys);
       }
     }

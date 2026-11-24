@@ -227,7 +227,9 @@ describe("facetdb backfill --question: what it leaves, and to whom", () => {
     // The command it names queues every one of them for the worker.
     const whole = await backfill(["--source", "listings"]);
     expect(whole.code, whole.stderr).toBe(0);
-    expect(whole.stdout).toContain("Done: 4 records queued for the worker, 0 already answered.");
+    expect(whole.stdout).toContain(
+      "Done: 4 records queued for the worker. Run facetdb worker to answer the queue.\n",
+    );
     expect(queued(["r1", "r2", "r3", "r4"])).toEqual(["r1", "r2", "r3", "r4"]);
   });
 
@@ -249,7 +251,9 @@ describe("facetdb backfill --question: what it leaves, and to whom", () => {
 
     // The command it names queues them.
     const whole = await backfill(["--source", "listings"]);
-    expect(whole.stdout).toContain("Done: 4 records queued for the worker, 0 already answered.");
+    expect(whole.stdout).toContain(
+      "Done: 4 records queued for the worker. Run facetdb worker to answer the queue.\n",
+    );
     expect(queued(["r1", "r2", "r3", "r4"])).toEqual(["r1", "r2", "r3", "r4"]);
   });
 
@@ -440,5 +444,129 @@ describe("the studio's backfill job of an added question", () => {
     const { status } = await finishedJob();
 
     expect(status.words).toBe("Finished: 2 queued for the worker.");
+  });
+});
+
+/**
+ * A whole-set backfill counts as queued only the records its connector queued. A plugin source
+ * leaves out a record its plugin no longer returns on the read again: the closing line names those
+ * apart, on the terminal, in `--json` and in the studio's job, and a part that counts zero is left
+ * out.
+ */
+describe("a whole-set backfill's closing line: only what the connector queued", () => {
+  /** Queues every key but those in `dropped`, as a plugin source does with records gone from its tool. */
+  class LeavesOut extends FakeConnector {
+    readonly #dropped: ReadonlySet<RecordKey>;
+    constructor(db: FakeDatabase, dropped: readonly RecordKey[]) {
+      super(db);
+      this.#dropped = new Set(dropped);
+    }
+    override enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]> {
+      return super.enqueue(keys.filter((key) => !this.#dropped.has(key)));
+    }
+  }
+
+  beforeEach(() => {
+    world = tableOf(["r1", "r2", "r3", "r4"]);
+  });
+
+  it("the terminal names the records not queued, and counts as queued only what the queue holds", async () => {
+    world = { ...world, connector: new LeavesOut(world.db, ["r2", "r3"]) };
+    await answered("r4", ["is_scam", "category", "is_vehicle"]);
+
+    const result = await backfill(["--source", "listings"]);
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "Done: 1 record queued for the worker, 1 already answered. 2 not queued: the plugin no longer returns them. Run facetdb worker to answer the queue.\n",
+    );
+    expect(queued(["r1", "r2", "r3", "r4"])).toEqual(["r1"]);
+  });
+
+  it("--json carries the count not queued beside the count queued", async () => {
+    world = { ...world, connector: new LeavesOut(world.db, ["r4"]) };
+
+    const result = await backfill(["--source", "listings", "--json"]);
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ queued: 3, notQueued: 1 });
+  });
+
+  it("nothing queued: the worker is not named, and one record left out is said in the singular", async () => {
+    world = tableOf(["r1"]);
+    world = { ...world, connector: new LeavesOut(world.db, ["r1"]) };
+
+    const result = await backfill(["--source", "listings"]);
+
+    expect(result.stdout).toContain("Done. 1 not queued: the plugin no longer returns it.\n");
+    expect(result.stdout).not.toContain("facetdb worker");
+    expect(queued(["r1"])).toEqual([]);
+  });
+
+  it("nothing to queue and nothing left out: said so, with no command", async () => {
+    for (const key of ["r1", "r2", "r3", "r4"]) {
+      await answered(key, ["is_scam", "category", "is_vehicle"]);
+    }
+
+    const result = await backfill(["--source", "listings"]);
+
+    expect(result.stdout).toContain("Done: 4 already answered.\n");
+    expect(result.stdout).not.toContain("facetdb worker");
+  });
+
+  it("the studio's job says the same, without a terminal command", async () => {
+    world = { ...world, connector: new LeavesOut(world.db, ["r2", "r3"]) };
+    const loop = { source, questionSet, version: 1, heldModel: freshHeldModel() };
+    const quiet: AlertSignals = {
+      modelCall: () => Promise.resolve(),
+      modelChecked: () => Promise.resolve(),
+      beat: () => Promise.resolve(),
+      backfillFinished: () => Promise.resolve(),
+      backfillFailed: () => Promise.resolve(),
+    };
+    const lines: string[] = [];
+    const jobs = createBackfillJobs({
+      projectId: PROJECT_ID,
+      loop: (name) => (name === source.name ? loop : undefined),
+      open: () => Promise.resolve(new FakeOpenConnector(world.db)),
+      newWorkerId: () => "backfill-1",
+      // The loop in force's queue, which leaves out what the plugin no longer returns.
+      queue: (name) => (name === source.name ? world.connector : undefined),
+      provider: createFakeProvider({ defaults: { noul: 0.1 } }),
+      spending: UNLIMITED,
+      clock: world.clock,
+      cursors: world.cursors,
+      log: () => world.log,
+      runs: (name) => ({ log: new FakeRunLog(), source: `${PROJECT_ID}:${name}` }),
+      reviews: (name) => reviewsOf(new FakeReviewQueue(), `${PROJECT_ID}:${name}`),
+      alerts: () => quiet,
+      expireAfter: () => new AbortController().signal,
+      newToken: () => "token-1",
+      print: (line) => {
+        lines.push(line);
+      },
+    });
+    const reaches = async (state: BackfillJobStatus["state"]) => {
+      for (let attempt = 0; attempt < 2_000; attempt += 1) {
+        const outcome = await jobs.status(source.name);
+        if (outcome.kind === "status" && outcome.status.state === state) {
+          return outcome.status;
+        }
+        await Promise.resolve();
+      }
+      throw new Error(`the job never reached ${state}`);
+    };
+    await jobs.estimate(source.name, undefined);
+    await reaches("waiting");
+    await jobs.start(source.name, "token-1");
+    const status = await reaches("finished");
+    await jobs.close();
+
+    const words =
+      "Finished: 2 records queued for the worker. 2 not queued: the plugin no longer returns them.";
+    expect(status.words).toBe(words);
+    expect(status.counts).toMatchObject({ queued: 2 });
+    expect(lines).toContain(`listings: backfill finished. ${words}`);
+    expect(queued(["r1", "r2", "r3", "r4"])).toEqual(["r1", "r4"]);
   });
 });

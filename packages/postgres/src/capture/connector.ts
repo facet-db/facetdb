@@ -377,8 +377,12 @@ export function createPostgresConnector(options: PostgresConnectorOptions): Post
     current,
     scan,
     // One key per statement, pipelined (`enqueueJobs`): an application transaction may hold one
-    // of these job rows, and a statement that waits on it must hold no other.
-    enqueue: (keys) => enqueueJobs(client, keys.map(queued)),
+    // of these job rows, and a statement that waits on it must hold no other. Every key is then
+    // in the jobs table (one queued already keeps its row), so every key is returned.
+    enqueue: async (keys) => {
+      await enqueueJobs(client, keys.map(queued));
+      return keys;
+    },
     async claim(limit) {
       if (limit < 1) {
         return [];

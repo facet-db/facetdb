@@ -78,3 +78,46 @@ export function addedQuestionsEnd(
       : "use Answer existing records on the Sources page";
   return `${line} ${whole.format(left.skipped)} skipped (changed or never fully answered): ${how} to queue ${left.skipped === 1 ? "it" : "them"} with every question.`;
 }
+
+/** What a whole-set backfill did with its records, from core's report. */
+export type WholeSetCounts = {
+  /** In the queue, by the connector's own answer: a worker asks each one. */
+  readonly queued: number;
+  readonly alreadyAnswered: number;
+  /** Handed to a plugin source's queue and left out: its plugin no longer returns them. */
+  readonly notQueued: number;
+};
+
+/**
+ * The closing line of a whole-set backfill, said alike by `facetdb backfill` and the studio's job:
+ * "Done: 3 records queued for the worker, 1 already answered. 2 not queued: the plugin no longer
+ * returns them. Run facetdb worker to answer the queue." Only a record the connector queued is
+ * counted as queued; a part that counts zero is left out, and the terminal names the worker only
+ * when something waits for it (the studio's job runs inside the worker).
+ */
+export function wholeSetEnd(opening: string, counts: WholeSetCounts, door: WholeSetDoor): string {
+  const parts = [
+    ...(counts.queued > 0
+      ? [
+          `${whole.format(counts.queued)} record${counts.queued === 1 ? "" : "s"} queued for the worker`,
+        ]
+      : []),
+    ...(counts.alreadyAnswered > 0
+      ? [`${whole.format(counts.alreadyAnswered)} already answered`]
+      : []),
+  ];
+  const sentences = [
+    parts.length > 0
+      ? `${opening}: ${parts.join(", ")}.`
+      : counts.notQueued > 0
+        ? `${opening}.`
+        : `${opening}: nothing to queue.`,
+    ...(counts.notQueued > 0
+      ? [
+          `${whole.format(counts.notQueued)} not queued: the plugin no longer returns ${counts.notQueued === 1 ? "it" : "them"}.`,
+        ]
+      : []),
+    ...(door === "cli" && counts.queued > 0 ? ["Run facetdb worker to answer the queue."] : []),
+  ];
+  return sentences.join(" ");
+}

@@ -113,10 +113,12 @@ export type Connector = {
   /** Pages through every record, newest first, from a cursor that survives a restart. */
   scan(cursor: ScanCursor | null): Promise<ScanPage>;
   /**
-   * Queues keys for the workers, as the change capture does: a key already queued stays one entry
-   * (the queue holds one entry per record). A backfill enqueues.
+   * Queues keys for the workers, as the change capture does: a key already queued stays one entry.
+   * A backfill enqueues. Returns the keys the queue holds once the call is done, one already queued
+   * among them (a worker holds it or will): a database's queue returns every key it was given; a
+   * plugin source leaves out a key its plugin no longer returns, and a backfill counts only these.
    */
-  enqueue(keys: readonly RecordKey[]): Promise<void>;
+  enqueue(keys: readonly RecordKey[]): Promise<readonly RecordKey[]>;
   /** Claims up to `limit` queued keys so no other worker on the same queue takes them. */
   claim(limit: number): Promise<readonly RecordKey[]>;
   /**

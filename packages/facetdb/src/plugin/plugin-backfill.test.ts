@@ -899,7 +899,9 @@ describe("a backfill never writes an older state over a newer one (plugin-backfi
     await rig.loop.intake([keyOf(5)]);
     rig.tracker.reads.length = 0;
 
-    await backfill.enqueue(keysFrom(5, 1));
+    const queued = await backfill.enqueue(keysFrom(5, 1));
+    // Every key was taken in and queued, so every key is returned.
+    expect([...queued].sort()).toEqual(keysFrom(5, 1).sort());
 
     const stored = await rig.loop.read(keysFrom(5, 1));
     expect(Object.fromEntries(stored.rows.map((row) => [row.key, row.state]))).toEqual({
@@ -928,6 +930,43 @@ describe("a backfill never writes an older state over a newer one (plugin-backfi
       "Issue 4",
       "Issue 5, edited",
     ]);
+  });
+
+  it("counts as queued only what it took in: a record the plugin no longer returns on the read again is named apart", async () => {
+    const rig = await rigOf(5, 10);
+    // Stored before at a text since edited in the tool: #4 and #2 are read again; #3 is stored as it is.
+    rig.tracker.issues.set(4, issueState("Issue 4, before", "the old text"));
+    rig.tracker.issues.set(2, issueState("Issue 2, before", "the old text"));
+    await rig.loop.intake([keyOf(4), keyOf(2), keyOf(3)]);
+    rig.tracker.issues.set(4, issueState("Issue 4", "What issue 4 says"));
+    rig.tracker.issues.set(2, issueState("Issue 2", "What issue 2 says"));
+    await rig.loop.ack(await rig.loop.claim(10));
+    // #4 is deleted in the tool after the run's page is read, before its chunk is taken in.
+    let started = false;
+    const connector = rig.adapter("backfill-1", (inner) => ({
+      ...inner,
+      read: (keys) => {
+        if (started) {
+          rig.tracker.issues.delete(4);
+        }
+        return inner.read(keys);
+      },
+    }));
+
+    const report = await rig.backfill(connector).run({
+      onEstimate: () => {
+        started = true;
+        return true;
+      },
+    });
+
+    expect(report.status).toBe("completed");
+    expect(report.enqueued).toEqual([keyOf(5), keyOf(3), keyOf(2), keyOf(1)]);
+    expect(report.notQueued).toEqual([keyOf(4)]);
+    expect(await count("jobs")).toBe(4);
+    expect(rig.alerts).toEqual(["finished: 4 queued"]);
+    await rig.drain();
+    expect(rig.provider.callCount).toBe(4);
   });
 
   it("leaves the worker's own adapter as it was: a preview reads the store, and an outage's re-queue keeps the stored state", async () => {

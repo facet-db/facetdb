@@ -245,7 +245,7 @@ describe("facetdb backfill on a plugin source", () => {
     expect(result.stdout).toContain("10 records done. Resume point saved.\n");
     expect(result.stdout).toContain("25 records done. That was the last page.");
     expect(result.stdout).toContain(
-      "Done: 25 records queued for the worker, 0 already answered. Run facetdb worker to answer the queue.",
+      "Done: 25 records queued for the worker. Run facetdb worker to answer the queue.",
     );
     expect(provider.callCount).toBe(0);
     expect(await count("records")).toBe(25);
